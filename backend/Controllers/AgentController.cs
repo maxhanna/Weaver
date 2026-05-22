@@ -1228,6 +1228,7 @@ Rules:
     {
         var sb = new StringBuilder(json.Length);
         var inString = false;
+        var changed = false;
 
         for (var i = 0; i < json.Length; i++)
         {
@@ -1270,16 +1271,35 @@ Rules:
                 else
                 {
                     sb.Append("\\\"");
+                    changed = true;
                 }
+                continue;
             }
-            else
+
+            if (c == '\n')
             {
-                sb.Append(c);
+                sb.Append("\\n");
+                changed = true;
+                continue;
             }
+            if (c == '\r')
+            {
+                sb.Append("\\r");
+                changed = true;
+                continue;
+            }
+            if (c == '\t')
+            {
+                sb.Append("\\t");
+                changed = true;
+                continue;
+            }
+
+            sb.Append(c);
         }
 
         var result = sb.ToString();
-        return result == json ? null : result;
+        return changed ? result : null;
     }
 
     private static List<string> ExtractJsonBlocks(string text)
@@ -1287,8 +1307,16 @@ Rules:
         var blocks = new List<string>();
         var depth = 0;
         var start = -1;
+        var inString = false;
         for (var i = 0; i < text.Length; i++)
         {
+            if (inString)
+            {
+                if (text[i] == '\\') { i++; continue; }
+                if (text[i] == '"') inString = false;
+                continue;
+            }
+            if (text[i] == '"') { inString = true; continue; }
             if (text[i] == '{')
             {
                 if (depth == 0) start = i;

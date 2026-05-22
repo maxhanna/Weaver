@@ -245,7 +245,7 @@
                   <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre>{{s.output | limitTo:1200}}</pre>
+                  <pre>{{s.output | limitTo:12000}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>
