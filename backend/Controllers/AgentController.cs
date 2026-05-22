@@ -316,6 +316,38 @@ public class AgentController : ControllerBase
         return (sb.ToString(), steps);
     }
 
+    private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
+        List<string> attachedFiles, string projectRoot, bool emitSse)
+    {
+        await EmitLog(emitSse, "info", "Light bootstrap: reading attached files only");
+
+        var plan = attachedFiles
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Select((f, i) => new AgentStep
+            {
+                Index = i,
+                Type = "read",
+                Path = f.Replace('\\', '/'),
+                Description = $"Read attached {f}"
+            })
+            .ToList();
+
+        if (plan.Count == 0)
+            return ("", new List<object>());
+
+        var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
+        var sb = new StringBuilder();
+        sb.AppendLine("Attached files (edit these paths only):");
+        foreach (var f in attachedFiles)
+            sb.AppendLine($"  - {f.Replace('\\', '/')}");
+        foreach (var item in steps)
+        {
+            if (item is Dictionary<string, object?> r && r.TryGetValue("output", out var o) && o != null)
+                sb.AppendLine($"\n### {r.GetValueOrDefault("path")}\n{Truncate(o.ToString() ?? "", 3000)}");
+        }
+        return (sb.ToString(), steps);
+    }
+
     private string GetLlamaBaseUrl()
     {
         var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
@@ -419,30 +451,49 @@ public class AgentController : ControllerBase
             await SendSse(Response, "phase", new { phase = "start", projectRoot, maxIter, maxBatch });
             await EmitLog(true, "info", "Agent run started", new { projectRoot, task = req.Prompt });
 
-            await SendSse(Response, "phase", new { phase = "discover", message = "Scanning project (list, grep, read, terminal)…" });
-            var (discoveryText, bootstrapSteps) = await RunBootstrapDiscovery(req.Prompt, projectRoot, emitSse: true);
+            List<object> allSteps;
+            AgentResponse? agentResp;
+            string? error;
 
-            var (allSteps, agentResp, error) = await RunAgentLoop(
-                req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
-                stream: true, bootstrapSteps, req.Files);
-
-            if (agentResp == null)
+            var useFastPath = (req.Files?.Count > 0) && TaskExpectsFileChanges(req.Prompt);
+            if (useFastPath)
             {
-                await SendSse(Response, "error", new { message = error ?? "Failed to parse AI response" });
-                await SendSse(Response, "done", new { steps = allSteps, filesEdited = ExtractFilesEdited(allSteps) });
-                return;
+                await SendSse(Response, "phase", new { phase = "fast", message = "Attached files — applying edits (per-file)…" });
+                await EmitLog(true, "info", "Fast path: skipping heavy discovery + plan LLM");
+                var (discoveryText, bootstrapSteps) = await RunLightBootstrap(req.Files, projectRoot, emitSse: true);
+                allSteps = new List<object>(bootstrapSteps);
+                var editResults = await RunDedicatedEditPhase(
+                    req.Prompt, req.Files, discoveryText, projectRoot, allSteps.Count, stream: true);
+                allSteps.AddRange(editResults);
+                agentResp = new AgentResponse
+                {
+                    Summary = HasSuccessfulEdits(editResults) ? "Edits applied (fast path)" : "Edit phase completed",
+                    Complete = HasSuccessfulEdits(editResults)
+                };
+                error = null;
+            }
+            else
+            {
+                await SendSse(Response, "phase", new { phase = "discover", message = "Scanning project…" });
+                var (discoveryText, bootstrapSteps) = await RunBootstrapDiscovery(req.Prompt, projectRoot, emitSse: true);
+                (allSteps, agentResp, error) = await RunAgentLoop(
+                    req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
+                    stream: true, bootstrapSteps, req.Files);
             }
 
             var editsApplied = HasSuccessfulEdits(allSteps);
+            if (agentResp == null && !editsApplied)
+                await SendSse(Response, "error", new { message = error ?? "Failed to parse AI response" });
+
             await SendSse(Response, "done", new
             {
-                thinking = agentResp.Thinking,
-                summary = agentResp.Summary,
-                complete = agentResp.Complete && editsApplied,
+                thinking = agentResp?.Thinking ?? "",
+                summary = agentResp?.Summary ?? (editsApplied ? "Edits applied" : "No edits applied"),
+                complete = (agentResp?.Complete ?? false) && editsApplied,
                 editsApplied,
                 incomplete = TaskExpectsFileChanges(req.Prompt) && !editsApplied,
                 warning = !editsApplied && TaskExpectsFileChanges(req.Prompt)
-                    ? "No files were modified. Check activity log for failed edit steps."
+                    ? "No files were modified. Check failed steps below."
                     : null,
                 steps = allSteps,
                 filesEdited = ExtractFilesEdited(allSteps)
@@ -486,7 +537,7 @@ public class AgentController : ControllerBase
 
             var (raw, agentResp, parseError) = await CallLlm(
                 prompt, enrichedContext, discoverySnapshot, projectRoot, observations.ToString(),
-                iteration, maxStepsPerBatch, stream && iteration == 0);
+                iteration, maxStepsPerBatch, stream: false);
 
             lastResponse = agentResp;
             lastError = parseError;
@@ -662,68 +713,72 @@ public class AgentController : ControllerBase
         if (stream)
             await SendSse(Response, "phase", new { phase = "edit-phase", message = $"Generating edits for {targetPaths.Count} file(s)…" });
 
-        await EmitLog(stream, "info", "Dedicated edit phase", new { files = targetPaths });
+        await EmitLog(stream, "info", "Edit phase (per-file first)", new { files = targetPaths });
 
-        var fullFiles = await BuildFullFileContextAsync(targetPaths, projectRoot);
-        if (string.IsNullOrWhiteSpace(fullFiles))
+        var idx = startIndex;
+        foreach (var path in targetPaths)
         {
-            await EmitLog(stream, "error", "Edit phase: could not read target files from disk");
-            return results;
-        }
-
-        for (var attempt = 0; attempt < 3 && !HasSuccessfulEdits(results); attempt++)
-        {
-            await EmitLog(stream, "info", $"Edit phase LLM attempt {attempt + 1}/3");
-
-            var (raw, agentResp, err) = await CallLlmEditsOnly(
-                prompt, fullFiles, discoveryContext, projectRoot, attempt);
-
-            if (agentResp == null)
-            {
-                await EmitLog(stream, "warn", "Edit phase: parse failed", new { error = err, rawPreview = Truncate(raw ?? "", 500) });
+            if (!path.EndsWith(".js", StringComparison.OrdinalIgnoreCase) &&
+                !path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) &&
+                !path.EndsWith(".css", StringComparison.OrdinalIgnoreCase) &&
+                !path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 continue;
-            }
 
-            var edits = agentResp.Steps
-                .Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase))
-                .ToList();
+            var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(full)) continue;
 
-            if (edits.Count == 0)
+            if (stream)
+                await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {path}…" });
+
+            try
             {
-                await EmitLog(stream, "warn", "Edit phase: model returned zero edit steps");
-                continue;
-            }
-
-            if (stream && !string.IsNullOrWhiteSpace(agentResp.Thinking))
-                await SendSse(Response, "thinking", new { text = agentResp.Thinking, iteration = $"edit-{attempt}" });
-            if (stream && !string.IsNullOrWhiteSpace(agentResp.Summary))
-                await SendSse(Response, "summary", new { text = agentResp.Summary, iteration = $"edit-{attempt}" });
-
-            var batchResults = await ExecuteSteps(edits, projectRoot, startIndex + results.Count, stream);
-            results.AddRange(batchResults);
-
-            if (!HasSuccessfulEdits(results))
-                await EmitLog(stream, "warn", "Edit phase: edits failed, retrying…");
-        }
-
-        // Per-file fallback for small models
-        if (!HasSuccessfulEdits(results))
-        {
-            await EmitLog(stream, "info", "Per-file edit fallback…");
-            var idx = startIndex + results.Count;
-            foreach (var path in targetPaths.Where(p => p.EndsWith(".js") || p.EndsWith(".html") || p.EndsWith(".css") || p.EndsWith(".json")))
-            {
-                var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
-                if (!System.IO.File.Exists(full)) continue;
                 var content = await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8);
-                var (raw, resp, _) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot);
-                if (resp?.Steps == null) continue;
+                await EmitLog(stream, "info", $"LLM edit: {path}", new { chars = content.Length });
+
+                var (raw, resp, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot);
+                if (resp?.Steps == null || resp.Steps.Count == 0)
+                {
+                    await EmitLog(stream, "warn", $"No edits parsed for {path}", new { error = err });
+                    continue;
+                }
+
                 var fileEdits = resp.Steps.Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase)).ToList();
                 if (fileEdits.Count == 0) continue;
+
                 var batch = await ExecuteSteps(fileEdits, projectRoot, idx, stream);
                 results.AddRange(batch);
                 idx += batch.Count;
-                if (HasSuccessfulEdits(results)) break;
+            }
+            catch (Exception ex)
+            {
+                await EmitLog(stream, "error", $"Edit failed for {path}: {ex.Message}");
+            }
+        }
+
+        // Optional: all-files batch only if per-file did nothing (smaller models may timeout on huge prompt)
+        if (!HasSuccessfulEdits(results) && targetPaths.Count == 1)
+        {
+            var fullFiles = await BuildFullFileContextAsync(targetPaths, projectRoot, maxTotalChars: 40000);
+            if (!string.IsNullOrWhiteSpace(fullFiles))
+            {
+                try
+                {
+                    await EmitLog(stream, "info", "Single-file combined edit attempt");
+                    var (raw, agentResp, err) = await CallLlmEditsOnly(prompt, fullFiles, discoveryContext, projectRoot, 0);
+                    if (agentResp?.Steps != null)
+                    {
+                        var edits = agentResp.Steps.Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase)).ToList();
+                        if (edits.Count > 0)
+                        {
+                            var batchResults = await ExecuteSteps(edits, projectRoot, idx, stream);
+                            results.AddRange(batchResults);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(stream, "error", $"Combined edit failed: {ex.Message}");
+                }
             }
         }
 
@@ -776,27 +831,49 @@ Rules:
         if (attempt > 0)
             user.AppendLine("\n## Retry: previous attempt produced no valid edits. Output correct edit steps now.");
 
-        return await CallLlmNonStreaming(
-            _clientFactory.CreateClient("llama"),
-            GetLlamaBaseUrl() + "/v1/chat/completions",
-            _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
-            new object[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = user.ToString() }
-            });
+        try
+        {
+            return await CallLlmNonStreaming(
+                _clientFactory.CreateClient("llama"),
+                GetLlamaBaseUrl() + "/v1/chat/completions",
+                _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
+                new object[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = user.ToString() }
+                });
+        }
+        catch (TaskCanceledException ex)
+        {
+            return ("", null, "LLM request timed out. Try a smaller model or fewer files per card.");
+        }
+        catch (Exception ex)
+        {
+            return ("", null, ex.Message);
+        }
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent, string projectRoot)
     {
         var systemPrompt = @"Output ONLY JSON with edit steps for this single file. type must be ""edit"". oldString must be exact substring of the file.";
-        var user = $"Task: {taskPrompt}\nProject root: {projectRoot}\nFile: {relativePath}\n\n```\n{Truncate(fileContent, 50000)}\n```";
-        return await CallLlmNonStreaming(
-            _clientFactory.CreateClient("llama"),
-            GetLlamaBaseUrl() + "/v1/chat/completions",
-            _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
-            new object[] { new { role = "system", content = systemPrompt }, new { role = "user", content = user } });
+        var user = $"Task: {taskPrompt}\nProject root: {projectRoot}\nFile: {relativePath}\n\n```\n{Truncate(fileContent, 28000)}\n```";
+        try
+        {
+            return await CallLlmNonStreaming(
+                _clientFactory.CreateClient("llama"),
+                GetLlamaBaseUrl() + "/v1/chat/completions",
+                _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
+                new object[] { new { role = "system", content = systemPrompt }, new { role = "user", content = user } });
+        }
+        catch (TaskCanceledException)
+        {
+            return ("", null, $"Timed out editing {relativePath}");
+        }
+        catch (Exception ex)
+        {
+            return ("", null, ex.Message);
+        }
     }
 
     private static void AppendObservations(StringBuilder observations, List<object> batchResults)
@@ -868,9 +945,10 @@ Rules:
             new { role = "user", content = userMessage }
         };
 
-        return stream
-            ? await CallLlmStreaming(client, target, model, messages)
-            : await CallLlmNonStreaming(client, target, model, messages);
+        if (stream)
+            await SendSse(Response, "phase", new { phase = "llm", message = "Waiting for model response…" });
+
+        return await CallLlmNonStreaming(client, target, model, messages);
     }
 
     private static string BuildSystemPrompt(int maxSteps) => $@"You are Maestro — a fast, tool-using coding agent on a Kanban board.
@@ -1048,7 +1126,6 @@ Rules:
                 if (!delta.TryGetProperty("content", out var contentProp)) continue;
                 var token = contentProp.GetString() ?? "";
                 fullContent.Append(token);
-                await SendSse(Response, "status", new { message = "Model responding…" });
             }
             catch { }
         }

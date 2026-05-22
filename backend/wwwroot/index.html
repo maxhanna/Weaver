@@ -185,22 +185,30 @@
             <span class="status-text">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span></span>
           </div>
 
-          <div class="agent-activity-log" ng-if="vm.streamingActive || vm.agentActivityLog.length">
-            <details open>
-              <summary>📋 Activity log ({{vm.agentActivityLog.length}})</summary>
+          <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">
+            <div class="agent-current-label">Now</div>
+            <div class="agent-current-step" ng-class="vm.getActiveStep().status">
+              <span class="step-icon">⏳</span>
+              <strong>{{vm.getActiveStep().type}}</strong>
+              <span class="step-path" ng-if="vm.getActiveStep().path">{{vm.getActiveStep().path}}</span>
+              <span>{{vm.getActiveStep().description || vm.getActiveStep().command || ''}}</span>
+            </div>
+          </div>
+
+          <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
+            <details>
+              <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
               <div class="log-entries">
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-level">{{e.level}}</span>
                   <span class="log-msg">{{e.message}}</span>
-                  <pre class="log-detail" ng-if="e.detail">{{vm.formatLogDetail(e.detail)}}</pre>
                 </div>
               </div>
             </details>
           </div>
 
           <div class="agent-streaming-thinking" ng-if="vm.streamingThinking">
-            <details open>
+            <details>
               <summary>🧠 Plan</summary>
               <pre class="streaming-text">{{vm.streamingThinking}}</pre>
             </details>
@@ -215,14 +223,16 @@
             <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited">{{f.path}}</div>
           </div>
 
-          <div class="agent-steps" ng-if="vm.streamingSteps.length">
-            <div class="step" ng-repeat="s in vm.streamingSteps track by s.index"
-                 ng-class="s.status || 'pending'">
-              <span class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
-              <div class="step-desc">
-                <strong>{{s.type}}</strong>
-                <span ng-if="s.path" class="step-path">{{s.path}}</span>
-                {{s.description || s.command || s.url || ''}}
+          <div class="agent-steps-list" ng-if="vm.streamingSteps.length">
+            <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"
+                     ng-class="s.status || 'pending'"
+                     ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
+              <summary class="step-summary-row">
+                <span class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
+                <span class="step-summary-title"><strong>{{s.type}}</strong> {{s.path || ''}}</span>
+                <span class="step-summary-desc">{{s.description || s.command || s.url || '' | limitTo:60}}</span>
+              </summary>
+              <div class="step-panel-body">
                 <div class="edit-diff" ng-if="s.type==='edit' && s.status==='done'">
                   <div class="edit-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
                   <pre ng-if="s.diffPreview">{{s.diffPreview}}</pre>
@@ -230,18 +240,18 @@
                   <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre>{{s.output | limitTo:800}}</pre>
+                  <pre>{{s.output | limitTo:1200}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>
                   <div class="path-suggestions" ng-if="s.suggestions && s.suggestions.length">
-                    <strong>Try these paths:</strong>
+                    <strong>Try:</strong>
                     <span class="file-edit-chip" ng-repeat="p in s.suggestions">{{p}}</span>
                   </div>
                   <pre ng-if="s.snippet" class="snippet-hint">{{s.snippet}}</pre>
                 </div>
               </div>
-            </div>
+            </details>
           </div>
 
           <div class="agent-result" ng-if="!vm.streamingActive && vm.agentResult">
@@ -284,7 +294,7 @@
       </div>
       <div class="popup-body">
         <div class="form-row">
-          <label>Project: {{vm.selectedProject}}</label>
+          <label>Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
         </div>
         <div class="file-picker-nav">
           <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
