@@ -997,49 +997,53 @@ Rules:
         var blocks = ExtractJsonBlocks(jsonStr);
         foreach (var block in blocks)
         {
-            try
+            foreach (var candidate in new[] { block, RepairJsonString(block) })
             {
-                using var doc = JsonDocument.Parse(block, jsonOptions);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+                if (candidate == null) continue;
+                try
                 {
-                    var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(block, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    if (envelope?.Edits != null)
+                    using var doc = JsonDocument.Parse(candidate, jsonOptions);
+                    var root = doc.RootElement;
+
+                    if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
                     {
-                        var i = 0;
-                        foreach (var e in envelope.Edits)
+                        var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(candidate, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (envelope?.Edits != null)
                         {
-                            if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
-                            steps.Add(new AgentStep
+                            var i = 0;
+                            foreach (var e in envelope.Edits)
                             {
-                                Index = i++,
-                                Type = "edit",
-                                Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
-                                OldString = e.OldString,
-                                NewString = e.NewString,
-                                Description = "LLM edit"
-                            });
+                                if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
+                                steps.Add(new AgentStep
+                                {
+                                    Index = i++,
+                                    Type = "edit",
+                                    Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
+                                    OldString = e.OldString,
+                                    NewString = e.NewString,
+                                    Description = "LLM edit"
+                                });
+                            }
+                            if (steps.Count > 0) return steps;
                         }
+                    }
+
+                    if (root.TryGetProperty("oldString", out var os) && root.TryGetProperty("newString", out var ns))
+                    {
+                        steps.Add(new AgentStep
+                        {
+                            Index = 0,
+                            Type = "edit",
+                            Path = defaultPath,
+                            OldString = os.GetString() ?? "",
+                            NewString = ns.GetString() ?? "",
+                            Description = "LLM edit"
+                        });
                         if (steps.Count > 0) return steps;
                     }
                 }
-
-                if (root.TryGetProperty("oldString", out var os) && root.TryGetProperty("newString", out var ns))
-                {
-                    steps.Add(new AgentStep
-                    {
-                        Index = 0,
-                        Type = "edit",
-                        Path = defaultPath,
-                        OldString = os.GetString() ?? "",
-                        NewString = ns.GetString() ?? "",
-                        Description = "LLM edit"
-                    });
-                    if (steps.Count > 0) return steps;
-                }
+                catch { }
             }
-            catch { }
         }
 
         // Regex fallback: extract oldString/newString pairs from malformed JSON
@@ -1047,24 +1051,33 @@ Rules:
         {
             try
             {
-                var pairs = Regex.Matches(jsonStr, @"""oldString""\s*:\s*""((?:[^""\\]|\\.)*)""\s*,\s*""newString""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.IgnoreCase);
-                if (pairs.Count > 0)
+                var repaired = RepairJsonString(jsonStr) ?? jsonStr;
+
+                var patOldFirst = new Regex(@"""oldString""\s*:\s*""((?:(?!""\s*,\s*""newString"").)*)""\s*,\s*""newString""\s*:\s*""((?:(?!""\s*[\]}]).)*)""", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                var patNewFirst = new Regex(@"""newString""\s*:\s*""((?:(?!""\s*,\s*""oldString"").)*)""\s*,\s*""oldString""\s*:\s*""((?:(?!""\s*[\]}]).)*)""", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+                foreach (var pattern in new[] { patOldFirst, patNewFirst })
                 {
-                    var i = 0;
-                    foreach (Match pair in pairs)
+                    var matches = pattern.Matches(repaired);
+                    if (matches.Count > 0)
                     {
-                        var oldStr = pair.Groups[1].Value;
-                        var newStr = pair.Groups[2].Value;
-                        if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) continue;
-                        steps.Add(new AgentStep
+                        var i = 0;
+                        foreach (Match match in matches)
                         {
-                            Index = i++,
-                            Type = "edit",
-                            Path = defaultPath,
-                            OldString = oldStr,
-                            NewString = newStr,
-                            Description = "LLM edit (regex)"
-                        });
+                            var oldStr = match.Groups[1].Value;
+                            var newStr = match.Groups[2].Value;
+                            if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) continue;
+                            steps.Add(new AgentStep
+                            {
+                                Index = i++,
+                                Type = "edit",
+                                Path = defaultPath,
+                                OldString = oldStr,
+                                NewString = newStr,
+                                Description = "LLM edit (regex)"
+                            });
+                        }
+                        if (steps.Count > 0) break;
                     }
                 }
             }
@@ -1072,6 +1085,64 @@ Rules:
         }
 
         return steps;
+    }
+
+    private static string? RepairJsonString(string json)
+    {
+        var sb = new StringBuilder(json.Length);
+        var inString = false;
+
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+
+            if (!inString)
+            {
+                if (c == '"')
+                    inString = true;
+                sb.Append(c);
+                continue;
+            }
+
+            // Inside a string value
+            if (c == '\\')
+            {
+                sb.Append(c);
+                i++;
+                if (i < json.Length) sb.Append(json[i]);
+                continue;
+            }
+
+            if (c == '"')
+            {
+                var nextNonWs = -1;
+                for (var j = i + 1; j < json.Length; j++)
+                {
+                    if (!char.IsWhiteSpace(json[j]))
+                    {
+                        nextNonWs = j;
+                        break;
+                    }
+                }
+
+                if (nextNonWs >= 0 && (json[nextNonWs] == ',' || json[nextNonWs] == '}' || json[nextNonWs] == ']' || json[nextNonWs] == ':'))
+                {
+                    sb.Append(c);
+                    inString = false;
+                }
+                else
+                {
+                    sb.Append("\\\"");
+                }
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+
+        var result = sb.ToString();
+        return result == json ? null : result;
     }
 
     private static List<string> ExtractJsonBlocks(string text)
