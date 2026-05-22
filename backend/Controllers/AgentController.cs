@@ -53,15 +53,32 @@ public class AgentController : ControllerBase
         public string? Error { get; set; }
     }
 
+    public class AgentStep
+    {
+        public int Index { get; set; }
+        public string Type { get; set; } = "";
+        public string Description { get; set; } = "";
+        public string? Path { get; set; }
+        public string? OldString { get; set; }
+        public string? NewString { get; set; }
+        public string? Command { get; set; }
+        public string? Status { get; set; }
+        public string? Output { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public class AgentResponse
+    {
+        public string Thinking { get; set; } = "";
+        public string Summary { get; set; } = "";
+        public List<AgentStep> Steps { get; set; } = new();
+    }
+
     private string ResolveWorkspaceRoot()
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
         if (!string.IsNullOrWhiteSpace(configuredRoot))
-        {
-            return Path.IsPathRooted(configuredRoot)
-                ? configuredRoot
-                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
-        }
+            return Path.IsPathRooted(configuredRoot) ? configuredRoot : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
         return Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
     }
 
@@ -72,6 +89,32 @@ public class AgentController : ControllerBase
         return Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
     }
 
+    private string GetLlamaBaseUrl()
+    {
+        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+        var baseUrl = "http://192.168.2.58:8080";
+        if (System.IO.File.Exists(configPath))
+        {
+            try
+            {
+                var configText = System.IO.File.ReadAllText(configPath);
+                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
+                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
+                    baseUrl = llamaUrlElement.GetString() ?? baseUrl;
+            }
+            catch { }
+        }
+        return baseUrl.TrimEnd('/');
+    }
+
+    private static string NormalizeLineEndings(string s)
+    {
+        return s.Replace("\r\n", "\n");
+    }
+
+    // ============================================================
+    // POST /api/agent/execute - Non-streaming (legacy)
+    // ============================================================
     [HttpPost("execute")]
     public async Task<IActionResult> Execute([FromBody] AgentRequest req)
     {
@@ -79,152 +122,26 @@ public class AgentController : ControllerBase
             return BadRequest("Prompt is required");
 
         var projectRoot = GetProjectRoot(req.Project);
+        var fileContents = await ReadAttachedFiles(req.Files, projectRoot);
 
-        // Read attached file contents from disk
-        var fileContents = new StringBuilder();
-        foreach (var filePath in req.Files)
-        {
-            if (string.IsNullOrWhiteSpace(filePath)) continue;
-            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-            if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            if (System.IO.File.Exists(fullPath))
-            {
-                var content = await System.IO.File.ReadAllTextAsync(fullPath);
-                fileContents.AppendLine($"\n### {filePath}\n```\n{content}\n```");
-            }
-        }
-
-            var systemPrompt = @"You are an AI coding assistant that modifies project files to complete tasks.
-
-You will receive a task description and file contents. You must decide what changes to make.
-
-Respond ONLY with valid JSON. No markdown, no code fences, just raw JSON:
-{
-  ""thinking"": ""your step-by-step analysis"",
-  ""edits"": [{ ""path"": ""relative/file/path"", ""oldString"": ""exact text in the file"", ""newString"": ""replacement text"" }],
-  ""commands"": [{ ""command"": ""shell command to run"" }],
-  ""summary"": ""brief explanation of changes""
-}
-
-Rules:
-- Each edit is a find-and-replace: oldString must match the existing file content exactly (preserve indentation/whitespace)
-- Multiple edits can target the same file; they are applied in order
-- For new files, set oldString to """" and newString to the full file content
-- oldString must uniquely match the text to replace (include enough surrounding context to be unambiguous)
-- Prefer small, targeted edits over large blocks - this saves tokens
-- Commands are optional (install deps, run tests, etc.)
-- Paths are relative to the project root
-- Only include files that need changes";
-
-        var userMessage = $"## Task\n{req.Prompt}\n\n## Files to modify ({req.Files.Count} file(s)):\n{fileContents}";
-
-        // Call LLM
-           // Read LlamaUrl from config.json if available
-            var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
-            var baseUrl = "http://192.168.2.58:8080"; // default fallback
-            
-            if (System.IO.File.Exists(configPath))
-            {
-                try
-                {
-                    var configText = System.IO.File.ReadAllText(configPath);
-                    var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
-                    if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
-                    {
-                        baseUrl = llamaUrlElement.GetString() ?? baseUrl;
-                    }
-                }
-                catch
-                {
-                    // Use default if parsing fails
-                }
-            }
-        var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
-        var client = _clientFactory.CreateClient("llama");
-        string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-
-        var messages = new[]
-        {
-            new { role = "system", content = systemPrompt },
-            new { role = "user", content = userMessage }
-        };
-
-        var requestBody = new { model, messages, stream = false, temperature = 0.2 };
-        var contentJson = JsonSerializer.Serialize(requestBody);
-        var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
-
-        var resp = await client.PostAsync(target, httpContent);
-        var respText = await resp.Content.ReadAsStringAsync();
-
-        // Extract LLM message content
-        string llmContent = "";
-        try
-        {
-            using var doc = JsonDocument.Parse(respText);
-            if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
-            {
-                var first = choices[0];
-                if (first.TryGetProperty("message", out var msg) && msg.TryGetProperty("content", out var c))
-                    llmContent = c.GetString() ?? "";
-            }
-        }
-        catch { }
-
-        if (string.IsNullOrWhiteSpace(llmContent))
-            return Ok(new { error = "Empty AI response", raw = respText });
-
-        // Extract JSON object from response (handles markdown-wrapped JSON)
-        var jsonStr = llmContent;
-        var start = jsonStr.IndexOf('{');
-        var end = jsonStr.LastIndexOf('}');
-        if (start >= 0 && end > start)
-            jsonStr = jsonStr.Substring(start, end - start + 1);
-
-        AgentResponse? agentResp = null;
-        try
-        {
-            agentResp = JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        }
-        catch { }
+        var (llmRaw, agentResp) = await CallLlm(req.Prompt, fileContents, stream: false);
 
         if (agentResp == null)
-            return Ok(new { error = "Failed to parse AI JSON response", raw = llmContent });
+            return Ok(new { error = "Failed to parse AI response", raw = llmRaw });
 
-        // Apply file edits with find-replace and retry
-        var editResultsList = await ApplyEditsWithRetry(agentResp.Edits, projectRoot, req);
-        var editResults = new List<object>();
-        foreach (var r in editResultsList)
-            editResults.Add(new { path = r.Path, status = r.Status, error = r.Error });
-
-        // Execute commands via terminal
-        var commandResults = new List<object>();
-        _terminal.Start();
-        foreach (var cmd in agentResp.Commands)
-        {
-            try
-            {
-                await _terminal.SendCommandAsync(cmd.Command);
-                await Task.Delay(800);
-                var output = _terminal.ReadLastLines(50);
-                commandResults.Add(new { command = cmd.Command, status = "ok", output });
-            }
-            catch (Exception ex)
-            {
-                commandResults.Add(new { command = cmd.Command, status = "error", error = ex.Message });
-            }
-        }
+        var stepResults = await ExecuteSteps(agentResp.Steps, projectRoot);
 
         return Ok(new
         {
             thinking = agentResp.Thinking,
             summary = agentResp.Summary,
-            edits = editResults,
-            commands = commandResults
+            steps = stepResults
         });
     }
 
+    // ============================================================
+    // POST /api/agent/apply - Apply edits directly (no LLM call)
+    // ============================================================
     [HttpPost("apply")]
     public async Task<IActionResult> ApplyEdits([FromBody] ApplyEditsRequest req)
     {
@@ -257,6 +174,9 @@ Rules:
         return Ok(new { edits = editResults, commands = commandResults });
     }
 
+    // ============================================================
+    // POST /api/agent/execute-stream - Streaming multi-step agent
+    // ============================================================
     [HttpPost("execute-stream")]
     public async Task ExecuteStream([FromBody] AgentRequest req)
     {
@@ -266,399 +186,389 @@ Rules:
 
         if (string.IsNullOrWhiteSpace(req.Prompt))
         {
-            await SendSseEvent(Response, "error", "{\"message\":\"Prompt is required\"}");
+            await SendSse(Response, "error", new { message = "Prompt is required" });
+            await SendSse(Response, "done", new { });
             return;
         }
 
         try
         {
             var projectRoot = GetProjectRoot(req.Project);
+            var fileContents = await ReadAttachedFiles(req.Files, projectRoot);
 
-            // Read attached file contents
-            var fileContents = new StringBuilder();
-            foreach (var filePath in req.Files)
-            {
-                if (string.IsNullOrWhiteSpace(filePath)) continue;
-                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-                if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (System.IO.File.Exists(fullPath))
-                {
-                    var content = await System.IO.File.ReadAllTextAsync(fullPath);
-                    fileContents.AppendLine($"\n### {filePath}\n```\n{content}\n```");
-                }
-            }
-
-        var systemPrompt = @"You are an AI coding assistant that modifies project files to complete tasks.
-
-You will receive a task description and file contents. You must decide what changes to make.
-
-Respond ONLY with valid JSON. No markdown, no code fences, just raw JSON:
-{
-  ""thinking"": ""your step-by-step analysis"",
-  ""edits"": [{ ""path"": ""relative/file/path"", ""oldString"": ""exact text in the file"", ""newString"": ""replacement text"" }],
-  ""commands"": [{ ""command"": ""shell command to run"" }],
-  ""summary"": ""brief explanation of changes""
-}
-
-Rules:
-- Each edit is a find-and-replace: oldString must match the existing file content exactly (preserve indentation/whitespace)
-- Multiple edits can target the same file; they are applied in order
-- For new files, set oldString to """" and newString to the full file content
-- oldString must uniquely match the text to replace (include enough surrounding context to be unambiguous)
-- Prefer small, targeted edits over large blocks - this saves tokens
-- Commands are optional (install deps, run tests, etc.)
-- Paths are relative to the project root
-- Only include files that need changes";
-
-            var userMessage = $"## Task\n{req.Prompt}\n\n## Files to modify ({req.Files.Count} file(s)):\n{fileContents}";
-
-            // Call LLM with streaming
-       // Read LlamaUrl from config.json if available
-        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
-        var baseUrl = "http://192.168.2.58:8080"; // default fallback
-        
-        if (System.IO.File.Exists(configPath))
-        {
-            try
-            {
-                var configText = System.IO.File.ReadAllText(configPath);
-                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
-                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
-                {
-                    baseUrl = llamaUrlElement.GetString() ?? baseUrl;
-                }
-            }
-            catch
-            {
-                // Use default if parsing fails
-            }
-        }
-            var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
-            var client = _clientFactory.CreateClient("llama");
-            string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-
-            var messages = new[]
-            {
-                new { role = "system", content = systemPrompt },
-                new { role = "user", content = userMessage }
-            };
-
-            var requestBody = new { model, messages, stream = true, temperature = 0.2 };
-            var contentJson = JsonSerializer.Serialize(requestBody);
-            var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
-
-            using var httpResp = await client.SendAsync(new HttpRequestMessage(HttpMethod.Post, target) { Content = httpContent }, HttpCompletionOption.ResponseHeadersRead);
-            httpResp.EnsureSuccessStatusCode();
-
-            using var stream = await httpResp.Content.ReadAsStreamAsync();
-            using var reader = new StreamReader(stream);
-
-            var fullContent = new StringBuilder();
-
-            string? line;
-            while ((line = await reader.ReadLineAsync()) != null)
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                if (!line.StartsWith("data: ")) continue;
-
-                var data = line.Substring(6).Trim();
-                if (data == "[DONE]") break;
-
-                try
-                {
-                    using var doc = JsonDocument.Parse(data);
-                    if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-                        continue;
-
-                    var delta = choices[0].GetProperty("delta");
-                    if (!delta.TryGetProperty("content", out var contentProp))
-                        continue;
-
-                    var token = contentProp.GetString() ?? "";
-                    fullContent.Append(token);
-
-                    await SendSseEvent(Response, "token", JsonSerializer.Serialize(new { t = token }));
-                }
-                catch { }
-            }
-
-            // Parse the full LLM response
-            var llmContent = fullContent.ToString();
-            var jsonStr = llmContent;
-            var startIdx = jsonStr.IndexOf('{');
-            var endIdx = jsonStr.LastIndexOf('}');
-            if (startIdx >= 0 && endIdx > startIdx)
-                jsonStr = jsonStr.Substring(startIdx, endIdx - startIdx + 1);
-
-            AgentResponse? agentResp = null;
-            try
-            {
-                agentResp = JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            }
-            catch { }
+            var (llmRaw, agentResp) = await CallLlm(req.Prompt, fileContents, stream: true);
 
             if (agentResp == null)
             {
-                await SendSseEvent(Response, "error", JsonSerializer.Serialize(new { message = "Failed to parse AI response", raw = llmContent }));
-                await SendSseEvent(Response, "done", "{}");
+                await SendSse(Response, "error", new { message = "Failed to parse AI response", raw = llmRaw });
+                await SendSse(Response, "done", new { });
                 return;
             }
 
-            // Apply edits with find-replace and retry
-            var editResults = await ApplyEditsWithRetry(agentResp.Edits, projectRoot, req);
-            foreach (var r in editResults)
-                await SendSseEvent(Response, "edit", JsonSerializer.Serialize(new { path = r.Path, status = r.Status, error = r.Error }));
+            // Execute steps
+            var stepResults = await ExecuteSteps(agentResp.Steps, projectRoot);
 
-            // Execute commands
-            _terminal.Start();
-            foreach (var cmd in agentResp.Commands)
-            {
-                try
-                {
-                    await _terminal.SendCommandAsync(cmd.Command);
-                    await Task.Delay(800);
-                    var output = _terminal.ReadLastLines(50);
-                    await SendSseEvent(Response, "command", JsonSerializer.Serialize(new { command = cmd.Command, status = "ok", output }));
-                }
-                catch (Exception ex)
-                {
-                    await SendSseEvent(Response, "command", JsonSerializer.Serialize(new { command = cmd.Command, status = "error", error = ex.Message }));
-                }
-            }
-
-            await SendSseEvent(Response, "done", JsonSerializer.Serialize(new
+            await SendSse(Response, "done", new
             {
                 thinking = agentResp.Thinking,
-                summary = agentResp.Summary
-            }));
+                summary = agentResp.Summary,
+                steps = stepResults
+            });
         }
         catch (Exception ex)
         {
-            await SendSseEvent(Response, "error", JsonSerializer.Serialize(new { message = ex.Message }));
-            await SendSseEvent(Response, "done", "{}");
+            await SendSse(Response, "error", new { message = ex.Message });
+            await SendSse(Response, "done", new { });
         }
     }
 
-    private static async Task SendSseEvent(HttpResponse response, string eventName, string data)
+    // ============================================================
+    // Core: Call LLM with comprehensive system prompt
+    // ============================================================
+    private async Task<(string rawContent, AgentResponse? parsed)> CallLlm(string prompt, string fileContents, bool stream)
     {
-        await response.WriteAsync($"event: {eventName}\ndata: {data}\n\n");
-        await response.Body.FlushAsync();
+        var systemPrompt = @"You are Maestro — an autonomous AI agent integrated with a Kanban board. You receive tasks and execute them on the user's machine.
+
+CAPABILITIES:
+1. Read files — use a ""read"" step to inspect file contents
+2. Edit files — use an ""edit"" step with find-and-replace (oldString must match exactly, preserve whitespace)
+3. Run commands — use a ""command"" step to execute shell commands (cmd/powershell on Windows, bash on Linux)
+4. Write new files — use an ""edit"" step with oldString="""" and newString containing the full file content
+5. Browse the web — use a ""command"" step with curl/powershell Invoke-WebRequest to fetch URLs
+6. Plan — think step-by-step before acting
+
+INSTRUCTIONS:
+- Break the task into clear, sequential steps
+- Each step must have a unique index starting from 0
+- Steps run in order; later steps can depend on earlier ones
+- For file edits, oldString must uniquely match the existing content (include surrounding context)
+- For commands, the working directory is the project root
+- After each command/read, you will see the output — use it to inform subsequent steps
+- When done, provide a concise English summary
+
+Respond ONLY with valid JSON. No markdown, no code fences:
+{
+  ""thinking"": ""Your step-by-step reasoning about the task"",
+  ""summary"": ""Brief summary of what was done"",
+  ""steps"": [
+    {
+      ""index"": 0,
+      ""type"": ""edit|command|read"",
+      ""description"": ""Human-readable description"",
+      ""path"": ""relative/file/path (for edit/read)"",
+      ""oldString"": ""exact text to replace (for edit)"",
+      ""newString"": ""replacement text (for edit)"",
+      ""command"": ""shell command to run (for command)""
+    }
+  ]
+}
+
+EXAMPLES:
+- To edit a file: { ""type"": ""edit"", ""path"": ""src/main.js"", ""oldString"": ""old code here"", ""newString"": ""new code here"" }
+- To run a command: { ""type"": ""command"", ""command"": ""npm install"", ""description"": ""Install dependencies"" }
+- To read a file: { ""type"": ""read"", ""path"": ""src/main.js"", ""description"": ""Check current contents"" }
+- To browse: { ""type"": ""command"", ""command"": ""curl -s https://example.com"", ""description"": ""Fetch example.com"" }
+- To write a new file: { ""type"": ""edit"", ""path"": ""newfile.txt"", ""oldString"": """", ""newString"": ""File content here"" }
+
+Rules:
+- path values are relative to the project root
+- Use / as path separator
+- oldString must match the file content exactly (including indentation)
+- Multiple edits to the same file are applied in order
+- Prefer small, targeted edits over large blocks";
+
+        var userMessage = $"## Task\n{prompt}\n\n## Project root\n{GetProjectRoot("")}\n\n## Attached files\n{fileContents}";
+
+        var baseUrl = GetLlamaBaseUrl();
+        var target = baseUrl + "/v1/chat/completions";
+        var client = _clientFactory.CreateClient("llama");
+        string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+
+        var messages = new[]
+        {
+            new { role = "system", content = systemPrompt },
+            new { role = "user", content = userMessage }
+        };
+
+        if (stream)
+        {
+            return await CallLlmStreaming(client, target, model, messages);
+        }
+        else
+        {
+            return await CallLlmNonStreaming(client, target, model, messages);
+        }
     }
 
-    private string GetLlamaBaseUrl()
+    private async Task<(string, AgentResponse?)> CallLlmNonStreaming(HttpClient client, string target, string model, object messages)
     {
-        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
-        var baseUrl = "http://192.168.2.58:8080";
-        if (System.IO.File.Exists(configPath))
+        var requestBody = new { model, messages, stream = false, temperature = 0.2 };
+        var contentJson = JsonSerializer.Serialize(requestBody);
+        var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync(target, httpContent);
+        var respText = await resp.Content.ReadAsStringAsync();
+
+        string llmContent = "";
+        try
         {
+            using var doc = JsonDocument.Parse(respText);
+            if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+            {
+                var first = choices[0];
+                if (first.TryGetProperty("message", out var msg) && msg.TryGetProperty("content", out var c))
+                    llmContent = c.GetString() ?? "";
+            }
+        }
+        catch { }
+
+        if (string.IsNullOrWhiteSpace(llmContent))
+            return (respText, null);
+
+        var parsed = ParseAgentResponse(llmContent);
+        return (llmContent, parsed);
+    }
+
+    private async Task<(string, AgentResponse?)> CallLlmStreaming(HttpClient client, string target, string model, object messages)
+    {
+        var requestBody = new { model, messages, stream = true, temperature = 0.2 };
+        var contentJson = JsonSerializer.Serialize(requestBody);
+        var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
+
+        using var httpResp = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Post, target) { Content = httpContent },
+            HttpCompletionOption.ResponseHeadersRead);
+        httpResp.EnsureSuccessStatusCode();
+
+        using var stream = await httpResp.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+
+        var fullContent = new StringBuilder();
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            if (!line.StartsWith("data: ")) continue;
+
+            var data = line.Substring(6).Trim();
+            if (data == "[DONE]") break;
+
             try
             {
-                var configText = System.IO.File.ReadAllText(configPath);
-                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
-                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
-                    baseUrl = llamaUrlElement.GetString() ?? baseUrl;
+                using var doc = JsonDocument.Parse(data);
+                if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+                    continue;
+
+                var delta = choices[0].GetProperty("delta");
+                if (!delta.TryGetProperty("content", out var contentProp))
+                    continue;
+
+                var token = contentProp.GetString() ?? "";
+                fullContent.Append(token);
+
+                await SendSse(Response, "token", new { t = token });
             }
             catch { }
         }
-        return baseUrl.TrimEnd('/');
+
+        var llmContent = fullContent.ToString();
+        if (string.IsNullOrWhiteSpace(llmContent))
+            return (llmContent, null);
+
+        var parsed = ParseAgentResponse(llmContent);
+        return (llmContent, parsed);
     }
 
-    private async Task<List<EditResult>> ApplyEditsWithRetry(List<EditAction> edits, string projectRoot, AgentRequest req)
+    private AgentResponse? ParseAgentResponse(string raw)
     {
-        var results = new List<EditResult>();
-        var remainingEdits = new List<EditAction>(edits);
-        int maxRetries = 3;
+        var jsonStr = raw;
+        var start = jsonStr.IndexOf('{');
+        var end = jsonStr.LastIndexOf('}');
+        if (start >= 0 && end > start)
+            jsonStr = jsonStr.Substring(start, end - start + 1);
 
-        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        try
         {
-            if (remainingEdits.Count == 0) break;
+            var resp = JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return resp;
+        }
+        catch { return null; }
+    }
 
-            var failedEdits = new List<(EditAction edit, string reason)>();
+    // ============================================================
+    // Execute steps: edit, command, read
+    // ============================================================
+    private async Task<List<object>> ExecuteSteps(List<AgentStep> steps, string projectRoot)
+    {
+        var results = new List<object>();
+        bool terminalStarted = false;
 
-            // Group remaining edits by file path (preserving order within each file)
-            var fileGroups = new Dictionary<string, List<EditAction>>(StringComparer.OrdinalIgnoreCase);
-            var fileOrder = new List<string>();
-            foreach (var edit in remainingEdits)
+        foreach (var step in steps)
+        {
+            var result = new Dictionary<string, object?>
             {
-                if (!fileGroups.ContainsKey(edit.Path))
-                {
-                    fileGroups[edit.Path] = new List<EditAction>();
-                    fileOrder.Add(edit.Path);
-                }
-                fileGroups[edit.Path].Add(edit);
-            }
-
-            foreach (var filePath in fileOrder)
-            {
-                var fileEdits = fileGroups[filePath];
-
-                try
-                {
-                    var targetPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-                    if (!targetPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
-                    {
-                        foreach (var _ in fileEdits)
-                            results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "Path outside project root" });
-                        continue;
-                    }
-
-                    string content = "";
-                    bool fileExists = System.IO.File.Exists(targetPath);
-
-                    if (fileExists)
-                        content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
-                    else if (fileEdits.Any(e => !string.IsNullOrEmpty(e.OldString)))
-                    {
-                        foreach (var e in fileEdits)
-                            results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "File does not exist and edit has non-empty oldString" });
-                        continue;
-                    }
-
-                    bool fileHasErrors = false;
-                    foreach (var edit in fileEdits)
-                    {
-                        // New file creation
-                        if (!fileExists && string.IsNullOrEmpty(edit.OldString))
-                        {
-                            content = edit.NewString ?? "";
-                            continue;
-                        }
-
-                        if (string.IsNullOrEmpty(edit.OldString))
-                        {
-                            content += edit.NewString ?? "";
-                            continue;
-                        }
-
-                        var searchContent = NormalizeLineEndings(content);
-                        var searchOld = NormalizeLineEndings(edit.OldString);
-                        var idx = searchContent.IndexOf(searchOld, StringComparison.Ordinal);
-                        if (idx == -1)
-                        {
-                            fileHasErrors = true;
-                            break;
-                        }
-
-                        content = searchContent.Substring(0, idx) + (edit.NewString ?? "") + searchContent.Substring(idx + searchOld.Length);
-                    }
-
-                    if (!fileHasErrors)
-                    {
-                        var dir = Path.GetDirectoryName(targetPath);
-                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                            Directory.CreateDirectory(dir);
-                        await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
-                        results.Add(new EditResult { Path = filePath, Status = "written" });
-                    }
-                    else
-                    {
-                        // If any edit in this file failed, retry ALL edits for this file together
-                        foreach (var fe in fileEdits)
-                            failedEdits.Add((fe, "edit failed for this file, retrying all"));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    foreach (var _ in fileEdits)
-                        results.Add(new EditResult { Path = filePath, Status = "error", Error = ex.Message });
-                    failedEdits.AddRange(fileEdits.Select(e => (e, ex.Message)));
-                }
-            }
-
-            remainingEdits = failedEdits.Select(f => f.edit).ToList();
-
-            if (remainingEdits.Count == 0 || attempt >= maxRetries)
-                break;
-
-            // Compact retry: ask LLM for corrected oldString/newString pairs
-            var retryPrompt = new StringBuilder();
-            retryPrompt.AppendLine("Some find-and-replace edits failed because the oldString was not found in the file. Current file contents:");
-            foreach (var filePath in remainingEdits.Select(e => e.Path).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-                if (fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(fullPath))
-                {
-                    var curContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-                    retryPrompt.AppendLine($"\n### {filePath}\n```\n{curContent}\n```");
-                }
-            }
-            retryPrompt.AppendLine("\nFailed edits (oldString was NOT found):");
-            foreach (var (edit, reason) in failedEdits)
-            {
-                retryPrompt.AppendLine($"- path: {edit.Path}");
-                retryPrompt.AppendLine($"  oldString: '{edit.OldString}'");
-                retryPrompt.AppendLine($"  newString: '{edit.NewString}'");
-                retryPrompt.AppendLine($"  reason: {reason}");
-            }
-            retryPrompt.AppendLine("\nPlease provide corrected oldString/newString pairs. oldString must match the existing file content exactly.");
-            retryPrompt.AppendLine("Respond ONLY with JSON:");
-            retryPrompt.AppendLine("{ \"edits\": [{ \"path\": \"...\", \"oldString\": \"...\", \"newString\": \"...\" }] }");
-
-            var baseUrl = GetLlamaBaseUrl();
-            var target = baseUrl + "/v1/chat/completions";
-            var client = _clientFactory.CreateClient("llama");
-            string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-
-            var retryMessages = new[]
-            {
-                new { role = "system", content = "You are a find-and-replace fixer. Correct the oldString values to match existing file content exactly." },
-                new { role = "user", content = retryPrompt.ToString() }
+                ["index"] = step.Index,
+                ["type"] = step.Type,
+                ["description"] = step.Description,
+                ["status"] = "running"
             };
 
-            var retryBody = new { model, messages = retryMessages, stream = false, temperature = 0.1 };
-            var retryJson = JsonSerializer.Serialize(retryBody);
-            var retryContent = new StringContent(retryJson, Encoding.UTF8, "application/json");
+            // Send running event
+            await SendSse(Response, "step", result);
 
             try
             {
-                var retryResp = await client.PostAsync(target, retryContent);
-                var retryText = await retryResp.Content.ReadAsStringAsync();
-
-                string retryLlmContent = "";
-                using var doc = JsonDocument.Parse(retryText);
-                if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+                switch (step.Type?.ToLowerInvariant())
                 {
-                    var first = choices[0];
-                    if (first.TryGetProperty("message", out var msg) && msg.TryGetProperty("content", out var c))
-                        retryLlmContent = c.GetString() ?? "";
-                }
+                    case "edit":
+                        await ExecuteEditStep(step, projectRoot, result);
+                        break;
 
-                if (!string.IsNullOrWhiteSpace(retryLlmContent))
-                {
-                    var jsonStr2 = retryLlmContent;
-                    var s2 = jsonStr2.IndexOf('{');
-                    var e2 = jsonStr2.LastIndexOf('}');
-                    if (s2 >= 0 && e2 > s2)
-                        jsonStr2 = jsonStr2.Substring(s2, e2 - s2 + 1);
+                    case "command":
+                        if (!terminalStarted) { _terminal.Start(); terminalStarted = true; }
+                        await ExecuteCommandStep(step, result);
+                        break;
 
-                    var fixedEditWrapper = JsonSerializer.Deserialize<JsonElement>(jsonStr2);
-                    if (fixedEditWrapper.TryGetProperty("edits", out var editsProp))
-                    {
-                        var fixedEdits = JsonSerializer.Deserialize<List<EditAction>>(editsProp.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                        if (fixedEdits != null && fixedEdits.Count > 0)
-                            remainingEdits = fixedEdits;
-                    }
+                    case "read":
+                        await ExecuteReadStep(step, projectRoot, result);
+                        break;
+
+                    default:
+                        result["status"] = "error";
+                        result["error"] = $"Unknown step type: {step.Type}";
+                        break;
                 }
             }
-            catch { }
-        }
+            catch (Exception ex)
+            {
+                result["status"] = "error";
+                result["error"] = ex.Message;
+            }
 
-        foreach (var (edit, reason) in remainingEdits.Select(e => (e, "oldString not found after retry")))
-        {
-            if (!results.Any(r => r.Path == edit.Path && r.Status == "error" && r.Error == reason))
-                results.Add(new EditResult { Path = edit.Path, Status = "error", Error = reason });
+            results.Add(result);
+
+            // Send completed event
+            await SendSse(Response, "step", result);
         }
 
         return results;
     }
 
+    private async Task ExecuteEditStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
+    {
+        var targetPath = Path.GetFullPath(Path.Combine(projectRoot, step.Path ?? ""));
+        if (!targetPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            result["status"] = "error";
+            result["error"] = "Path outside project root";
+            return;
+        }
+
+        var fileExists = System.IO.File.Exists(targetPath);
+        var oldString = step.OldString ?? "";
+        var newString = step.NewString ?? "";
+
+        if (!fileExists)
+        {
+            if (string.IsNullOrEmpty(oldString) && !string.IsNullOrEmpty(newString))
+            {
+                // Create new file
+                var dir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+                await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
+                result["status"] = "written";
+                result["path"] = step.Path;
+                result["description"] = $"Created {step.Path}";
+                return;
+            }
+            result["status"] = "error";
+            result["error"] = "File does not exist";
+            return;
+        }
+
+        var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
+
+        if (string.IsNullOrEmpty(oldString))
+        {
+            // Append
+            content += newString;
+            await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
+            result["status"] = "written";
+            result["path"] = step.Path;
+            return;
+        }
+
+        // Find-and-replace with line ending normalization
+        var searchContent = NormalizeLineEndings(content);
+        var searchOld = NormalizeLineEndings(oldString);
+        var idx = searchContent.IndexOf(searchOld, StringComparison.Ordinal);
+
+        if (idx == -1)
+        {
+            result["status"] = "error";
+            result["error"] = $"oldString not found in {step.Path}";
+            return;
+        }
+
+        content = searchContent.Substring(0, idx) + newString + searchContent.Substring(idx + searchOld.Length);
+        await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
+
+        result["status"] = "written";
+        result["path"] = step.Path;
+    }
+
+    private async Task ExecuteCommandStep(AgentStep step, Dictionary<string, object?> result)
+    {
+        var command = step.Command ?? "";
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            result["status"] = "error";
+            result["error"] = "No command provided";
+            return;
+        }
+
+        await _terminal.SendCommandAsync(command);
+        await Task.Delay(1200);
+        var output = _terminal.ReadLastLines(200);
+
+        result["status"] = "ok";
+        result["command"] = command;
+        result["output"] = output;
+    }
+
+    private async Task ExecuteReadStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
+    {
+        var targetPath = Path.GetFullPath(Path.Combine(projectRoot, step.Path ?? ""));
+        if (!targetPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            result["status"] = "error";
+            result["error"] = "Path outside project root";
+            return;
+        }
+
+        if (!System.IO.File.Exists(targetPath))
+        {
+            result["status"] = "error";
+            result["error"] = "File not found";
+            return;
+        }
+
+        var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
+        result["status"] = "ok";
+        result["path"] = step.Path;
+        result["output"] = content;
+    }
+
+    // ============================================================
+    // Apply edits directly (no retry, no LLM)
+    // ============================================================
     private async Task<List<EditResult>> ApplyEditsDirect(List<EditAction> edits, string projectRoot)
     {
         var results = new List<EditResult>();
-
         var fileGroups = new Dictionary<string, List<EditAction>>(StringComparer.OrdinalIgnoreCase);
         var fileOrder = new List<string>();
+
         foreach (var edit in edits)
         {
             if (!fileGroups.ContainsKey(edit.Path))
@@ -673,7 +583,6 @@ Rules:
         {
             var fileEdits = fileGroups[filePath];
             var targetPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-
             if (!targetPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var _ in fileEdits)
@@ -683,13 +592,12 @@ Rules:
 
             string content = "";
             bool fileExists = System.IO.File.Exists(targetPath);
-
             if (fileExists)
                 content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
             else if (fileEdits.Any(e => !string.IsNullOrEmpty(e.OldString)))
             {
                 foreach (var e in fileEdits)
-                    results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "File does not exist and edit has non-empty oldString" });
+                    results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "File does not exist" });
                 continue;
             }
 
@@ -701,7 +609,6 @@ Rules:
                     content = edit.NewString ?? "";
                     continue;
                 }
-
                 if (string.IsNullOrEmpty(edit.OldString))
                 {
                     content += edit.NewString ?? "";
@@ -713,11 +620,10 @@ Rules:
                 var idx = content.IndexOf(searchOld, StringComparison.Ordinal);
                 if (idx == -1)
                 {
-                    results.Add(new EditResult { Path = filePath, Status = "error", Error = $"oldString not found in {filePath}" });
+                    results.Add(new EditResult { Path = filePath, Status = "error", Error = "oldString not found" });
                     hasError = true;
                     break;
                 }
-
                 content = content.Substring(0, idx) + (edit.NewString ?? "") + content.Substring(idx + searchOld.Length);
             }
 
@@ -734,16 +640,33 @@ Rules:
         return results;
     }
 
-    private static string NormalizeLineEndings(string s)
+    // ============================================================
+    // Read attached file contents for context
+    // ============================================================
+    private async Task<string> ReadAttachedFiles(List<string> files, string projectRoot)
     {
-        return s.Replace("\r\n", "\n");
+        var sb = new StringBuilder();
+        foreach (var filePath in files)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
+            if (!fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase)) continue;
+            if (System.IO.File.Exists(fullPath))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath);
+                sb.AppendLine($"\n### {filePath}\n```\n{content}\n```");
+            }
+        }
+        return sb.ToString();
     }
 
-    public class AgentResponse
+    // ============================================================
+    // SSE helper
+    // ============================================================
+    private static async Task SendSse(HttpResponse response, string eventName, object data)
     {
-        public string Thinking { get; set; } = "";
-        public string Summary { get; set; } = "";
-        public List<EditAction> Edits { get; set; } = new();
-        public List<CommandAction> Commands { get; set; } = new();
+        var json = JsonSerializer.Serialize(data);
+        await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n");
+        await response.Body.FlushAsync();
     }
 }

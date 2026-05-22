@@ -3,254 +3,314 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Maestro</title>
+  <title>Maestro — Agentic Kanban</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1>Maestro</h1>
+    <h1>Maestro <span class="badge">Agentic Kanban</span></h1>
     <div class="project-picker">
-      <label for="project-select">Select Project:</label>
+      <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects" ng-change="vm.changeProject()"></select>
-      <div class="project-desc" ng-if="vm.selectedProject">{{vm.getSelectedProjectDescription()}}</div>
+      <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">— {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
-        <button class="options-btn" ng-click="vm.toggleProjectOptions()">Options ▾</button>
+        <button class="options-btn small" ng-click="vm.toggleProjectOptions()">Options ▾</button>
         <div class="options-menu" ng-show="vm.showProjectOptions">
-          <button ng-click="vm.editProjectUI(); vm.toggleProjectOptions()">Edit Project</button>
-          <button ng-click="vm.addProjectUI(); vm.toggleProjectOptions()">Add Project</button>
-          <button ng-click="vm.removeProjectUI(); vm.toggleProjectOptions()">Remove Project</button>
+          <button ng-click="vm.editProjectUI(); vm.toggleProjectOptions()">✎ Edit Project</button>
+          <button ng-click="vm.addProjectUI(); vm.toggleProjectOptions()">＋ Add Project</button>
+          <button ng-click="vm.removeProjectUI(); vm.toggleProjectOptions()">✕ Remove Project</button>
+          <button ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
         </div>
       </div>
     </div>
-
   </header>
+
   <main>
+    <!-- KANBAN BOARD -->
     <div id="board" class="board">
-      <div class="column">
-        <h2>To Do</h2>
-        <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id">
-            <textarea class="card-text" ng-model="card.text" ng-click="vm.selectCard(card)" ng-dblclick="vm.editCardText(card)" ng-blur="vm.saveCardText(card)"></textarea>
-            <div class="file-attachment" ng-if="vm.selectedProject">
-              <button ng-click="vm.attachFile(card.id)">Choose File</button>
-              <div ng-if="card.attached" class="attached-file-name">
-                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
-                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+      <!-- TODO column -->
+      <div class="column" data-col="todo">
+        <h3>
+          <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
+          <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
+        </h3>
+        <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}">
+          <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
+               ng-class="{selected: card.id===vm.selectedCardId}"
+               draggable="true"
+               ng-attr-id="card-{{card.id}}"
+               ng-click="vm.selectCard(card)"
+               ng-dblclick="vm.editCardText(card)">
+            <div class="card-meta">
+              <span class="card-id">#{{card.id | limitTo:6}}</span>
+              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+            </div>
+            <div class="card-text">
+              <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
+                        ng-click="$event.stopPropagation()"
+                        placeholder="Task description..."></textarea>
+            </div>
+            <div class="card-tags" ng-if="card.priority">
+              <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            </div>
+            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                <span>📎</span><span class="name">{{f}}</span>
+                <span class="remove" ng-click="vm.removeAttachment(card.id); $event.stopPropagation()">✕</span>
               </div>
             </div>
             <div class="card-actions">
-              <button ng-click="vm.startCard(card)">Start</button>
+              <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small" title="Attach file">📎</button>
+              <button ng-click="vm.startCard(card); $event.stopPropagation()" class="primary small">▶ Start</button>
             </div>
           </div>
         </div>
-        <button class="addBtn" ng-click="vm.addCard('todo')">Add</button>
       </div>
-      <div class="column">
-        <h2>Doing</h2>
-        <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id">
-            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
-            <div class="file-attachment" ng-if="vm.selectedProject">
-              <div ng-if="card.attached" class="attached-file-name">
-                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
-                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+
+      <!-- DOING column -->
+      <div class="column" data-col="doing">
+        <h3>
+          <span class="col-header">⚡ Doing <span class="col-badge">{{vm.cardsForProject('doing').length}}</span></span>
+        </h3>
+        <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}">
+          <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
+               ng-class="{selected: card.id===vm.selectedCardId}"
+               draggable="true"
+               ng-attr-id="card-{{card.id}}"
+               ng-click="vm.selectCard(card)">
+            <div class="card-meta">
+              <span class="card-id">#{{card.id | limitTo:6}}</span>
+              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+            </div>
+            <div class="card-text">{{card.text}}</div>
+            <div class="card-tags" ng-if="card.priority">
+              <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            </div>
+            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                <span>📎</span><span class="name">{{f}}</span>
               </div>
             </div>
             <div class="card-actions">
-              <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
-              <button ng-click="vm.moveCard(card.id,'doing','todo')">Back</button>
+              <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive">✔ Done</button>
+              <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             </div>
           </div>
         </div>
       </div>
-      <div class="column">
-        <h2>Done</h2>
-        <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id">
-            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
-            <div class="file-attachment" ng-if="vm.selectedProject">
-              <div ng-if="card.attached" class="attached-file-name">
-                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
-                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+
+      <!-- DONE column -->
+      <div class="column" data-col="done">
+        <h3>
+          <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
+        </h3>
+        <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}">
+          <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
+               ng-class="{selected: card.id===vm.selectedCardId}"
+               draggable="true"
+               ng-attr-id="card-{{card.id}}"
+               ng-click="vm.selectCard(card)">
+            <div class="card-meta">
+              <span class="card-id">#{{card.id | limitTo:6}}</span>
+              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+            </div>
+            <div class="card-text">{{card.text}}</div>
+            <div class="card-tags" ng-if="card.priority">
+              <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            </div>
+            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                <span>📎</span><span class="name">{{f}}</span>
               </div>
             </div>
-            <div ng-if="card.agentAnalysis" style="margin-top:8px; border-top:1px solid rgba(255,255,255,0.05); padding-top:6px; font-size:0.85em;">
+            <!-- Agent analysis shown on Done cards -->
+            <div class="card-analysis" ng-if="card.agentAnalysis">
               <details>
-                <summary style="cursor:pointer; opacity:0.7;">AI Analysis</summary>
-                <div ng-if="card.agentAnalysis.summary" style="margin-top:4px; padding:4px; background:rgba(255,255,255,0.03); border-radius:4px;">
+                <summary>🤖 AI Analysis</summary>
+                <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                   <strong>Summary:</strong> {{card.agentAnalysis.summary}}
                 </div>
-                <div ng-if="card.agentAnalysis.thinking" style="margin-top:4px;">
+                <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
+                  <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps">
+                    <span class="step-status" ng-class="s.status || 'ok'">{{s.status==='error'?'✕':(s.status==='pending'?'○':'✓')}}</span>
+                    <span>{{s.description || s.type + ' ' + (s.path || s.command || '')}}</span>
+                  </div>
+                </div>
+                <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
                   <details>
-                    <summary style="cursor:pointer; opacity:0.6; font-size:0.9em;">Reasoning</summary>
-                    <pre style="white-space:pre-wrap; margin:4px 0; font-size:0.85em; opacity:0.6;">{{card.agentAnalysis.thinking}}</pre>
+                    <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
+                    <pre>{{card.agentAnalysis.thinking}}</pre>
                   </details>
-                </div>
-                <div ng-if="card.agentAnalysis.edits.length" style="margin-top:4px;">
-                  <div ng-repeat="e in card.agentAnalysis.edits" style="padding:2px 0;">
-                    <span style="opacity:0.5;">{{e.path}}</span>
-                    <span ng-if="e.status === 'written'" style="color:#4ade80; margin-left:4px;">[written]</span>
-                    <span ng-if="e.status === 'skipped' || e.status === 'error'" style="color:#f87171; margin-left:4px;">[{{e.status}}]</span>
-                  </div>
-                </div>
-                <div ng-if="card.agentAnalysis.commands.length" style="margin-top:4px;">
-                  <div ng-repeat="c in card.agentAnalysis.commands" style="padding:2px 0;">
-                    <code style="opacity:0.5; font-size:0.85em;">{{c.command}}</code>
-                    <span ng-if="c.status === 'ok'" style="color:#4ade80; margin-left:4px;">[ok]</span>
-                    <span ng-if="c.status === 'error'" style="color:#f87171; margin-left:4px;">[error]</span>
-                  </div>
                 </div>
               </details>
             </div>
             <div class="card-actions">
-              <button ng-click="vm.moveCard(card.id,'done','doing')">Reopen</button>
+              <button ng-click="vm.reopenCard(card); $event.stopPropagation()" class="small">↺ Reopen</button>
+              <button ng-click="vm.deleteCard(card.id,'done'); $event.stopPropagation()" class="danger small">✕</button>
             </div>
           </div>
         </div>
       </div>
     </div>
 
-    <section class="panel">
-      <h3>AI Assistant</h3>
-      <textarea ng-model="vm.aiPrompt" placeholder="Select a card or type a prompt"></textarea>
-      <button ng-click="vm.askAI()">Ask AI</button>
+    <!-- RIGHT PANEL: Agent + Terminal -->
+    <div class="right-panel">
+      <!-- Agent Panel -->
+      <div class="panel">
+        <h3>🤖 Agent</h3>
+        <div class="panel-body">
+          <!-- Idle state -->
+          <div class="agent-status idle" ng-if="!vm.streamingActive && !vm.agentResult">
+            <span style="font-size:12px;color:var(--muted);">Select a card and press <strong>Start</strong></span>
+          </div>
 
-      <!-- Live streaming status -->
-      <div ng-if="vm.streamingActive" class="streaming-indicator">
-        <span class="pulse-dot"></span> AI is working...
-      </div>
+          <!-- Streaming state -->
+          <div class="agent-status" ng-if="vm.streamingActive">
+            <span class="pulse-dot"></span>
+            <span class="status-text">Agent is working on "{{vm.activeCardText | limitTo:40}}"</span>
+          </div>
 
-      <!-- Streaming thinking (incremental) -->
-      <div ng-if="vm.streamingThinking" class="agent-streaming-thinking">
-        <details open>
-          <summary>AI Reasoning</summary>
-          <pre class="streaming-text">{{vm.streamingThinking}}</pre>
-        </details>
-      </div>
+          <!-- Live thinking tokens -->
+          <div class="agent-streaming-thinking" ng-if="vm.streamingThinking">
+            <details open>
+              <summary>🧠 Thinking {{vm.streamingActive ? '(live)' : ''}}</summary>
+              <pre class="streaming-text">{{vm.streamingThinking}}</pre>
+            </details>
+          </div>
 
-      <!-- Streaming edits -->
-      <div ng-if="vm.streamingEdits.length">
-        <strong>File Edits:</strong>
-        <ul class="agent-edits">
-          <li ng-repeat="e in vm.streamingEdits" ng-class="'status-' + e.status">
-            <span class="edit-path">{{e.path}}</span>
-            <span class="edit-status">[{{e.status}}]</span>
-            <span ng-if="e.error" class="edit-error">{{e.error}}</span>
-          </li>
-        </ul>
-      </div>
+          <!-- Streaming steps -->
+          <div class="agent-steps" ng-if="vm.streamingSteps.length">
+            <div class="step" ng-repeat="s in vm.streamingSteps track by $index"
+                 ng-class="s.status || 'pending'">
+              <span class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
+              <div class="step-desc">
+                <strong>{{s.type}}</strong> {{s.description || s.path || s.command || ''}}
+                <div class="step-detail" ng-if="s.output">
+                  <pre>{{s.output}}</pre>
+                </div>
+                <div class="step-detail" ng-if="s.error">
+                  <span style="color:var(--error)">{{s.error}}</span>
+                </div>
+              </div>
+            </div>
+          </div>
 
-      <!-- Streaming commands -->
-      <div ng-if="vm.streamingCommands.length">
-        <strong>Commands:</strong>
-        <ul class="agent-commands">
-          <li ng-repeat="c in vm.streamingCommands" ng-class="'status-' + c.status">
-            <span class="cmd-text">{{c.command}}</span>
-            <span class="cmd-status">[{{c.status}}]</span>
-            <pre ng-if="c.output" class="cmd-output">{{c.output}}</pre>
-          </li>
-        </ul>
-      </div>
-
-      <!-- Final result (shown after streaming completes) -->
-      <div ng-if="!vm.streamingActive && vm.agentResult" class="agent-result">
-        <div ng-if="vm.agentResult.error" class="agent-error">{{vm.agentResult.error}}</div>
-        <div ng-if="vm.agentResult.summary" class="agent-summary">
-          <strong>Summary:</strong> {{vm.agentResult.summary}}
-        </div>
-        <div ng-if="vm.agentResult.thinking && !vm.streamingThinking" class="agent-thinking">
-          <details>
-            <summary>AI Reasoning</summary>
-            <pre>{{vm.agentResult.thinking}}</pre>
-          </details>
+          <!-- Completed result -->
+          <div class="agent-result" ng-if="!vm.streamingActive && vm.agentResult">
+            <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
+            <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong> {{vm.agentResult.summary}}</div>
+            <details ng-if="vm.agentResult.thinking && !vm.streamingThinking">
+              <summary>🧠 Full Reasoning</summary>
+              <pre style="white-space:pre-wrap;font-size:12px;margin:4px 0;">{{vm.agentResult.thinking}}</pre>
+            </details>
+          </div>
         </div>
       </div>
 
-      <!-- Simple response (ask AI or old agent) -->
-      <pre ng-if="!vm.streamingActive && !vm.agentResult && vm.aiResponse" class="aiResponse">{{vm.aiResponse}}</pre>
-    </section>
-
-    <section class="panel">
-      <h3>Terminal</h3>
-      <div class="terminalOutput">{{vm.terminalOutput}}</div>
-      <input ng-model="vm.termInput" placeholder="command" />
-      <button ng-click="vm.sendCmd()">Send</button>
-      <button ng-click="vm.startTerminal()">Start Terminal</button>
-    </section>
+      <!-- Terminal Panel -->
+      <div class="panel term-panel">
+        <h3>⌨ Terminal</h3>
+        <div class="panel-body">
+          <div class="terminalOutput">{{vm.terminalOutput}}</div>
+          <div class="term-input-row">
+            <input ng-model="vm.termInput" placeholder="Command..." ng-keydown="$event.key==='Enter' && vm.sendCmd()" />
+            <button ng-click="vm.sendCmd()">Send</button>
+            <button class="small ghost" ng-click="vm.startTerminal()">↻</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
-   <!-- File picker modal for card attachments -->
-    <div class="popup-overlay" ng-if="vm.showFilePicker">
-      <div class="popup-panel">
-        <div class="popup-header">
-          <strong>Pick a file (project: {{vm.selectedProject}})</strong>
-          <button ng-click="vm.closeFilePicker()">Close</button>
-        </div>
-        <div>
-          <button ng-click="vm.pickerUpDir()">Up</button>
-          <span style="margin-left:12px;">{{vm.pickerPath || '/'}}</span>
-        </div>
-        <ul style="list-style:none; padding:0; margin-top:8px;">
-          <li ng-repeat="e in vm.pickerEntries" style="padding:6px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;">
-            <button ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</button>
-            <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;">
-              <input type="checkbox" ng-checked="vm.pickerSelected.indexOf(e.path) !== -1" style="margin-right:8px; pointer-events:none;">
-              {{e.name}}
-            </span>
-          </li>
-        </ul>
-        <div class="popup-footer">
-          <button ng-click="vm.confirmFilePicker()">Done</button>
-          <button ng-click="vm.closeFilePicker()">Cancel</button>
-        </div>
-      </div>
-    </div>
 
-    <!-- Add Project modal -->
-    <div class="popup-overlay" ng-if="vm.showAddProjectPanel">
-      <div class="popup-panel">
-        <div class="popup-header">
-          <strong ng-if="!vm.editMode">Add New Project</strong>
-          <strong ng-if="vm.editMode">Edit Project</strong>
-          <button ng-click="vm.closeAddProjectPanel()">Close</button>
+  <!-- FILE PICKER MODAL -->
+  <div class="popup-overlay" ng-if="vm.showFilePicker">
+    <div class="popup-panel" style="max-width:600px;">
+      <div class="popup-header">
+        <strong>Attach Files</strong>
+        <button ng-click="vm.closeFilePicker()">✕</button>
+      </div>
+      <div class="popup-body">
+        <div class="form-row">
+          <label>Project: {{vm.selectedProject}}</label>
         </div>
-        <div style="margin-bottom: 12px;">
-          <label for="project-name">Project Name:</label>
-          <input type="text" id="project-name" ng-model="vm.newProjectName" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project name">
+        <div class="file-picker-nav">
+          <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
+          <span>{{vm.pickerPath || '/'}}</span>
         </div>
-        <div style="margin-bottom: 12px;">
-          <label for="project-path">Project Path:</label>
-          <input type="text" id="project-path" ng-model="vm.newProjectPath" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project path (relative to repo root)">
-        </div>
-        <div style="margin-bottom: 12px;">
-          <label for="project-desc">Description:</label>
-          <input type="text" id="project-desc" ng-model="vm.newProjectDescription" style="width:100%; padding:8px; margin-top:4px;" placeholder="Short description shown in header">
-        </div>
-        <div class="popup-footer">
-          <button ng-if="!vm.editMode" ng-click="vm.addProjectFromPanel()">Add Project</button>
-          <button ng-if="vm.editMode" ng-click="vm.updateProjectFromPanel()">Save Changes</button>
-          <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
+        <div class="file-picker-list">
+          <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">
+            <span>📁</span><span>{{e.name}}/</span>
+          </div>
+          <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory" ng-click="vm.pickerToggleFile(e.path)">
+            <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}"></div>
+            <span>📄</span><span>{{e.name}}</span>
+          </div>
+          <div ng-if="!vm.pickerEntries.length" class="muted text-sm" style="padding:12px;text-align:center;">No files in this directory</div>
         </div>
       </div>
+      <div class="popup-footer">
+        <span class="text-sm muted" ng-if="vm.pickerSelected.length">{{vm.pickerSelected.length}} file(s) selected</span>
+        <button ng-click="vm.confirmFilePicker()">Attach</button>
+        <button ng-click="vm.closeFilePicker()">Cancel</button>
+      </div>
     </div>
+  </div>
 
-    <!-- Settings modal -->
-    <div class="popup-overlay" ng-if="vm.showSettingsPanel">
-      <div class="popup-panel">
-        <div class="popup-header">
-          <strong>Settings</strong>
-          <button ng-click="vm.closeSettingsPanel()">Close</button>
+  <!-- ADD/EDIT PROJECT MODAL -->
+  <div class="popup-overlay" ng-if="vm.showAddProjectPanel">
+    <div class="popup-panel" style="max-width:480px;">
+      <div class="popup-header">
+        <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
+        <button ng-click="vm.closeAddProjectPanel()">✕</button>
+      </div>
+      <div class="popup-body">
+        <div class="form-row">
+          <label for="proj-name">Project Name</label>
+          <input id="proj-name" ng-model="vm.newProjectName" placeholder="My Project" />
         </div>
-        <div style="margin-bottom: 12px;">
-          <label for="settings-default-project">Default Project:</label>
-          <select id="settings-default-project" ng-model="vm.settingsDefaultProject" ng-options="p.Path as p.Name for p in vm.projects" style="width:100%; padding:8px; margin-top:4px;"></select>
+        <div class="form-row">
+          <label for="proj-path">Path (relative or absolute)</label>
+          <input id="proj-path" ng-model="vm.newProjectPath" placeholder="../my-project or C:/path" />
         </div>
-        <div class="popup-footer">
-          <button ng-click="vm.saveDefaultProject()">Save Settings</button>
-          <button ng-click="vm.closeSettingsPanel()">Cancel</button>
+        <div class="form-row">
+          <label for="proj-desc">Description</label>
+          <input id="proj-desc" ng-model="vm.newProjectDescription" placeholder="Short description shown in header" />
         </div>
       </div>
+      <div class="popup-footer">
+        <button ng-if="!vm.editMode" ng-click="vm.addProjectFromPanel()" class="primary">Add Project</button>
+        <button ng-if="vm.editMode" ng-click="vm.updateProjectFromPanel()" class="primary">Save Changes</button>
+        <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
+      </div>
     </div>
-    <script src="/app.js"></script>
-  </body>
+  </div>
+
+  <!-- SETTINGS MODAL -->
+  <div class="popup-overlay" ng-if="vm.showSettingsPanel">
+    <div class="popup-panel" style="max-width:480px;">
+      <div class="popup-header">
+        <strong>⚙ Settings</strong>
+        <button ng-click="vm.closeSettingsPanel()">✕</button>
+      </div>
+      <div class="popup-body">
+        <div class="form-row">
+          <label for="settings-default">Default Project</label>
+          <select id="settings-default" ng-model="vm.settingsDefaultProject" ng-options="p.Path as p.Name for p in vm.projects"></select>
+        </div>
+        <div class="form-row">
+          <label>
+            <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
+          </label>
+        </div>
+      </div>
+      <div class="popup-footer">
+        <button ng-click="vm.saveSettings()" class="primary">Save</button>
+        <button ng-click="vm.closeSettingsPanel()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
 </html>

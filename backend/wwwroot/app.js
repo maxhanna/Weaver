@@ -1,23 +1,79 @@
 angular.module('kanbanApp', [])
-  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', function($http, $interval, $window, $scope) {
+  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', function($http, $interval, $window, $scope, $timeout) {
     const vm = this;
-    const STORAGE_KEY = 'kanban.cards';
+    const STORAGE_KEY = 'maestro.cards';
+    const SETTINGS_KEY = 'maestro.settings';
 
+    // === State ===
+    vm.selectedProject = '';
+    vm.projects = [];
+    vm.defaultProject = '';
     vm.aiPrompt = '';
     vm.aiResponse = '';
-    vm.termInput = '';
     vm.terminalOutput = '';
-    vm.streamingThinking = '';
-    vm.streamingEdits = [];
-    vm.streamingCommands = [];
-    vm.streamingSummary = '';
+    vm.termInput = '';
+    vm.selectedCardId = null;
+    vm.activeCardText = '';
+    vm.autoQueue = true;
+
+    // Agent streaming state
     vm.streamingActive = false;
+    vm.streamingThinking = '';
+    vm.streamingSteps = [];
+    vm.agentResult = null;
 
-    // === Project configuration ===
+    // Project UI
+    vm.showProjectOptions = false;
+    vm.showAddProjectPanel = false;
+    vm.showSettingsPanel = false;
+    vm.showFilePicker = false;
+    vm.editMode = false;
+    vm.newProjectName = '';
+    vm.newProjectPath = '';
+    vm.newProjectDescription = '';
+    vm.editingProjectPath = '';
 
-    vm.projects = [];
-    vm.selectedProject = '';
+    // File picker
+    vm.pickerCardId = null;
+    vm.pickerPath = '';
+    vm.pickerEntries = [];
+    vm.pickerSelected = [];
 
+    // Settings
+    vm.settingsDefaultProject = '';
+
+    // === Load settings from localStorage ===
+    function loadSettings() {
+      try {
+        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+        if (raw) {
+          var s = JSON.parse(raw);
+          vm.autoQueue = s.autoQueue !== false;
+        }
+      } catch(e) {}
+    }
+    loadSettings();
+
+    function saveSettings() {
+      try {
+        $window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ autoQueue: vm.autoQueue }));
+      } catch(e) {}
+    }
+
+    vm.saveSettings = function() {
+      saveSettings();
+      if (vm.settingsDefaultProject) {
+        vm.selectedProject = vm.settingsDefaultProject;
+        $http.post('/api/config/default-project', { ProjectPath: vm.settingsDefaultProject }).then(function() {
+          vm.defaultProject = vm.settingsDefaultProject;
+          vm.closeSettingsPanel();
+        }, function() { vm.closeSettingsPanel(); });
+      } else {
+        vm.closeSettingsPanel();
+      }
+    };
+
+    // === Project config ===
     function normalizeProjects(raw) {
       return raw.map(function(p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
     }
@@ -26,213 +82,176 @@ angular.module('kanbanApp', [])
       $http.get('/api/config').then(function(resp) {
         var cfg = resp.data || {};
         var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
-          { Name: 'Project Alpha', Path: '../project-alpha' },
-          { Name: 'Project Beta', Path: '../project-beta' }
+          { Name: 'Project Alpha', Path: '../project-alpha' }
         ];
         vm.projects = normalizeProjects(raw);
         vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
         vm.defaultProject = cfg.defaultProject;
       }, function() {
-        vm.projects = normalizeProjects([
-          { Name: 'Project Alpha', Path: '../project-alpha' },
-          { Name: 'Project Beta', Path: '../project-beta' }
-        ]);
-        vm.selectedProject = vm.projects[0].Path;
-        vm.defaultProject = vm.projects[0].Path;
+        vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
+        vm.selectedProject = '..';
+        vm.defaultProject = '..';
       });
     };
-
     vm.loadConfig();
-
-    // UI controls for project options menu
-    vm.showProjectOptions = false;
-    vm.toggleProjectOptions = function() { vm.showProjectOptions = !vm.showProjectOptions; };
 
     vm.getSelectedProjectDescription = function() {
       if (!vm.selectedProject) return '';
-      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
-      return proj ? (proj.Description || proj.description || '') : '';
+      var p = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      return p ? (p.Description || '') : '';
     };
 
-    vm.showAddProjectPanel = false;
-    vm.newProjectName = '';
-    vm.newProjectPath = '';
-    vm.newProjectDescription = '';
-    vm.editMode = false;
-    vm.editingProjectPath = '';
+    vm.toggleProjectOptions = function() { vm.showProjectOptions = !vm.showProjectOptions; };
+    vm.changeProject = function() {};
 
     vm.addProjectUI = function() {
       vm.showAddProjectPanel = true;
+      vm.editMode = false;
       vm.newProjectName = '';
       vm.newProjectPath = '';
+      vm.newProjectDescription = '';
     };
 
-    vm.closeAddProjectPanel = function() {
-      vm.showAddProjectPanel = false;
-    };
+    vm.closeAddProjectPanel = function() { vm.showAddProjectPanel = false; };
 
     vm.addProjectFromPanel = function() {
-      if (!vm.newProjectName) {
-        $window.alert('Project name is required');
-        return;
-      }
-      if (!vm.newProjectPath) {
-        $window.alert('Project path is required');
-        return;
-      }
-      var payload = { Name: vm.newProjectName, Path: vm.newProjectPath.replace(/\\/g, "/"), Description: vm.newProjectDescription || '' };
-      
-      $http.post('/api/config/projects/add', payload).then(function(resp) {
+      if (!vm.newProjectName) return $window.alert('Project name is required');
+      if (!vm.newProjectPath) return $window.alert('Project path is required');
+      $http.post('/api/config/projects/add', {
+        Name: vm.newProjectName,
+        Path: vm.newProjectPath.replace(/\\/g, '/'),
+        Description: vm.newProjectDescription || ''
+      }).then(function() {
         vm.loadConfig();
         vm.closeAddProjectPanel();
       }, function(err) {
-        $window.alert('Failed to add project: ' + (err.data || err.statusText || err));
+        $window.alert('Failed to add project: ' + (err.data || err.statusText));
       });
     };
 
     vm.editProjectUI = function() {
       if (!vm.selectedProject) return $window.alert('No project selected');
-      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
-      if (!proj) return $window.alert('Selected project not found');
+      var p = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      if (!p) return;
       vm.showAddProjectPanel = true;
-      vm.newProjectName = proj.Name || proj.name || '';
-      vm.newProjectPath = proj.Path || proj.path || '';
-      vm.newProjectDescription = proj.Description || proj.description || '';
       vm.editMode = true;
-      vm.editingProjectPath = proj.Path || proj.path || '';
+      vm.newProjectName = p.Name || '';
+      vm.newProjectPath = p.Path || '';
+      vm.newProjectDescription = p.Description || '';
+      vm.editingProjectPath = p.Path || '';
     };
 
     vm.updateProjectFromPanel = function() {
       if (!vm.editMode) return vm.addProjectFromPanel();
       if (!vm.newProjectName || !vm.newProjectPath) return $window.alert('Name and Path are required');
-
-      // Load current config, update the matching project, then save entire config
       $http.get('/api/config').then(function(resp) {
         var cfg = resp.data || { projects: [] };
         cfg.projects = cfg.projects || [];
         var idx = cfg.projects.findIndex(function(p) { return (p.Path || p.path) === vm.editingProjectPath; });
-        if (idx === -1) return $window.alert('Original project not found in config');
-
-        // Prevent duplicate paths if changed
-        var newPath = vm.newProjectPath.replace(/\\/g, "/");
-        if (newPath !== vm.editingProjectPath && cfg.projects.some(function(p){ return (p.Path || p.path) === newPath; })) {
+        if (idx === -1) return $window.alert('Original project not found');
+        var newPath = vm.newProjectPath.replace(/\\/g, '/');
+        if (newPath !== vm.editingProjectPath && cfg.projects.some(function(p) { return (p.Path || p.path) === newPath; }))
           return $window.alert('A project with that path already exists');
-        }
-
         cfg.projects[idx].Name = vm.newProjectName;
         cfg.projects[idx].Path = newPath;
         cfg.projects[idx].Description = vm.newProjectDescription || '';
-
-        // Persist
         $http.post('/api/config/save', cfg).then(function() {
           vm.loadConfig();
           vm.closeAddProjectPanel();
           vm.editMode = false;
           vm.editingProjectPath = '';
-        }, function(err) {
-          $window.alert('Failed to save config: ' + (err.data || err.statusText || err));
-        });
-      }, function(err) { $window.alert('Failed to load config: ' + (err.data || err.statusText || err)); });
+        }, function(err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
+      });
     };
 
     vm.removeProjectUI = function() {
-      if(!vm.selectedProject) return $window.alert('No project selected');
-      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
-      if(!proj) return;
-      if(!$window.confirm('Remove project "' + (proj.Name || proj.name) + '" (' + vm.selectedProject + ')?')) return;
-      $http.post('/api/config/projects/remove', { Path: vm.selectedProject }).then(function() {
-        vm.loadConfig();
-      }, function(err) {
-        $window.alert('Failed to remove project: ' + (err.data || err.statusText || err));
-      });
+      if (!vm.selectedProject) return $window.alert('No project selected');
+      var p = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      if (!p) return;
+      if (!$window.confirm('Remove project "' + (p.Name || '') + '" (' + vm.selectedProject + ')?')) return;
+      $http.post('/api/config/projects/remove', { Path: vm.selectedProject }).then(function() { vm.loadConfig(); });
     };
-
-    vm.setDefaultProject = function() {
-      if(!vm.selectedProject) return $window.alert('No project selected');
-      $http.post('/api/config/default-project', { ProjectPath: vm.selectedProject }).then(function() {
-        vm.defaultProject = vm.selectedProject;
-        $window.alert('Default project set successfully');
-      }, function(err) {
-        $window.alert('Failed to set default project: ' + (err.data || err.statusText || err));
-      });
-    };
-
-    vm.showSettingsPanel = false;
 
     vm.openSettingsPanel = function() {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
     };
+    vm.closeSettingsPanel = function() { vm.showSettingsPanel = false; };
 
-    vm.closeSettingsPanel = function() {
-      vm.showSettingsPanel = false;
-    };
-
-    vm.saveDefaultProject = function() {
-      if (!vm.settingsDefaultProject) { $window.alert('No project selected'); return; }
-      vm.selectedProject = vm.settingsDefaultProject;
-      vm.setDefaultProject();
-      vm.closeSettingsPanel();
-    };
-
-    // === Card state ===
-
+    // === Cards ===
     function uid() { return Math.random().toString(36).slice(2,9); }
 
-    function loadCards(){
+    function loadCards() {
       var raw = $window.localStorage.getItem(STORAGE_KEY);
       return raw ? JSON.parse(raw) : { todo:[], doing:[], done:[] };
     }
-
-    function saveCards(){ $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state)); }
+    function saveCards() { $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state)); }
 
     vm.state = loadCards();
 
-    // Filter cards by the selected project
     vm.cardsForProject = function(col) {
       var all = vm.state[col] || [];
       if (!vm.selectedProject) return all;
       return all.filter(function(c) { return c.filePath === vm.selectedProject; });
     };
 
-    vm.changeProject = function() {
-      console.log('Changed project to:', vm.selectedProject);
-    };
-
-    vm.addCard = function(col){
-      var text = $window.prompt('Card text'); if(!text) return;
-      vm.state[col].push({ id: uid(), text: text, filePath: vm.selectedProject }); saveCards();
-    };
-
-    vm.moveCard = function(id, from, to){
-      var idx = vm.state[from].findIndex(function(c){ return c.id === id; }); if(idx === -1) return;
-      var card = vm.state[from].splice(idx,1)[0]; 
-      vm.state[to].push(card); 
+    vm.addCard = function(col) {
+      var text = $window.prompt('Card text:');
+      if (!text) return;
+      vm.state[col].push({
+        id: uid(),
+        text: text,
+        filePath: vm.selectedProject,
+        createdAt: new Date().toISOString(),
+        priority: 'medium',
+        attached: []
+      });
       saveCards();
     };
 
-    vm.startCard = function(card) {
-      if (!card) return;
-      
-      // Execute AI on the card first
-      vm.executeAgent(card);
-      
-      // Then move to 'doing' column (this will happen after AI execution completes)
-      // The moveCard call is already included in executeAgent function
+    vm.deleteCard = function(id, col) {
+      if (!$window.confirm('Delete this card?')) return;
+      var idx = vm.state[col].findIndex(function(c) { return c.id === id; });
+      if (idx !== -1) { vm.state[col].splice(idx, 1); saveCards(); }
     };
 
-    vm.selectCard = function(card){
+    vm.selectCard = function(card) {
+      vm.selectedCardId = card.id;
       vm.aiPrompt = card.text;
     };
 
     vm.editCardText = function(card) {
-      var newText = $window.prompt('Edit task text:', card.text);
+      var newText = $window.prompt('Edit task:', card.text);
       if (newText !== null && newText !== card.text) {
         card.text = newText;
         saveCards();
       }
     };
 
+    vm.saveCardText = function(card) {
+      saveCards();
+    };
+
+    vm.moveCard = function(id, from, to) {
+      var idx = vm.state[from].findIndex(function(c) { return c.id === id; });
+      if (idx === -1) return;
+      var card = vm.state[from].splice(idx, 1)[0];
+      vm.state[to].push(card);
+      saveCards();
+    };
+
+    vm.reopenCard = function(card) {
+      // Clear analysis, move to todo
+      delete card.agentAnalysis;
+      delete card.agentSteps;
+      var idx = vm.state.done.findIndex(function(c) { return c.id === card.id; });
+      if (idx === -1) return;
+      vm.state.done.splice(idx, 1);
+      vm.state.todo.push(card);
+      saveCards();
+    };
+
+    // === Attachments ===
     vm.getAttachedFiles = function(card) {
       if (Array.isArray(card.attached)) return card.attached;
       if (card.attached) return [card.attached];
@@ -244,8 +263,7 @@ angular.module('kanbanApp', [])
         var cards = vm.state[col];
         for (var i = 0; i < cards.length; i++) {
           if (cards[i].id === cardId) {
-            delete cards[i].attached;
-            delete cards[i].attachedProject;
+            cards[i].attached = [];
             break;
           }
         }
@@ -253,13 +271,11 @@ angular.module('kanbanApp', [])
       saveCards();
     };
 
-    // === File picker for card attachments ===
-
-    vm.showFilePicker = false;
-    vm.pickerCardId = null;
-    vm.pickerPath = '';
-    vm.pickerEntries = [];
-    vm.pickerSelected = [];
+    vm.pickerToggleFile = function(path) {
+      var idx = vm.pickerSelected.indexOf(path);
+      if (idx === -1) vm.pickerSelected.push(path);
+      else vm.pickerSelected.splice(idx, 1);
+    };
 
     vm.attachFile = function(cardId) {
       vm.pickerCardId = cardId;
@@ -281,84 +297,61 @@ angular.module('kanbanApp', [])
       var params = { project: vm.selectedProject };
       if (vm.pickerPath) params.path = vm.pickerPath;
       $http.get('/api/editor/list', { params: params }).then(function(resp) {
-        var data = resp.data || {};
-        vm.pickerEntries = data.entries || [];
-      }, function() {
-        vm.pickerEntries = [];
-      });
+        vm.pickerEntries = (resp.data && resp.data.entries) || [];
+      }, function() { vm.pickerEntries = []; });
     };
 
-    vm.pickerEnterDir = function(path) {
-      vm.pickerPath = path;
-      vm.loadPickerEntries();
-    };
+    vm.pickerEnterDir = function(path) { vm.pickerPath = path; vm.loadPickerEntries(); };
 
     vm.pickerUpDir = function() {
       if (!vm.pickerPath) return;
-      var segs = vm.pickerPath.split('/').filter(function(s){ return s && s.length; });
+      var segs = vm.pickerPath.split('/').filter(function(s) { return s && s.length; });
       segs.pop();
       vm.pickerPath = segs.join('/');
       vm.loadPickerEntries();
     };
 
-    vm.pickerSelectFile = function(path) {
-      var idx = vm.pickerSelected.indexOf(path);
-      if (idx === -1) {
-        vm.pickerSelected.push(path);
-      } else {
-        vm.pickerSelected.splice(idx, 1);
-      }
-    };
-
     vm.confirmFilePicker = function() {
-      if (!vm.pickerSelected.length) { $window.alert('Please select at least one file.'); return; }
+      if (!vm.pickerSelected.length) return $window.alert('Select at least one file');
       var cardId = vm.pickerCardId;
-      if (!cardId) { vm.closeFilePicker(); return; }
-      // Find the card and store the attached file paths
-      var found = false;
+      if (!cardId) return vm.closeFilePicker();
       ['todo','doing','done'].forEach(function(col) {
         var cards = vm.state[col];
         for (var i = 0; i < cards.length; i++) {
           if (cards[i].id === cardId) {
             cards[i].attached = angular.copy(vm.pickerSelected);
             cards[i].attachedProject = vm.selectedProject;
-            found = true;
             break;
           }
         }
       });
-      if (found) saveCards();
+      saveCards();
       vm.closeFilePicker();
     };
 
-    // === AI Agent (streaming) ===
-
-    vm.agentResult = null;
+    // === Agent Execution (streaming) ===
 
     vm.executeAgent = function(card) {
       if (!card) return;
-      if (vm.streamingActive) { console.log('Agent busy, skipping'); return; }
-      if (!card.text) { $window.alert('Card has no task text'); return; }
+      if (vm.streamingActive) return;
+      if (!card.text) return $window.alert('Card has no task text');
       var proj = card.filePath || vm.selectedProject;
-      if (!proj) { $window.alert('No project assigned to this card'); return; }
+      if (!proj) return $window.alert('No project assigned');
 
-      // Reset streaming state
+      // Reset
       vm.agentResult = null;
       vm.aiResponse = '';
       vm.streamingThinking = '';
-      vm.streamingEdits = [];
-      vm.streamingCommands = [];
-      vm.streamingSummary = '';
+      vm.streamingSteps = [];
       vm.streamingActive = true;
-      vm.aiPrompt = card.text;
+      vm.activeCardText = card.text;
 
       var files = card.attached || [];
       var payload = { prompt: card.text, project: proj, files: files };
 
-      // Mark the card as in-progress now that execution started
+      // Move to Doing
       moveCardToDoing(card.id);
 
-      // Use fetch with streaming reader
       fetch('/api/agent/execute-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -382,8 +375,6 @@ angular.module('kanbanApp', [])
               return;
             }
             buffer += decoder.decode(result.value, { stream: true });
-
-            // Parse SSE events from buffer
             var parts = buffer.split('\n\n');
             buffer = parts.pop();
 
@@ -406,32 +397,70 @@ angular.module('kanbanApp', [])
                   case 'token':
                     if (parsed && parsed.t) vm.streamingThinking += parsed.t;
                     break;
+                  case 'step':
+                    if (parsed) {
+                      // Update or add step
+                      var existing = vm.streamingSteps.find(function(s) { return s.index === parsed.index; });
+                      if (existing) {
+                        angular.extend(existing, parsed);
+                      } else {
+                        vm.streamingSteps.push(parsed);
+                      }
+                    }
+                    break;
                   case 'edit':
-                    if (parsed) vm.streamingEdits.push(parsed);
+                    // Show edit as a step
+                    if (parsed) {
+                      vm.streamingSteps.push({
+                        index: vm.streamingSteps.length,
+                        type: 'edit',
+                        description: parsed.path,
+                        status: parsed.status === 'written' ? 'done' : (parsed.status === 'error' ? 'error' : 'done'),
+                        path: parsed.path,
+                        error: parsed.error || undefined
+                      });
+                    }
                     break;
                   case 'command':
-                    if (parsed) vm.streamingCommands.push(parsed);
-                    break;
-                  case 'summary':
-                    if (parsed) vm.streamingSummary = parsed.summary || '';
+                    if (parsed) {
+                      var step = vm.streamingSteps.find(function(s) { return s.index === parsed.index; });
+                      if (step) {
+                        step.status = parsed.status === 'ok' ? 'done' : 'error';
+                        if (parsed.output) step.output = parsed.output;
+                        if (parsed.error) step.error = parsed.error;
+                      } else {
+                        vm.streamingSteps.push({
+                          index: parsed.index,
+                          type: 'command',
+                          description: parsed.command,
+                          command: parsed.command,
+                          status: parsed.status === 'ok' ? 'done' : 'error',
+                          output: parsed.output || undefined,
+                          error: parsed.error || undefined
+                        });
+                      }
+                    }
                     break;
                   case 'done':
                     vm.streamingActive = false;
-                    vm.agentResult = { summary: vm.streamingSummary, thinking: vm.streamingThinking };
-                    vm.aiResponse = vm.streamingSummary || 'Agent completed.';
-
+                    vm.agentResult = {
+                      summary: parsed ? parsed.summary : '',
+                      thinking: vm.streamingThinking
+                    };
+                    vm.aiResponse = (parsed && parsed.summary) || 'Agent completed.';
                     // Save analysis onto the card
                     var analysis = {
-                      summary: vm.streamingSummary,
+                      summary: parsed ? parsed.summary : '',
                       thinking: vm.streamingThinking,
-                      edits: angular.copy(vm.streamingEdits),
-                      commands: angular.copy(vm.streamingCommands)
+                      steps: angular.copy(vm.streamingSteps)
                     };
-                    var doIdx = vm.state.doing.findIndex(function(c){ return c.id === card.id; });
+                    var doIdx = vm.state.doing.findIndex(function(c) { return c.id === card.id; });
                     if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;
-
                     moveCardToDone(card.id);
-                    vm.processQueue();
+                    // Auto-queue next
+                    if (vm.autoQueue) {
+                      $timeout(function() { vm.processQueue(); }, 500);
+                    }
                     break;
                   case 'error':
                     vm.streamingActive = false;
@@ -441,12 +470,10 @@ angular.module('kanbanApp', [])
                 }
               }
             }
-
             $scope.$digest();
             readNext();
           });
         }
-
         readNext();
       }).catch(function(err) {
         vm.streamingActive = false;
@@ -456,7 +483,7 @@ angular.module('kanbanApp', [])
     };
 
     function moveCardToDoing(cardId) {
-      var idx = vm.state.todo.findIndex(function(c){ return c.id === cardId; });
+      var idx = vm.state.todo.findIndex(function(c) { return c.id === cardId; });
       if (idx === -1) return;
       var card = vm.state.todo.splice(idx, 1)[0];
       vm.state.doing.push(card);
@@ -464,60 +491,62 @@ angular.module('kanbanApp', [])
     }
 
     function moveCardToDone(cardId) {
-      var idx = vm.state.doing.findIndex(function(c){ return c.id === cardId; });
+      var idx = vm.state.doing.findIndex(function(c) { return c.id === cardId; });
       if (idx === -1) return;
       var card = vm.state.doing.splice(idx, 1)[0];
       vm.state.done.push(card);
       saveCards();
     }
 
-    // === Auto-queue: process next todo card when one completes ===
+    vm.startCard = function(card) {
+      if (!card) return;
+      vm.executeAgent(card);
+    };
 
+    // === Auto-queue ===
     vm.processQueue = function() {
       if (vm.streamingActive) return;
-      var nextCard = vm.state.todo.filter(function(c){ return c.filePath === vm.selectedProject; })[0];
-      if (nextCard) vm.executeAgent(nextCard);
+      var next = vm.state.todo.filter(function(c) { return c.filePath === vm.selectedProject; })[0];
+      if (next) vm.executeAgent(next);
     };
 
     // === AI Chat ===
-
-    vm.askAI = function(){
-      if(!vm.aiPrompt) return $window.alert('Enter a prompt');
+    vm.askAI = function() {
+      if (!vm.aiPrompt) return $window.alert('Enter a prompt');
       vm.agentResult = null;
       vm.aiResponse = 'Thinking...';
       $http.post('/api/ai/generate', { prompt: vm.aiPrompt })
-        .then(function(resp){
-          if(typeof resp.data === 'string') vm.aiResponse = resp.data;
+        .then(function(resp) {
+          if (typeof resp.data === 'string') vm.aiResponse = resp.data;
           else vm.aiResponse = JSON.stringify(resp.data, null, 2);
-        }, function(err){ vm.aiResponse = 'Error: ' + (err.statusText || err); });
+        }, function(err) { vm.aiResponse = 'Error: ' + (err.statusText || err); });
     };
 
     // === Terminal ===
-
-    vm.startTerminal = function(){ $http.post('/api/terminal/start').catch(function(){}); };
-
-    vm.sendCmd = function(){ if(!vm.termInput) return; $http.post('/api/terminal/exec', { command: vm.termInput }).then(function(){ vm.termInput = ''; vm.refreshTerminal(); }); };
-
-    vm.refreshTerminal = function(){
-      $http.get('/api/terminal/output').then(function(resp){ vm.terminalOutput = resp.data.output || ''; });
+    vm.startTerminal = function() { $http.post('/api/terminal/start').catch(function() {}); };
+    vm.sendCmd = function() {
+      if (!vm.termInput) return;
+      $http.post('/api/terminal/exec', { command: vm.termInput }).then(function() {
+        vm.termInput = '';
+        vm.refreshTerminal();
+      });
     };
-
+    vm.refreshTerminal = function() {
+      $http.get('/api/terminal/output').then(function(resp) { vm.terminalOutput = resp.data.output || ''; });
+    };
     vm.refreshTerminal();
 
-    // Initialize column resizers so users can drag to resize Kanban columns
+    // === Column Resizers ===
     vm.initColumnResizers = function() {
       try {
-        // remove any existing resizers
         var existing = document.querySelectorAll('.col-resizer');
-        existing.forEach(function(el){ el.remove(); });
-
+        existing.forEach(function(el) { el.remove(); });
         var cols = Array.prototype.slice.call(document.querySelectorAll('#board .column'));
         for (var i = 0; i < cols.length - 1; i++) {
-          (function(leftCol){
+          (function(leftCol) {
             var resizer = document.createElement('div');
             resizer.className = 'col-resizer';
             leftCol.appendChild(resizer);
-
             resizer.addEventListener('pointerdown', function startDrag(e) {
               e.preventDefault();
               var rightCol = leftCol.nextElementSibling;
@@ -525,47 +554,83 @@ angular.module('kanbanApp', [])
               var startX = e.clientX;
               var leftRect = leftCol.getBoundingClientRect();
               var rightRect = rightCol.getBoundingClientRect();
-              var leftWidth = leftRect.width;
-              var rightWidth = rightRect.width;
-              var min = 160; // minimum column width
+              var leftW = leftRect.width;
+              var rightW = rightRect.width;
+              var min = 200;
               document.body.style.userSelect = 'none';
               resizer.classList.add('active');
-
               function onMove(ev) {
                 var dx = ev.clientX - startX;
-                var newLeft = leftWidth + dx;
-                var newRight = rightWidth - dx;
-                var total = leftWidth + rightWidth;
-                if (newLeft < min) { newLeft = min; newRight = total - min; }
-                if (newRight < min) { newRight = min; newLeft = total - min; }
-                leftCol.style.flex = '0 0 ' + Math.round(newLeft) + 'px';
-                rightCol.style.flex = '0 0 ' + Math.round(newRight) + 'px';
+                var nl = leftW + dx;
+                var nr = rightW - dx;
+                var total = leftW + rightW;
+                if (nl < min) { nl = min; nr = total - min; }
+                if (nr < min) { nr = min; nl = total - min; }
+                leftCol.style.flex = '0 0 ' + Math.round(nl) + 'px';
+                rightCol.style.flex = '0 0 ' + Math.round(nr) + 'px';
               }
-
               function stopDrag() {
                 document.removeEventListener('pointermove', onMove);
                 document.removeEventListener('pointerup', stopDrag);
                 document.body.style.userSelect = '';
                 resizer.classList.remove('active');
               }
-
               document.addEventListener('pointermove', onMove);
               document.addEventListener('pointerup', stopDrag);
             });
-
-            // double-click resets flex sizing to allow automatic layout
             resizer.addEventListener('dblclick', function() {
-              cols.forEach(function(c){ c.style.flex = ''; c.style.width = ''; });
+              cols.forEach(function(c) { c.style.flex = ''; c.style.width = ''; });
             });
           })(cols[i]);
         }
-      } catch (err) {
-        console.error('initColumnResizers error', err);
-      }
+      } catch(e) { console.error('resizer error', e); }
     };
 
-    // run after a short delay so DOM is ready
-    setTimeout(function(){ vm.initColumnResizers(); }, 200);
+    $timeout(function() { vm.initColumnResizers(); }, 300);
 
-    $interval(vm.refreshTerminal, 2000);
+    // === Drag & Drop between columns ===
+    vm.setupDragDrop = function() {
+      try {
+        var cards = document.querySelectorAll('.card[draggable]');
+        cards.forEach(function(c) {
+          c.addEventListener('dragstart', function(e) {
+            e.dataTransfer.setData('text/plain', c.id.replace('card-', ''));
+            c.classList.add('dragging');
+          });
+          c.addEventListener('dragend', function(e) {
+            c.classList.remove('dragging');
+          });
+        });
+        var cols = document.querySelectorAll('.cards');
+        cols.forEach(function(col) {
+          col.addEventListener('dragover', function(e) { e.preventDefault(); col.closest('.column').classList.add('drop-target'); });
+          col.addEventListener('dragleave', function(e) { col.closest('.column').classList.remove('drop-target'); });
+          col.addEventListener('drop', function(e) {
+            e.preventDefault();
+            col.closest('.column').classList.remove('drop-target');
+            var cardId = e.dataTransfer.getData('text/plain');
+            var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
+            if (!cardId || !targetCol) return;
+            // Find which column the card is currently in
+            var fromCol = null;
+            ['todo','doing','done'].forEach(function(cn) {
+              var idx = vm.state[cn].findIndex(function(c) { return c.id === cardId; });
+              if (idx !== -1) fromCol = cn;
+            });
+            if (!fromCol || fromCol === targetCol) return;
+            // Remove from source, add to target
+            var idx = vm.state[fromCol].findIndex(function(c) { return c.id === cardId; });
+            if (idx === -1) return;
+            var card = vm.state[fromCol].splice(idx, 1)[0];
+            vm.state[targetCol].push(card);
+            saveCards();
+            $scope.$digest();
+          });
+        });
+      } catch(e) { console.error('dragdrop error', e); }
+    };
+    $timeout(function() { vm.setupDragDrop(); }, 500);
+
+    // Refresh terminal periodically
+    $interval(vm.refreshTerminal, 3000);
   }]);
