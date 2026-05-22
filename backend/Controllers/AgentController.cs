@@ -148,6 +148,173 @@ public class AgentController : ControllerBase
     private static bool BatchWasExplorationOnly(IReadOnlyList<AgentStep> batch) =>
         batch.Count > 0 && batch.All(s => ExplorationStepTypes.Contains(s.Type ?? ""));
 
+    private async Task EmitLog(bool emit, string level, string message, object? detail = null)
+    {
+        if (!emit) return;
+        await SendSse(Response, "log", new
+        {
+            ts = DateTime.UtcNow.ToString("o"),
+            level,
+            message,
+            detail
+        });
+    }
+
+    private static List<string> ExtractSearchKeywords(string prompt)
+    {
+        var result = new List<string>();
+        string[] priority = { "settings", "terminal", "popup", "panel", "toggle", "config", "visibility", "maestro", "showSettingsPanel", "autoQueue" };
+        foreach (var p in priority)
+            if (prompt.Contains(p, StringComparison.OrdinalIgnoreCase))
+                result.Add(p);
+
+        foreach (Match m in Regex.Matches(prompt, @"\b[a-zA-Z]{4,}\b"))
+        {
+            var w = m.Value;
+            if (!result.Contains(w, StringComparer.OrdinalIgnoreCase))
+                result.Add(w);
+        }
+        return result.Take(8).ToList();
+    }
+
+    private static List<string> FindLikelyFiles(string prompt, string projectRoot)
+    {
+        var matches = new List<string>();
+        if (!Directory.Exists(projectRoot)) return matches;
+
+        var lower = prompt.ToLowerInvariant();
+        var presets = new[]
+        {
+            "backend/wwwroot/app.js", "backend/wwwroot/index.html",
+            "wwwroot/app.js", "wwwroot/index.html",
+            "app.js", "index.html"
+        };
+        foreach (var p in presets)
+        {
+            var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(full))
+                matches.Add(p.Replace('\\', '/'));
+        }
+
+        var nameHints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (lower.Contains("setting") || lower.Contains("popup") || lower.Contains("panel") || lower.Contains("toggle"))
+        {
+            nameHints.Add("app.js"); nameHints.Add("index.html"); nameHints.Add("settings");
+        }
+        if (lower.Contains("terminal"))
+        {
+            nameHints.Add("app.js"); nameHints.Add("index.html"); nameHints.Add("terminal");
+        }
+
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages" };
+
+        foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+            if (skip.Any(s => rel.Contains("/" + s + "/", StringComparison.OrdinalIgnoreCase))) continue;
+            var name = Path.GetFileName(file);
+            if (nameHints.Any(h => rel.Contains(h, StringComparison.OrdinalIgnoreCase) || name.Contains(h, StringComparison.OrdinalIgnoreCase)))
+                matches.Add(rel);
+            if (matches.Count >= 12) break;
+        }
+
+        return matches.Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
+    }
+
+    private static List<string> FindSimilarFiles(string missingPath, string projectRoot)
+    {
+        var name = Path.GetFileName(missingPath.Replace('/', Path.DirectorySeparatorChar));
+        if (string.IsNullOrEmpty(name)) name = missingPath;
+        var found = new List<string>();
+        if (!Directory.Exists(projectRoot)) return found;
+
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "node_modules", ".git", "bin", "obj", "dist" };
+
+        foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+            if (skip.Any(s => rel.Contains("/" + s + "/", StringComparison.OrdinalIgnoreCase))) continue;
+            if (rel.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(file).Equals(name, StringComparison.OrdinalIgnoreCase))
+                found.Add(rel);
+            if (found.Count >= 10) break;
+        }
+        return found;
+    }
+
+    private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
+        string prompt, string projectRoot, bool emitSse)
+    {
+        await EmitLog(emitSse, "info", "Auto-discovering project files (list → grep → read)…");
+
+        var plan = new List<AgentStep>();
+        var idx = 0;
+        plan.Add(new AgentStep
+        {
+            Index = idx++,
+            Type = "list",
+            Path = "",
+            Description = "Auto: list project root"
+        });
+
+        foreach (var kw in ExtractSearchKeywords(prompt))
+        {
+            plan.Add(new AgentStep
+            {
+                Index = idx++,
+                Type = "grep",
+                Query = kw,
+                Description = $"Auto: search codebase for '{kw}'"
+            });
+        }
+
+        foreach (var file in FindLikelyFiles(prompt, projectRoot))
+        {
+            plan.Add(new AgentStep
+            {
+                Index = idx++,
+                Type = "read",
+                Path = file,
+                Description = $"Auto: read candidate file {file}"
+            });
+        }
+
+        // Windows-friendly discovery via terminal
+        plan.Add(new AgentStep
+        {
+            Index = idx++,
+            Type = "command",
+            Command = OperatingSystem.IsWindows()
+                ? "dir /s /b app.js index.html 2>nul | more"
+                : "find . -name 'app.js' -o -name 'index.html' 2>/dev/null | head -20",
+            Description = "Auto: locate app.js / index.html via shell"
+        });
+
+        var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
+
+        var sb = new StringBuilder();
+        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths like src/components/ unless listed.");
+        sb.AppendLine();
+        foreach (var item in steps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (r.TryGetValue("output", out var output) && output != null)
+            {
+                sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
+                sb.AppendLine(Truncate(output.ToString() ?? "", type == "read" ? 4000 : 1500));
+                sb.AppendLine();
+            }
+            if (r.TryGetValue("suggestions", out var sug) && sug is IEnumerable<object> list)
+                sb.AppendLine("Suggestions: " + string.Join(", ", list));
+        }
+
+        await EmitLog(emitSse, "info", $"Discovery complete ({steps.Count} bootstrap steps)");
+        return (sb.ToString(), steps);
+    }
+
     private string GetLlamaBaseUrl()
     {
         var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
@@ -177,8 +344,10 @@ public class AgentController : ControllerBase
         var maxIter = req.MaxIterations ?? DefaultMaxIterations;
         var maxBatch = req.MaxStepsPerBatch ?? DefaultMaxStepsPerBatch;
 
+        var (discoveryText, bootstrapSteps) = await RunBootstrapDiscovery(req.Prompt, projectRoot, emitSse: false);
         var (allSteps, agentResp, error) = await RunAgentLoop(
-            req.Prompt, fileContents, projectRoot, maxIter, maxBatch, stream: false);
+            req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
+            stream: false, bootstrapSteps);
 
         if (agentResp == null)
             return Ok(new { error = error ?? "Failed to parse AI response", steps = allSteps });
@@ -247,9 +416,14 @@ public class AgentController : ControllerBase
             var maxBatch = req.MaxStepsPerBatch ?? DefaultMaxStepsPerBatch;
 
             await SendSse(Response, "phase", new { phase = "start", projectRoot, maxIter, maxBatch });
+            await EmitLog(true, "info", "Agent run started", new { projectRoot, task = req.Prompt });
+
+            await SendSse(Response, "phase", new { phase = "discover", message = "Scanning project (list, grep, read, terminal)…" });
+            var (discoveryText, bootstrapSteps) = await RunBootstrapDiscovery(req.Prompt, projectRoot, emitSse: true);
 
             var (allSteps, agentResp, error) = await RunAgentLoop(
-                req.Prompt, fileContents, projectRoot, maxIter, maxBatch, stream: true);
+                req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
+                stream: true, bootstrapSteps);
 
             if (agentResp == null)
             {
@@ -275,27 +449,47 @@ public class AgentController : ControllerBase
     }
 
     private async Task<(List<object> steps, AgentResponse? lastResponse, string? error)> RunAgentLoop(
-        string prompt, string fileContents, string projectRoot, int maxIterations, int maxStepsPerBatch, bool stream)
+        string prompt, string fileContents, string discoveryContext, string projectRoot,
+        int maxIterations, int maxStepsPerBatch, bool stream, List<object>? bootstrapSteps = null)
     {
-        var allSteps = new List<object>();
+        var allSteps = bootstrapSteps != null ? new List<object>(bootstrapSteps) : new List<object>();
         var observations = new StringBuilder();
+        var discoveryBuilder = new StringBuilder(discoveryContext ?? "");
+        if (discoveryBuilder.Length > 0)
+            observations.AppendLine(discoveryBuilder.ToString());
+        if (bootstrapSteps != null)
+            AppendObservations(observations, bootstrapSteps);
+
         AgentResponse? lastResponse = null;
         string? lastError = null;
-        var globalStepIndex = 0;
+        var globalStepIndex = allSteps.Count;
 
         for (var iteration = 0; iteration < maxIterations; iteration++)
         {
             if (stream)
-                await SendSse(Response, "phase", new { phase = "llm", iteration, message = iteration == 0 ? "Planning…" : "Continuing with observations…" });
+                await SendSse(Response, "phase", new { phase = "llm", iteration, message = iteration == 0 ? "Asking model (batch 1)…" : $"Model follow-up (batch {iteration + 1})…" });
+
+            await EmitLog(stream, "info", iteration == 0 ? "Calling LLM for plan + steps…" : $"Calling LLM for batch {iteration + 1}…");
+
+            var discoverySnapshot = discoveryBuilder.ToString();
+            var enrichedContext = fileContents;
+            if (!string.IsNullOrWhiteSpace(discoverySnapshot))
+                enrichedContext += "\n\n## Project discovery\n" + discoverySnapshot;
 
             var (raw, agentResp, parseError) = await CallLlm(
-                prompt, fileContents, projectRoot, observations.ToString(), iteration, maxStepsPerBatch, stream && iteration == 0);
+                prompt, enrichedContext, discoverySnapshot, projectRoot, observations.ToString(),
+                iteration, maxStepsPerBatch, stream && iteration == 0);
 
             lastResponse = agentResp;
             lastError = parseError;
 
             if (agentResp == null)
+            {
+                await EmitLog(stream, "error", "Failed to parse model response", new { error = parseError });
                 break;
+            }
+
+            await EmitLog(stream, "info", $"Model returned {agentResp.Steps.Count} step(s), complete={agentResp.Complete}");
 
             if (stream && !string.IsNullOrWhiteSpace(agentResp.Thinking))
                 await SendSse(Response, "thinking", new { text = agentResp.Thinking, iteration });
@@ -305,7 +499,15 @@ public class AgentController : ControllerBase
 
             var batch = agentResp.Steps.Take(maxStepsPerBatch).ToList();
             if (batch.Count == 0)
+            {
+                await EmitLog(stream, "warn", "Model returned zero steps");
                 break;
+            }
+
+            await EmitLog(stream, "info", $"Executing {batch.Count} step(s)…", new
+            {
+                steps = batch.Select(s => new { s.Type, s.Path, s.Command, s.Description }).ToList()
+            });
 
             var batchResults = await ExecuteSteps(batch, projectRoot, globalStepIndex, stream);
             globalStepIndex += batch.Count;
@@ -326,6 +528,22 @@ public class AgentController : ControllerBase
                 r is Dictionary<string, object?> d &&
                 d.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
                 d.TryGetValue("status", out var st) && st?.ToString() == "error");
+
+            var pathNotFound = batchResults.Any(r =>
+                r is Dictionary<string, object?> d &&
+                d.TryGetValue("error", out var err) &&
+                (err?.ToString()?.Contains("does not exist", StringComparison.OrdinalIgnoreCase) ?? false));
+
+            if (pathNotFound && iteration < maxIterations - 1)
+            {
+                await EmitLog(stream, "warn", "Model used wrong paths — re-scanning project…");
+                var (extraDiscovery, extraSteps) = await RunBootstrapDiscovery(prompt, projectRoot, stream);
+                discoveryBuilder.AppendLine(extraDiscovery);
+                allSteps.AddRange(extraSteps);
+                AppendObservations(observations, extraSteps);
+                globalStepIndex += extraSteps.Count;
+                continue;
+            }
 
             // Small models often set complete:true after a read — ignore until edits land
             var modelSaysComplete = agentResp.Complete;
@@ -355,10 +573,26 @@ public class AgentController : ControllerBase
         if (TaskExpectsFileChanges(prompt) && !HasSuccessfulEdits(allSteps))
         {
             if (stream)
-                await SendSse(Response, "phase", new { phase = "mandatory-edits", message = "Applying required file changes…" });
+                await SendSse(Response, "phase", new { phase = "mandatory-edits", message = "Re-reading real files + applying edits…" });
+
+            await EmitLog(stream, "info", "Mandatory edit pass: re-reading likely files from disk…");
+            var rereadPlan = FindLikelyFiles(prompt, projectRoot).Select((f, i) => new AgentStep
+            {
+                Index = i,
+                Type = "read",
+                Path = f,
+                Description = $"Mandatory: read {f} before edit"
+            }).ToList();
+            if (rereadPlan.Count > 0)
+            {
+                var rereadResults = await ExecuteSteps(rereadPlan, projectRoot, globalStepIndex, stream);
+                globalStepIndex += rereadPlan.Count;
+                allSteps.AddRange(rereadResults);
+                AppendObservations(observations, rereadResults);
+            }
 
             var (rawM, agentRespM, _) = await CallLlmMandatoryEdits(
-                prompt, observations.ToString(), projectRoot);
+                prompt, observations.ToString(), discoveryBuilder.ToString(), projectRoot);
 
             if (agentRespM != null)
             {
@@ -400,6 +634,11 @@ public class AgentController : ControllerBase
             if (type == "edit" && status == "error")
             {
                 observations.AppendLine($"EDIT FAILED: {r.GetValueOrDefault("path")} — {r.GetValueOrDefault("error")}");
+                if (r.TryGetValue("suggestions", out var sug) && sug != null)
+                {
+                    var paths = sug is IEnumerable<string> ss ? ss : (sug as System.Collections.IEnumerable)?.Cast<object>().Select(x => x?.ToString() ?? "") ?? Array.Empty<string>();
+                    observations.AppendLine("USE THESE REAL PATHS INSTEAD: " + string.Join(", ", paths));
+                }
                 if (r.TryGetValue("snippet", out var sn) && sn != null)
                     observations.AppendLine($"Near match context:\n{sn}");
             }
@@ -435,11 +674,11 @@ public class AgentController : ControllerBase
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlm(
-        string prompt, string fileContents, string projectRoot, string observations,
+        string prompt, string fileContents, string discoveryContext, string projectRoot, string observations,
         int iteration, int maxSteps, bool stream)
     {
         var systemPrompt = BuildSystemPrompt(maxSteps);
-        var userMessage = BuildUserMessage(prompt, projectRoot, fileContents, observations, iteration);
+        var userMessage = BuildUserMessage(prompt, projectRoot, fileContents, discoveryContext, observations, iteration);
 
         var baseUrl = GetLlamaBaseUrl();
         var target = baseUrl + "/v1/chat/completions";
@@ -486,9 +725,12 @@ Respond ONLY with JSON (no markdown):
   ]
 }}
 
-Paths use / relative to project root. Commands run with cwd = project root.";
+Paths use / relative to project root. Commands run with cwd = project root.
+NEVER invent paths (e.g. src/components/SettingsPopup.jsx) unless they appear in Project discovery.
+Before edit: read the file OR use exact content from discovery. Use list/grep/command to find real paths.";
 
-    private static string BuildUserMessage(string prompt, string projectRoot, string fileContents, string observations, int iteration)
+    private static string BuildUserMessage(string prompt, string projectRoot, string fileContents,
+        string discoveryContext, string observations, int iteration)
     {
         var sb = new StringBuilder();
         sb.AppendLine("## Task");
@@ -497,11 +739,19 @@ Paths use / relative to project root. Commands run with cwd = project root.";
         sb.AppendLine("## Project root (use this for all paths)");
         sb.AppendLine(projectRoot);
 
+        if (!string.IsNullOrWhiteSpace(discoveryContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Project discovery (REAL paths — only edit files listed here)");
+            sb.AppendLine(discoveryContext);
+        }
+
         if (TaskExpectsFileChanges(prompt))
         {
             sb.AppendLine();
             sb.AppendLine("## Requirement");
-            sb.AppendLine("This task requires file changes. Include edit step(s). Do not mark complete without edits.");
+            sb.AppendLine("This task requires file changes. Use paths from discovery (e.g. wwwroot/app.js, wwwroot/index.html).");
+            sb.AppendLine("If unsure: add grep/list/read steps first — do NOT guess React paths.");
         }
 
         if (iteration > 0)
@@ -524,10 +774,10 @@ Paths use / relative to project root. Commands run with cwd = project root.";
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmMandatoryEdits(
-        string prompt, string observations, string projectRoot)
+        string prompt, string observations, string discoveryContext, string projectRoot)
     {
         var systemPrompt = @"You are Maestro completing a task that MUST modify files.
-The previous agent pass only read files — no edits were applied. This is your last chance.
+The previous agent pass failed or used wrong paths. This is your last chance.
 
 Respond ONLY with JSON:
 {
@@ -540,10 +790,10 @@ Respond ONLY with JSON:
 }
 
 Rules:
-- steps must be type ""edit"" only (no read/list).
-- oldString must be copied EXACTLY from the file content in observations.
-- You may include multiple edit steps for the same file.
-- path is relative to project root, use / separators.";
+- steps must be type ""edit"" only.
+- path MUST be from Project discovery (e.g. backend/wwwroot/app.js or wwwroot/index.html) — NEVER invent src/components paths.
+- oldString must be copied EXACTLY from FILE content in observations.
+- Maestro Kanban UI lives in wwwroot/app.js and wwwroot/index.html unless discovery shows otherwise.";
 
         var userMessage = new StringBuilder();
         userMessage.AppendLine("## Task to complete");
@@ -552,8 +802,11 @@ Rules:
         userMessage.AppendLine("## Project root");
         userMessage.AppendLine(projectRoot);
         userMessage.AppendLine();
-        userMessage.AppendLine("## File contents from prior reads (copy oldString from here)");
-        userMessage.AppendLine(observations.Length > 0 ? observations.ToString() : "(missing — use attached context if any)");
+        userMessage.AppendLine("## Project discovery");
+        userMessage.AppendLine(discoveryContext);
+        userMessage.AppendLine();
+        userMessage.AppendLine("## File contents (copy oldString from here)");
+        userMessage.AppendLine(observations.Length > 0 ? observations.ToString() : "(missing)");
 
         var baseUrl = GetLlamaBaseUrl();
         var target = baseUrl + "/v1/chat/completions";
@@ -617,7 +870,7 @@ Rules:
                 if (!delta.TryGetProperty("content", out var contentProp)) continue;
                 var token = contentProp.GetString() ?? "";
                 fullContent.Append(token);
-                await SendSse(Response, "status", new { message = "Generating plan…" });
+                await SendSse(Response, "status", new { message = "Model responding…" });
             }
             catch { }
         }
@@ -684,7 +937,10 @@ Rules:
             };
 
             if (emitSse)
+            {
+                await EmitLog(emitSse, "step", $"▶ {step.Type}: {step.Description ?? step.Path ?? step.Command ?? step.Query ?? ""}");
                 await SendSse(Response, "step", result);
+            }
 
             try
             {
@@ -728,7 +984,12 @@ Rules:
             results.Add(result);
 
             if (emitSse)
+            {
+                var st = result["status"]?.ToString() ?? "?";
+                await EmitLog(emitSse, st == "error" ? "error" : "info", $"✓ {step.Type} finished ({st})",
+                    new { path = result.GetValueOrDefault("path"), error = result.GetValueOrDefault("error") });
                 await SendSse(Response, "step", result);
+            }
         }
 
         return results;
@@ -762,8 +1023,10 @@ Rules:
                 PopulateEditResult(result, "created", step.Path!, null, newString, newString);
                 return;
             }
+            var suggestions = FindSimilarFiles(step.Path ?? "", projectRoot);
             result["status"] = "error";
-            result["error"] = "File does not exist";
+            result["error"] = $"File does not exist: {step.Path}. Use a path from discovery.";
+            result["suggestions"] = suggestions;
             return;
         }
 

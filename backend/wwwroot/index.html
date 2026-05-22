@@ -185,6 +185,20 @@
             <span class="status-text">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span></span>
           </div>
 
+          <div class="agent-activity-log" ng-if="vm.streamingActive || vm.agentActivityLog.length">
+            <details open>
+              <summary>📋 Activity log ({{vm.agentActivityLog.length}})</summary>
+              <div class="log-entries">
+                <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
+                  <span class="log-ts">{{e.ts}}</span>
+                  <span class="log-level">{{e.level}}</span>
+                  <span class="log-msg">{{e.message}}</span>
+                  <pre class="log-detail" ng-if="e.detail">{{vm.formatLogDetail(e.detail)}}</pre>
+                </div>
+              </div>
+            </details>
+          </div>
+
           <div class="agent-streaming-thinking" ng-if="vm.streamingThinking">
             <details open>
               <summary>🧠 Plan</summary>
@@ -220,6 +234,10 @@
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>
+                  <div class="path-suggestions" ng-if="s.suggestions && s.suggestions.length">
+                    <strong>Try these paths:</strong>
+                    <span class="file-edit-chip" ng-repeat="p in s.suggestions">{{p}}</span>
+                  </div>
                   <pre ng-if="s.snippet" class="snippet-hint">{{s.snippet}}</pre>
                 </div>
               </div>

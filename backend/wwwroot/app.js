@@ -23,6 +23,7 @@ angular.module('kanbanApp', [])
     vm.streamingPhase = '';
     vm.streamingSteps = [];
     vm.streamingFilesEdited = [];
+    vm.agentActivityLog = [];
     vm.agentResult = null;
 
     // Project UI
@@ -345,6 +346,23 @@ angular.module('kanbanApp', [])
       return step;
     }
 
+    function pushAgentLog(level, message, detail) {
+      var entry = {
+        ts: new Date().toLocaleTimeString(),
+        level: level || 'info',
+        message: message || '',
+        detail: detail
+      };
+      vm.agentActivityLog.push(entry);
+      if (vm.agentActivityLog.length > 200) vm.agentActivityLog.shift();
+    }
+
+    function formatLogDetail(detail) {
+      if (!detail) return '';
+      if (typeof detail === 'string') return detail;
+      try { return JSON.stringify(detail, null, 0); } catch (e) { return String(detail); }
+    }
+
     function refreshFilesEditedFromSteps() {
       vm.streamingFilesEdited = vm.streamingSteps.filter(function(s) {
         return s.type === 'edit' && s.status === 'done' && s.path;
@@ -410,7 +428,9 @@ angular.module('kanbanApp', [])
       vm.streamingPhase = '';
       vm.streamingSteps = [];
       vm.streamingFilesEdited = [];
+      vm.agentActivityLog = [];
       vm.streamingActive = true;
+      pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
       vm.activeCardText = card.text;
 
       var files = card.attached || [];
@@ -467,24 +487,51 @@ angular.module('kanbanApp', [])
                 try { parsed = JSON.parse(data); } catch(e) {}
 
                 switch (eventName) {
+                  case 'log':
+                    if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
+                    break;
                   case 'phase':
-                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
-                    else if (parsed && parsed.phase) vm.streamingPhase = parsed.phase;
+                    if (parsed && parsed.message) {
+                      vm.streamingPhase = parsed.message;
+                      pushAgentLog('phase', parsed.message, parsed);
+                    } else if (parsed && parsed.phase) {
+                      vm.streamingPhase = parsed.phase;
+                      pushAgentLog('phase', parsed.phase, parsed);
+                    }
                     break;
                   case 'status':
-                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                    if (parsed && parsed.message) {
+                      vm.streamingPhase = parsed.message;
+                      pushAgentLog('status', parsed.message);
+                    }
                     break;
                   case 'thinking':
-                    if (parsed && parsed.text) vm.streamingThinking = parsed.text;
+                    if (parsed && parsed.text) {
+                      vm.streamingThinking = parsed.text;
+                      pushAgentLog('think', 'Plan updated', { len: parsed.text.length });
+                    }
                     break;
                   case 'summary':
-                    if (parsed && parsed.text) vm.streamingSummary = parsed.text;
+                    if (parsed && parsed.text) {
+                      vm.streamingSummary = parsed.text;
+                      pushAgentLog('summary', parsed.text);
+                    }
                     break;
                   case 'step':
-                    if (parsed) upsertStreamingStep(parsed);
+                    if (parsed) {
+                      upsertStreamingStep(parsed);
+                      if (parsed.status === 'running') {
+                        pushAgentLog('step', 'Running ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
+                      } else {
+                        pushAgentLog(parsed.status === 'error' ? 'error' : 'step',
+                          (parsed.status === 'error' ? 'Failed ' : 'Done ') + parsed.type + ': ' + (parsed.description || parsed.path || ''),
+                          parsed.error ? { error: parsed.error, suggestions: parsed.suggestions } : null);
+                      }
+                    }
                     break;
                   case 'done':
                     vm.streamingActive = false;
+                    pushAgentLog('info', 'Agent finished', { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0 });
                     var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                     var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                     var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
@@ -512,6 +559,7 @@ angular.module('kanbanApp', [])
                     break;
                   case 'error':
                     vm.streamingActive = false;
+                    pushAgentLog('error', parsed ? parsed.message : data);
                     vm.agentResult = { error: parsed ? parsed.message : data };
                     vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
                     break;
@@ -582,6 +630,8 @@ angular.module('kanbanApp', [])
     vm.refreshTerminal = function() {
       $http.get('/api/terminal/output').then(function(resp) { vm.terminalOutput = resp.data.output || ''; });
     };
+
+    vm.formatLogDetail = formatLogDetail;
     vm.refreshTerminal();
 
     // === Column Resizers ===
