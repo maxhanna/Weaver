@@ -911,10 +911,10 @@ Output ONLY this JSON (no markdown):
 }
 
 Rules:
+- PREFER small targeted changes (1-5 lines) over large blocks.
 - steps must ALL be type ""edit"".
 - path must match a ### FILE: header path exactly.
-- oldString must appear exactly once in that file.
-- For config.json: preserve valid JSON; use POST-worthy structure (projects, defaultProject, showTerminal, etc.).";
+- oldString must appear exactly once in that file.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -959,12 +959,13 @@ Rules:
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0)
     {
-        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation.
+        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation. Keep patches SMALL (under 5 lines if possible).
 
 Format:
 {""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}
 
 Rules:
+- PREFER small targeted changes (1-3 lines) over large blocks.
 - oldString MUST be copied verbatim from the file (2-8 lines with exact spaces).
 - Include at least one edit in the edits array.
 - Do not wrap in ``` fences.";
@@ -977,7 +978,7 @@ Rules:
         user.AppendLine();
         user.AppendLine("FILE CONTENT:");
         user.AppendLine("```");
-        user.AppendLine(Truncate(fileContent, 24000));
+        user.AppendLine(Truncate(fileContent, 12000));
         user.AppendLine("```");
 
         try
@@ -1037,8 +1038,11 @@ Rules:
 
         var jsonOptions = new JsonDocumentOptions { AllowTrailingCommas = true };
 
+        // First try repairing the entire text so ExtractJsonBlocks sees properly-escaped strings
+        var repaired = RepairJsonString(jsonStr) ?? jsonStr;
+
         // Try parsing the full block, then fall back to individual brace blocks
-        var blocks = ExtractJsonBlocks(jsonStr);
+        var blocks = ExtractJsonBlocks(repaired);
         foreach (var block in blocks)
         {
             foreach (var candidate in new[] { block, RepairJsonString(block) })
@@ -1228,6 +1232,8 @@ Rules:
     {
         var sb = new StringBuilder(json.Length);
         var inString = false;
+        var depth = 0;
+        var valueStartDepth = 0;
         var changed = false;
 
         for (var i = 0; i < json.Length; i++)
@@ -1236,18 +1242,37 @@ Rules:
 
             if (!inString)
             {
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') depth--;
+
                 if (c == '"')
+                {
                     inString = true;
+                    valueStartDepth = depth;
+                }
                 sb.Append(c);
                 continue;
             }
 
-            // Inside a string value
+            // Inside a string
             if (c == '\\')
             {
                 sb.Append(c);
                 i++;
                 if (i < json.Length) sb.Append(json[i]);
+                continue;
+            }
+
+            if (c == '{' || c == '[')
+            {
+                depth++;
+                sb.Append(c);
+                continue;
+            }
+            if (c == '}' || c == ']')
+            {
+                depth--;
+                sb.Append(c);
                 continue;
             }
 
@@ -1263,7 +1288,8 @@ Rules:
                     }
                 }
 
-                if (nextNonWs >= 0 && (json[nextNonWs] == ',' || json[nextNonWs] == '}' || json[nextNonWs] == ']' || json[nextNonWs] == ':'))
+                if (nextNonWs >= 0 && depth == valueStartDepth &&
+                    (json[nextNonWs] == ',' || json[nextNonWs] == '}' || json[nextNonWs] == ']' || json[nextNonWs] == ':'))
                 {
                     sb.Append(c);
                     inString = false;
@@ -1682,7 +1708,7 @@ Rules:
             messages,
             stream = false,
             temperature = 0.05,
-            max_tokens = 4096
+            max_tokens = 1024
         };
         var contentJson = JsonSerializer.Serialize(requestBody);
         var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");

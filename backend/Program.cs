@@ -5,7 +5,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddHttpClient("llama", client =>
 {
-    client.Timeout = TimeSpan.FromMinutes(20);
+    client.Timeout = TimeSpan.FromMinutes(3);
 });
 builder.Services.AddControllers();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
