@@ -1,5 +1,4 @@
-# Ignore build output directories
 **/bin/
 **/bin/
 **/obj/Debug/
-backend/wwwroot/config.json
+**/wwwroot/config.json
