@@ -1,57 +1,157 @@
-* { box-sizing: border-box; }
-body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 0; }
-header { background:#333; color:#fff; padding:10px 16px; display: flex; justify-content: space-between; align-items: center; }
-.project-picker { display: flex; align-items: center; gap: 10px; }
-.project-picker label { margin: 0; }
-.project-picker select { padding: 5px 10px; border-radius: 4px; border: none; }
-main{ display:flex; gap:16px; padding:16px; }
-.board{ display:flex; gap:12px; flex:1; }
-.column{ background:#f4f4f4; padding:8px; width:33%; border-radius:6px; }
-.cards{ min-height:200px; }
-.card{ background:#fff; padding:8px; margin:8px 0; border-radius:4px; cursor:grab; }
-.card .file-attachment { margin-top: 8px; padding: 5px; background: #e9e9e9; border-radius: 4px; }
-.attached-file-name { font-size: 11px; color: #555; word-break: break-all; margin-left: 4px; }
-.attached-file-name a { color:#c00; text-decoration:none; font-weight:bold; margin-left:4px; }
-.file-picker ul li span.selected { font-weight: bold; color: #0066cc; }
-.panel{ width:360px; background:#fafafa; padding:12px; border-radius:6px; }
+/* ------------------------------------------------------------------
+	 Maestro — Feature-rich Kanban stylesheet
+	 Replaces and enhances existing styles without altering markup.
+	 - Responsive horizontal board with column collapse/expand
+	 - Smooth transitions and drag/drop visuals
+	 - Card expand panels, badges, labels, attachments
+	 - Theming variables for easy tweaks
+	------------------------------------------------------------------ */
 
-/* AI Agent button */
-.btn-ai { background:#5a2d82; color:#fff; border:1px solid #4a2572; }
-.btn-ai:hover { background:#6d3a99; }
+:root{
+	--bg: #071025;
+	--surface: #0b1220;
+	--panel: #071322;
+	--muted: #9fb3c8;
+	--text: #e6eef6;
+	--accent: #06b6d4;
+	--accent-2: #7c3aed;
+	--card: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+	--glass: rgba(255,255,255,0.03);
+	--shadow: 0 8px 30px rgba(2,6,23,0.6);
+	--radius: 10px;
+}
 
-/* Agent results in the panel */
-.agent-result { background:#fff; padding:8px; border-radius:4px; margin-top:8px; font-size:13px; max-height:400px; overflow-y:auto; }
-.agent-result strong { display:block; margin:6px 0 2px; }
-.agent-error { color:#c00; font-weight:bold; }
-.agent-summary { background:#e8f5e9; padding:6px; border-radius:4px; margin-bottom:4px; }
-.agent-thinking details { margin:4px 0; }
-.agent-thinking summary { cursor:pointer; color:#555; font-style:italic; }
-.agent-thinking pre { font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px; max-height:150px; overflow:auto; }
-.agent-edits, .agent-commands { list-style:none; padding:0; margin:4px 0; }
-.agent-edits li, .agent-commands li { padding:3px 6px; margin:2px 0; border-radius:3px; font-size:12px; }
-.edit-path, .cmd-text { font-family:monospace; }
-.edit-status, .cmd-status { margin-left:6px; font-size:11px; }
-.edit-error { color:#c00; font-size:11px; margin-left:6px; }
-.cmd-output { font-size:11px; background:#f5f5f5; padding:4px; border-radius:3px; margin:2px 0; max-height:100px; overflow:auto; white-space:pre-wrap; }
-.status-written, .status-ok { background:#e8f5e9; }
-.status-error { background:#ffebee; }
-.status-skipped { background:#fff3e0; }
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;font-family:Inter,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
 
-/* Reusable popup panel */
-.popup-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000; }
-.popup-panel { background:#fff; border-radius:8px; padding:16px; width:70%; max-height:80%; overflow:auto; box-shadow:0 4px 24px rgba(0,0,0,0.25); }
-.popup-panel .popup-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #ddd; }
-.popup-panel .popup-header strong { font-size:1.1em; }
-.popup-panel .popup-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; padding-top:8px; border-top:1px solid #ddd; }
-.aiResponse{ white-space:pre-wrap; background:#fff; padding:8px; min-height:80px; border-radius:4px; }
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:linear-gradient(90deg,#041026,#07132a);box-shadow:0 2px 8px rgba(0,0,0,0.4)}
+header h1{font-size:18px;margin:0;letter-spacing:0.4px}
+.project-picker{display:flex;align-items:center;gap:10px}
+/* Improved select styling for readability and contrast */
+.project-picker select{
+	background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+	border: 1px solid rgba(255,255,255,0.06);
+	color: var(--text);
+	padding: 8px 36px 8px 10px; /* space for custom arrow */
+	border-radius: 8px;
+	-webkit-appearance: none; -moz-appearance: none; appearance: none;
+	background-position: right 10px center;
+	background-repeat: no-repeat;
+	background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='10' viewBox='0 0 20 12'><polyline points='2,2 10,10 18,2' stroke='%23e6eef6' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
 
-/* Streaming live updates */
-.streaming-indicator { display:flex; align-items:center; gap:6px; padding:6px; margin-top:6px; font-size:13px; color:#555; background:#e3f2fd; border-radius:4px; }
-.pulse-dot { width:8px; height:8px; border-radius:50%; background:#1976d2; animation:pulse 1s ease-in-out infinite; }
-@keyframes pulse { 0%, 100% { opacity:0.4; } 50% { opacity:1; } }
-.agent-streaming-thinking { margin-top:6px; }
-.agent-streaming-thinking details { margin:4px 0; }
-.agent-streaming-thinking summary { cursor:pointer; color:#555; font-style:italic; }
-.streaming-text { font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; border-left:3px solid #1976d2; }
-.terminalOutput{ background:#000; color:#0f0; height:160px; overflow:auto; padding:8px; font-family:monospace; border-radius:4px; }
-button{ margin-top:6px; }
+/* Remove native dropdown arrow on IE */
+.project-picker select::-ms-expand{display:none}
+
+/* Ensure options are readable in dropdown menus */
+.project-picker select option{background:var(--surface);color:var(--text)}
+
+.project-picker select:focus{outline:none;box-shadow:0 0 0 3px rgba(6,182,212,0.12)}
+
+/* Project description shown next to the select */
+.project-desc{color:var(--muted);font-size:13px;margin-left:10px;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Options menu that contains Add/Remove actions */
+.project-options{position:relative;margin-left:8px}
+.options-btn{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--text);padding:8px 10px;border-radius:8px;cursor:pointer}
+.options-menu{position:absolute;top:44px;right:0;min-width:160px;background:var(--panel);border:1px solid rgba(255,255,255,0.04);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6);padding:8px;display:flex;flex-direction:column;gap:6px;z-index:1200}
+.options-menu button{background:transparent;border:none;color:var(--text);text-align:left;padding:8px;border-radius:6px;cursor:pointer}
+.options-menu button:hover{background:rgba(255,255,255,0.02)}
+
+main{display:flex;gap:16px;padding:16px;height:calc(100vh - 64px)}
+
+/* BOARD */
+.board{display:flex;gap:16px;flex:1;align-items:flex-start;overflow:auto;padding-bottom:12px}
+.board::-webkit-scrollbar{height:10px}
+.board::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.04);border-radius:999px}
+
+.column{position:relative;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));min-width:300px;width:320px;border-radius:var(--radius);padding:12px;display:flex;flex-direction:column;max-height:100%}
+.column.compact{width:80px;padding:8px}
+.column > h3{margin:0 0 8px 0;color:var(--accent);display:flex;align-items:center;justify-content:space-between;font-size:14px}
+.column .col-controls{display:flex;gap:6px;align-items:center}
+.col-badge{background:rgba(255,255,255,0.03);padding:4px 8px;border-radius:999px;font-size:12px;color:var(--muted)}
+
+.cards{overflow:auto;flex:1;padding-right:6px}
+.cards.empty{min-height:80px}
+
+/* CARD */
+.card{background:var(--card);border-radius:8px;padding:12px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.03);box-shadow:none;transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
+.card:hover{transform:translateY(-6px);box-shadow:var(--shadow)}
+.card.dragging{opacity:0.6;transform:scale(1.02)}
+.card .meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:6px}
+.card .title{font-weight:600;margin-bottom:6px}
+.card .labels{display:flex;gap:6px;flex-wrap:wrap}
+.label{background:var(--glass);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px}
+.label.priority{background:linear-gradient(90deg,var(--accent-2),var(--accent));color:#fff}
+.card .attachments{margin-top:8px}
+.attachment{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.02);padding:6px;border-radius:6px;font-size:12px}
+.attachment .name{color:var(--muted);word-break:break-all}
+
+/* Actions */
+.card .actions{display:flex;gap:8px;margin-top:10px}
+.card .actions button{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--text);padding:6px 8px;border-radius:6px;cursor:pointer}
+.card .actions button.primary{background:linear-gradient(90deg,var(--accent),#4dd0e1);border:none;color:#022;}
+
+/* Expanded card panel */
+.card.expanded{position:relative;z-index:50}
+.card .expand-panel{margin-top:10px;background:linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.02));padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.02);max-height:320px;overflow:auto}
+.card .expand-panel pre{white-space:pre-wrap;word-break:break-word;margin:0}
+
+/* Column drop target visual */
+.column.drop-target{outline:2px dashed rgba(6,182,212,0.18);box-shadow:0 6px 24px rgba(6,182,212,0.06)}
+
+/* Add card placeholder */
+.add-card{display:flex;gap:8px;align-items:center;margin-top:8px}
+.add-card input{flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:var(--text)}
+.add-card button{padding:8px 10px;border-radius:8px;background:var(--accent);border:none;color:#042}
+
+/* Panel / right column */
+.panel{width:360px;background:linear-gradient(180deg,#061025,#07132a);padding:14px;border-radius:12px;border:1px solid rgba(255,255,255,0.03);box-shadow:var(--shadow)}
+
+/* Agent result blocks */
+.agent-result{background:rgba(255,255,255,0.02);padding:10px;border-radius:8px;font-size:13px;max-height:420px;overflow:auto}
+.agent-error{color:#ffb4b4;font-weight:600}
+.agent-summary{background:linear-gradient(90deg,rgba(6,182,212,0.06),rgba(124,58,237,0.04));padding:8px;border-radius:6px;margin-bottom:8px}
+.agent-thinking summary{cursor:pointer;color:var(--muted);font-style:italic}
+.agent-thinking pre{background:rgba(255,255,255,0.02);padding:8px;border-radius:6px}
+
+/* Streaming */
+.streaming-indicator{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;background:linear-gradient(90deg,#06203a,#041827)}
+.pulse-dot{width:10px;height:10px;border-radius:999px;background:var(--accent);box-shadow:0 0 10px rgba(6,182,212,0.6);animation:pulse 1.2s infinite}
+@keyframes pulse{0%{transform:scale(.8);opacity:.6}50%{transform:scale(1.15);opacity:1}100%{transform:scale(.8);opacity:.6}}
+
+.streaming-text{font-size:13px;background:rgba(255,255,255,0.02);padding:8px;border-radius:6px;max-height:200px;overflow:auto}
+
+/* Terminal */
+.terminalOutput{background:#021007;color:#6ef26e;height:180px;overflow:auto;padding:10px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* Popup / Modal */
+.popup-overlay{position:fixed;inset:0;background:linear-gradient(180deg,rgba(2,6,23,0.6),rgba(2,6,23,0.7));display:flex;align-items:center;justify-content:center;z-index:1200}
+.popup-panel{background:linear-gradient(180deg,#071426,#071428);padding:16px;border-radius:12px;width:80%;max-width:1100px;color:var(--text);box-shadow:0 18px 60px rgba(2,6,23,0.7)}
+.popup-panel .popup-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.02);padding-bottom:10px;margin-bottom:10px}
+.popup-panel .popup-footer{display:flex;gap:8px;justify-content:flex-end;padding-top:10px;border-top:1px solid rgba(255,255,255,0.02);margin-top:12px}
+
+/* Buttons */
+button{background:transparent;border:1px solid rgba(255,255,255,0.04);color:var(--text);padding:8px 10px;border-radius:8px;cursor:pointer}
+button.primary{background:linear-gradient(90deg,var(--accent),#4dd0e1);border:none;color:#012}
+button.ghost{background:transparent;border:1px dashed rgba(255,255,255,0.03)}
+
+/* small helpers */
+.muted{color:var(--muted)}
+.hidden{display:none}
+
+/* responsive */
+@media (max-width: 900px){
+	.board{flex-direction:column;align-items:stretch;padding:12px}
+	main{padding:12px}
+	.panel{position:relative;width:100%}
+	.column{width:100%;min-width:0}
+}
+
+/* Column resizer handle */
+.col-resizer{position:absolute;top:8px;bottom:8px;right:-6px;width:12px;cursor:col-resize;border-radius:6px;background:linear-gradient(90deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));z-index:60;display:flex;align-items:center;justify-content:center;transition:background .12s}
+.col-resizer::after{content:'';width:2px;height:60%;background:rgba(255,255,255,0.12);border-radius:2px}
+.col-resizer:hover{background:rgba(255,255,255,0.04)}
+.col-resizer.active{background:linear-gradient(90deg,rgba(6,182,212,0.14),rgba(124,58,237,0.08));box-shadow:0 0 12px rgba(6,182,212,0.12)}
+@media (max-width:900px){.col-resizer{display:none}}
+

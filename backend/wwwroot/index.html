@@ -3,19 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kanban + Llama AI</title>
+  <title>Maestro</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1>Kanban + Llama AI</h1>
+    <h1>Maestro</h1>
     <div class="project-picker">
       <label for="project-select">Select Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects" ng-change="vm.changeProject()"></select>
-      <button ng-click="vm.setDefaultProject()">Set as Default</button>
-      <button ng-click="vm.addProjectUI()">Add Project</button>
-      <button ng-click="vm.removeProjectUI()">Remove Project</button>
+      <div class="project-desc" ng-if="vm.selectedProject">{{vm.getSelectedProjectDescription()}}</div>
+      <div class="project-options">
+        <button class="options-btn" ng-click="vm.toggleProjectOptions()">Options ▾</button>
+        <div class="options-menu" ng-show="vm.showProjectOptions">
+          <button ng-click="vm.editProjectUI(); vm.toggleProjectOptions()">Edit Project</button>
+          <button ng-click="vm.addProjectUI(); vm.toggleProjectOptions()">Add Project</button>
+          <button ng-click="vm.removeProjectUI(); vm.toggleProjectOptions()">Remove Project</button>
+        </div>
+      </div>
     </div>
     <div ng-if="vm.defaultProject" style="margin-top: 10px;">
       <strong>Current Default Project:</strong> {{vm.defaultProject}}
@@ -30,7 +36,10 @@
             <div class="card-text" ng-click="vm.selectCard(card)" ng-dblclick="vm.editCardText(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
               <button ng-click="vm.attachFile(card.id)">Choose File</button>
-              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+              <span ng-if="card.attached" class="attached-file-name">
+                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+              </span>
             </div>
             <div class="card-actions">
               <button ng-click="vm.startCard(card)">Start</button>
@@ -46,12 +55,15 @@
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
               <button ng-click="vm.attachFile(card.id)">Choose File</button>
-              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+              <span ng-if="card.attached" class="attached-file-name">
+                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+              </span>
             </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
               <button ng-click="vm.moveCard(card.id,'doing','todo')">Back</button>
-              <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button>
+              <!-- <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button> -->
             </div>
           </div>
         </div>
@@ -64,11 +76,14 @@
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
               <button ng-click="vm.attachFile(card.id)">Choose File</button>
-              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+              <span ng-if="card.attached" class="attached-file-name">
+                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+                <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
+              </span>
             </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'done','doing')">Reopen</button>
-              <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button>
+              <!-- <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button> -->
             </div>
           </div>
         </div>
@@ -158,14 +173,14 @@
         <ul style="list-style:none; padding:0; margin-top:8px;">
           <li ng-repeat="e in vm.pickerEntries" style="padding:6px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;">
             <button ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</button>
-            <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;" ng-class="{selected: vm.pickerSelected === e.path}">
-              <span ng-if="vm.pickerSelected === e.path" style="margin-right: 8px;">✓</span>
+            <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;">
+              <input type="checkbox" ng-checked="vm.pickerSelected.indexOf(e.path) !== -1" style="margin-right:8px; pointer-events:none;">
               {{e.name}}
             </span>
           </li>
         </ul>
         <div class="popup-footer">
-          <button ng-click="vm.confirmFilePicker()">Attach File</button>
+          <button ng-click="vm.confirmFilePicker()">Done</button>
           <button ng-click="vm.closeFilePicker()">Cancel</button>
         </div>
       </div>
@@ -175,19 +190,25 @@
     <div class="popup-overlay" ng-if="vm.showAddProjectPanel">
       <div class="popup-panel">
         <div class="popup-header">
-          <strong>Add New Project</strong>
+          <strong ng-if="!vm.editMode">Add New Project</strong>
+          <strong ng-if="vm.editMode">Edit Project</strong>
           <button ng-click="vm.closeAddProjectPanel()">Close</button>
         </div>
-        <div style="margin-bottom: 16px;">
+        <div style="margin-bottom: 12px;">
           <label for="project-name">Project Name:</label>
           <input type="text" id="project-name" ng-model="vm.newProjectName" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project name">
         </div>
-        <div style="margin-bottom: 16px;">
+        <div style="margin-bottom: 12px;">
           <label for="project-path">Project Path:</label>
           <input type="text" id="project-path" ng-model="vm.newProjectPath" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project path (relative to repo root)">
         </div>
+        <div style="margin-bottom: 12px;">
+          <label for="project-desc">Description:</label>
+          <input type="text" id="project-desc" ng-model="vm.newProjectDescription" style="width:100%; padding:8px; margin-top:4px;" placeholder="Short description shown in header">
+        </div>
         <div class="popup-footer">
-          <button ng-click="vm.addProjectFromPanel()">Add Project</button>
+          <button ng-if="!vm.editMode" ng-click="vm.addProjectFromPanel()">Add Project</button>
+          <button ng-if="vm.editMode" ng-click="vm.updateProjectFromPanel()">Save Changes</button>
           <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
         </div>
       </div>

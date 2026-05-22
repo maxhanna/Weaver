@@ -19,7 +19,7 @@ angular.module('kanbanApp', [])
     vm.selectedProject = '';
 
     function normalizeProjects(raw) {
-      return raw.map(function(p) { return { Name: p.Name || p.name, Path: p.Path || p.path }; });
+      return raw.map(function(p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
     }
 
     vm.loadConfig = function() {
@@ -44,9 +44,22 @@ angular.module('kanbanApp', [])
 
     vm.loadConfig();
 
+    // UI controls for project options menu
+    vm.showProjectOptions = false;
+    vm.toggleProjectOptions = function() { vm.showProjectOptions = !vm.showProjectOptions; };
+
+    vm.getSelectedProjectDescription = function() {
+      if (!vm.selectedProject) return '';
+      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      return proj ? (proj.Description || proj.description || '') : '';
+    };
+
     vm.showAddProjectPanel = false;
     vm.newProjectName = '';
     vm.newProjectPath = '';
+    vm.newProjectDescription = '';
+    vm.editMode = false;
+    vm.editingProjectPath = '';
 
     vm.addProjectUI = function() {
       vm.showAddProjectPanel = true;
@@ -67,13 +80,59 @@ angular.module('kanbanApp', [])
         $window.alert('Project path is required');
         return;
       }
+      var payload = { Name: vm.newProjectName, Path: vm.newProjectPath.replace(/\\/g, "/"), Description: vm.newProjectDescription || '' };
       
-      $http.post('/api/config/projects/add', { Name: vm.newProjectName, Path: vm.newProjectPath }).then(function(resp) {
+      $http.post('/api/config/projects/add', payload).then(function(resp) {
         vm.loadConfig();
         vm.closeAddProjectPanel();
       }, function(err) {
         $window.alert('Failed to add project: ' + (err.data || err.statusText || err));
       });
+    };
+
+    vm.editProjectUI = function() {
+      if (!vm.selectedProject) return $window.alert('No project selected');
+      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      if (!proj) return $window.alert('Selected project not found');
+      vm.showAddProjectPanel = true;
+      vm.newProjectName = proj.Name || proj.name || '';
+      vm.newProjectPath = proj.Path || proj.path || '';
+      vm.newProjectDescription = proj.Description || proj.description || '';
+      vm.editMode = true;
+      vm.editingProjectPath = proj.Path || proj.path || '';
+    };
+
+    vm.updateProjectFromPanel = function() {
+      if (!vm.editMode) return vm.addProjectFromPanel();
+      if (!vm.newProjectName || !vm.newProjectPath) return $window.alert('Name and Path are required');
+
+      // Load current config, update the matching project, then save entire config
+      $http.get('/api/config').then(function(resp) {
+        var cfg = resp.data || { projects: [] };
+        cfg.projects = cfg.projects || [];
+        var idx = cfg.projects.findIndex(function(p) { return (p.Path || p.path) === vm.editingProjectPath; });
+        if (idx === -1) return $window.alert('Original project not found in config');
+
+        // Prevent duplicate paths if changed
+        var newPath = vm.newProjectPath.replace(/\\/g, "/");
+        if (newPath !== vm.editingProjectPath && cfg.projects.some(function(p){ return (p.Path || p.path) === newPath; })) {
+          return $window.alert('A project with that path already exists');
+        }
+
+        cfg.projects[idx].Name = vm.newProjectName;
+        cfg.projects[idx].Path = newPath;
+        cfg.projects[idx].Description = vm.newProjectDescription || '';
+
+        // Persist
+        $http.post('/api/config/save', cfg).then(function() {
+          vm.loadConfig();
+          vm.closeAddProjectPanel();
+          vm.editMode = false;
+          vm.editingProjectPath = '';
+        }, function(err) {
+          $window.alert('Failed to save config: ' + (err.data || err.statusText || err));
+        });
+      }, function(err) { $window.alert('Failed to load config: ' + (err.data || err.statusText || err)); });
     };
 
     vm.removeProjectUI = function() {
@@ -91,6 +150,7 @@ angular.module('kanbanApp', [])
     vm.setDefaultProject = function() {
       if(!vm.selectedProject) return $window.alert('No project selected');
       $http.post('/api/config/default-project', { ProjectPath: vm.selectedProject }).then(function() {
+        vm.defaultProject = vm.selectedProject;
         $window.alert('Default project set successfully');
       }, function(err) {
         $window.alert('Failed to set default project: ' + (err.data || err.statusText || err));
@@ -155,6 +215,12 @@ angular.module('kanbanApp', [])
       }
     };
 
+    vm.getAttachedFiles = function(card) {
+      if (Array.isArray(card.attached)) return card.attached;
+      if (card.attached) return [card.attached];
+      return [];
+    };
+
     vm.removeAttachment = function(cardId) {
       ['todo','doing','done'].forEach(function(col) {
         var cards = vm.state[col];
@@ -175,12 +241,12 @@ angular.module('kanbanApp', [])
     vm.pickerCardId = null;
     vm.pickerPath = '';
     vm.pickerEntries = [];
-    vm.pickerSelected = null;
+    vm.pickerSelected = [];
 
     vm.attachFile = function(cardId) {
       vm.pickerCardId = cardId;
       vm.pickerPath = '';
-      vm.pickerSelected = null;
+      vm.pickerSelected = [];
       vm.showFilePicker = true;
       vm.loadPickerEntries();
     };
@@ -190,7 +256,7 @@ angular.module('kanbanApp', [])
       vm.pickerCardId = null;
       vm.pickerPath = '';
       vm.pickerEntries = [];
-      vm.pickerSelected = null;
+      vm.pickerSelected = [];
     };
 
     vm.loadPickerEntries = function() {
@@ -206,7 +272,6 @@ angular.module('kanbanApp', [])
 
     vm.pickerEnterDir = function(path) {
       vm.pickerPath = path;
-      vm.pickerSelected = null;
       vm.loadPickerEntries();
     };
 
@@ -215,25 +280,29 @@ angular.module('kanbanApp', [])
       var segs = vm.pickerPath.split('/').filter(function(s){ return s && s.length; });
       segs.pop();
       vm.pickerPath = segs.join('/');
-      vm.pickerSelected = null;
       vm.loadPickerEntries();
     };
 
     vm.pickerSelectFile = function(path) {
-      vm.pickerSelected = (vm.pickerSelected === path) ? null : path;
+      var idx = vm.pickerSelected.indexOf(path);
+      if (idx === -1) {
+        vm.pickerSelected.push(path);
+      } else {
+        vm.pickerSelected.splice(idx, 1);
+      }
     };
 
     vm.confirmFilePicker = function() {
-      if (!vm.pickerSelected) { $window.alert('Please select a file first.'); return; }
+      if (!vm.pickerSelected.length) { $window.alert('Please select at least one file.'); return; }
       var cardId = vm.pickerCardId;
       if (!cardId) { vm.closeFilePicker(); return; }
-      // Find the card and store the attached file path
+      // Find the card and store the attached file paths
       var found = false;
       ['todo','doing','done'].forEach(function(col) {
         var cards = vm.state[col];
         for (var i = 0; i < cards.length; i++) {
           if (cards[i].id === cardId) {
-            cards[i].attached = vm.pickerSelected;
+            cards[i].attached = angular.copy(vm.pickerSelected);
             cards[i].attachedProject = vm.selectedProject;
             found = true;
             break;
@@ -264,7 +333,7 @@ angular.module('kanbanApp', [])
       vm.streamingActive = true;
       vm.aiPrompt = card.text;
 
-      var files = card.attached ? [card.attached] : [];
+      var files = card.attached || [];
       var payload = { prompt: card.text, project: proj, files: files };
 
       // Mark the card as in-progress now that execution started
@@ -395,5 +464,69 @@ angular.module('kanbanApp', [])
     };
 
     vm.refreshTerminal();
+
+    // Initialize column resizers so users can drag to resize Kanban columns
+    vm.initColumnResizers = function() {
+      try {
+        // remove any existing resizers
+        var existing = document.querySelectorAll('.col-resizer');
+        existing.forEach(function(el){ el.remove(); });
+
+        var cols = Array.prototype.slice.call(document.querySelectorAll('#board .column'));
+        for (var i = 0; i < cols.length - 1; i++) {
+          (function(leftCol){
+            var resizer = document.createElement('div');
+            resizer.className = 'col-resizer';
+            leftCol.appendChild(resizer);
+
+            resizer.addEventListener('pointerdown', function startDrag(e) {
+              e.preventDefault();
+              var rightCol = leftCol.nextElementSibling;
+              if (!rightCol) return;
+              var startX = e.clientX;
+              var leftRect = leftCol.getBoundingClientRect();
+              var rightRect = rightCol.getBoundingClientRect();
+              var leftWidth = leftRect.width;
+              var rightWidth = rightRect.width;
+              var min = 160; // minimum column width
+              document.body.style.userSelect = 'none';
+              resizer.classList.add('active');
+
+              function onMove(ev) {
+                var dx = ev.clientX - startX;
+                var newLeft = leftWidth + dx;
+                var newRight = rightWidth - dx;
+                var total = leftWidth + rightWidth;
+                if (newLeft < min) { newLeft = min; newRight = total - min; }
+                if (newRight < min) { newRight = min; newLeft = total - min; }
+                leftCol.style.flex = '0 0 ' + Math.round(newLeft) + 'px';
+                rightCol.style.flex = '0 0 ' + Math.round(newRight) + 'px';
+              }
+
+              function stopDrag() {
+                document.removeEventListener('pointermove', onMove);
+                document.removeEventListener('pointerup', stopDrag);
+                document.body.style.userSelect = '';
+                resizer.classList.remove('active');
+              }
+
+              document.addEventListener('pointermove', onMove);
+              document.addEventListener('pointerup', stopDrag);
+            });
+
+            // double-click resets flex sizing to allow automatic layout
+            resizer.addEventListener('dblclick', function() {
+              cols.forEach(function(c){ c.style.flex = ''; c.style.width = ''; });
+            });
+          })(cols[i]);
+        }
+      } catch (err) {
+        console.error('initColumnResizers error', err);
+      }
+    };
+
+    // run after a short delay so DOM is ready
+    setTimeout(function(){ vm.initColumnResizers(); }, 200);
+
     $interval(vm.refreshTerminal, 2000);
   }]);
