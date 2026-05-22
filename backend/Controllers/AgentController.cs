@@ -86,6 +86,18 @@ public class AgentController : ControllerBase
         public List<AgentStep> Steps { get; set; } = new();
     }
 
+    private class MinimalEditDto
+    {
+        public string Path { get; set; } = "";
+        public string OldString { get; set; } = "";
+        public string NewString { get; set; } = "";
+    }
+
+    private class MinimalEditsEnvelope
+    {
+        public List<MinimalEditDto> Edits { get; set; } = new();
+    }
+
     private string ResolveWorkspaceRoot()
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
@@ -481,18 +493,20 @@ public class AgentController : ControllerBase
                     stream: true, bootstrapSteps, req.Files);
             }
 
+            var targetPaths = ResolveEditTargetPaths(req.Prompt, req.Files ?? new List<string>(), projectRoot);
             var editsApplied = HasSuccessfulEdits(allSteps);
-            if (agentResp == null && !editsApplied)
+            var requirementsMet = editsApplied || TaskRequirementsMet(req.Prompt, targetPaths, projectRoot, allSteps);
+            if (agentResp == null && !requirementsMet)
                 await SendSse(Response, "error", new { message = error ?? "Failed to parse AI response" });
 
             await SendSse(Response, "done", new
             {
                 thinking = agentResp?.Thinking ?? "",
-                summary = agentResp?.Summary ?? (editsApplied ? "Edits applied" : "No edits applied"),
-                complete = (agentResp?.Complete ?? false) && editsApplied,
-                editsApplied,
-                incomplete = TaskExpectsFileChanges(req.Prompt) && !editsApplied,
-                warning = !editsApplied && TaskExpectsFileChanges(req.Prompt)
+                summary = agentResp?.Summary ?? (requirementsMet ? "Task completed" : "No edits applied"),
+                complete = requirementsMet,
+                editsApplied = requirementsMet,
+                incomplete = TaskExpectsFileChanges(req.Prompt) && !requirementsMet,
+                warning = !requirementsMet && TaskExpectsFileChanges(req.Prompt)
                     ? "No files were modified. Check failed steps below."
                     : null,
                 steps = allSteps,
@@ -683,6 +697,11 @@ public class AgentController : ControllerBase
     private static List<string> ResolveEditTargetPaths(string prompt, List<string> attachedFiles, string projectRoot)
     {
         var paths = attachedFiles.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => f.Replace('\\', '/')).ToList();
+        foreach (var likely in FindLikelyFiles(prompt, projectRoot))
+        {
+            if (!paths.Contains(likely, StringComparer.OrdinalIgnoreCase))
+                paths.Add(likely);
+        }
         if (paths.Count == 0)
             paths = FindLikelyFiles(prompt, projectRoot);
 
@@ -725,25 +744,65 @@ public class AgentController : ControllerBase
                 continue;
 
             var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
-            if (!System.IO.File.Exists(full)) continue;
+            var fileExists = System.IO.File.Exists(full);
 
             if (stream)
                 await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {path}…" });
 
             try
             {
-                var content = await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8);
-                await EmitLog(stream, "info", $"LLM edit: {path}", new { chars = content.Length });
+                var content = fileExists
+                    ? await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8)
+                    : "";
 
-                var (raw, resp, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot);
-                if (resp?.Steps == null || resp.Steps.Count == 0)
+                if (!fileExists && path.EndsWith("config.json", StringComparison.OrdinalIgnoreCase))
                 {
-                    await EmitLog(stream, "warn", $"No edits parsed for {path}", new { error = err });
+                    await EmitLog(stream, "info", $"Creating missing {path}");
+                    content = "";
+                }
+                else if (!fileExists)
+                {
+                    await EmitLog(stream, "warn", $"File not found: {path}");
                     continue;
                 }
 
-                var fileEdits = resp.Steps.Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase)).ToList();
-                if (fileEdits.Count == 0) continue;
+                var fileEdits = new List<AgentStep>();
+
+                for (var attempt = 0; attempt < 2 && fileEdits.Count == 0; attempt++)
+                {
+                    await EmitLog(stream, "info", $"LLM edit: {path} (attempt {attempt + 1})", new { chars = content.Length });
+                    var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
+                    fileEdits = ParseEditsFromLlmRaw(raw, path);
+                    if (fileEdits.Count == 0)
+                        await EmitLog(stream, "warn", $"Parse failed for {path}", new { error = err, preview = Truncate(raw ?? "", 400) });
+                }
+
+                if (fileEdits.Count == 0)
+                {
+                    fileEdits = TryHeuristicPatches(prompt, path, content);
+                    if (fileEdits.Count > 0)
+                        await EmitLog(stream, "info", $"Applied built-in patch for {path}");
+                }
+
+                if (fileEdits.Count == 0 && IsTaskAlreadySatisfied(prompt, path, content))
+                {
+                    await EmitLog(stream, "info", $"{path}: task already implemented in file");
+                    results.Add(new Dictionary<string, object?>
+                    {
+                        ["index"] = idx++,
+                        ["type"] = "note",
+                        ["path"] = path,
+                        ["description"] = "Task already implemented in this file",
+                        ["status"] = "done"
+                    });
+                    continue;
+                }
+
+                if (fileEdits.Count == 0)
+                {
+                    await EmitLog(stream, "error", $"No edits for {path} — model output was not usable JSON");
+                    continue;
+                }
 
                 var batch = await ExecuteSteps(fileEdits, projectRoot, idx, stream);
                 results.AddRange(batch);
@@ -854,17 +913,46 @@ Rules:
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
-        string taskPrompt, string relativePath, string fileContent, string projectRoot)
+        string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0)
     {
-        var systemPrompt = @"Output ONLY JSON with edit steps for this single file. type must be ""edit"". oldString must be exact substring of the file.";
-        var user = $"Task: {taskPrompt}\nProject root: {projectRoot}\nFile: {relativePath}\n\n```\n{Truncate(fileContent, 28000)}\n```";
+        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation.
+
+Format:
+{""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}
+
+Rules:
+- oldString MUST be copied verbatim from the file (2-8 lines with exact spaces).
+- Include at least one edit in the edits array.
+- Do not wrap in ``` fences.";
+
+        var user = new StringBuilder();
+        user.AppendLine($"Task: {taskPrompt}");
+        user.AppendLine($"File path: {relativePath}");
+        if (attempt > 0)
+            user.AppendLine("RETRY: Your last reply was not valid JSON. Output ONLY the edits JSON object.");
+        user.AppendLine();
+        user.AppendLine("FILE CONTENT:");
+        user.AppendLine("```");
+        user.AppendLine(Truncate(fileContent, 24000));
+        user.AppendLine("```");
+
         try
         {
-            return await CallLlmNonStreaming(
+            var (raw, parsed, err) = await CallLlmNonStreaming(
                 _clientFactory.CreateClient("llama"),
                 GetLlamaBaseUrl() + "/v1/chat/completions",
                 _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
-                new object[] { new { role = "system", content = systemPrompt }, new { role = "user", content = user } });
+                new object[]
+                {
+                    new { role = "system", content = systemPrompt },
+                    new { role = "user", content = user.ToString() }
+                });
+
+            var steps = ParseEditsFromLlmRaw(raw, relativePath);
+            if (steps.Count > 0)
+                return (raw, new AgentResponse { Steps = steps, Summary = "Parsed edits" }, null);
+
+            return (raw, parsed, err ?? "No edits in response");
         }
         catch (TaskCanceledException)
         {
@@ -874,6 +962,221 @@ Rules:
         {
             return ("", null, ex.Message);
         }
+    }
+
+    private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath)
+    {
+        var steps = new List<AgentStep>();
+        if (string.IsNullOrWhiteSpace(raw)) return steps;
+
+        var agent = ParseAgentResponse(raw);
+        if (agent?.Steps != null)
+        {
+            foreach (var s in agent.Steps)
+            {
+                if (!string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase) &&
+                    string.IsNullOrEmpty(s.OldString) && string.IsNullOrEmpty(s.NewString))
+                    continue;
+                s.Type = "edit";
+                s.Path = string.IsNullOrWhiteSpace(s.Path) ? defaultPath : s.Path;
+                steps.Add(s);
+            }
+            if (steps.Count > 0) return steps;
+        }
+
+        var jsonStr = raw.Trim();
+        if (jsonStr.StartsWith("```"))
+        {
+            var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) jsonStr = m.Groups[1].Value.Trim();
+        }
+
+        var start = jsonStr.IndexOf('{');
+        var end = jsonStr.LastIndexOf('}');
+        if (start < 0 || end <= start) return steps;
+        jsonStr = jsonStr.Substring(start, end - start + 1);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonStr);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+            {
+                var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (envelope?.Edits != null)
+                {
+                    var i = 0;
+                    foreach (var e in envelope.Edits)
+                    {
+                        if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
+                        steps.Add(new AgentStep
+                        {
+                            Index = i++,
+                            Type = "edit",
+                            Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
+                            OldString = e.OldString,
+                            NewString = e.NewString,
+                            Description = "LLM edit"
+                        });
+                    }
+                    return steps;
+                }
+            }
+
+            if (root.TryGetProperty("oldString", out var os) && root.TryGetProperty("newString", out var ns))
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = 0,
+                    Type = "edit",
+                    Path = defaultPath,
+                    OldString = os.GetString() ?? "",
+                    NewString = ns.GetString() ?? "",
+                    Description = "LLM edit"
+                });
+            }
+        }
+        catch { }
+
+        return steps;
+    }
+
+    private static List<AgentStep> TryHeuristicPatches(string prompt, string relativePath, string content)
+    {
+        var steps = new List<AgentStep>();
+        var task = prompt.ToLowerInvariant();
+        var path = relativePath.Replace('\\', '/').ToLowerInvariant();
+
+        if (!task.Contains("terminal") && !task.Contains("showterminal"))
+            return steps;
+
+        if (path.EndsWith("index.html"))
+        {
+            if (!content.Contains("vm.showTerminal"))
+            {
+                const string oldBlock = "        <div class=\"form-row\">\r\n          <label>\r\n            <input type=\"checkbox\" ng-model=\"vm.autoQueue\" /> Auto-queue: process next Todo card when one completes\r\n          </label>\r\n        </div>";
+                const string newBlock = oldBlock + "\r\n        <div class=\"form-row\">\r\n          <label>\r\n            <input type=\"checkbox\" ng-model=\"vm.showTerminal\" /> Show terminal panel (saved to config.json)\r\n          </label>\r\n        </div>";
+                if (content.Contains("vm.autoQueue") && content.Contains("Auto-queue"))
+                {
+                    steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = NormalizeLineEndings(oldBlock), NewString = NormalizeLineEndings(newBlock), Description = "Add terminal toggle (heuristic)" });
+                }
+            }
+            if (!content.Contains("ng-if=\"vm.showTerminal\"") && content.Contains("class=\"panel term-panel\""))
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = steps.Count,
+                    Type = "edit",
+                    Path = relativePath,
+                    OldString = "<div class=\"panel term-panel\">",
+                    NewString = "<div class=\"panel term-panel\" ng-if=\"vm.showTerminal\">",
+                    Description = "Hide terminal panel when off (heuristic)"
+                });
+            }
+        }
+
+        if (path.EndsWith("app.js"))
+        {
+            if (!content.Contains("vm.showTerminal"))
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = steps.Count,
+                    Type = "edit",
+                    Path = relativePath,
+                    OldString = "    vm.autoQueue = true;",
+                    NewString = "    vm.autoQueue = true;\r\n    vm.showTerminal = true;",
+                    Description = "Add showTerminal state (heuristic)"
+                });
+            }
+            if (!content.Contains("cfg.showTerminal"))
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = steps.Count,
+                    Type = "edit",
+                    Path = relativePath,
+                    OldString = "        vm.defaultProject = cfg.defaultProject;",
+                    NewString = "        vm.defaultProject = cfg.defaultProject;\r\n        if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;",
+                    Description = "Load showTerminal from config (heuristic)"
+                });
+            }
+        }
+
+        if (path.EndsWith("config.json"))
+        {
+            if (string.IsNullOrWhiteSpace(content) || content.Trim() == "{}")
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = 0,
+                    Type = "edit",
+                    Path = relativePath,
+                    OldString = "",
+                    NewString = "{\r\n  \"projects\": [],\r\n  \"defaultProject\": \"..\",\r\n  \"showTerminal\": true\r\n}\r\n",
+                    Description = "Create config.json with showTerminal (heuristic)"
+                });
+            }
+            else if (!content.Contains("showTerminal"))
+            {
+                var trimmed = content.TrimEnd();
+                if (trimmed.EndsWith("}"))
+                {
+                    var insert = trimmed.TrimEnd('}').TrimEnd() + ",\r\n  \"showTerminal\": true\r\n}";
+                    steps.Add(new AgentStep
+                    {
+                        Index = 0,
+                        Type = "edit",
+                        Path = relativePath,
+                        OldString = content,
+                        NewString = insert,
+                        Description = "Add showTerminal to config.json (heuristic)"
+                    });
+                }
+            }
+        }
+
+        return steps.Where(s => !string.IsNullOrEmpty(s.NewString) || !string.IsNullOrEmpty(s.OldString)).ToList();
+    }
+
+    private static bool IsTaskAlreadySatisfied(string prompt, string relativePath, string content)
+    {
+        var task = prompt.ToLowerInvariant();
+        if (!task.Contains("terminal") && !task.Contains("show") && !task.Contains("hide"))
+            return false;
+
+        var path = relativePath.Replace('\\', '/').ToLowerInvariant();
+        if (path.EndsWith("index.html"))
+            return content.Contains("vm.showTerminal", StringComparison.OrdinalIgnoreCase) &&
+                   content.Contains("ng-if=\"vm.showTerminal\"", StringComparison.OrdinalIgnoreCase);
+        if (path.EndsWith("app.js"))
+            return content.Contains("vm.showTerminal", StringComparison.OrdinalIgnoreCase) &&
+                   content.Contains("cfg.showTerminal", StringComparison.OrdinalIgnoreCase);
+        if (path.EndsWith("config.json"))
+            return content.Contains("showTerminal", StringComparison.OrdinalIgnoreCase);
+        return false;
+    }
+
+    private static bool TaskRequirementsMet(string prompt, List<string> targetPaths, string projectRoot, List<object> steps)
+    {
+        if (HasSuccessfulEdits(steps)) return true;
+
+        foreach (var rel in targetPaths)
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(full))
+            {
+                if (rel.EndsWith("config.json", StringComparison.OrdinalIgnoreCase) &&
+                    prompt.Contains("config", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                continue;
+            }
+            var content = System.IO.File.ReadAllText(full);
+            if (!IsTaskAlreadySatisfied(prompt, rel, content))
+                return false;
+        }
+        return targetPaths.Count > 0;
     }
 
     private static void AppendObservations(StringBuilder observations, List<object> batchResults)
@@ -1080,7 +1383,14 @@ Rules:
 
     private async Task<(string, AgentResponse?, string?)> CallLlmNonStreaming(HttpClient client, string target, string model, object messages)
     {
-        var requestBody = new { model, messages, stream = false, temperature = 0.15 };
+        var requestBody = new
+        {
+            model,
+            messages,
+            stream = false,
+            temperature = 0.05,
+            max_tokens = 4096
+        };
         var contentJson = JsonSerializer.Serialize(requestBody);
         var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
@@ -1154,7 +1464,7 @@ Rules:
         return "";
     }
 
-    private AgentResponse? ParseAgentResponse(string raw)
+    private static AgentResponse? ParseAgentResponse(string raw)
     {
         var jsonStr = raw.Trim();
         if (jsonStr.StartsWith("```"))

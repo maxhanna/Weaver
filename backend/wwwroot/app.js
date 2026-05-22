@@ -557,6 +557,7 @@ angular.module('kanbanApp', [])
                     vm.streamingActive = false;
                     var editsApplied = parsed && parsed.editsApplied;
                     var incomplete = parsed && parsed.incomplete;
+                    if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
                     pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
                       { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
                     var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
