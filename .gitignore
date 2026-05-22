@@ -1,0 +1,4 @@
+# Ignore build output directories
+**/bin/
+**/bin/
+**/obj/Debug/
