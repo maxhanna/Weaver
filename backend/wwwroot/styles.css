@@ -46,6 +46,13 @@ header h1 span.badge { font-size:11px; background:rgba(255,255,255,0.04); paddin
 .options-menu { position:absolute; top:40px; right:0; min-width:180px; background:var(--panel); border:1px solid rgba(255,255,255,0.06); border-radius:8px; box-shadow:0 8px 30px rgba(0,0,0,0.6); padding:6px; display:flex; flex-direction:column; gap:4px; z-index:1200; }
 .options-menu button { justify-content:flex-start; padding:8px 10px; }
 
+.delete-confirm-modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:2000; }
+.delete-confirm-panel { background:var(--panel); border-radius:12px; padding:20px; width:400px; max-width:90%; box-shadow:var(--shadow); border:1px solid rgba(255,255,255,0.06); }
+.delete-confirm-panel h3 { margin:0 0 16px 0; color:var(--error); font-size:16px; }
+.delete-confirm-panel p { margin:0 0 20px 0; color:var(--muted); font-size:14px; }
+.delete-confirm-actions { display:flex; gap:10px; justify-content:flex-end; }
+.delete-confirm-actions button { padding:8px 16px; }
+
 main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow:hidden; }
 
 .board { display:flex; gap:16px; flex:1; overflow-x:auto; overflow-y:hidden; padding-bottom:8px; }
