@@ -28,6 +28,7 @@
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
+    vm.abortController = null;
 
     // Project UI
     vm.showProjectOptions = false;
@@ -521,10 +522,13 @@
       // Move to Doing
       moveCardToDoing(card.id);
 
+      vm.abortController = new AbortController();
+
       fetch('/api/agent/execute-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: vm.abortController.signal
       }).then(function(response) {
         if (!response.ok) {
           vm.streamingActive = false;
@@ -658,7 +662,12 @@
         readNext();
       }).catch(function(err) {
         vm.streamingActive = false;
-        vm.agentResult = { error: 'Connection failed: ' + err.message };
+        vm.abortController = null;
+        if (err.name === 'AbortError') {
+          vm.agentResult = { warning: 'Agent stopped by user.' };
+        } else {
+          vm.agentResult = { error: 'Connection failed: ' + err.message };
+        }
         $scope.$digest();
       });
     };
@@ -714,6 +723,15 @@
     };
     vm.refreshTerminal = function() {
       $http.get('/api/terminal/output').then(function(resp) { vm.terminalOutput = resp.data.output || ''; });
+    };
+
+    vm.stopAgent = function(card) {
+      if (vm.abortController) {
+        vm.abortController.abort();
+        vm.abortController = null;
+        vm.streamingActive = false;
+        pushAgentLog('warn', 'Agent stopped by user');
+      }
     };
 
     vm.formatLogDetail = formatLogDetail;

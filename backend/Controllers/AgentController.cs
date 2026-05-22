@@ -2440,4 +2440,12 @@ Rules:
         await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n");
         await response.Body.FlushAsync();
     }
+
+    [HttpPost("cancel")]
+    public async Task<IActionResult> Cancel([FromBody] object? payload)
+    {
+        // This could be extended to cancel by card ID or session
+        // For now, we just return a 200 response
+        return Ok();
+    }
 }
