@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #071025;
   --surface: #0b1220;
   --panel: #071322;
@@ -172,7 +172,7 @@ main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow
 .popup-footer { display:flex; gap:8px; justify-content:flex-end; padding-top:10px; border-top:1px solid rgba(255,255,255,0.02); margin-top:12px; }
 .popup-body { font-size:13px; }
 .popup-body .form-row { margin-bottom:10px; }
-.popup-body .form-row label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+.popup-body .form-row label { display: flex; flex-direction: row-reverse; font-size:12px; color:var(--muted); margin-bottom:4px; }
 .popup-body .form-row input, .popup-body .form-row select, .popup-body .form-row textarea { width:100%; }
 
 .file-picker-nav { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
