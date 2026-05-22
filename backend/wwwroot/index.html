@@ -246,6 +246,7 @@
 
           <div class="agent-result" ng-if="!vm.streamingActive && vm.agentResult">
             <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
+            <div class="agent-warning" ng-if="vm.agentResult.warning">{{vm.agentResult.warning}}</div>
             <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong> {{vm.agentResult.summary}}</div>
             <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
               <strong>Files changed ({{vm.agentResult.filesEdited.length}})</strong>
@@ -260,7 +261,7 @@
       </div>
 
       <!-- Terminal Panel -->
-      <div class="panel term-panel">
+      <div class="panel term-panel" ng-if="vm.showTerminal">
         <h3>⌨ Terminal</h3>
         <div class="panel-body">
           <div class="terminalOutput">{{vm.terminalOutput}}</div>
@@ -352,6 +353,11 @@
         <div class="form-row">
           <label>
             <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
+          </label>
+        </div>
+        <div class="form-row">
+          <label>
+            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel (saved to config.json)
           </label>
         </div>
       </div>

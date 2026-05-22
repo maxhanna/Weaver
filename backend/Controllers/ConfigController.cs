@@ -18,7 +18,12 @@ public class ConfigController : ControllerBase
     private string ConfigPath => Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
 
     public class ProjectDto { public string Name { get; set; } = ""; public string Path { get; set; } = ""; public string Description { get; set; } = ""; }
-    public class FrontendConfig { public List<ProjectDto> projects { get; set; } = new List<ProjectDto>(); public string defaultProject { get; set; } = ""; }
+    public class FrontendConfig
+    {
+        public List<ProjectDto> projects { get; set; } = new List<ProjectDto>();
+        public string defaultProject { get; set; } = "";
+        public bool showTerminal { get; set; } = true;
+    }
 
     private async Task<FrontendConfig> LoadConfigAsync()
     {

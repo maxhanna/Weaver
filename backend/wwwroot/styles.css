@@ -158,6 +158,7 @@ main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow
 
 .agent-result { margin-top:8px; }
 .agent-result .agent-error { color:var(--error); font-weight:600; padding:8px; background:rgba(248,113,113,0.06); border-radius:6px; }
+.agent-result .agent-warning { color:#fbbf24; font-weight:600; padding:8px; background:rgba(251,191,36,0.08); border-radius:6px; margin-bottom:6px; }
 .agent-result .agent-summary { background:linear-gradient(90deg,rgba(6,182,212,0.06),rgba(124,58,237,0.04)); padding:8px; border-radius:6px; margin-bottom:6px; font-size:13px; }
 .agent-result summary { cursor:pointer; color:var(--muted); font-size:12px; }
 

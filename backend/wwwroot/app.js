@@ -15,6 +15,7 @@ angular.module('kanbanApp', [])
     vm.selectedCardId = null;
     vm.activeCardText = '';
     vm.autoQueue = true;
+    vm.showTerminal = true;
 
     // Agent streaming state
     vm.streamingActive = false;
@@ -66,15 +67,20 @@ angular.module('kanbanApp', [])
 
     vm.saveSettings = function() {
       saveSettings();
-      if (vm.settingsDefaultProject) {
-        vm.selectedProject = vm.settingsDefaultProject;
-        $http.post('/api/config/default-project', { ProjectPath: vm.settingsDefaultProject }).then(function() {
-          vm.defaultProject = vm.settingsDefaultProject;
-          vm.closeSettingsPanel();
-        }, function() { vm.closeSettingsPanel(); });
-      } else {
+      $http.get('/api/config').then(function(resp) {
+        var cfg = resp.data || { projects: vm.projects };
+        cfg.projects = cfg.projects || vm.projects;
+        cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
+        cfg.showTerminal = vm.showTerminal !== false;
+        return $http.post('/api/config/save', cfg);
+      }).then(function() {
+        vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+        if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
+        vm.loadConfig();
         vm.closeSettingsPanel();
-      }
+      }, function(err) {
+        $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
+      });
     };
 
     // === Project config ===
@@ -91,6 +97,7 @@ angular.module('kanbanApp', [])
         vm.projects = normalizeProjects(raw);
         vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
         vm.defaultProject = cfg.defaultProject;
+        if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
       }, function() {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -531,7 +538,10 @@ angular.module('kanbanApp', [])
                     break;
                   case 'done':
                     vm.streamingActive = false;
-                    pushAgentLog('info', 'Agent finished', { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0 });
+                    var editsApplied = parsed && parsed.editsApplied;
+                    var incomplete = parsed && parsed.incomplete;
+                    pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
+                      { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
                     var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                     var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                     var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
@@ -540,18 +550,26 @@ angular.module('kanbanApp', [])
                       summary: finalSummary,
                       thinking: finalThinking,
                       filesEdited: vm.streamingFilesEdited,
-                      steps: finalSteps
+                      steps: finalSteps,
+                      warning: parsed && parsed.warning,
+                      incomplete: incomplete
                     };
-                    vm.aiResponse = finalSummary || 'Agent completed.';
+                    vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                     var analysis = {
                       summary: finalSummary,
                       thinking: finalThinking,
                       steps: finalSteps,
-                      filesEdited: vm.streamingFilesEdited
+                      filesEdited: vm.streamingFilesEdited,
+                      warning: parsed && parsed.warning,
+                      incomplete: incomplete
                     };
                     var doIdx = vm.state.doing.findIndex(function(c) { return c.id === card.id; });
                     if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;
-                    moveCardToDone(card.id);
+                    if (incomplete) {
+                      pushAgentLog('warn', 'Card kept in Doing — no files were modified');
+                    } else {
+                      moveCardToDone(card.id);
+                    }
                     // Auto-queue next
                     if (vm.autoQueue) {
                       $timeout(function() { vm.processQueue(); }, 500);

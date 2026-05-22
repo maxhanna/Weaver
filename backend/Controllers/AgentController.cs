@@ -103,11 +103,12 @@ public class AgentController : ControllerBase
 
     private static bool IsPathUnderRoot(string fullPath, string root)
     {
-        root = Path.GetFullPath(root);
-        fullPath = Path.GetFullPath(fullPath);
-        if (!root.EndsWith(Path.DirectorySeparatorChar))
-            root += Path.DirectorySeparatorChar;
-        return fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+        root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        fullPath = Path.GetFullPath(fullPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase))
+            return true;
+        var rootPrefix = root + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
@@ -347,7 +348,7 @@ public class AgentController : ControllerBase
         var (discoveryText, bootstrapSteps) = await RunBootstrapDiscovery(req.Prompt, projectRoot, emitSse: false);
         var (allSteps, agentResp, error) = await RunAgentLoop(
             req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
-            stream: false, bootstrapSteps);
+            stream: false, bootstrapSteps, req.Files);
 
         if (agentResp == null)
             return Ok(new { error = error ?? "Failed to parse AI response", steps = allSteps });
@@ -423,7 +424,7 @@ public class AgentController : ControllerBase
 
             var (allSteps, agentResp, error) = await RunAgentLoop(
                 req.Prompt, fileContents, discoveryText, projectRoot, maxIter, maxBatch,
-                stream: true, bootstrapSteps);
+                stream: true, bootstrapSteps, req.Files);
 
             if (agentResp == null)
             {
@@ -432,11 +433,17 @@ public class AgentController : ControllerBase
                 return;
             }
 
+            var editsApplied = HasSuccessfulEdits(allSteps);
             await SendSse(Response, "done", new
             {
                 thinking = agentResp.Thinking,
                 summary = agentResp.Summary,
-                complete = agentResp.Complete,
+                complete = agentResp.Complete && editsApplied,
+                editsApplied,
+                incomplete = TaskExpectsFileChanges(req.Prompt) && !editsApplied,
+                warning = !editsApplied && TaskExpectsFileChanges(req.Prompt)
+                    ? "No files were modified. Check activity log for failed edit steps."
+                    : null,
                 steps = allSteps,
                 filesEdited = ExtractFilesEdited(allSteps)
             });
@@ -450,7 +457,8 @@ public class AgentController : ControllerBase
 
     private async Task<(List<object> steps, AgentResponse? lastResponse, string? error)> RunAgentLoop(
         string prompt, string fileContents, string discoveryContext, string projectRoot,
-        int maxIterations, int maxStepsPerBatch, bool stream, List<object>? bootstrapSteps = null)
+        int maxIterations, int maxStepsPerBatch, bool stream, List<object>? bootstrapSteps,
+        List<string>? attachedFiles = null)
     {
         var allSteps = bootstrapSteps != null ? new List<object>(bootstrapSteps) : new List<object>();
         var observations = new StringBuilder();
@@ -559,6 +567,18 @@ public class AgentController : ControllerBase
             if (hasEditErrors)
                 continue;
 
+            // Model returned another read/grep batch — run dedicated edit phase immediately
+            if (expectsEdits && !anyEditsDone && BatchWasExplorationOnly(batch))
+            {
+                var inlineEdits = await RunDedicatedEditPhase(
+                    prompt, attachedFiles ?? new List<string>(), discoveryBuilder.ToString(),
+                    projectRoot, globalStepIndex, stream);
+                globalStepIndex += inlineEdits.Count;
+                allSteps.AddRange(inlineEdits);
+                if (HasSuccessfulEdits(allSteps))
+                    break;
+            }
+
             // Keep going: read-only batch but task still needs file changes
             if (expectsEdits && !anyEditsDone)
                 continue;
@@ -569,57 +589,214 @@ public class AgentController : ControllerBase
             break;
         }
 
-        // Last resort: force an edit-only LLM pass when reads happened but no files changed
+        // Dedicated edit phase — full file bodies, edit-only JSON (models often skip edits in the main loop)
         if (TaskExpectsFileChanges(prompt) && !HasSuccessfulEdits(allSteps))
         {
-            if (stream)
-                await SendSse(Response, "phase", new { phase = "mandatory-edits", message = "Re-reading real files + applying edits…" });
-
-            await EmitLog(stream, "info", "Mandatory edit pass: re-reading likely files from disk…");
-            var rereadPlan = FindLikelyFiles(prompt, projectRoot).Select((f, i) => new AgentStep
-            {
-                Index = i,
-                Type = "read",
-                Path = f,
-                Description = $"Mandatory: read {f} before edit"
-            }).ToList();
-            if (rereadPlan.Count > 0)
-            {
-                var rereadResults = await ExecuteSteps(rereadPlan, projectRoot, globalStepIndex, stream);
-                globalStepIndex += rereadPlan.Count;
-                allSteps.AddRange(rereadResults);
-                AppendObservations(observations, rereadResults);
-            }
-
-            var (rawM, agentRespM, _) = await CallLlmMandatoryEdits(
-                prompt, observations.ToString(), discoveryBuilder.ToString(), projectRoot);
-
-            if (agentRespM != null)
-            {
-                lastResponse = agentRespM;
-                if (stream && !string.IsNullOrWhiteSpace(agentRespM.Thinking))
-                    await SendSse(Response, "thinking", new { text = agentRespM.Thinking, iteration = "final" });
-                if (stream && !string.IsNullOrWhiteSpace(agentRespM.Summary))
-                    await SendSse(Response, "summary", new { text = agentRespM.Summary, iteration = "final" });
-
-                var editBatch = agentRespM.Steps
-                    .Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase))
-                    .Take(maxStepsPerBatch)
-                    .ToList();
-                if (editBatch.Count == 0)
-                    editBatch = agentRespM.Steps.Take(maxStepsPerBatch).ToList();
-
-                if (editBatch.Count > 0)
-                {
-                    var mandatoryResults = await ExecuteSteps(editBatch, projectRoot, globalStepIndex, stream);
-                    globalStepIndex += editBatch.Count;
-                    allSteps.AddRange(mandatoryResults);
-                    AppendObservations(observations, mandatoryResults);
-                }
-            }
+            var editPhaseResults = await RunDedicatedEditPhase(
+                prompt, attachedFiles ?? new List<string>(), discoveryBuilder.ToString(),
+                projectRoot, globalStepIndex, stream);
+            globalStepIndex += editPhaseResults.Count;
+            allSteps.AddRange(editPhaseResults);
+            if (editPhaseResults.Count > 0)
+                lastResponse = new AgentResponse { Summary = "Dedicated edit phase", Complete = HasSuccessfulEdits(editPhaseResults) };
         }
 
         return (allSteps, lastResponse, lastError);
+    }
+
+    private async Task<string> BuildFullFileContextAsync(IEnumerable<string> relativePaths, string projectRoot, int maxTotalChars = 120000)
+    {
+        var sb = new StringBuilder();
+        var total = 0;
+        foreach (var rel in relativePaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(rel)) continue;
+            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!IsPathUnderRoot(full, projectRoot) || !System.IO.File.Exists(full)) continue;
+
+            var text = await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8);
+            if (total + text.Length > maxTotalChars)
+                text = Truncate(text, Math.Max(2000, maxTotalChars - total));
+
+            sb.AppendLine($"### FILE: {rel.Replace('\\', '/')}");
+            sb.AppendLine("```");
+            sb.AppendLine(text);
+            sb.AppendLine("```");
+            sb.AppendLine();
+            total += text.Length;
+            if (total >= maxTotalChars) break;
+        }
+        return sb.ToString();
+    }
+
+    private static List<string> ResolveEditTargetPaths(string prompt, List<string> attachedFiles, string projectRoot)
+    {
+        var paths = attachedFiles.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => f.Replace('\\', '/')).ToList();
+        if (paths.Count == 0)
+            paths = FindLikelyFiles(prompt, projectRoot);
+
+        if (prompt.Contains("config.json", StringComparison.OrdinalIgnoreCase) &&
+            !paths.Any(p => p.EndsWith("config.json", StringComparison.OrdinalIgnoreCase)))
+        {
+            foreach (var p in new[] { "backend/wwwroot/config.json", "wwwroot/config.json" })
+            {
+                var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
+                if (System.IO.File.Exists(full)) paths.Add(p);
+            }
+        }
+        return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private async Task<List<object>> RunDedicatedEditPhase(
+        string prompt, List<string> attachedFiles, string discoveryContext, string projectRoot,
+        int startIndex, bool stream)
+    {
+        var results = new List<object>();
+        var targetPaths = ResolveEditTargetPaths(prompt, attachedFiles, projectRoot);
+        if (targetPaths.Count == 0)
+        {
+            await EmitLog(stream, "error", "Edit phase: no target files found");
+            return results;
+        }
+
+        if (stream)
+            await SendSse(Response, "phase", new { phase = "edit-phase", message = $"Generating edits for {targetPaths.Count} file(s)…" });
+
+        await EmitLog(stream, "info", "Dedicated edit phase", new { files = targetPaths });
+
+        var fullFiles = await BuildFullFileContextAsync(targetPaths, projectRoot);
+        if (string.IsNullOrWhiteSpace(fullFiles))
+        {
+            await EmitLog(stream, "error", "Edit phase: could not read target files from disk");
+            return results;
+        }
+
+        for (var attempt = 0; attempt < 3 && !HasSuccessfulEdits(results); attempt++)
+        {
+            await EmitLog(stream, "info", $"Edit phase LLM attempt {attempt + 1}/3");
+
+            var (raw, agentResp, err) = await CallLlmEditsOnly(
+                prompt, fullFiles, discoveryContext, projectRoot, attempt);
+
+            if (agentResp == null)
+            {
+                await EmitLog(stream, "warn", "Edit phase: parse failed", new { error = err, rawPreview = Truncate(raw ?? "", 500) });
+                continue;
+            }
+
+            var edits = agentResp.Steps
+                .Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (edits.Count == 0)
+            {
+                await EmitLog(stream, "warn", "Edit phase: model returned zero edit steps");
+                continue;
+            }
+
+            if (stream && !string.IsNullOrWhiteSpace(agentResp.Thinking))
+                await SendSse(Response, "thinking", new { text = agentResp.Thinking, iteration = $"edit-{attempt}" });
+            if (stream && !string.IsNullOrWhiteSpace(agentResp.Summary))
+                await SendSse(Response, "summary", new { text = agentResp.Summary, iteration = $"edit-{attempt}" });
+
+            var batchResults = await ExecuteSteps(edits, projectRoot, startIndex + results.Count, stream);
+            results.AddRange(batchResults);
+
+            if (!HasSuccessfulEdits(results))
+                await EmitLog(stream, "warn", "Edit phase: edits failed, retrying…");
+        }
+
+        // Per-file fallback for small models
+        if (!HasSuccessfulEdits(results))
+        {
+            await EmitLog(stream, "info", "Per-file edit fallback…");
+            var idx = startIndex + results.Count;
+            foreach (var path in targetPaths.Where(p => p.EndsWith(".js") || p.EndsWith(".html") || p.EndsWith(".css") || p.EndsWith(".json")))
+            {
+                var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
+                if (!System.IO.File.Exists(full)) continue;
+                var content = await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8);
+                var (raw, resp, _) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot);
+                if (resp?.Steps == null) continue;
+                var fileEdits = resp.Steps.Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (fileEdits.Count == 0) continue;
+                var batch = await ExecuteSteps(fileEdits, projectRoot, idx, stream);
+                results.AddRange(batch);
+                idx += batch.Count;
+                if (HasSuccessfulEdits(results)) break;
+            }
+        }
+
+        return results;
+    }
+
+    private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmEditsOnly(
+        string taskPrompt, string fullFileContext, string discoveryContext, string projectRoot, int attempt)
+    {
+        var systemPrompt = @"You MUST output file edits as JSON. Do not only plan or read — apply changes.
+
+Output ONLY this JSON (no markdown):
+{
+  ""thinking"": ""short"",
+  ""summary"": ""edits applied"",
+  ""complete"": true,
+  ""steps"": [
+    {
+      ""index"": 0,
+      ""type"": ""edit"",
+      ""description"": ""what changed"",
+      ""path"": ""exact/path/from/FILE/headers"",
+      ""oldString"": ""verbatim text from file including whitespace"",
+      ""newString"": ""replacement""
+    }
+  ]
+}
+
+Rules:
+- steps must ALL be type ""edit"".
+- path must match a ### FILE: header path exactly.
+- oldString must appear exactly once in that file.
+- For config.json: preserve valid JSON; use POST-worthy structure (projects, defaultProject, showTerminal, etc.).";
+
+        var user = new StringBuilder();
+        user.AppendLine("## Task");
+        user.AppendLine(taskPrompt);
+        user.AppendLine();
+        user.AppendLine("## Project root");
+        user.AppendLine(projectRoot);
+        if (!string.IsNullOrWhiteSpace(discoveryContext))
+        {
+            user.AppendLine();
+            user.AppendLine("## Discovery notes");
+            user.AppendLine(Truncate(discoveryContext, 4000));
+        }
+        user.AppendLine();
+        user.AppendLine("## Full files to edit (copy oldString from here)");
+        user.AppendLine(fullFileContext);
+        if (attempt > 0)
+            user.AppendLine("\n## Retry: previous attempt produced no valid edits. Output correct edit steps now.");
+
+        return await CallLlmNonStreaming(
+            _clientFactory.CreateClient("llama"),
+            GetLlamaBaseUrl() + "/v1/chat/completions",
+            _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
+            new object[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = user.ToString() }
+            });
+    }
+
+    private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
+        string taskPrompt, string relativePath, string fileContent, string projectRoot)
+    {
+        var systemPrompt = @"Output ONLY JSON with edit steps for this single file. type must be ""edit"". oldString must be exact substring of the file.";
+        var user = $"Task: {taskPrompt}\nProject root: {projectRoot}\nFile: {relativePath}\n\n```\n{Truncate(fileContent, 50000)}\n```";
+        return await CallLlmNonStreaming(
+            _clientFactory.CreateClient("llama"),
+            GetLlamaBaseUrl() + "/v1/chat/completions",
+            _config.GetValue<string>("Ai:Model") ?? "medgemma:4b",
+            new object[] { new { role = "system", content = systemPrompt }, new { role = "user", content = user } });
     }
 
     private static void AppendObservations(StringBuilder observations, List<object> batchResults)
@@ -793,7 +970,8 @@ Rules:
 - steps must be type ""edit"" only.
 - path MUST be from Project discovery (e.g. backend/wwwroot/app.js or wwwroot/index.html) — NEVER invent src/components paths.
 - oldString must be copied EXACTLY from FILE content in observations.
-- Maestro Kanban UI lives in wwwroot/app.js and wwwroot/index.html unless discovery shows otherwise.";
+- Maestro Kanban UI: backend/wwwroot/app.js, backend/wwwroot/index.html, backend/wwwroot/config.json (from repo root).
+- Persist UI settings via config.json field showTerminal (bool); save uses POST /api/config/save.";
 
         var userMessage = new StringBuilder();
         userMessage.AppendLine("## Task to complete");
@@ -915,9 +1093,37 @@ Rules:
 
         try
         {
-            return JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var parsed = JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (parsed != null && parsed.Steps.Count > 0)
+                return parsed;
         }
-        catch { return null; }
+        catch { }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonStr);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                var steps = JsonSerializer.Deserialize<List<AgentStep>>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (steps != null && steps.Count > 0)
+                    return new AgentResponse { Steps = steps, Summary = "Parsed steps array" };
+            }
+            if (root.TryGetProperty("steps", out var stepsEl) && stepsEl.ValueKind == JsonValueKind.Array)
+            {
+                var steps = JsonSerializer.Deserialize<List<AgentStep>>(stepsEl.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (steps != null && steps.Count > 0)
+                {
+                    var thinking = root.TryGetProperty("thinking", out var th) ? th.GetString() ?? "" : "";
+                    var summary = root.TryGetProperty("summary", out var sm) ? sm.GetString() ?? "" : "";
+                    var complete = root.TryGetProperty("complete", out var cp) && cp.ValueKind == JsonValueKind.True;
+                    return new AgentResponse { Thinking = thinking, Summary = summary, Complete = complete, Steps = steps };
+                }
+            }
+        }
+        catch { }
+
+        return null;
     }
 
     private async Task<List<object>> ExecuteSteps(List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse)
