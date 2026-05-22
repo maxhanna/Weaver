@@ -772,9 +772,30 @@ public class AgentController : ControllerBase
                 {
                     await EmitLog(stream, "info", $"LLM edit: {path} (attempt {attempt + 1})", new { chars = content.Length });
                     var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
+
+                    await EmitLog(stream, "debug", $"LLM raw response for {path}",
+                        new { raw = Truncate(raw ?? "", 600), error = err });
+
                     fileEdits = ParseEditsFromLlmRaw(raw, path);
+
                     if (fileEdits.Count == 0)
-                        await EmitLog(stream, "warn", $"Parse failed for {path}", new { error = err, preview = Truncate(raw ?? "", 400) });
+                    {
+                        await EmitLog(stream, "warn", $"Parse failed for {path}",
+                            new { error = err, raw = Truncate(raw ?? "", 400) });
+                    }
+                    else
+                    {
+                        foreach (var fe in fileEdits)
+                        {
+                            await EmitLog(stream, "debug", $"Extracted edit for {path}",
+                                new
+                                {
+                                    oldStringPreview = Truncate(fe.OldString, 300),
+                                    newStringPreview = Truncate(fe.NewString, 300),
+                                    description = fe.Description
+                                });
+                        }
+                    }
                 }
 
                 if (fileEdits.Count == 0)
@@ -805,6 +826,29 @@ public class AgentController : ControllerBase
                 }
 
                 var batch = await ExecuteSteps(fileEdits, projectRoot, idx, stream);
+                foreach (var r in batch)
+                {
+                    if (r is Dictionary<string, object?> stepResult)
+                    {
+                        var status = stepResult.GetValueOrDefault("status")?.ToString();
+                        var err = stepResult.GetValueOrDefault("error")?.ToString();
+                        if (!string.IsNullOrEmpty(err) || status == "error")
+                        {
+                            await EmitLog(stream, "error", $"Edit step failed for {stepResult.GetValueOrDefault("path") ?? path}",
+                                new
+                                {
+                                    error = err,
+                                    oldStringPreview = stepResult.GetValueOrDefault("oldStringPreview"),
+                                    snippet = stepResult.GetValueOrDefault("snippet"),
+                                    suggestions = stepResult.GetValueOrDefault("suggestions")
+                                });
+                        }
+                        else if (status == "skipped")
+                        {
+                            await EmitLog(stream, "info", $"Edit skipped for {stepResult.GetValueOrDefault("path") ?? path} — no changes needed");
+                        }
+                    }
+                }
                 results.AddRange(batch);
                 idx += batch.Count;
             }
@@ -1046,45 +1090,100 @@ Rules:
             }
         }
 
-        // Regex fallback: extract oldString/newString pairs from malformed JSON
+        // Fallback: character-by-character extraction of oldString/newString pairs
         if (steps.Count == 0)
         {
-            try
-            {
-                var repaired = RepairJsonString(jsonStr) ?? jsonStr;
-
-                var patOldFirst = new Regex(@"""oldString""\s*:\s*""((?:(?!""\s*,\s*""newString"").)*)""\s*,\s*""newString""\s*:\s*""((?:(?!""\s*[\]}]).)*)""", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-                var patNewFirst = new Regex(@"""newString""\s*:\s*""((?:(?!""\s*,\s*""oldString"").)*)""\s*,\s*""oldString""\s*:\s*""((?:(?!""\s*[\]}]).)*)""", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-                foreach (var pattern in new[] { patOldFirst, patNewFirst })
-                {
-                    var matches = pattern.Matches(repaired);
-                    if (matches.Count > 0)
-                    {
-                        var i = 0;
-                        foreach (Match match in matches)
-                        {
-                            var oldStr = match.Groups[1].Value;
-                            var newStr = match.Groups[2].Value;
-                            if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) continue;
-                            steps.Add(new AgentStep
-                            {
-                                Index = i++,
-                                Type = "edit",
-                                Path = defaultPath,
-                                OldString = oldStr,
-                                NewString = newStr,
-                                Description = "LLM edit (regex)"
-                            });
-                        }
-                        if (steps.Count > 0) break;
-                    }
-                }
-            }
-            catch { }
+            steps = ExtractEditPairs(jsonStr, defaultPath);
         }
 
         return steps;
+    }
+
+    private static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
+    {
+        var steps = new List<AgentStep>();
+        var i = 0;
+
+        while (i < text.Length)
+        {
+            var oldKeyIdx = text.IndexOf("\"oldString\"", i, StringComparison.OrdinalIgnoreCase);
+            var newKeyIdx = text.IndexOf("\"newString\"", i, StringComparison.OrdinalIgnoreCase);
+
+            if (oldKeyIdx < 0 || newKeyIdx < 0) break;
+
+            // Determine which comes first
+            string firstKey, secondKey;
+            int firstIdx, secondIdx;
+            if (oldKeyIdx < newKeyIdx)
+            {
+                firstKey = "oldString"; secondKey = "newString";
+                firstIdx = oldKeyIdx; secondIdx = newKeyIdx;
+            }
+            else
+            {
+                firstKey = "newString"; secondKey = "oldString";
+                firstIdx = newKeyIdx; secondIdx = oldKeyIdx;
+            }
+
+            var firstVal = ExtractJsonStringValue(text, firstIdx + firstKey.Length);
+            if (firstVal == null) { i = firstIdx + 1; continue; }
+
+            var secKeyPos = text.IndexOf("\"" + secondKey + "\"", firstVal.Value.EndPos, StringComparison.OrdinalIgnoreCase);
+            if (secKeyPos < 0) { i = firstIdx + 1; continue; }
+
+            var secVal = ExtractJsonStringValue(text, secKeyPos + secondKey.Length);
+            if (secVal == null) { i = firstIdx + 1; continue; }
+
+            var oldStr = firstKey == "oldString" ? firstVal.Value.Text : secVal.Value.Text;
+            var newStr = firstKey == "newString" ? firstVal.Value.Text : secVal.Value.Text;
+
+            if (!string.IsNullOrEmpty(oldStr) || !string.IsNullOrEmpty(newStr))
+            {
+                steps.Add(new AgentStep
+                {
+                    Index = steps.Count,
+                    Type = "edit",
+                    Path = defaultPath,
+                    OldString = oldStr ?? "",
+                    NewString = newStr ?? "",
+                    Description = "LLM edit (extracted)"
+                });
+            }
+
+            i = secVal.Value.EndPos;
+        }
+
+        return steps;
+    }
+
+    private static (string Text, int EndPos)? ExtractJsonStringValue(string text, int keyEndPos)
+    {
+        // Skip past "key":  — find the colon and opening quote
+        var pos = keyEndPos;
+        while (pos < text.Length && text[pos] != ':') pos++;
+        if (pos >= text.Length) return null;
+        pos++; // skip ':'
+        while (pos < text.Length && char.IsWhiteSpace(text[pos])) pos++;
+        if (pos >= text.Length || text[pos] != '"') return null;
+        pos++; // skip opening '"'
+
+        var start = pos;
+        while (pos < text.Length)
+        {
+            if (text[pos] == '\\')
+            {
+                pos += 2; // skip escape sequence
+                continue;
+            }
+            if (text[pos] == '"')
+            {
+                var value = text.Substring(start, pos - start);
+                return (value, pos + 1);
+            }
+            pos++;
+        }
+
+        return null;
     }
 
     private static string? RepairJsonString(string json)
@@ -1708,7 +1807,14 @@ Rules:
             {
                 var st = result["status"]?.ToString() ?? "?";
                 await EmitLog(emitSse, st == "error" ? "error" : "info", $"✓ {step.Type} finished ({st})",
-                    new { path = result.GetValueOrDefault("path"), error = result.GetValueOrDefault("error") });
+                    new
+                    {
+                        path = result.GetValueOrDefault("path"),
+                        error = result.GetValueOrDefault("error"),
+                        oldStringPreview = result.GetValueOrDefault("oldStringPreview"),
+                        snippet = result.GetValueOrDefault("snippet"),
+                        suggestions = result.GetValueOrDefault("suggestions")
+                    });
                 await SendSse(Response, "step", result);
             }
         }
