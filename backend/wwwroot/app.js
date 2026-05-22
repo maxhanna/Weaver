@@ -400,6 +400,17 @@ angular.module('kanbanApp', [])
                     vm.streamingActive = false;
                     vm.agentResult = { summary: vm.streamingSummary, thinking: vm.streamingThinking };
                     vm.aiResponse = vm.streamingSummary || 'Agent completed.';
+
+                    // Save analysis onto the card
+                    var analysis = {
+                      summary: vm.streamingSummary,
+                      thinking: vm.streamingThinking,
+                      edits: angular.copy(vm.streamingEdits),
+                      commands: angular.copy(vm.streamingCommands)
+                    };
+                    var doIdx = vm.state.doing.findIndex(function(c){ return c.id === cardId; });
+                    if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;
+
                     moveCardToDone(card.id);
                     break;
                   case 'error':

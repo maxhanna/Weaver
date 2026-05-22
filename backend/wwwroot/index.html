@@ -54,7 +54,6 @@
           <div class="card" ng-repeat="card in vm.cardsForProject('doing')">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
-              <button ng-click="vm.attachFile(card.id)">Choose File</button>
               <span ng-if="card.attached" class="attached-file-name">
                 <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
                 <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
@@ -63,11 +62,9 @@
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
               <button ng-click="vm.moveCard(card.id,'doing','todo')">Back</button>
-              <!-- <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button> -->
             </div>
           </div>
         </div>
-        <button class="addBtn" ng-click="vm.addCard('doing')">Add</button>
       </div>
       <div class="column">
         <h2>Done</h2>
@@ -75,19 +72,44 @@
           <div class="card" ng-repeat="card in vm.cardsForProject('done')">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
-              <button ng-click="vm.attachFile(card.id)">Choose File</button>
               <span ng-if="card.attached" class="attached-file-name">
                 <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
                 <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
               </span>
             </div>
+            <div ng-if="card.agentAnalysis" style="margin-top:8px; border-top:1px solid rgba(255,255,255,0.05); padding-top:6px; font-size:0.85em;">
+              <details>
+                <summary style="cursor:pointer; opacity:0.7;">AI Analysis</summary>
+                <div ng-if="card.agentAnalysis.summary" style="margin-top:4px; padding:4px; background:rgba(255,255,255,0.03); border-radius:4px;">
+                  <strong>Summary:</strong> {{card.agentAnalysis.summary}}
+                </div>
+                <div ng-if="card.agentAnalysis.thinking" style="margin-top:4px;">
+                  <details>
+                    <summary style="cursor:pointer; opacity:0.6; font-size:0.9em;">Reasoning</summary>
+                    <pre style="white-space:pre-wrap; margin:4px 0; font-size:0.85em; opacity:0.6;">{{card.agentAnalysis.thinking}}</pre>
+                  </details>
+                </div>
+                <div ng-if="card.agentAnalysis.edits.length" style="margin-top:4px;">
+                  <div ng-repeat="e in card.agentAnalysis.edits" style="padding:2px 0;">
+                    <span style="opacity:0.5;">{{e.path}}</span>
+                    <span ng-if="e.status === 'written'" style="color:#4ade80; margin-left:4px;">[written]</span>
+                    <span ng-if="e.status === 'skipped' || e.status === 'error'" style="color:#f87171; margin-left:4px;">[{{e.status}}]</span>
+                  </div>
+                </div>
+                <div ng-if="card.agentAnalysis.commands.length" style="margin-top:4px;">
+                  <div ng-repeat="c in card.agentAnalysis.commands" style="padding:2px 0;">
+                    <code style="opacity:0.5; font-size:0.85em;">{{c.command}}</code>
+                    <span ng-if="c.status === 'ok'" style="color:#4ade80; margin-left:4px;">[ok]</span>
+                    <span ng-if="c.status === 'error'" style="color:#f87171; margin-left:4px;">[error]</span>
+                  </div>
+                </div>
+              </details>
+            </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'done','doing')">Reopen</button>
-              <!-- <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button> -->
             </div>
           </div>
         </div>
-        <button class="addBtn" ng-click="vm.addCard('done')">Add</button>
       </div>
     </div>
 
