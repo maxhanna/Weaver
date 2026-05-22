@@ -774,14 +774,14 @@ public class AgentController : ControllerBase
                     var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
 
                     await EmitLog(stream, "debug", $"LLM raw response for {path}",
-                        new { raw = Truncate(raw ?? "", 600), error = err });
+                        new { raw = raw ?? "", error = err });
 
                     fileEdits = ParseEditsFromLlmRaw(raw, path);
 
                     if (fileEdits.Count == 0)
                     {
                         await EmitLog(stream, "warn", $"Parse failed for {path}",
-                            new { error = err, raw = Truncate(raw ?? "", 400) });
+                            new { error = err, raw = raw ?? "" });
                     }
                     else
                     {
@@ -790,8 +790,8 @@ public class AgentController : ControllerBase
                             await EmitLog(stream, "debug", $"Extracted edit for {path}",
                                 new
                                 {
-                                    oldStringPreview = Truncate(fe.OldString, 300),
-                                    newStringPreview = Truncate(fe.NewString, 300),
+                                    oldString = fe.OldString,
+                                    newString = fe.NewString,
                                     description = fe.Description
                                 });
                         }
@@ -1177,13 +1177,51 @@ Rules:
             }
             if (text[pos] == '"')
             {
-                var value = text.Substring(start, pos - start);
-                return (value, pos + 1);
+                var rawValue = text.Substring(start, pos - start);
+                return (UnescapeJsonString(rawValue), pos + 1);
             }
             pos++;
         }
 
         return null;
+    }
+
+    private static string UnescapeJsonString(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var sb = new StringBuilder(s.Length);
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] != '\\')
+            {
+                sb.Append(s[i]);
+                continue;
+            }
+            i++;
+            if (i >= s.Length) { sb.Append('\\'); break; }
+            switch (s[i])
+            {
+                case '"': sb.Append('"'); break;
+                case '\\': sb.Append('\\'); break;
+                case '/': sb.Append('/'); break;
+                case 'n': sb.Append('\n'); break;
+                case 'r': sb.Append('\r'); break;
+                case 't': sb.Append('\t'); break;
+                case 'b': sb.Append('\b'); break;
+                case 'f': sb.Append('\f'); break;
+                case 'u':
+                    if (i + 4 < s.Length &&
+                        int.TryParse(s.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, null, out var code))
+                    {
+                        sb.Append((char)code);
+                        i += 4;
+                    }
+                    else sb.Append('u');
+                    break;
+                default: sb.Append(s[i]); break;
+            }
+        }
+        return sb.ToString();
     }
 
     private static string? RepairJsonString(string json)
