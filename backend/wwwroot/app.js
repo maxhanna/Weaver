@@ -1,4 +1,4 @@
-angular.module('kanbanApp', [])
+﻿angular.module('kanbanApp', [])
   .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', function($http, $interval, $window, $scope, $timeout) {
     const vm = this;
     const STORAGE_KEY = 'maestro.cards';
@@ -223,10 +223,19 @@ angular.module('kanbanApp', [])
     };
 
     vm.deleteCard = function(id, col) {
-      if (!$window.confirm('Delete this card?')) return;
-      var idx = vm.state[col].findIndex(function(c) { return c.id === id; });
-      if (idx !== -1) { vm.state[col].splice(idx, 1); saveCards(); }
-    };
+      // Check if user previously chose not to show this confirmation
+      var showConfirm = true;
+      try {
+        var raw = $window.localStorage.getItem(SETTINGS_KEY);
+        if (raw) {
+          var s = JSON.parse(raw);
+          showConfirm = s.showDeleteConfirm !== false;
+        }
+      } catch(e) {}
+      
+      if (showConfirm && !$window.confirm('Delete this card?')) return;
+      
+      // Save user's preference if they clicked 
 
     vm.selectCard = function(card) {
       vm.selectedCardId = card.id;

@@ -991,55 +991,112 @@ Rules:
             if (m.Success) jsonStr = m.Groups[1].Value.Trim();
         }
 
-        var start = jsonStr.IndexOf('{');
-        var end = jsonStr.LastIndexOf('}');
-        if (start < 0 || end <= start) return steps;
-        jsonStr = jsonStr.Substring(start, end - start + 1);
+        var jsonOptions = new JsonDocumentOptions { AllowTrailingCommas = true };
 
-        try
+        // Try parsing the full block, then fall back to individual brace blocks
+        var blocks = ExtractJsonBlocks(jsonStr);
+        foreach (var block in blocks)
         {
-            using var doc = JsonDocument.Parse(jsonStr);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+            try
             {
-                var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                if (envelope?.Edits != null)
+                using var doc = JsonDocument.Parse(block, jsonOptions);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
+                {
+                    var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(block, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (envelope?.Edits != null)
+                    {
+                        var i = 0;
+                        foreach (var e in envelope.Edits)
+                        {
+                            if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
+                            steps.Add(new AgentStep
+                            {
+                                Index = i++,
+                                Type = "edit",
+                                Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
+                                OldString = e.OldString,
+                                NewString = e.NewString,
+                                Description = "LLM edit"
+                            });
+                        }
+                        if (steps.Count > 0) return steps;
+                    }
+                }
+
+                if (root.TryGetProperty("oldString", out var os) && root.TryGetProperty("newString", out var ns))
+                {
+                    steps.Add(new AgentStep
+                    {
+                        Index = 0,
+                        Type = "edit",
+                        Path = defaultPath,
+                        OldString = os.GetString() ?? "",
+                        NewString = ns.GetString() ?? "",
+                        Description = "LLM edit"
+                    });
+                    if (steps.Count > 0) return steps;
+                }
+            }
+            catch { }
+        }
+
+        // Regex fallback: extract oldString/newString pairs from malformed JSON
+        if (steps.Count == 0)
+        {
+            try
+            {
+                var pairs = Regex.Matches(jsonStr, @"""oldString""\s*:\s*""((?:[^""\\]|\\.)*)""\s*,\s*""newString""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.IgnoreCase);
+                if (pairs.Count > 0)
                 {
                     var i = 0;
-                    foreach (var e in envelope.Edits)
+                    foreach (Match pair in pairs)
                     {
-                        if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
+                        var oldStr = pair.Groups[1].Value;
+                        var newStr = pair.Groups[2].Value;
+                        if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) continue;
                         steps.Add(new AgentStep
                         {
                             Index = i++,
                             Type = "edit",
-                            Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
-                            OldString = e.OldString,
-                            NewString = e.NewString,
-                            Description = "LLM edit"
+                            Path = defaultPath,
+                            OldString = oldStr,
+                            NewString = newStr,
+                            Description = "LLM edit (regex)"
                         });
                     }
-                    return steps;
                 }
             }
-
-            if (root.TryGetProperty("oldString", out var os) && root.TryGetProperty("newString", out var ns))
-            {
-                steps.Add(new AgentStep
-                {
-                    Index = 0,
-                    Type = "edit",
-                    Path = defaultPath,
-                    OldString = os.GetString() ?? "",
-                    NewString = ns.GetString() ?? "",
-                    Description = "LLM edit"
-                });
-            }
+            catch { }
         }
-        catch { }
 
         return steps;
+    }
+
+    private static List<string> ExtractJsonBlocks(string text)
+    {
+        var blocks = new List<string>();
+        var depth = 0;
+        var start = -1;
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '{')
+            {
+                if (depth == 0) start = i;
+                depth++;
+            }
+            else if (text[i] == '}')
+            {
+                depth--;
+                if (depth == 0 && start >= 0)
+                {
+                    blocks.Add(text.Substring(start, i - start + 1));
+                    start = -1;
+                }
+            }
+        }
+        return blocks;
     }
 
     private static List<AgentStep> TryHeuristicPatches(string prompt, string relativePath, string content)
@@ -1640,6 +1697,13 @@ Rules:
             result["error"] = matchError ?? "oldString not found";
             if (snippet != null) result["snippet"] = snippet;
             result["oldStringPreview"] = Truncate(oldString, 200);
+            return;
+        }
+
+        if (NormalizeLineEndings(newContent) == NormalizeLineEndings(content))
+        {
+            result["status"] = "skipped";
+            result["path"] = step.Path;
             return;
         }
 
