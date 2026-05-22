@@ -1,0 +1,25 @@
+﻿{
+  "projects": [
+    {
+      "Name": "Project Alpha (example)",
+      "Path": "../project-alpha",
+      "Description": "Replace with path to your project root (relative to repository root)"
+    },
+    {
+      "Name": "Project Beta (example)",
+      "Path": "../project-beta",
+      "Description": "Another example project"
+    },
+    {
+      "Name": "Repository Root",
+      "Path": "..",
+      "Description": "Use the repository root for workspace-wide browsing"
+    },
+    {
+      "Name": "BugHosted",
+      "Path": "C:/Users/Saint/Desktop/Repos/BugHosted",
+      "Description": ""
+    }
+  ],
+  "defaultProject": "../project-alpha"
+}

@@ -1,12 +1,57 @@
 * { box-sizing: border-box; }
 body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 0; }
-header { background:#333; color:#fff; padding:10px 16px; }
+header { background:#333; color:#fff; padding:10px 16px; display: flex; justify-content: space-between; align-items: center; }
+.project-picker { display: flex; align-items: center; gap: 10px; }
+.project-picker label { margin: 0; }
+.project-picker select { padding: 5px 10px; border-radius: 4px; border: none; }
 main{ display:flex; gap:16px; padding:16px; }
 .board{ display:flex; gap:12px; flex:1; }
 .column{ background:#f4f4f4; padding:8px; width:33%; border-radius:6px; }
 .cards{ min-height:200px; }
 .card{ background:#fff; padding:8px; margin:8px 0; border-radius:4px; cursor:grab; }
+.card .file-attachment { margin-top: 8px; padding: 5px; background: #e9e9e9; border-radius: 4px; }
+.attached-file-name { font-size: 11px; color: #555; word-break: break-all; margin-left: 4px; }
+.attached-file-name a { color:#c00; text-decoration:none; font-weight:bold; margin-left:4px; }
+.file-picker ul li span.selected { font-weight: bold; color: #0066cc; }
 .panel{ width:360px; background:#fafafa; padding:12px; border-radius:6px; }
+
+/* AI Agent button */
+.btn-ai { background:#5a2d82; color:#fff; border:1px solid #4a2572; }
+.btn-ai:hover { background:#6d3a99; }
+
+/* Agent results in the panel */
+.agent-result { background:#fff; padding:8px; border-radius:4px; margin-top:8px; font-size:13px; max-height:400px; overflow-y:auto; }
+.agent-result strong { display:block; margin:6px 0 2px; }
+.agent-error { color:#c00; font-weight:bold; }
+.agent-summary { background:#e8f5e9; padding:6px; border-radius:4px; margin-bottom:4px; }
+.agent-thinking details { margin:4px 0; }
+.agent-thinking summary { cursor:pointer; color:#555; font-style:italic; }
+.agent-thinking pre { font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px; max-height:150px; overflow:auto; }
+.agent-edits, .agent-commands { list-style:none; padding:0; margin:4px 0; }
+.agent-edits li, .agent-commands li { padding:3px 6px; margin:2px 0; border-radius:3px; font-size:12px; }
+.edit-path, .cmd-text { font-family:monospace; }
+.edit-status, .cmd-status { margin-left:6px; font-size:11px; }
+.edit-error { color:#c00; font-size:11px; margin-left:6px; }
+.cmd-output { font-size:11px; background:#f5f5f5; padding:4px; border-radius:3px; margin:2px 0; max-height:100px; overflow:auto; white-space:pre-wrap; }
+.status-written, .status-ok { background:#e8f5e9; }
+.status-error { background:#ffebee; }
+.status-skipped { background:#fff3e0; }
+
+/* Reusable popup panel */
+.popup-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:1000; }
+.popup-panel { background:#fff; border-radius:8px; padding:16px; width:70%; max-height:80%; overflow:auto; box-shadow:0 4px 24px rgba(0,0,0,0.25); }
+.popup-panel .popup-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid #ddd; }
+.popup-panel .popup-header strong { font-size:1.1em; }
+.popup-panel .popup-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; padding-top:8px; border-top:1px solid #ddd; }
 .aiResponse{ white-space:pre-wrap; background:#fff; padding:8px; min-height:80px; border-radius:4px; }
+
+/* Streaming live updates */
+.streaming-indicator { display:flex; align-items:center; gap:6px; padding:6px; margin-top:6px; font-size:13px; color:#555; background:#e3f2fd; border-radius:4px; }
+.pulse-dot { width:8px; height:8px; border-radius:50%; background:#1976d2; animation:pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity:0.4; } 50% { opacity:1; } }
+.agent-streaming-thinking { margin-top:6px; }
+.agent-streaming-thinking details { margin:4px 0; }
+.agent-streaming-thinking summary { cursor:pointer; color:#555; font-style:italic; }
+.streaming-text { font-size:11px; background:#f5f5f5; padding:6px; border-radius:4px; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; border-left:3px solid #1976d2; }
 .terminalOutput{ background:#000; color:#0f0; height:160px; overflow:auto; padding:8px; font-family:monospace; border-radius:4px; }
 button{ margin-top:6px; }

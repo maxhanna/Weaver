@@ -42,3 +42,27 @@ The frontend is a small AngularJS (1.x) single-file app in `wwwroot/` that provi
 - The frontend currently uses AngularJS for quick scaffolding. If you want a full Angular (2+) project, I can scaffold an `ng`-based project and integrate its build output into `wwwroot`.
 - The terminal executes commands on the server — be cautious when exposing this over the network.
 
+## File editing API
+
+You can now instruct the backend to write files inside the repository workspace. The API is intentionally conservative and only allows writes under the configured workspace root (defaults to the parent folder of `backend`).
+
+- `POST /api/editor/write` — JSON body:
+
+```json
+{
+	"project": "backend",
+	"path": "Services/TerminalService.cs",
+	"content": "...new file contents...",
+	"apply": true,
+	"createIfMissing": true
+}
+```
+
+If `apply` is `true`, the server writes the file (creating directories if needed). If `apply` is `false`, the server will only return the resolved absolute path and whether the file exists.
+
+- `GET /api/editor/projects` — lists top-level folders under the workspace root so you can pick a `project` value.
+
+Configuration: set the workspace root in [backend/appsettings.json](backend/appsettings.json#L1-L20) via `Editor:WorkspaceRoot`. Relative paths are resolved from the `backend` folder; the default is `..` which points to the repository root.
+
+Security: the endpoint will reject any write that resolves outside the workspace root. Do NOT expose this API publicly without additional auth/ACL controls.
+

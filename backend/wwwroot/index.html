@@ -10,16 +10,26 @@
 <body ng-controller="MainCtrl as vm">
   <header>
     <h1>Kanban + Llama AI</h1>
+    <div class="project-picker">
+      <label for="project-select">Select Project:</label>
+      <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects" ng-change="vm.changeProject()"></select>
+      <button ng-click="vm.addProjectUI()">Add Project</button>
+      <button ng-click="vm.removeProjectUI()">Remove Project</button>
+    </div>
   </header>
   <main>
     <div id="board" class="board">
       <div class="column">
         <h2>To Do</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.state.todo">
-            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+          <div class="card" ng-repeat="card in vm.cardsForProject('todo')">
+            <div class="card-text" ng-click="vm.selectCard(card)" ng-dblclick="vm.editCardText(card)">{{card.text}}</div>
+            <div class="file-attachment" ng-if="vm.selectedProject">
+              <button ng-click="vm.attachFile(card.id)">Choose File</button>
+              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+            </div>
             <div class="card-actions">
-              <button ng-click="vm.moveCard(card.id,'todo','doing')">Start</button>
+              <button ng-click="vm.startCard(card)">Start</button>
             </div>
           </div>
         </div>
@@ -28,11 +38,16 @@
       <div class="column">
         <h2>Doing</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.state.doing">
+          <div class="card" ng-repeat="card in vm.cardsForProject('doing')">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+            <div class="file-attachment" ng-if="vm.selectedProject">
+              <button ng-click="vm.attachFile(card.id)">Choose File</button>
+              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+            </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
               <button ng-click="vm.moveCard(card.id,'doing','todo')">Back</button>
+              <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button>
             </div>
           </div>
         </div>
@@ -41,10 +56,15 @@
       <div class="column">
         <h2>Done</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.state.done">
+          <div class="card" ng-repeat="card in vm.cardsForProject('done')">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+            <div class="file-attachment" ng-if="vm.selectedProject">
+              <button ng-click="vm.attachFile(card.id)">Choose File</button>
+              <span ng-if="card.attached" class="attached-file-name">{{card.attached}} <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a></span>
+            </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'done','doing')">Reopen</button>
+              <button class="btn-ai" ng-click="vm.executeAgent(card)">Run on AI</button>
             </div>
           </div>
         </div>
@@ -56,7 +76,60 @@
       <h3>AI Assistant</h3>
       <textarea ng-model="vm.aiPrompt" placeholder="Select a card or type a prompt"></textarea>
       <button ng-click="vm.askAI()">Ask AI</button>
-      <pre class="aiResponse">{{vm.aiResponse}}</pre>
+
+      <!-- Live streaming status -->
+      <div ng-if="vm.streamingActive" class="streaming-indicator">
+        <span class="pulse-dot"></span> AI is working...
+      </div>
+
+      <!-- Streaming thinking (incremental) -->
+      <div ng-if="vm.streamingThinking" class="agent-streaming-thinking">
+        <details open>
+          <summary>AI Reasoning</summary>
+          <pre class="streaming-text">{{vm.streamingThinking}}</pre>
+        </details>
+      </div>
+
+      <!-- Streaming edits -->
+      <div ng-if="vm.streamingEdits.length">
+        <strong>File Edits:</strong>
+        <ul class="agent-edits">
+          <li ng-repeat="e in vm.streamingEdits" ng-class="'status-' + e.status">
+            <span class="edit-path">{{e.path}}</span>
+            <span class="edit-status">[{{e.status}}]</span>
+            <span ng-if="e.error" class="edit-error">{{e.error}}</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Streaming commands -->
+      <div ng-if="vm.streamingCommands.length">
+        <strong>Commands:</strong>
+        <ul class="agent-commands">
+          <li ng-repeat="c in vm.streamingCommands" ng-class="'status-' + c.status">
+            <span class="cmd-text">{{c.command}}</span>
+            <span class="cmd-status">[{{c.status}}]</span>
+            <pre ng-if="c.output" class="cmd-output">{{c.output}}</pre>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Final result (shown after streaming completes) -->
+      <div ng-if="!vm.streamingActive && vm.agentResult" class="agent-result">
+        <div ng-if="vm.agentResult.error" class="agent-error">{{vm.agentResult.error}}</div>
+        <div ng-if="vm.agentResult.summary" class="agent-summary">
+          <strong>Summary:</strong> {{vm.agentResult.summary}}
+        </div>
+        <div ng-if="vm.agentResult.thinking && !vm.streamingThinking" class="agent-thinking">
+          <details>
+            <summary>AI Reasoning</summary>
+            <pre>{{vm.agentResult.thinking}}</pre>
+          </details>
+        </div>
+      </div>
+
+      <!-- Simple response (ask AI or old agent) -->
+      <pre ng-if="!vm.streamingActive && !vm.agentResult && vm.aiResponse" class="aiResponse">{{vm.aiResponse}}</pre>
     </section>
 
     <section class="panel">
@@ -67,6 +140,29 @@
       <button ng-click="vm.startTerminal()">Start Terminal</button>
     </section>
   </main>
+  <!-- File picker modal for card attachments -->
+  <div class="popup-overlay" ng-if="vm.showFilePicker">
+    <div class="popup-panel">
+      <div class="popup-header">
+        <strong>Pick a file (project: {{vm.selectedProject}})</strong>
+        <button ng-click="vm.closeFilePicker()">Close</button>
+      </div>
+      <div>
+        <button ng-click="vm.pickerUpDir()">Up</button>
+        <span style="margin-left:12px;">{{vm.pickerPath || '/'}}</span>
+      </div>
+      <ul style="list-style:none; padding:0; margin-top:8px;">
+        <li ng-repeat="e in vm.pickerEntries" style="padding:6px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;">
+          <button ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</button>
+          <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;" ng-class="{selected: vm.pickerSelected === e.path}">{{e.name}}</span>
+        </li>
+      </ul>
+      <div class="popup-footer">
+        <button ng-click="vm.confirmFilePicker()">Attach File</button>
+        <button ng-click="vm.closeFilePicker()">Cancel</button>
+      </div>
+    </div>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

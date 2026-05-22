@@ -18,11 +18,46 @@ public class AiController : ControllerBase
     public async Task<IActionResult> Generate([FromBody] JsonElement payload)
     {
         var baseUrl = _config.GetValue<string>("LlamaUrl") ?? "http://192.168.2.58:8080";
-        var target = baseUrl.TrimEnd('/') + "/generate";
+        var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
         var client = _clientFactory.CreateClient("llama");
-        var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+        // Determine model: prefer payload.model, then configuration, then fallback
+        string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("model", out var modelProp) && modelProp.ValueKind == JsonValueKind.String)
+        {
+            var m = modelProp.GetString();
+            if (!string.IsNullOrWhiteSpace(m)) model = m!;
+        }
+
         try
         {
+            string contentJson;
+
+            if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("messages", out var messagesProp))
+            {
+                // Use provided messages but ensure model is present
+                var messagesRaw = messagesProp.GetRawText();
+                contentJson = $"{{\"model\":\"{model}\",\"messages\":{messagesRaw},\"stream\":false}}";
+            }
+            else if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("prompt", out var promptProp))
+            {
+                var prompt = promptProp.GetString() ?? string.Empty;
+                var messagesText = JsonSerializer.Serialize(new[] { new { role = "user", content = prompt } });
+                contentJson = $"{{\"model\":\"{model}\",\"messages\":{messagesText},\"stream\":false}}";
+            }
+            else if (payload.ValueKind == JsonValueKind.String)
+            {
+                var prompt = payload.GetString() ?? string.Empty;
+                var messagesText = JsonSerializer.Serialize(new[] { new { role = "user", content = prompt } });
+                contentJson = $"{{\"model\":\"{model}\",\"messages\":{messagesText},\"stream\":false}}";
+            }
+            else
+            {
+                // Fallback: forward the body as-is
+                contentJson = JsonSerializer.Serialize(payload);
+            }
+
+            var content = new StringContent(contentJson, Encoding.UTF8, "application/json");
             var resp = await client.PostAsync(target, content);
             var text = await resp.Content.ReadAsStringAsync();
             return Content(text, resp.Content.Headers.ContentType?.ToString() ?? "application/json");

@@ -1,5 +1,5 @@
 angular.module('kanbanApp', [])
-  .controller('MainCtrl', ['$http', '$interval', '$window', function($http, $interval, $window) {
+  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', function($http, $interval, $window, $scope) {
     const vm = this;
     const STORAGE_KEY = 'kanban.cards';
 
@@ -7,11 +7,69 @@ angular.module('kanbanApp', [])
     vm.aiResponse = '';
     vm.termInput = '';
     vm.terminalOutput = '';
+    vm.streamingThinking = '';
+    vm.streamingEdits = [];
+    vm.streamingCommands = [];
+    vm.streamingSummary = '';
+    vm.streamingActive = false;
+
+    // === Project configuration ===
+
+    vm.projects = [];
+    vm.selectedProject = '';
+
+    function normalizeProjects(raw) {
+      return raw.map(function(p) { return { Name: p.Name || p.name, Path: p.Path || p.path }; });
+    }
+
+    vm.loadConfig = function() {
+      $http.get('/api/config').then(function(resp) {
+        var cfg = resp.data || {};
+        var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
+          { Name: 'Project Alpha', Path: '../project-alpha' },
+          { Name: 'Project Beta', Path: '../project-beta' }
+        ];
+        vm.projects = normalizeProjects(raw);
+        vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
+      }, function() {
+        vm.projects = normalizeProjects([
+          { Name: 'Project Alpha', Path: '../project-alpha' },
+          { Name: 'Project Beta', Path: '../project-beta' }
+        ]);
+        vm.selectedProject = vm.projects[0].Path;
+      });
+    };
+
+    vm.loadConfig();
+
+    vm.addProjectUI = function() {
+      var name = $window.prompt('Project name'); if(!name) return;
+      var path = $window.prompt('Project path (relative to repo root)'); if(!path) return;
+      $http.post('/api/config/projects/add', { Name: name, Path: path }).then(function(resp) {
+        vm.loadConfig();
+      }, function(err) {
+        $window.alert('Failed to add project: ' + (err.data || err.statusText || err));
+      });
+    };
+
+    vm.removeProjectUI = function() {
+      if(!vm.selectedProject) return $window.alert('No project selected');
+      var proj = vm.projects.find(function(p) { return (p.Path || p.path) === vm.selectedProject; });
+      if(!proj) return;
+      if(!$window.confirm('Remove project "' + (proj.Name || proj.name) + '" (' + vm.selectedProject + ')?')) return;
+      $http.post('/api/config/projects/remove', { Path: vm.selectedProject }).then(function() {
+        vm.loadConfig();
+      }, function(err) {
+        $window.alert('Failed to remove project: ' + (err.data || err.statusText || err));
+      });
+    };
+
+    // === Card state ===
 
     function uid() { return Math.random().toString(36).slice(2,9); }
 
     function loadCards(){
-      const raw = $window.localStorage.getItem(STORAGE_KEY);
+      var raw = $window.localStorage.getItem(STORAGE_KEY);
       return raw ? JSON.parse(raw) : { todo:[], doing:[], done:[] };
     }
 
@@ -19,20 +77,261 @@ angular.module('kanbanApp', [])
 
     vm.state = loadCards();
 
+    // Filter cards by the selected project
+    vm.cardsForProject = function(col) {
+      var all = vm.state[col] || [];
+      if (!vm.selectedProject) return all;
+      return all.filter(function(c) { return c.filePath === vm.selectedProject; });
+    };
+
+    vm.changeProject = function() {
+      console.log('Changed project to:', vm.selectedProject);
+    };
+
     vm.addCard = function(col){
-      const text = $window.prompt('Card text'); if(!text) return;
-      vm.state[col].push({ id: uid(), text }); saveCards();
+      var text = $window.prompt('Card text'); if(!text) return;
+      vm.state[col].push({ id: uid(), text: text, filePath: vm.selectedProject }); saveCards();
     };
 
     vm.moveCard = function(id, from, to){
-      const idx = vm.state[from].findIndex(c=>c.id===id); if(idx===-1) return;
-      const [card] = vm.state[from].splice(idx,1); vm.state[to].push(card); saveCards();
+      var idx = vm.state[from].findIndex(function(c){ return c.id === id; }); if(idx === -1) return;
+      var card = vm.state[from].splice(idx,1)[0]; 
+      vm.state[to].push(card); 
+      saveCards();
     };
 
-    vm.selectCard = function(card){ vm.aiPrompt = card.text; };
+    vm.startCard = function(card) {
+      if (!card) return;
+      
+      // Execute AI on the card first
+      vm.executeAgent(card);
+      
+      // Then move to 'doing' column (this will happen after AI execution completes)
+      // The moveCard call is already included in executeAgent function
+    };
+
+    vm.selectCard = function(card){
+      vm.aiPrompt = card.text;
+    };
+
+    vm.editCardText = function(card) {
+      var newText = $window.prompt('Edit task text:', card.text);
+      if (newText !== null && newText !== card.text) {
+        card.text = newText;
+        saveCards();
+      }
+    };
+
+    vm.removeAttachment = function(cardId) {
+      ['todo','doing','done'].forEach(function(col) {
+        var cards = vm.state[col];
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === cardId) {
+            delete cards[i].attached;
+            delete cards[i].attachedProject;
+            break;
+          }
+        }
+      });
+      saveCards();
+    };
+
+    // === File picker for card attachments ===
+
+    vm.showFilePicker = false;
+    vm.pickerCardId = null;
+    vm.pickerPath = '';
+    vm.pickerEntries = [];
+    vm.pickerSelected = null;
+
+    vm.attachFile = function(cardId) {
+      vm.pickerCardId = cardId;
+      vm.pickerPath = '';
+      vm.pickerSelected = null;
+      vm.showFilePicker = true;
+      vm.loadPickerEntries();
+    };
+
+    vm.closeFilePicker = function() {
+      vm.showFilePicker = false;
+      vm.pickerCardId = null;
+      vm.pickerPath = '';
+      vm.pickerEntries = [];
+      vm.pickerSelected = null;
+    };
+
+    vm.loadPickerEntries = function() {
+      var params = { project: vm.selectedProject };
+      if (vm.pickerPath) params.path = vm.pickerPath;
+      $http.get('/api/editor/list', { params: params }).then(function(resp) {
+        var data = resp.data || {};
+        vm.pickerEntries = data.entries || [];
+      }, function() {
+        vm.pickerEntries = [];
+      });
+    };
+
+    vm.pickerEnterDir = function(path) {
+      vm.pickerPath = path;
+      vm.pickerSelected = null;
+      vm.loadPickerEntries();
+    };
+
+    vm.pickerUpDir = function() {
+      if (!vm.pickerPath) return;
+      var segs = vm.pickerPath.split('/').filter(function(s){ return s && s.length; });
+      segs.pop();
+      vm.pickerPath = segs.join('/');
+      vm.pickerSelected = null;
+      vm.loadPickerEntries();
+    };
+
+    vm.pickerSelectFile = function(path) {
+      vm.pickerSelected = (vm.pickerSelected === path) ? null : path;
+    };
+
+    vm.confirmFilePicker = function() {
+      if (!vm.pickerSelected) { $window.alert('Please select a file first.'); return; }
+      var cardId = vm.pickerCardId;
+      if (!cardId) { vm.closeFilePicker(); return; }
+      // Find the card and store the attached file path
+      var found = false;
+      ['todo','doing','done'].forEach(function(col) {
+        var cards = vm.state[col];
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === cardId) {
+            cards[i].attached = vm.pickerSelected;
+            cards[i].attachedProject = vm.selectedProject;
+            found = true;
+            break;
+          }
+        }
+      });
+      if (found) saveCards();
+      vm.closeFilePicker();
+    };
+
+    // === AI Agent (streaming) ===
+
+    vm.agentResult = null;
+
+    vm.executeAgent = function(card) {
+      if (!card) return;
+      if (!card.text) { $window.alert('Card has no task text'); return; }
+      var proj = card.filePath || vm.selectedProject;
+      if (!proj) { $window.alert('No project assigned to this card'); return; }
+
+      // Reset streaming state
+      vm.agentResult = null;
+      vm.aiResponse = '';
+      vm.streamingThinking = '';
+      vm.streamingEdits = [];
+      vm.streamingCommands = [];
+      vm.streamingSummary = '';
+      vm.streamingActive = true;
+      vm.aiPrompt = card.text;
+
+      var files = card.attached ? [card.attached] : [];
+      var payload = { prompt: card.text, project: proj, files: files };
+
+      // Use fetch with streaming reader
+      fetch('/api/agent/execute-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function(response) {
+        if (!response.ok) {
+          vm.streamingActive = false;
+          vm.agentResult = { error: 'Server error: ' + response.status };
+          $scope.$digest();
+          return;
+        }
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+
+        function readNext() {
+          reader.read().then(function(result) {
+            if (result.done) {
+              vm.streamingActive = false;
+              $scope.$digest();
+              return;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+
+            // Parse SSE events from buffer
+            var parts = buffer.split('\n\n');
+            buffer = parts.pop();
+
+            for (var p = 0; p < parts.length; p++) {
+              var block = parts[p];
+              var lines = block.split('\n');
+              var eventName = '';
+              var data = '';
+
+              for (var l = 0; l < lines.length; l++) {
+                if (lines[l].startsWith('event: ')) eventName = lines[l].substring(7);
+                else if (lines[l].startsWith('data: ')) data += lines[l].substring(6);
+              }
+
+              if (eventName) {
+                var parsed = null;
+                try { parsed = JSON.parse(data); } catch(e) {}
+
+                switch (eventName) {
+                  case 'token':
+                    if (parsed && parsed.t) vm.streamingThinking += parsed.t;
+                    break;
+                  case 'edit':
+                    if (parsed) vm.streamingEdits.push(parsed);
+                    break;
+                  case 'command':
+                    if (parsed) vm.streamingCommands.push(parsed);
+                    break;
+                  case 'summary':
+                    if (parsed) vm.streamingSummary = parsed.summary || '';
+                    break;
+                  case 'done':
+                    vm.streamingActive = false;
+                    vm.agentResult = { summary: vm.streamingSummary, thinking: vm.streamingThinking };
+                    vm.aiResponse = vm.streamingSummary || 'Agent completed.';
+                    moveCardToDoing(card.id);
+                    break;
+                  case 'error':
+                    vm.streamingActive = false;
+                    vm.agentResult = { error: parsed ? parsed.message : data };
+                    vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
+                    break;
+                }
+              }
+            }
+
+            $scope.$digest();
+            readNext();
+          });
+        }
+
+        readNext();
+      }).catch(function(err) {
+        vm.streamingActive = false;
+        vm.agentResult = { error: 'Connection failed: ' + err.message };
+        $scope.$digest();
+      });
+    };
+
+    function moveCardToDoing(cardId) {
+      var idx = vm.state.todo.findIndex(function(c){ return c.id === cardId; });
+      if (idx === -1) return;
+      var card = vm.state.todo.splice(idx, 1)[0];
+      vm.state.doing.push(card);
+      saveCards();
+    }
+
+    // === AI Chat ===
 
     vm.askAI = function(){
       if(!vm.aiPrompt) return $window.alert('Enter a prompt');
+      vm.agentResult = null;
       vm.aiResponse = 'Thinking...';
       $http.post('/api/ai/generate', { prompt: vm.aiPrompt })
         .then(function(resp){
@@ -41,7 +340,9 @@ angular.module('kanbanApp', [])
         }, function(err){ vm.aiResponse = 'Error: ' + (err.statusText || err); });
     };
 
-    vm.startTerminal = function(){ $http.post('/api/terminal/start').catch(()=>{}); };
+    // === Terminal ===
+
+    vm.startTerminal = function(){ $http.post('/api/terminal/start').catch(function(){}); };
 
     vm.sendCmd = function(){ if(!vm.termInput) return; $http.post('/api/terminal/exec', { command: vm.termInput }).then(function(){ vm.termInput = ''; vm.refreshTerminal(); }); };
 
@@ -49,7 +350,6 @@ angular.module('kanbanApp', [])
       $http.get('/api/terminal/output').then(function(resp){ vm.terminalOutput = resp.data.output || ''; });
     };
 
-    // initial load + polling
     vm.refreshTerminal();
     $interval(vm.refreshTerminal, 2000);
   }]);
