@@ -238,8 +238,8 @@
         dontShowAgain: false
       };
       try {
-        var raw = $window.localStorage.getItem('maestro.deleteCardConfirm');
-        if (raw === 'false') {
+        var showConfirm = $window.localStorage.getItem('maestro.deleteCardConfirm');
+        if (showConfirm === 'false') {
           vm.confirmDeleteCard();
         }
       } catch(e) {}
@@ -417,6 +417,17 @@
     function formatLogDetail(detail) {
       if (!detail) return '';
       if (typeof detail === 'string') return detail;
+      if (typeof detail === 'object' && detail !== null) {
+        var lines = [];
+        var diagnosticKeys = ['hasUnquotedKeyNewString','hasUnquotedKeyOldString','extractJsonBlocks','repairChanged','endsWithClosingBrace','totalChars','hasMarkdownComment'];
+        for (var k = 0; k < diagnosticKeys.length; k++) {
+          var dk = diagnosticKeys[k];
+          if (detail.hasOwnProperty(dk) && detail[dk] !== null && detail[dk] !== undefined) {
+            lines.push(dk + ': ' + JSON.stringify(detail[dk]));
+          }
+        }
+        if (lines.length > 0) return lines.join('\n') + '\n' + JSON.stringify(detail, null, 0);
+      }
       try { return JSON.stringify(detail, null, 0); } catch (e) { return String(detail); }
     }
 

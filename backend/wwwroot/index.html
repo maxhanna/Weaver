@@ -204,8 +204,19 @@
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
                   <details ng-if="e.detail" class="log-detail">
-                    <summary>detail</summary>
-                    <pre>{{vm.formatLogDetail(e.detail)}}</pre>
+                    <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'" style="font-weight:600;color:var(--error);">!</span></summary>
+                    <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                    <div ng-if="e.detail.diagnosis" class="log-diagnosis">
+                      <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing opening quote on "newString" key</div>
+                      <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing opening quote on "oldString" key</div>
+                      <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON blocks found in response</div>
+                      <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified the text</div>
+                      <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be truncated (no closing brace)</div>
+                      <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains markdown comments (## or ?)</div>
+                      <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
+                        <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
+                      </div>
+                    </div>
                   </details>
                 </div>
               </div>
@@ -383,6 +394,36 @@
     </div>
   </div>
 
+  <div class="popup-panel" ng-show="vm.showDeleteConfirm">
+    <div class="popup-content">
+      <h4>Delete this card?</h4>
+      <p>Are you sure you want to delete this card? This action cannot be undone.</p>
+      <label><input type="checkbox" ng-model="vm.dontShowDeleteConfirm"> Don't show this again</label>
+      <div class="popup-actions">
+        <button ng-click="vm.confirmDeleteCard()" class="danger">Delete</button>
+        <button ng-click="vm.cancelDeleteCard()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>
+            <div class="card-actions">
+              <button ng-click="vm.reopenCard(card); $event.stopPropagation()" class="small">↺ Reopen</button>
+              <button ng-click="vm.deleteCardConfirm(card.id,'done'); $event.stopPropagation()" class="danger small">✕</button>
+            </div>
+            <div class="popup-panel" ng-if="vm.confirmDeleteCardId === card.id">
+              <div class="popup-content">
+                <p>Are you sure you want to delete this card?</p>
+                <div class="checkbox">
+                  <label>
+                    <input type="checkbox" ng-model="vm.dontShowDeleteConfirm"> Don't show this again
+                  </label>
+                </div>
+                <div class="popup-actions">
+                  <button ng-click="vm.deleteCard(vm.confirmDeleteCardId); vm.confirmDeleteCardId = null" class="danger">Yes, Delete</button>
+                  <button ng-click="vm.confirmDeleteCardId = null" class="secondary">Cancel</button>
+                </div>
+              </div>
+            </div>

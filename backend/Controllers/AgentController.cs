@@ -773,15 +773,24 @@ public class AgentController : ControllerBase
                     await EmitLog(stream, "info", $"LLM edit: {path} (attempt {attempt + 1})", new { chars = content.Length });
                     var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
 
-                    await EmitLog(stream, "debug", $"LLM raw response for {path}",
-                        new { raw = raw ?? "", error = err });
+                    var rawSnippet = (raw?.Length ?? 0) > 500
+                        ? raw.Substring(0, 250) + "\n... [truncated] ...\n" + raw.Substring(raw.Length - 250)
+                        : (raw ?? "");
+                    await EmitLog(stream, "debug", $"LLM raw response for {path} ({raw?.Length ?? 0} chars)",
+                        new { raw = rawSnippet, error = err, totalLength = raw?.Length ?? 0 });
 
                     fileEdits = ParseEditsFromLlmRaw(raw, path);
 
                     if (fileEdits.Count == 0)
                     {
+                        var diag = DiagnoseJsonParseFailure(raw ?? "");
                         await EmitLog(stream, "warn", $"Parse failed for {path}",
-                            new { error = err, raw = raw ?? "" });
+                            new
+                            {
+                                error = err,
+                                diagnosis = diag,
+                                raw = (raw?.Length ?? 0) > 800 ? raw.Substring(0, 400) + "\n... [truncated] ...\n" + raw.Substring(raw.Length - 400) : (raw ?? "")
+                            });
                     }
                     else
                     {
@@ -1103,10 +1112,97 @@ Rules:
         return steps;
     }
 
+    private static Dictionary<string, object?> DiagnoseJsonParseFailure(string raw)
+    {
+        var diag = new Dictionary<string, object?>();
+        if (string.IsNullOrWhiteSpace(raw)) return diag;
+
+        diag["totalChars"] = raw.Length;
+        diag["startsWith"] = raw.Length > 300 ? raw.Substring(0, 300) : raw;
+        diag["endsWith"] = raw.Length > 300 ? raw.Substring(raw.Length - 200) : "";
+
+        var blocks = ExtractJsonBlocks(raw);
+        diag["extractJsonBlocks"] = blocks.Count;
+        for (var b = 0; b < blocks.Count && b < 3; b++)
+        {
+            var bv = blocks[b];
+            diag["block" + b] = new
+            {
+                chars = bv.Length,
+                snippet = bv.Length > 400 ? bv.Substring(0, 200) + "..." + bv.Substring(bv.Length - 200) : bv
+            };
+        }
+
+        var repaired = RepairJsonString(raw);
+        if (repaired != null)
+        {
+            var repairedBlocks = ExtractJsonBlocks(repaired);
+            diag["repairChanged"] = true;
+            diag["repairedBlocks"] = repairedBlocks.Count;
+            for (var b = 0; b < repairedBlocks.Count && b < 3; b++)
+            {
+                var bv = repairedBlocks[b];
+                diag["repairedBlock" + b] = new
+                {
+                    chars = bv.Length,
+                    snippet = bv.Length > 400 ? bv.Substring(0, 200) + "..." + bv.Substring(bv.Length - 200) : bv
+                };
+            }
+        }
+        else
+        {
+            diag["repairChanged"] = false;
+        }
+
+        var unquotedNewString = raw.IndexOf(",newString\"", StringComparison.Ordinal);
+        var unquotedOldString = raw.IndexOf(",oldString\"", StringComparison.Ordinal);
+        diag["hasUnquotedKeyNewString"] = unquotedNewString >= 0;
+        diag["hasUnquotedKeyOldString"] = unquotedOldString >= 0;
+
+        if (unquotedNewString >= 0)
+        {
+            var start = Math.Max(0, unquotedNewString - 60);
+            var len = Math.Min(120, raw.Length - start);
+            diag["unquotedNewStringContext"] = raw.Substring(start, len);
+        }
+
+        var truncatedClose = raw.LastIndexOf('}');
+        diag["endsWithClosingBrace"] = truncatedClose == raw.Length - 1;
+        diag["truncatedAt"] = truncatedClose >= 0 && truncatedClose < raw.Length - 1
+            ? raw.Substring(truncatedClose, Math.Min(20, raw.Length - truncatedClose))
+            : null;
+
+        var hashIdx = raw.IndexOf("#", StringComparison.Ordinal);
+        var questionIdx = raw.IndexOf("?\n", StringComparison.Ordinal);
+        diag["hasMarkdownComment"] = hashIdx >= 0 || questionIdx >= 0;
+
+        if (raw.Length > 20)
+        {
+            var surround = raw.Substring(Math.Max(0, raw.Length - 25), Math.Min(25, raw.Length));
+            diag["tailChars"] = surround;
+        }
+
+        return diag;
+    }
+
     private static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
         var i = 0;
+
+        // Try common unquoted-key patterns first (LLM blunder when content is JSON)
+        var unquotedNewKeyIdx = text.IndexOf(",newString\"", StringComparison.OrdinalIgnoreCase);
+        var unquotedOldKeyIdx = text.IndexOf(",oldString\"", StringComparison.OrdinalIgnoreCase);
+        if (unquotedNewKeyIdx >= 0 || unquotedOldKeyIdx >= 0)
+        {
+            // Insert the missing opening quote so the standard parser can find it
+            var fixedText = text;
+            if (unquotedNewKeyIdx >= 0)
+                fixedText = fixedText.Substring(0, unquotedNewKeyIdx + 1) + "\"" + fixedText.Substring(unquotedNewKeyIdx + 1);
+            if (unquotedOldKeyIdx >= 0)
+                fixedText = fixedText.Substring(0, unquotedOldKeyIdx + 1) + "\"" + fixedText.Substring(unquotedOldKeyIdx + 1);
+            return ExtractEditPairs(fixedText, defaultPath);
+        }
 
         while (i < text.Length)
         {
