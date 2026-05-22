@@ -1,0 +1,72 @@
+<!doctype html>
+<html ng-app="kanbanApp">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kanban + Llama AI</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
+</head>
+<body ng-controller="MainCtrl as vm">
+  <header>
+    <h1>Kanban + Llama AI</h1>
+  </header>
+  <main>
+    <div id="board" class="board">
+      <div class="column">
+        <h2>To Do</h2>
+        <div class="cards">
+          <div class="card" ng-repeat="card in vm.state.todo">
+            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+            <div class="card-actions">
+              <button ng-click="vm.moveCard(card.id,'todo','doing')">Start</button>
+            </div>
+          </div>
+        </div>
+        <button class="addBtn" ng-click="vm.addCard('todo')">Add</button>
+      </div>
+      <div class="column">
+        <h2>Doing</h2>
+        <div class="cards">
+          <div class="card" ng-repeat="card in vm.state.doing">
+            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+            <div class="card-actions">
+              <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
+              <button ng-click="vm.moveCard(card.id,'doing','todo')">Back</button>
+            </div>
+          </div>
+        </div>
+        <button class="addBtn" ng-click="vm.addCard('doing')">Add</button>
+      </div>
+      <div class="column">
+        <h2>Done</h2>
+        <div class="cards">
+          <div class="card" ng-repeat="card in vm.state.done">
+            <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
+            <div class="card-actions">
+              <button ng-click="vm.moveCard(card.id,'done','doing')">Reopen</button>
+            </div>
+          </div>
+        </div>
+        <button class="addBtn" ng-click="vm.addCard('done')">Add</button>
+      </div>
+    </div>
+
+    <section class="panel">
+      <h3>AI Assistant</h3>
+      <textarea ng-model="vm.aiPrompt" placeholder="Select a card or type a prompt"></textarea>
+      <button ng-click="vm.askAI()">Ask AI</button>
+      <pre class="aiResponse">{{vm.aiResponse}}</pre>
+    </section>
+
+    <section class="panel">
+      <h3>Terminal</h3>
+      <div class="terminalOutput">{{vm.terminalOutput}}</div>
+      <input ng-model="vm.termInput" placeholder="command" />
+      <button ng-click="vm.sendCmd()">Send</button>
+      <button ng-click="vm.startTerminal()">Start Terminal</button>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
