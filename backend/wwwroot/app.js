@@ -19,7 +19,10 @@ angular.module('kanbanApp', [])
     // Agent streaming state
     vm.streamingActive = false;
     vm.streamingThinking = '';
+    vm.streamingSummary = '';
+    vm.streamingPhase = '';
     vm.streamingSteps = [];
+    vm.streamingFilesEdited = [];
     vm.agentResult = null;
 
     // Project UI
@@ -329,6 +332,67 @@ angular.module('kanbanApp', [])
       vm.closeFilePicker();
     };
 
+    // === Agent helpers ===
+    function normalizeStepStatus(status) {
+      if (status === 'written' || status === 'ok' || status === 'created') return 'done';
+      if (status === 'running' || status === 'error' || status === 'pending') return status;
+      return status || 'pending';
+    }
+
+    function normalizeStep(step) {
+      if (!step) return step;
+      step.status = normalizeStepStatus(step.status);
+      return step;
+    }
+
+    function refreshFilesEditedFromSteps() {
+      vm.streamingFilesEdited = vm.streamingSteps.filter(function(s) {
+        return s.type === 'edit' && s.status === 'done' && s.path;
+      }).map(function(s) {
+        return { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
+      });
+    }
+
+    function upsertStreamingStep(parsed) {
+      normalizeStep(parsed);
+      var existing = vm.streamingSteps.find(function(s) { return s.index === parsed.index; });
+      if (existing) angular.extend(existing, parsed);
+      else vm.streamingSteps.push(parsed);
+      vm.streamingSteps.sort(function(a, b) { return (a.index || 0) - (b.index || 0); });
+      refreshFilesEditedFromSteps();
+    }
+
+    vm.splitCardIntoSubtasks = function(card) {
+      if (!card || !card.text) return;
+      var lines = card.text.split(/\n+/).map(function(l) { return l.trim(); }).filter(Boolean);
+      if (lines.length <= 1) {
+        var parts = card.text.split(/[.;]\s+/).filter(function(p) { return p.length > 10; });
+        if (parts.length <= 1) return $window.alert('Task is already small. Add line breaks or bullet points to split.');
+        lines = parts;
+      }
+      if (!$window.confirm('Split into ' + lines.length + ' smaller Todo cards?')) return;
+      var idx = vm.state.todo.findIndex(function(c) { return c.id === card.id; });
+      if (idx === -1) {
+        ['doing','done'].forEach(function(col) {
+          var i = vm.state[col].findIndex(function(c) { return c.id === card.id; });
+          if (i !== -1) { vm.state[col].splice(i, 1); idx = -2; }
+        });
+      } else {
+        vm.state.todo.splice(idx, 1);
+      }
+      lines.forEach(function(line, i) {
+        vm.state.todo.push({
+          id: uid(),
+          text: line.charAt(0).toUpperCase() + line.slice(1),
+          filePath: card.filePath || vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: card.priority || 'medium',
+          attached: i === 0 ? angular.copy(card.attached || []) : []
+        });
+      });
+      saveCards();
+    };
+
     // === Agent Execution (streaming) ===
 
     vm.executeAgent = function(card) {
@@ -342,12 +406,21 @@ angular.module('kanbanApp', [])
       vm.agentResult = null;
       vm.aiResponse = '';
       vm.streamingThinking = '';
+      vm.streamingSummary = '';
+      vm.streamingPhase = '';
       vm.streamingSteps = [];
+      vm.streamingFilesEdited = [];
       vm.streamingActive = true;
       vm.activeCardText = card.text;
 
       var files = card.attached || [];
-      var payload = { prompt: card.text, project: proj, files: files };
+      var payload = {
+        prompt: card.text,
+        project: proj,
+        files: files,
+        maxIterations: 4,
+        maxStepsPerBatch: 6
+      };
 
       // Move to Doing
       moveCardToDoing(card.id);
@@ -394,65 +467,40 @@ angular.module('kanbanApp', [])
                 try { parsed = JSON.parse(data); } catch(e) {}
 
                 switch (eventName) {
-                  case 'token':
-                    if (parsed && parsed.t) vm.streamingThinking += parsed.t;
+                  case 'phase':
+                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                    else if (parsed && parsed.phase) vm.streamingPhase = parsed.phase;
+                    break;
+                  case 'status':
+                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                    break;
+                  case 'thinking':
+                    if (parsed && parsed.text) vm.streamingThinking = parsed.text;
+                    break;
+                  case 'summary':
+                    if (parsed && parsed.text) vm.streamingSummary = parsed.text;
                     break;
                   case 'step':
-                    if (parsed) {
-                      // Update or add step
-                      var existing = vm.streamingSteps.find(function(s) { return s.index === parsed.index; });
-                      if (existing) {
-                        angular.extend(existing, parsed);
-                      } else {
-                        vm.streamingSteps.push(parsed);
-                      }
-                    }
-                    break;
-                  case 'edit':
-                    // Show edit as a step
-                    if (parsed) {
-                      vm.streamingSteps.push({
-                        index: vm.streamingSteps.length,
-                        type: 'edit',
-                        description: parsed.path,
-                        status: parsed.status === 'written' ? 'done' : (parsed.status === 'error' ? 'error' : 'done'),
-                        path: parsed.path,
-                        error: parsed.error || undefined
-                      });
-                    }
-                    break;
-                  case 'command':
-                    if (parsed) {
-                      var step = vm.streamingSteps.find(function(s) { return s.index === parsed.index; });
-                      if (step) {
-                        step.status = parsed.status === 'ok' ? 'done' : 'error';
-                        if (parsed.output) step.output = parsed.output;
-                        if (parsed.error) step.error = parsed.error;
-                      } else {
-                        vm.streamingSteps.push({
-                          index: parsed.index,
-                          type: 'command',
-                          description: parsed.command,
-                          command: parsed.command,
-                          status: parsed.status === 'ok' ? 'done' : 'error',
-                          output: parsed.output || undefined,
-                          error: parsed.error || undefined
-                        });
-                      }
-                    }
+                    if (parsed) upsertStreamingStep(parsed);
                     break;
                   case 'done':
                     vm.streamingActive = false;
+                    var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
+                    var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
+                    var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                    vm.streamingFilesEdited = (parsed && parsed.filesEdited) || [];
                     vm.agentResult = {
-                      summary: parsed ? parsed.summary : '',
-                      thinking: vm.streamingThinking
+                      summary: finalSummary,
+                      thinking: finalThinking,
+                      filesEdited: vm.streamingFilesEdited,
+                      steps: finalSteps
                     };
-                    vm.aiResponse = (parsed && parsed.summary) || 'Agent completed.';
-                    // Save analysis onto the card
+                    vm.aiResponse = finalSummary || 'Agent completed.';
                     var analysis = {
-                      summary: parsed ? parsed.summary : '',
-                      thinking: vm.streamingThinking,
-                      steps: angular.copy(vm.streamingSteps)
+                      summary: finalSummary,
+                      thinking: finalThinking,
+                      steps: finalSteps,
+                      filesEdited: vm.streamingFilesEdited
                     };
                     var doIdx = vm.state.doing.findIndex(function(c) { return c.id === card.id; });
                     if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;

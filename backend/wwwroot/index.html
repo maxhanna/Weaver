@@ -37,8 +37,7 @@
         </h3>
         <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
-               ng-class="{selected: card.id===vm.selectedCardId}"
-               draggable="true"
+               ng-class="{selected: card.id===vm.selectedCardId}" 
                ng-attr-id="card-{{card.id}}"
                ng-click="vm.selectCard(card)"
                ng-dblclick="vm.editCardText(card)">
@@ -49,7 +48,7 @@
             <div class="card-text">
               <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
                         ng-click="$event.stopPropagation()"
-                        placeholder="Task description..."></textarea>
+                        placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             </div>
             <div class="card-tags" ng-if="card.priority">
               <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
@@ -62,6 +61,7 @@
             </div>
             <div class="card-actions">
               <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small" title="Attach file">📎</button>
+              <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost" title="Split into smaller tasks">✂ Split</button>
               <button ng-click="vm.startCard(card); $event.stopPropagation()" class="primary small">▶ Start</button>
             </div>
           </div>
@@ -75,8 +75,7 @@
         </h3>
         <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
-               ng-class="{selected: card.id===vm.selectedCardId}"
-               draggable="true"
+               ng-class="{selected: card.id===vm.selectedCardId}" 
                ng-attr-id="card-{{card.id}}"
                ng-click="vm.selectCard(card)">
             <div class="card-meta">
@@ -107,8 +106,7 @@
         </h3>
         <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
-               ng-class="{selected: card.id===vm.selectedCardId}"
-               draggable="true"
+               ng-class="{selected: card.id===vm.selectedCardId}" 
                ng-attr-id="card-{{card.id}}"
                ng-click="vm.selectCard(card)">
             <div class="card-meta">
@@ -131,10 +129,26 @@
                 <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                   <strong>Summary:</strong> {{card.agentAnalysis.summary}}
                 </div>
+                <div class="analysis-files" ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
+                  <strong>Files changed:</strong>
+                  <div class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
+                    <span class="chip-path">{{f.path}}</span>
+                    <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
+                  </div>
+                </div>
                 <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
-                  <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps">
-                    <span class="step-status" ng-class="s.status || 'ok'">{{s.status==='error'?'✕':(s.status==='pending'?'○':'✓')}}</span>
-                    <span>{{s.description || s.type + ' ' + (s.path || s.command || '')}}</span>
+                  <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
+                    <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                    <div class="step-body">
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <div class="edit-diff" ng-if="s.type==='edit' && (s.diffPreview || s.oldStringPreview || s.newStringPreview)">
+                        <pre ng-if="s.diffPreview">{{s.diffPreview}}</pre>
+                        <pre class="diff-old" ng-if="!s.diffPreview && s.oldStringPreview">− {{s.oldStringPreview}}</pre>
+                        <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
+                      </div>
+                      <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
+                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                    </div>
                   </div>
                 </div>
                 <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
@@ -168,41 +182,60 @@
           <!-- Streaming state -->
           <div class="agent-status" ng-if="vm.streamingActive">
             <span class="pulse-dot"></span>
-            <span class="status-text">Agent is working on "{{vm.activeCardText | limitTo:40}}"</span>
+            <span class="status-text">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span></span>
           </div>
 
-          <!-- Live thinking tokens -->
           <div class="agent-streaming-thinking" ng-if="vm.streamingThinking">
             <details open>
-              <summary>🧠 Thinking {{vm.streamingActive ? '(live)' : ''}}</summary>
+              <summary>🧠 Plan</summary>
               <pre class="streaming-text">{{vm.streamingThinking}}</pre>
             </details>
           </div>
 
-          <!-- Streaming steps -->
+          <div class="agent-summary-live" ng-if="vm.streamingSummary">
+            <strong>Batch:</strong> {{vm.streamingSummary}}
+          </div>
+
+          <div class="files-edited-panel" ng-if="vm.streamingFilesEdited.length">
+            <strong>Files changed</strong>
+            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited">{{f.path}}</div>
+          </div>
+
           <div class="agent-steps" ng-if="vm.streamingSteps.length">
-            <div class="step" ng-repeat="s in vm.streamingSteps track by $index"
+            <div class="step" ng-repeat="s in vm.streamingSteps track by s.index"
                  ng-class="s.status || 'pending'">
               <span class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
               <div class="step-desc">
-                <strong>{{s.type}}</strong> {{s.description || s.path || s.command || ''}}
+                <strong>{{s.type}}</strong>
+                <span ng-if="s.path" class="step-path">{{s.path}}</span>
+                {{s.description || s.command || s.url || ''}}
+                <div class="edit-diff" ng-if="s.type==='edit' && s.status==='done'">
+                  <div class="edit-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
+                  <pre ng-if="s.diffPreview">{{s.diffPreview}}</pre>
+                  <pre class="diff-old" ng-if="!s.diffPreview && s.oldStringPreview">− {{s.oldStringPreview}}</pre>
+                  <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
+                </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre>{{s.output}}</pre>
+                  <pre>{{s.output | limitTo:800}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
-                  <span style="color:var(--error)">{{s.error}}</span>
+                  <span class="step-err">{{s.error}}</span>
+                  <pre ng-if="s.snippet" class="snippet-hint">{{s.snippet}}</pre>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- Completed result -->
           <div class="agent-result" ng-if="!vm.streamingActive && vm.agentResult">
             <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
             <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong> {{vm.agentResult.summary}}</div>
-            <details ng-if="vm.agentResult.thinking && !vm.streamingThinking">
-              <summary>🧠 Full Reasoning</summary>
-              <pre style="white-space:pre-wrap;font-size:12px;margin:4px 0;">{{vm.agentResult.thinking}}</pre>
+            <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
+              <strong>Files changed ({{vm.agentResult.filesEdited.length}})</strong>
+              <div class="file-edit-chip" ng-repeat="f in vm.agentResult.filesEdited">{{f.path}} <span class="chip-meta">{{f.editAction}}</span></div>
+            </div>
+            <details ng-if="vm.agentResult.thinking">
+              <summary>🧠 Reasoning</summary>
+              <pre class="streaming-text">{{vm.agentResult.thinking}}</pre>
             </details>
           </div>
         </div>

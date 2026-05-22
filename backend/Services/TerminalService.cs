@@ -34,9 +34,16 @@ public class TerminalService : IDisposable
         _process.BeginErrorReadLine();
     }
 
-    public async Task SendCommandAsync(string command)
+    public async Task SendCommandAsync(string command, string? workingDirectory = null)
     {
         if (!IsRunning) Start();
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            var dir = Path.GetFullPath(workingDirectory);
+            command = OperatingSystem.IsWindows()
+                ? $"cd /d \"{dir}\" && {command}"
+                : $"cd \"{dir}\" && {command}";
+        }
         if (_process?.StandardInput != null)
         {
             await _process.StandardInput.WriteLineAsync(command);
