@@ -31,22 +31,46 @@ angular.module('kanbanApp', [])
         ];
         vm.projects = normalizeProjects(raw);
         vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
+        vm.defaultProject = cfg.defaultProject;
       }, function() {
         vm.projects = normalizeProjects([
           { Name: 'Project Alpha', Path: '../project-alpha' },
           { Name: 'Project Beta', Path: '../project-beta' }
         ]);
         vm.selectedProject = vm.projects[0].Path;
+        vm.defaultProject = vm.projects[0].Path;
       });
     };
 
     vm.loadConfig();
 
+    vm.showAddProjectPanel = false;
+    vm.newProjectName = '';
+    vm.newProjectPath = '';
+
     vm.addProjectUI = function() {
-      var name = $window.prompt('Project name'); if(!name) return;
-      var path = $window.prompt('Project path (relative to repo root)'); if(!path) return;
-      $http.post('/api/config/projects/add', { Name: name, Path: path }).then(function(resp) {
+      vm.showAddProjectPanel = true;
+      vm.newProjectName = '';
+      vm.newProjectPath = '';
+    };
+
+    vm.closeAddProjectPanel = function() {
+      vm.showAddProjectPanel = false;
+    };
+
+    vm.addProjectFromPanel = function() {
+      if (!vm.newProjectName) {
+        $window.alert('Project name is required');
+        return;
+      }
+      if (!vm.newProjectPath) {
+        $window.alert('Project path is required');
+        return;
+      }
+      
+      $http.post('/api/config/projects/add', { Name: vm.newProjectName, Path: vm.newProjectPath }).then(function(resp) {
         vm.loadConfig();
+        vm.closeAddProjectPanel();
       }, function(err) {
         $window.alert('Failed to add project: ' + (err.data || err.statusText || err));
       });
@@ -61,6 +85,15 @@ angular.module('kanbanApp', [])
         vm.loadConfig();
       }, function(err) {
         $window.alert('Failed to remove project: ' + (err.data || err.statusText || err));
+      });
+    };
+
+    vm.setDefaultProject = function() {
+      if(!vm.selectedProject) return $window.alert('No project selected');
+      $http.post('/api/config/default-project', { ProjectPath: vm.selectedProject }).then(function() {
+        $window.alert('Default project set successfully');
+      }, function(err) {
+        $window.alert('Failed to set default project: ' + (err.data || err.statusText || err));
       });
     };
 
@@ -234,6 +267,9 @@ angular.module('kanbanApp', [])
       var files = card.attached ? [card.attached] : [];
       var payload = { prompt: card.text, project: proj, files: files };
 
+      // Mark the card as in-progress now that execution started
+      moveCardToDoing(card.id);
+
       // Use fetch with streaming reader
       fetch('/api/agent/execute-stream', {
         method: 'POST',
@@ -295,7 +331,7 @@ angular.module('kanbanApp', [])
                     vm.streamingActive = false;
                     vm.agentResult = { summary: vm.streamingSummary, thinking: vm.streamingThinking };
                     vm.aiResponse = vm.streamingSummary || 'Agent completed.';
-                    moveCardToDoing(card.id);
+                    moveCardToDone(card.id);
                     break;
                   case 'error':
                     vm.streamingActive = false;
@@ -324,6 +360,14 @@ angular.module('kanbanApp', [])
       if (idx === -1) return;
       var card = vm.state.todo.splice(idx, 1)[0];
       vm.state.doing.push(card);
+      saveCards();
+    }
+
+    function moveCardToDone(cardId) {
+      var idx = vm.state.doing.findIndex(function(c){ return c.id === cardId; });
+      if (idx === -1) return;
+      var card = vm.state.doing.splice(idx, 1)[0];
+      vm.state.done.push(card);
       saveCards();
     }
 

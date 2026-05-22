@@ -98,4 +98,21 @@ public class ConfigController : ControllerBase
         }
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
+
+    [HttpPost("default-project")]
+    public async Task<IActionResult> SetDefaultProject([FromBody] SetDefaultProjectRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ProjectPath))
+            return BadRequest("Project path is required");
+
+        var cfg = await LoadConfigAsync();
+        if (cfg.projects == null || !cfg.projects.Any(p => string.Equals(p.Path, request.ProjectPath, StringComparison.OrdinalIgnoreCase)))
+            return NotFound("Project not found");
+
+        cfg.defaultProject = request.ProjectPath;
+        await WriteConfigAsync(cfg);
+        return Ok(cfg);
+    }
 }
+
+public class SetDefaultProjectRequest { public string ProjectPath { get; set; } = ""; }

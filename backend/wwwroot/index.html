@@ -13,8 +13,12 @@
     <div class="project-picker">
       <label for="project-select">Select Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects" ng-change="vm.changeProject()"></select>
+      <button ng-click="vm.setDefaultProject()">Set as Default</button>
       <button ng-click="vm.addProjectUI()">Add Project</button>
       <button ng-click="vm.removeProjectUI()">Remove Project</button>
+    </div>
+    <div ng-if="vm.defaultProject" style="margin-top: 10px;">
+      <strong>Current Default Project:</strong> {{vm.defaultProject}}
     </div>
   </header>
   <main>
@@ -140,29 +144,54 @@
       <button ng-click="vm.startTerminal()">Start Terminal</button>
     </section>
   </main>
-  <!-- File picker modal for card attachments -->
-  <div class="popup-overlay" ng-if="vm.showFilePicker">
-    <div class="popup-panel">
-      <div class="popup-header">
-        <strong>Pick a file (project: {{vm.selectedProject}})</strong>
-        <button ng-click="vm.closeFilePicker()">Close</button>
-      </div>
-      <div>
-        <button ng-click="vm.pickerUpDir()">Up</button>
-        <span style="margin-left:12px;">{{vm.pickerPath || '/'}}</span>
-      </div>
-      <ul style="list-style:none; padding:0; margin-top:8px;">
-        <li ng-repeat="e in vm.pickerEntries" style="padding:6px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;">
-          <button ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</button>
-          <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;" ng-class="{selected: vm.pickerSelected === e.path}">{{e.name}}</span>
-        </li>
-      </ul>
-      <div class="popup-footer">
-        <button ng-click="vm.confirmFilePicker()">Attach File</button>
-        <button ng-click="vm.closeFilePicker()">Cancel</button>
+   <!-- File picker modal for card attachments -->
+    <div class="popup-overlay" ng-if="vm.showFilePicker">
+      <div class="popup-panel">
+        <div class="popup-header">
+          <strong>Pick a file (project: {{vm.selectedProject}})</strong>
+          <button ng-click="vm.closeFilePicker()">Close</button>
+        </div>
+        <div>
+          <button ng-click="vm.pickerUpDir()">Up</button>
+          <span style="margin-left:12px;">{{vm.pickerPath || '/'}}</span>
+        </div>
+        <ul style="list-style:none; padding:0; margin-top:8px;">
+          <li ng-repeat="e in vm.pickerEntries" style="padding:6px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;">
+            <button ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</button>
+            <span ng-if="!e.isDirectory" ng-click="vm.pickerSelectFile(e.path)" style="cursor:pointer;" ng-class="{selected: vm.pickerSelected === e.path}">
+              <span ng-if="vm.pickerSelected === e.path" style="margin-right: 8px;">✓</span>
+              {{e.name}}
+            </span>
+          </li>
+        </ul>
+        <div class="popup-footer">
+          <button ng-click="vm.confirmFilePicker()">Attach File</button>
+          <button ng-click="vm.closeFilePicker()">Cancel</button>
+        </div>
       </div>
     </div>
-  </div>
-  <script src="/app.js"></script>
-</body>
+
+    <!-- Add Project modal -->
+    <div class="popup-overlay" ng-if="vm.showAddProjectPanel">
+      <div class="popup-panel">
+        <div class="popup-header">
+          <strong>Add New Project</strong>
+          <button ng-click="vm.closeAddProjectPanel()">Close</button>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <label for="project-name">Project Name:</label>
+          <input type="text" id="project-name" ng-model="vm.newProjectName" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project name">
+        </div>
+        <div style="margin-bottom: 16px;">
+          <label for="project-path">Project Path:</label>
+          <input type="text" id="project-path" ng-model="vm.newProjectPath" style="width:100%; padding:8px; margin-top:4px;" placeholder="Enter project path (relative to repo root)">
+        </div>
+        <div class="popup-footer">
+          <button ng-click="vm.addProjectFromPanel()">Add Project</button>
+          <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <script src="/app.js"></script>
+  </body>
 </html>

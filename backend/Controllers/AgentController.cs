@@ -103,7 +103,26 @@ Rules:
         var userMessage = $"## Task\n{req.Prompt}\n\n## Files to modify ({req.Files.Count} file(s)):\n{fileContents}";
 
         // Call LLM
-        var baseUrl = _config.GetValue<string>("LlamaUrl") ?? "http://192.168.2.58:8080";
+           // Read LlamaUrl from config.json if available
+            var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+            var baseUrl = "http://192.168.2.58:8080"; // default fallback
+            
+            if (System.IO.File.Exists(configPath))
+            {
+                try
+                {
+                    var configText = System.IO.File.ReadAllText(configPath);
+                    var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
+                    if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
+                    {
+                        baseUrl = llamaUrlElement.GetString() ?? baseUrl;
+                    }
+                }
+                catch
+                {
+                    // Use default if parsing fails
+                }
+            }
         var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
         var client = _clientFactory.CreateClient("llama");
         string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
@@ -261,7 +280,26 @@ Rules:
             var userMessage = $"## Task\n{req.Prompt}\n\n## Files to modify ({req.Files.Count} file(s)):\n{fileContents}";
 
             // Call LLM with streaming
-            var baseUrl = _config.GetValue<string>("LlamaUrl") ?? "http://192.168.2.58:8080";
+       // Read LlamaUrl from config.json if available
+        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+        var baseUrl = "http://192.168.2.58:8080"; // default fallback
+        
+        if (System.IO.File.Exists(configPath))
+        {
+            try
+            {
+                var configText = System.IO.File.ReadAllText(configPath);
+                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
+                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
+                {
+                    baseUrl = llamaUrlElement.GetString() ?? baseUrl;
+                }
+            }
+            catch
+            {
+                // Use default if parsing fails
+            }
+        }
             var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
             var client = _clientFactory.CreateClient("llama");
             string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";

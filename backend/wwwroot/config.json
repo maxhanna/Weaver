@@ -1,5 +1,5 @@
 ﻿{
-  "projects": [ 
+  "projects": [
     {
       "Name": "Repository Root",
       "Path": "..",
@@ -11,5 +11,5 @@
       "Description": ""
     }
   ],
-  "defaultProject": "../project-alpha"
+  "defaultProject": "C:/Users/Saint/Desktop/Repos/BugHosted"
 }
