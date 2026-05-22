@@ -531,14 +531,16 @@ Rules:
                             continue;
                         }
 
-                        var idx = content.IndexOf(edit.OldString, StringComparison.Ordinal);
+                        var searchContent = NormalizeLineEndings(content);
+                        var searchOld = NormalizeLineEndings(edit.OldString);
+                        var idx = searchContent.IndexOf(searchOld, StringComparison.Ordinal);
                         if (idx == -1)
                         {
                             fileHasErrors = true;
                             break;
                         }
 
-                        content = content.Substring(0, idx) + (edit.NewString ?? "") + content.Substring(idx + edit.OldString.Length);
+                        content = searchContent.Substring(0, idx) + (edit.NewString ?? "") + searchContent.Substring(idx + searchOld.Length);
                     }
 
                     if (!fileHasErrors)
@@ -706,7 +708,9 @@ Rules:
                     continue;
                 }
 
-                var idx = content.IndexOf(edit.OldString, StringComparison.Ordinal);
+                content = NormalizeLineEndings(content);
+                var searchOld = NormalizeLineEndings(edit.OldString);
+                var idx = content.IndexOf(searchOld, StringComparison.Ordinal);
                 if (idx == -1)
                 {
                     results.Add(new EditResult { Path = filePath, Status = "error", Error = $"oldString not found in {filePath}" });
@@ -714,7 +718,7 @@ Rules:
                     break;
                 }
 
-                content = content.Substring(0, idx) + (edit.NewString ?? "") + content.Substring(idx + edit.OldString.Length);
+                content = content.Substring(0, idx) + (edit.NewString ?? "") + content.Substring(idx + searchOld.Length);
             }
 
             if (!hasError)
@@ -728,6 +732,11 @@ Rules:
         }
 
         return results;
+    }
+
+    private static string NormalizeLineEndings(string s)
+    {
+        return s.Replace("\r\n", "\n");
     }
 
     public class AgentResponse
