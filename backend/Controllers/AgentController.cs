@@ -27,6 +27,13 @@ public class AgentController : ControllerBase
         public List<string> Files { get; set; } = new();
     }
 
+    public class ApplyEditsRequest
+    {
+        public string Project { get; set; } = "";
+        public List<EditAction> Edits { get; set; } = new();
+        public List<CommandAction> Commands { get; set; } = new();
+    }
+
     public class EditAction
     {
         public string Path { get; set; } = "";
@@ -216,6 +223,38 @@ Rules:
             edits = editResults,
             commands = commandResults
         });
+    }
+
+    [HttpPost("apply")]
+    public async Task<IActionResult> ApplyEdits([FromBody] ApplyEditsRequest req)
+    {
+        if (req.Edits == null || req.Edits.Count == 0)
+            return BadRequest(new { error = "No edits provided" });
+
+        var projectRoot = GetProjectRoot(req.Project);
+        var editResults = await ApplyEditsDirect(req.Edits, projectRoot);
+
+        var commandResults = new List<object>();
+        if (req.Commands != null && req.Commands.Count > 0)
+        {
+            _terminal.Start();
+            foreach (var cmd in req.Commands)
+            {
+                try
+                {
+                    await _terminal.SendCommandAsync(cmd.Command);
+                    await Task.Delay(800);
+                    var output = _terminal.ReadLastLines(50);
+                    commandResults.Add(new { command = cmd.Command, status = "ok", output });
+                }
+                catch (Exception ex)
+                {
+                    commandResults.Add(new { command = cmd.Command, status = "error", error = ex.Message });
+                }
+            }
+        }
+
+        return Ok(new { edits = editResults, commands = commandResults });
     }
 
     [HttpPost("execute-stream")]
@@ -607,6 +646,85 @@ Rules:
         {
             if (!results.Any(r => r.Path == edit.Path && r.Status == "error" && r.Error == reason))
                 results.Add(new EditResult { Path = edit.Path, Status = "error", Error = reason });
+        }
+
+        return results;
+    }
+
+    private async Task<List<EditResult>> ApplyEditsDirect(List<EditAction> edits, string projectRoot)
+    {
+        var results = new List<EditResult>();
+
+        var fileGroups = new Dictionary<string, List<EditAction>>(StringComparer.OrdinalIgnoreCase);
+        var fileOrder = new List<string>();
+        foreach (var edit in edits)
+        {
+            if (!fileGroups.ContainsKey(edit.Path))
+            {
+                fileGroups[edit.Path] = new List<EditAction>();
+                fileOrder.Add(edit.Path);
+            }
+            fileGroups[edit.Path].Add(edit);
+        }
+
+        foreach (var filePath in fileOrder)
+        {
+            var fileEdits = fileGroups[filePath];
+            var targetPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
+
+            if (!targetPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var _ in fileEdits)
+                    results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "Path outside project root" });
+                continue;
+            }
+
+            string content = "";
+            bool fileExists = System.IO.File.Exists(targetPath);
+
+            if (fileExists)
+                content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
+            else if (fileEdits.Any(e => !string.IsNullOrEmpty(e.OldString)))
+            {
+                foreach (var e in fileEdits)
+                    results.Add(new EditResult { Path = filePath, Status = "skipped", Error = "File does not exist and edit has non-empty oldString" });
+                continue;
+            }
+
+            bool hasError = false;
+            foreach (var edit in fileEdits)
+            {
+                if (!fileExists && string.IsNullOrEmpty(edit.OldString))
+                {
+                    content = edit.NewString ?? "";
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(edit.OldString))
+                {
+                    content += edit.NewString ?? "";
+                    continue;
+                }
+
+                var idx = content.IndexOf(edit.OldString, StringComparison.Ordinal);
+                if (idx == -1)
+                {
+                    results.Add(new EditResult { Path = filePath, Status = "error", Error = $"oldString not found in {filePath}" });
+                    hasError = true;
+                    break;
+                }
+
+                content = content.Substring(0, idx) + (edit.NewString ?? "") + content.Substring(idx + edit.OldString.Length);
+            }
+
+            if (!hasError)
+            {
+                var dir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+                await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
+                results.Add(new EditResult { Path = filePath, Status = "written" });
+            }
         }
 
         return results;

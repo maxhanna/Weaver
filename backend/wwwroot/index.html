@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html ng-app="kanbanApp">
 <head>
   <meta charset="utf-8" />
@@ -25,6 +25,7 @@
     </div>
     <div ng-if="vm.defaultProject" style="margin-top: 10px;">
       <strong>Current Default Project:</strong> {{vm.defaultProject}}
+      <button ng-click="vm.openSettingsPanel()" style="margin-left: 10px;">Settings</button>
     </div>
   </header>
   <main>
@@ -32,14 +33,14 @@
       <div class="column">
         <h2>To Do</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('todo')">
-            <div class="card-text" ng-click="vm.selectCard(card)" ng-dblclick="vm.editCardText(card)">{{card.text}}</div>
+          <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id">
+            <textarea class="card-text" ng-model="card.text" ng-click="vm.selectCard(card)" ng-dblclick="vm.editCardText(card)" ng-blur="vm.saveCardText(card)"></textarea>
             <div class="file-attachment" ng-if="vm.selectedProject">
               <button ng-click="vm.attachFile(card.id)">Choose File</button>
-              <span ng-if="card.attached" class="attached-file-name">
-                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+              <div ng-if="card.attached" class="attached-file-name">
+                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
                 <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
-              </span>
+              </div>
             </div>
             <div class="card-actions">
               <button ng-click="vm.startCard(card)">Start</button>
@@ -51,13 +52,13 @@
       <div class="column">
         <h2>Doing</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('doing')">
+          <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
-              <span ng-if="card.attached" class="attached-file-name">
-                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+              <div ng-if="card.attached" class="attached-file-name">
+                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
                 <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
-              </span>
+              </div>
             </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'doing','done')">Done</button>
@@ -69,13 +70,13 @@
       <div class="column">
         <h2>Done</h2>
         <div class="cards">
-          <div class="card" ng-repeat="card in vm.cardsForProject('done')">
+          <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id">
             <div class="card-text" ng-click="vm.selectCard(card)">{{card.text}}</div>
             <div class="file-attachment" ng-if="vm.selectedProject">
-              <span ng-if="card.attached" class="attached-file-name">
-                <span ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</span>
+              <div ng-if="card.attached" class="attached-file-name">
+                <div ng-repeat="f in vm.getAttachedFiles(card)">{{f}}{{$last ? '' : ', '}}</div>
                 <a href="#" ng-click="vm.removeAttachment(card.id)" title="Remove file">&times;</a>
-              </span>
+              </div>
             </div>
             <div ng-if="card.agentAnalysis" style="margin-top:8px; border-top:1px solid rgba(255,255,255,0.05); padding-top:6px; font-size:0.85em;">
               <details>
@@ -232,6 +233,24 @@
           <button ng-if="!vm.editMode" ng-click="vm.addProjectFromPanel()">Add Project</button>
           <button ng-if="vm.editMode" ng-click="vm.updateProjectFromPanel()">Save Changes</button>
           <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings modal -->
+    <div class="popup-overlay" ng-if="vm.showSettingsPanel">
+      <div class="popup-panel">
+        <div class="popup-header">
+          <strong>Settings</strong>
+          <button ng-click="vm.closeSettingsPanel()">Close</button>
+        </div>
+        <div style="margin-bottom: 12px;">
+          <label for="settings-default-project">Default Project:</label>
+          <select id="settings-default-project" ng-model="vm.settingsDefaultProject" ng-options="p.Path as p.Name for p in vm.projects" style="width:100%; padding:8px; margin-top:4px;"></select>
+        </div>
+        <div class="popup-footer">
+          <button ng-click="vm.saveDefaultProject()">Save Settings</button>
+          <button ng-click="vm.closeSettingsPanel()">Cancel</button>
         </div>
       </div>
     </div>

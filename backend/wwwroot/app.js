@@ -157,6 +157,24 @@ angular.module('kanbanApp', [])
       });
     };
 
+    vm.showSettingsPanel = false;
+
+    vm.openSettingsPanel = function() {
+      vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
+      vm.showSettingsPanel = true;
+    };
+
+    vm.closeSettingsPanel = function() {
+      vm.showSettingsPanel = false;
+    };
+
+    vm.saveDefaultProject = function() {
+      if (!vm.settingsDefaultProject) { $window.alert('No project selected'); return; }
+      vm.selectedProject = vm.settingsDefaultProject;
+      vm.setDefaultProject();
+      vm.closeSettingsPanel();
+    };
+
     // === Card state ===
 
     function uid() { return Math.random().toString(36).slice(2,9); }
@@ -319,6 +337,7 @@ angular.module('kanbanApp', [])
 
     vm.executeAgent = function(card) {
       if (!card) return;
+      if (vm.streamingActive) { console.log('Agent busy, skipping'); return; }
       if (!card.text) { $window.alert('Card has no task text'); return; }
       var proj = card.filePath || vm.selectedProject;
       if (!proj) { $window.alert('No project assigned to this card'); return; }
@@ -408,10 +427,11 @@ angular.module('kanbanApp', [])
                       edits: angular.copy(vm.streamingEdits),
                       commands: angular.copy(vm.streamingCommands)
                     };
-                    var doIdx = vm.state.doing.findIndex(function(c){ return c.id === cardId; });
+                    var doIdx = vm.state.doing.findIndex(function(c){ return c.id === card.id; });
                     if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;
 
                     moveCardToDone(card.id);
+                    vm.processQueue();
                     break;
                   case 'error':
                     vm.streamingActive = false;
@@ -450,6 +470,14 @@ angular.module('kanbanApp', [])
       vm.state.done.push(card);
       saveCards();
     }
+
+    // === Auto-queue: process next todo card when one completes ===
+
+    vm.processQueue = function() {
+      if (vm.streamingActive) return;
+      var nextCard = vm.state.todo.filter(function(c){ return c.filePath === vm.selectedProject; })[0];
+      if (nextCard) vm.executeAgent(nextCard);
+    };
 
     // === AI Chat ===
 
