@@ -103,6 +103,7 @@
       <div class="column" data-col="done">
         <h3>
           <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
+          <button class="small ghost" ng-click="vm.clearDoneCards()" title="Clear all done tasks">Clear</button>
         </h3>
         <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
@@ -161,7 +162,7 @@
             </div>
             <div class="card-actions">
               <button ng-click="vm.reopenCard(card); $event.stopPropagation()" class="small">↺ Reopen</button>
-              <button ng-click="vm.deleteCard(card.id,'done'); $event.stopPropagation()" class="danger small">✕</button>
+              <button ng-click="vm.deleteCardConfirm(card.id,'done'); $event.stopPropagation()" class="danger small">✕</button>
             </div>
           </div>
         </div>
@@ -202,6 +203,10 @@
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
+                  <details ng-if="e.detail" class="log-detail">
+                    <summary>detail</summary>
+                    <pre>{{vm.formatLogDetail(e.detail)}}</pre>
+                  </details>
                 </div>
               </div>
             </details>

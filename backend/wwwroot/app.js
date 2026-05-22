@@ -222,10 +222,48 @@
       saveCards();
     };
 
+    vm.clearDoneCards = function() {
+      if (!$window.confirm('Delete all done tasks?')) return;
+      vm.state.done = [];
+      saveCards();
+    };
+
     vm.deleteCard = function(id, col) {
-      if (!$window.confirm('Delete this card?')) return;
+      var card = vm.state[col].find(function(c) { return c.id === id; });
+      if (!card) return;
+      vm.deleteCardConfirm = {
+        id: id,
+        col: col,
+        show: true,
+        dontShowAgain: false
+      };
+      try {
+        var raw = $window.localStorage.getItem('maestro.deleteCardConfirm');
+        if (raw === 'false') {
+          vm.confirmDeleteCard();
+        }
+      } catch(e) {}
+    };
+
+    vm.confirmDeleteCard = function() {
+      if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
+      var id = vm.deleteCardConfirm.id;
+      var col = vm.deleteCardConfirm.col;
       var idx = vm.state[col].findIndex(function(c) { return c.id === id; });
-      if (idx !== -1) { vm.state[col].splice(idx, 1); saveCards(); }
+      if (idx !== -1) { 
+        vm.state[col].splice(idx, 1); 
+        saveCards(); 
+      }
+      if (vm.deleteCardConfirm.dontShowAgain) {
+        try {
+          $window.localStorage.setItem('maestro.deleteCardConfirm', 'false');
+        } catch(e) {}
+      }
+      vm.deleteCardConfirm = null;
+    };
+
+    vm.cancelDeleteCard = function() {
+      vm.deleteCardConfirm = null;
     };
 
     vm.selectCard = function(card) {
