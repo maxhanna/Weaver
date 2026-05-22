@@ -124,6 +124,30 @@ public class AgentController : ControllerBase
             _ => status ?? "pending"
         };
 
+    private static readonly HashSet<string> ExplorationStepTypes = new(StringComparer.OrdinalIgnoreCase)
+        { "read", "list", "glob", "grep", "web" };
+
+    private static bool HasSuccessfulEdits(IEnumerable<object> steps) =>
+        steps.OfType<Dictionary<string, object?>>().Any(s =>
+            s.TryGetValue("type", out var t) && string.Equals(t?.ToString(), "edit", StringComparison.OrdinalIgnoreCase) &&
+            s.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+    private static bool TaskExpectsFileChanges(string prompt)
+    {
+        var lower = prompt.ToLowerInvariant();
+        string[] verbs =
+        {
+            "add", "implement", "fix", "update", "change", "create", "modify", "remove", "delete",
+            "refactor", "edit", "write", "toggle", "enable", "disable", "insert", "set", "make",
+            "build", "install", "configure", "hook", "wire", "connect", "show", "hide", "display",
+            "save", "persist", "store", "expose", "include"
+        };
+        return verbs.Any(v => lower.Contains(v, StringComparison.Ordinal));
+    }
+
+    private static bool BatchWasExplorationOnly(IReadOnlyList<AgentStep> batch) =>
+        batch.Count > 0 && batch.All(s => ExplorationStepTypes.Contains(s.Type ?? ""));
+
     private string GetLlamaBaseUrl()
     {
         var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
@@ -296,18 +320,69 @@ public class AgentController : ControllerBase
                 observations.Append(Truncate(trimmed, MaxObservationChars));
             }
 
-            if (agentResp.Complete)
-                break;
-
+            var expectsEdits = TaskExpectsFileChanges(prompt);
+            var anyEditsDone = HasSuccessfulEdits(allSteps);
             var hasEditErrors = batchResults.Any(r =>
                 r is Dictionary<string, object?> d &&
                 d.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
                 d.TryGetValue("status", out var st) && st?.ToString() == "error");
 
-            if (hasEditErrors && iteration < maxIterations - 1)
+            // Small models often set complete:true after a read — ignore until edits land
+            var modelSaysComplete = agentResp.Complete;
+            if (modelSaysComplete && expectsEdits && !anyEditsDone)
+                modelSaysComplete = false;
+
+            if (modelSaysComplete && (!expectsEdits || anyEditsDone))
+                break;
+
+            if (iteration >= maxIterations - 1)
+                break;
+
+            if (hasEditErrors)
+                continue;
+
+            // Keep going: read-only batch but task still needs file changes
+            if (expectsEdits && !anyEditsDone)
+                continue;
+
+            if (!modelSaysComplete)
                 continue;
 
             break;
+        }
+
+        // Last resort: force an edit-only LLM pass when reads happened but no files changed
+        if (TaskExpectsFileChanges(prompt) && !HasSuccessfulEdits(allSteps))
+        {
+            if (stream)
+                await SendSse(Response, "phase", new { phase = "mandatory-edits", message = "Applying required file changes…" });
+
+            var (rawM, agentRespM, _) = await CallLlmMandatoryEdits(
+                prompt, observations.ToString(), projectRoot);
+
+            if (agentRespM != null)
+            {
+                lastResponse = agentRespM;
+                if (stream && !string.IsNullOrWhiteSpace(agentRespM.Thinking))
+                    await SendSse(Response, "thinking", new { text = agentRespM.Thinking, iteration = "final" });
+                if (stream && !string.IsNullOrWhiteSpace(agentRespM.Summary))
+                    await SendSse(Response, "summary", new { text = agentRespM.Summary, iteration = "final" });
+
+                var editBatch = agentRespM.Steps
+                    .Where(s => string.Equals(s.Type, "edit", StringComparison.OrdinalIgnoreCase))
+                    .Take(maxStepsPerBatch)
+                    .ToList();
+                if (editBatch.Count == 0)
+                    editBatch = agentRespM.Steps.Take(maxStepsPerBatch).ToList();
+
+                if (editBatch.Count > 0)
+                {
+                    var mandatoryResults = await ExecuteSteps(editBatch, projectRoot, globalStepIndex, stream);
+                    globalStepIndex += editBatch.Count;
+                    allSteps.AddRange(mandatoryResults);
+                    AppendObservations(observations, mandatoryResults);
+                }
+            }
         }
 
         return (allSteps, lastResponse, lastError);
@@ -331,7 +406,9 @@ public class AgentController : ControllerBase
             else if (r.TryGetValue("output", out var output) && output != null)
             {
                 var outStr = output.ToString() ?? "";
-                observations.AppendLine($"[{type?.ToUpper()} {status}] {desc}\n{Truncate(outStr, 2000)}");
+                var maxOut = type == "read" ? 5000 : 2000;
+                var pathLabel = r.TryGetValue("path", out var p) && p != null ? $"FILE: {p}\n" : "";
+                observations.AppendLine($"[{type?.ToUpper()} {status}] {desc}\n{pathLabel}{Truncate(outStr, maxOut)}");
             }
             else if (type == "edit" && status == "done")
             {
@@ -384,10 +461,11 @@ public class AgentController : ControllerBase
 
 KANBAN RULES (critical for small models):
 - This card is ONE small slice of work. Max {maxSteps} steps this batch.
-- Prefer: read/list/grep first, then 1–2 tiny edits, then optional command.
-- Each edit: change the smallest unique oldString (3–8 lines of context).
-- Set ""complete"": true when this card's slice is fully done.
-- Set ""complete"": false if more batches are needed.
+- If the task changes code/UI/config, you MUST include ""edit"" steps (read + edit in the SAME batch is best).
+- NEVER set ""complete"": true unless edit steps are included and the task is finished.
+- A batch with only ""read"" is incomplete — set ""complete"": false.
+- Each edit: copy oldString EXACTLY from the file content (3–8 lines of context).
+- Set ""complete"": true only after all required edits are listed in steps.
 
 TOOLS (step types):
 - read — read a file (path)
@@ -418,12 +496,24 @@ Paths use / relative to project root. Commands run with cwd = project root.";
         sb.AppendLine();
         sb.AppendLine("## Project root (use this for all paths)");
         sb.AppendLine(projectRoot);
+
+        if (TaskExpectsFileChanges(prompt))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Requirement");
+            sb.AppendLine("This task requires file changes. Include edit step(s). Do not mark complete without edits.");
+        }
+
         if (iteration > 0)
         {
             sb.AppendLine();
-            sb.AppendLine($"## Batch {iteration + 1} — prior step results (use to fix edits or continue)");
-            sb.AppendLine(observations.Length > 0 ? observations.ToString() : "(none)");
+            sb.AppendLine($"## Batch {iteration + 1} — CONTINUE (edits required)");
+            sb.AppendLine("You already read files below. Output edit step(s) NOW with exact oldString from that content.");
+            sb.AppendLine("Do NOT output another read-only batch. Do NOT set complete:true without edit steps.");
+            sb.AppendLine();
+            sb.AppendLine(observations.Length > 0 ? observations.ToString() : "(no observations)");
         }
+
         if (!string.IsNullOrWhiteSpace(fileContents))
         {
             sb.AppendLine();
@@ -431,6 +521,52 @@ Paths use / relative to project root. Commands run with cwd = project root.";
             sb.AppendLine(Truncate(fileContents, MaxFileContextChars));
         }
         return sb.ToString();
+    }
+
+    private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmMandatoryEdits(
+        string prompt, string observations, string projectRoot)
+    {
+        var systemPrompt = @"You are Maestro completing a task that MUST modify files.
+The previous agent pass only read files — no edits were applied. This is your last chance.
+
+Respond ONLY with JSON:
+{
+  ""thinking"": ""brief"",
+  ""summary"": ""edits being applied"",
+  ""complete"": true,
+  ""steps"": [
+    { ""index"": 0, ""type"": ""edit"", ""description"": ""..."", ""path"": ""relative/path"", ""oldString"": ""exact existing text"", ""newString"": ""replacement"" }
+  ]
+}
+
+Rules:
+- steps must be type ""edit"" only (no read/list).
+- oldString must be copied EXACTLY from the file content in observations.
+- You may include multiple edit steps for the same file.
+- path is relative to project root, use / separators.";
+
+        var userMessage = new StringBuilder();
+        userMessage.AppendLine("## Task to complete");
+        userMessage.AppendLine(prompt);
+        userMessage.AppendLine();
+        userMessage.AppendLine("## Project root");
+        userMessage.AppendLine(projectRoot);
+        userMessage.AppendLine();
+        userMessage.AppendLine("## File contents from prior reads (copy oldString from here)");
+        userMessage.AppendLine(observations.Length > 0 ? observations.ToString() : "(missing — use attached context if any)");
+
+        var baseUrl = GetLlamaBaseUrl();
+        var target = baseUrl + "/v1/chat/completions";
+        var client = _clientFactory.CreateClient("llama");
+        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+
+        var messages = new object[]
+        {
+            new { role = "system", content = systemPrompt },
+            new { role = "user", content = userMessage.ToString() }
+        };
+
+        return await CallLlmNonStreaming(client, target, model, messages);
     }
 
     private async Task<(string, AgentResponse?, string?)> CallLlmNonStreaming(HttpClient client, string target, string model, object messages)

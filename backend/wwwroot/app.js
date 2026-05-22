@@ -418,8 +418,8 @@ angular.module('kanbanApp', [])
         prompt: card.text,
         project: proj,
         files: files,
-        maxIterations: 4,
-        maxStepsPerBatch: 6
+        maxIterations: 5,
+        maxStepsPerBatch: 8
       };
 
       // Move to Doing
