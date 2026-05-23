@@ -232,12 +232,12 @@
       saveCards();
     };
 
-    vm.openDeleteCardConfirm = function (id) {
-      vm.confirmDeleteCardId = id;
-      var col = 'done';
+    vm.openDeleteCardConfirm = function (id, col) {
+      vm.confirmDeleteCardId = id; 
+      var col = col || 'done';
       var card = vm.state[col].find(function(c) { return c.id === id; });
       if (!card) {
-        alert('Card not found in Done column');
+        alert('Card not found in ' + col + ' column');
         return;
       }
       vm.deleteCardConfirm = {
@@ -246,12 +246,10 @@
         show: true,
         dontShowAgain: false
       };
+      // Add backdrop class to body for blurred background
+      document.body.classList.add('backdrop-active');
     };
-
-    vm.deleteCard = function(id) {
-      vm.openDeleteCardConfirm(id);
-    };
-
+ 
     vm.confirmDeleteCard = function() {
       if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
       var id = vm.deleteCardConfirm.id;
