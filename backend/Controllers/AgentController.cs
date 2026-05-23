@@ -751,24 +751,42 @@ RULES:
 
                     editSteps = ParseEditsFromLlmRaw(raw, relPath);
 
-                      // Determine rejection reason for better logging
-                    string? rejectReason = null;
-           
+                     // Determine rejection reason for better logging
+                     string? rejectReason = null;
+                     if (editSteps.Count > 0)
+                     {
+                         var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                         if (missingNew.Count > 0)
+                         {
+                             // We are not removing them, but we log why they might be problematic.
+                             rejectReason = "newString is empty — model returned oldString without replacement (treated as deletion)";
+                         }
 
-                    // Filter no-op edits (oldString == newString)
-                    var identicalCount = editSteps.Count;
-                    editSteps = editSteps
-                        .Where(e => !string.Equals(
-                            NormalizeLineEndings(e.OldString ?? ""),
-                            NormalizeLineEndings(e.NewString ?? ""),
-                            StringComparison.Ordinal))
-                        .ToList();
-                    if (identicalCount > 0 && editSteps.Count == 0)
-                        rejectReason = "oldString and newString are identical";
+                         var identical = editSteps.Where(e => string.Equals(
+                             NormalizeLineEndings(e.OldString ?? ""),
+                             NormalizeLineEndings(e.NewString ?? ""),
+                             StringComparison.Ordinal)).ToList();
+                         if (identical.Count > 0)
+                         {
+                             // We are going to remove these in the next step.
+                             if (rejectReason == null)
+                                 rejectReason = "oldString and newString are identical";
+                             else
+                                 rejectReason += "; some edits are identical oldString/newString (no-op)";
+                         }
+                     }
 
-                    if (editSteps.Count == 0)
-                        await EmitLog(emitSse, "warn",
-                            $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
+                     // Filter no-op edits (oldString == newString)
+                     editSteps = editSteps
+                         .Where(e => !string.Equals(
+                             NormalizeLineEndings(e.OldString ?? ""),
+                             NormalizeLineEndings(e.NewString ?? ""),
+                             StringComparison.Ordinal))
+                         .ToList();
+
+                     if (editSteps.Count == 0)
+                         await EmitLog(emitSse, "warn",
+                             $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
                 }
 
                 if (timedOut) continue;

@@ -347,15 +347,7 @@ main {
 	padding-bottom: 8px;
 }
 
-.board::-webkit-scrollbar {
-	height: 8px;
-	border: var(--accent);
-}
 
-.board::-webkit-scrollbar-thumb {
-	background: var(--accent);
-	border-radius: 999px;
-}
 
 .column {
 	position: relative;

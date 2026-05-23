@@ -34,6 +34,7 @@
     vm.lastStreamingSummary = '';
     vm.lastStreamingThinking = '';
     vm.streamingStepsCopy = [];
+    vm.lastStreamingStepsUpdate = 0;
 
     // Debug logging for file size and token count
     vm.logFileSizeAndTokens = function (filePath, content) {
@@ -51,13 +52,23 @@
       $timeout(function () {
         var logContainer = document.querySelector('.agent-log');
         if (logContainer) {
-          logContainer.scrollTop = logContainer.scrollHeight;
+          // Only scroll if we're not already at the bottom to prevent digest loops
+          if (logContainer.scrollHeight - logContainer.scrollTop < logContainer.clientHeight + 10) {
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }
         }
       }, 10);
     };
 
     // Auto-scroll agent log when new content is added
     vm.addLogEntry = function (entry) {
+      // Prevent duplicate entries that could cause digest loops
+      if (vm.agentActivityLog.length > 0) {
+        var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
+        if (lastEntry.type === entry.type && lastEntry.message === entry.message) {
+          return;
+        }
+      }
       vm.agentActivityLog.push(entry);
       vm.scrollToBottom();
     };
@@ -836,6 +847,7 @@
 
       if (!vm.activeCardIds) vm.activeCardIds = [];
       vm.activeCardIds = vm.activeCardIds.filter(function (id) { return id !== cardId; });
+    vm.activeCardIds.contains = function (id) { return this.indexOf(id) !== -1; };
       saveCards();
     }
 
