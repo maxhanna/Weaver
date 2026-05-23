@@ -341,10 +341,11 @@ main {
 .board {
 	display: flex;
 	gap: 16px;
-	flex: 1;
+	/* flex: 1; */
 	overflow-x: auto;
 	overflow-y: hidden;
 	padding-bottom: 8px;
+    resize: horizontal;
 }
 
 
@@ -710,13 +711,13 @@ main {
 }
 
 .right-panel {
-	flex: 1;
-	min-width: 360px;
+	width: 50%;
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
 	overflow-y: auto;
 	max-height: calc(100vh - 80px);
+    resize: horizontal;
 }
 
 .panel {
