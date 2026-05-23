@@ -473,6 +473,7 @@
   </div>
 
   <!-- SETTINGS MODAL -->
+  <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()"></div>
   <div class="delete-confirm-modal" ng-if="vm.showSettingsPanel"  ng-click="vm.closeSettingsPanel()">
     <div class="popup-panel" style="max-width:480px;">
       <div class="popup-header">

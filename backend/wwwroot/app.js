@@ -216,8 +216,20 @@
     vm.openSettingsPanel = function () {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
+      // Show backdrop when settings panel is opened
+      var backdrop = document.getElementById('backdrop');
+      if (backdrop) {
+        backdrop.style.display = 'block';
+      }
     };
-    vm.closeSettingsPanel = function () { vm.showSettingsPanel = false; };
+    vm.closeSettingsPanel = function () { 
+      vm.showSettingsPanel = false; 
+      // Hide backdrop when settings panel is closed
+      var backdrop = document.getElementById('backdrop');
+      if (backdrop) {
+        backdrop.style.display = 'none';
+      }
+    };
 
     // === Cards ===
     function uid() { return Math.random().toString(36).slice(2, 9); }

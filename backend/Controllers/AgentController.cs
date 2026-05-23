@@ -865,7 +865,7 @@ RULES:
         allSteps.AddRange(discoverySteps);
 
         // ── Phase 2: PLAN ────────────────────────────────────────────────────
-        var plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
+        var plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse, ct);
 
         // ── Phase 3: EDIT ────────────────────────────────────────────────────
         var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
@@ -877,7 +877,7 @@ RULES:
         {
             await EmitLog(emitSse, "warn",
                 $"Phase 4 — VERIFY attempt {retry + 1}: no successful edits. Re-planning with stronger instructions…", ct: ct);
-            plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
+            plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse, ct);
             var retryEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
             allSteps.AddRange(retryEdits);
             editsApplied = HasSuccessfulEdits(allSteps);
