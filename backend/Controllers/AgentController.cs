@@ -138,6 +138,20 @@ public class AgentController : ControllerBase
         public int Priority { get; set; } = 1;
     }
 
+    private class PlanItemDeserialized
+    {
+        public string file { get; set; } = "";
+        public string change { get; set; } = "";
+        public int priority { get; set; } = 1;
+    }
+
+    private class AgentPlanDeserialized
+    {
+        public string thinking { get; set; } = "";
+        public string summary { get; set; } = "";
+        public List<PlanItemDeserialized> plan { get; set; } = new();
+    }
+
     /// <summary>
     /// The full plan envelope returned by the Phase-2 LLM call.
     /// </summary>
@@ -489,20 +503,22 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
   ""plan"": [
     {
       ""file"":   ""relative/path/to/file"",
-      ""change"": ""specific description of what to add/modify/remove in this file"",
+      ""change"": ""specific description of what to add/modify/remove in this file. Be very detailed."",
       ""priority"": 1
     }
   ]
 }
 
+The ""change"" field is CRITICAL — it will be passed directly to the edit model so it knows exactly what to do.
+Make it specific: e.g. 'Add a <div class=""popup-overlay""> before the closing </main> tag in index.html'
+NOT vague like 'modify the HTML file'.
+
 RULES:
 - Only list files that actually exist in the Project Discovery section below.
 - Maximum 5 files total.
-- Be SPECIFIC: e.g. 'Add a <div class=""popup-overlay""> before the .delete-confirm-modal div'
-  NOT 'modify the HTML file'.
 - If both HTML and CSS need changes, list them as separate plan items.
-- Priority 1 = most important file.  Sort by priority ascending.
-- If the task is purely CSS, list only the CSS file.  If purely JS, list only JS.";
+- Priority 1 = most important file. Sort by priority ascending.
+- If the task is purely CSS, list only the CSS file. If purely JS, list only JS.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -526,7 +542,6 @@ RULES:
     private static AgentPlan? ParseAgentPlan(string raw)
     {
         var jsonStr = raw.Trim();
-        // Strip markdown fences if present
         if (jsonStr.StartsWith("```"))
         {
             var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
@@ -537,12 +552,24 @@ RULES:
         if (start >= 0 && end > start)
             jsonStr = jsonStr.Substring(start, end - start + 1);
 
+        // Try exact-match DTO first (field names match LLM output exactly)
         try
         {
-            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var parsed = JsonSerializer.Deserialize<AgentPlan>(jsonStr, opts);
-            if (parsed?.Plan != null && parsed.Plan.Count > 0)
-                return parsed;
+            var parsed = JsonSerializer.Deserialize<AgentPlanDeserialized>(jsonStr);
+            if (parsed?.plan != null && parsed.plan.Count > 0)
+            {
+                return new AgentPlan
+                {
+                    Thinking = parsed.thinking,
+                    Summary = parsed.summary,
+                    Plan = parsed.plan.Select(p => new PlanItem
+                    {
+                        File = p.file,
+                        ChangeDescription = p.change,
+                        Priority = p.priority
+                    }).ToList()
+                };
+            }
         }
         catch { }
 
@@ -552,15 +579,20 @@ RULES:
             var blocks = ExtractJsonBlocks(jsonStr);
             foreach (var block in blocks)
             {
-                using var doc = JsonDocument.Parse(block, new JsonDocumentOptions { AllowTrailingCommas = true });
-                if (!doc.RootElement.TryGetProperty("plan", out var planEl)) continue;
-                var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                var items = JsonSerializer.Deserialize<List<PlanItem>>(planEl.GetRawText(), opts);
-                if (items != null && items.Count > 0)
+                var inner = JsonSerializer.Deserialize<AgentPlanDeserialized>(block);
+                if (inner?.plan != null && inner.plan.Count > 0)
                 {
-                    var thinking = doc.RootElement.TryGetProperty("thinking", out var th) ? th.GetString() ?? "" : "";
-                    var summary = doc.RootElement.TryGetProperty("summary", out var sm) ? sm.GetString() ?? "" : "";
-                    return new AgentPlan { Thinking = thinking, Summary = summary, Plan = items };
+                    return new AgentPlan
+                    {
+                        Thinking = inner.thinking,
+                        Summary = inner.summary,
+                        Plan = inner.plan.Select(p => new PlanItem
+                        {
+                            File = p.file,
+                            ChangeDescription = p.change,
+                            Priority = p.priority
+                        }).ToList()
+                    };
                 }
             }
         }
@@ -579,7 +611,7 @@ RULES:
 
     private async Task<List<object>> RunEditPhase(
         List<PlanItem> plan, string discoveryContext, string projectRoot,
-        int startIndex, bool emitSse)
+        int startIndex, bool emitSse, string originalPrompt)
     {
         var allResults = new List<object>();
 
@@ -630,18 +662,21 @@ RULES:
 
             var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
+            // Combine the original prompt with the file-specific change description
+            var fileTask = string.IsNullOrWhiteSpace(item.ChangeDescription)
+                ? originalPrompt
+                : $"{originalPrompt}\n\nSpecific change needed in {relPath}: {item.ChangeDescription}";
+
             // --- up to 2 attempts ---
             List<AgentStep> editSteps = new();
             for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
             {
                 await EmitLog(emitSse, "info",
                     $"LLM edit call: {relPath} (attempt {attempt + 1})",
-                    new { chars = fileContent.Length, task = item.ChangeDescription });
+                    new { chars = fileContent.Length, taskSummary = item.ChangeDescription });
 
-                // Use the plan's changeDescription as the focused task, not the raw original prompt.
-                // This gives the edit model a much tighter, file-specific instruction.
                 var (raw, _, err) = await CallLlmSingleFileEdit(
-                    item.ChangeDescription, relPath, fileContent, projectRoot, attempt, discoveryContext);
+                    fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext);
 
                 await EmitLog(emitSse, "debug",
                     $"LLM raw ({raw?.Length ?? 0} chars)",
@@ -665,7 +700,7 @@ RULES:
             if (editSteps.Count == 0)
             {
                 // Heuristic patches as last resort
-                editSteps = TryHeuristicPatches(item.ChangeDescription, relPath, fileContent);
+                editSteps = TryHeuristicPatches(fileTask, relPath, fileContent);
                 if (editSteps.Count > 0)
                     await EmitLog(emitSse, "info", $"Applied {editSteps.Count} heuristic patch(es) for {relPath}");
             }
@@ -698,7 +733,7 @@ RULES:
                 {
                     var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
                     var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                        item.ChangeDescription, relPath, freshContent, projectRoot, 2, discoveryContext);
+                        fileTask, relPath, freshContent, projectRoot, 2, discoveryContext);
                     var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
                         .Where(e => !string.Equals(
                             NormalizeLineEndings(e.OldString ?? ""),
@@ -739,20 +774,25 @@ RULES:
         var plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
 
         // ── Phase 3: EDIT ────────────────────────────────────────────────────
-        var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse);
-        allSteps.AddRange(editResults);
+        var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt);
 
-        // ── Phase 4: VERIFY ──────────────────────────────────────────────────
+        // ── Phase 4: VERIFY + RETRY LOOP ─────────────────────────────────────
         var editsApplied = HasSuccessfulEdits(allSteps);
+        for (var retry = 0; retry < 2 && !editsApplied && TaskExpectsFileChanges(prompt); retry++)
+        {
+            await EmitLog(emitSse, "warn",
+                $"Phase 4 — VERIFY attempt {retry + 1}: no successful edits. Re-planning with stronger instructions…");
+            plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
+            var retryEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt);
+            allSteps.AddRange(retryEdits);
+            editsApplied = HasSuccessfulEdits(allSteps);
+        }
+
         var summary = editsApplied
             ? $"Edits applied to {ExtractFilesEdited(allSteps).Count} file(s)"
             : "No edits were applied — check failed steps for details";
 
-        if (!editsApplied && TaskExpectsFileChanges(prompt))
-            await EmitLog(emitSse, "warn",
-                "Phase 4 — VERIFY: no successful edits. " +
-                "Check that the planned file paths exist and the model response contained valid oldString matches.");
-        else if (editsApplied)
+        if (editsApplied)
             await EmitLog(emitSse, "info", $"Phase 4 — VERIFY: ✓ {summary}");
 
         return (allSteps, summary, editsApplied);
@@ -863,7 +903,7 @@ RULES:
                     })
                     .ToList();
 
-                var fastEdits = await RunEditPhase(fastPlan, discoveryText, projectRoot, allSteps.Count, emitSse: true);
+                var fastEdits = await RunEditPhase(fastPlan, discoveryText, projectRoot, allSteps.Count, emitSse: true, req.Prompt);
                 allSteps.AddRange(fastEdits);
 
                 complete = HasSuccessfulEdits(allSteps);
@@ -953,6 +993,8 @@ RULES:
 OUTPUT FORMAT — output ONLY this JSON, nothing else, no markdown fences:
 {""edits"":[{""oldString"":""…"",""newString"":""…""}]}
 
+You MUST include BOTH oldString AND newString in every edit. An edit without newString is useless and will be rejected.
+
 RULES FOR oldString (critical — mismatches cause patch failure):
 1. Copy character-for-character from the FILE CONTENT block below.
 2. Preserve every space, tab, and newline exactly as they appear in the file.
@@ -962,7 +1004,8 @@ RULES FOR oldString (critical — mismatches cause patch failure):
 
 RULES FOR newString:
 1. Write the full replacement text, including indentation that matches the file.
-2. Do NOT repeat lines that are above or below the changed region.";
+2. Do NOT repeat lines that are above or below the changed region.
+3. newString MUST be different from oldString for a real change to happen.";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
@@ -1010,7 +1053,7 @@ RULES FOR newString:
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
         HttpClient client, string target, string model, object messages)
     {
-        var requestBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = 1024 };
+        var requestBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = 2048 };
         var contentJson = JsonSerializer.Serialize(requestBody);
         var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
