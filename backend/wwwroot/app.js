@@ -838,11 +838,18 @@
                 }
               }
             }
-            $scope.$digest();
+            try { $scope.$digest(); } catch (e) { /* digest already in progress or infdig — skip */ }
             readNext();
+          }).catch(function (readErr) {
+            if (readErr && readErr.name === 'AbortError') return;
+            vm.streamingActive = false;
+            resumeTerminalPolling();
+            vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
+            try { $scope.$digest(); } catch (e) { }
           });
         }
         readNext();
+
       }).catch(function (err) {
         vm.streamingActive = false;
         resumeTerminalPolling();
