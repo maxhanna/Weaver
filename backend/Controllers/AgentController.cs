@@ -680,21 +680,37 @@ RULES:
 
                 await EmitLog(emitSse, "debug",
                     $"LLM raw ({raw?.Length ?? 0} chars)",
-                    new { snippet = raw?.Length > 400 ? raw.Substring(0, 200) + "…" + raw.Substring(raw.Length - 200) : raw });
+                    new { raw });
 
                 editSteps = ParseEditsFromLlmRaw(raw, relPath);
 
+                // Determine rejection reason for better logging
+                string? rejectReason = null;
+                if (editSteps.Count > 0)
+                {
+                    // Reject edits where newString is empty/missing (model returned oldString only)
+                    var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                    if (missingNew.Count > 0)
+                    {
+                        rejectReason = "newString is empty — model returned oldString without replacement";
+                        editSteps = editSteps.Where(e => !string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                    }
+                }
+
                 // Filter no-op edits (oldString == newString)
+                var identicalCount = editSteps.Count;
                 editSteps = editSteps
                     .Where(e => !string.Equals(
                         NormalizeLineEndings(e.OldString ?? ""),
                         NormalizeLineEndings(e.NewString ?? ""),
                         StringComparison.Ordinal))
                     .ToList();
+                if (identicalCount > 0 && editSteps.Count == 0)
+                    rejectReason = "oldString and newString are identical";
 
                 if (editSteps.Count == 0)
                     await EmitLog(emitSse, "warn",
-                        $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {err}");
+                        $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}");
             }
 
             if (editSteps.Count == 0)
@@ -988,24 +1004,24 @@ RULES:
         string taskPrompt, string relativePath, string fileContent,
         string projectRoot, int attempt = 0, string? discoveryContext = null)
     {
-        const string systemPrompt = @"You are a precise code patch tool.
+        const string systemPrompt = @"You are a precise code patch tool. Your task is to output JSON with BOTH oldString and newString.
 
-OUTPUT FORMAT — output ONLY this JSON, nothing else, no markdown fences:
-{""edits"":[{""oldString"":""…"",""newString"":""…""}]}
+FORMAT (output ONLY this JSON, no other text):
+{
+  ""edits"": [
+    {
+      ""oldString"": ""exact 2-4 lines from file (verbatim, max 300 chars)"",
+      ""newString"": ""replacement lines (MUST differ from oldString, never empty)""
+    }
+  ]
+}
 
-You MUST include BOTH oldString AND newString in every edit. An edit without newString is useless and will be rejected.
-
-RULES FOR oldString (critical — mismatches cause patch failure):
-1. Copy character-for-character from the FILE CONTENT block below.
-2. Preserve every space, tab, and newline exactly as they appear in the file.
-3. Include 2-4 surrounding lines for uniqueness — never just one line.
-4. Never paraphrase, reformat, or summarise — it must be a verbatim substring.
-5. If the target region appears more than once, extend oldString until it is unique.
-
-RULES FOR newString:
-1. Write the full replacement text, including indentation that matches the file.
-2. Do NOT repeat lines that are above or below the changed region.
-3. newString MUST be different from oldString for a real change to happen.";
+RULES:
+- oldString = 2-4 lines copied VERBATIM from the FILE CONTENT below. Keep small.
+- newString = replacement text. MUST differ from oldString. NEVER empty or missing.
+- BOTH oldString and newString are REQUIRED. Every edit must have both.
+- For INSERTING new code: set oldString to existing nearby lines, newString to existing+new code.
+- If no change needed: {""edits"":[]}";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
@@ -1014,9 +1030,15 @@ RULES FOR newString:
         if (attempt > 0)
         {
             user.AppendLine();
-            user.AppendLine("RETRY: Your previous oldString did not match any text in the file.");
-            user.AppendLine("Re-read the FILE CONTENT below and copy the target lines verbatim.");
-            user.AppendLine("Check: indentation, quotes, semicolons — every character must match exactly.");
+            user.AppendLine("RETRY: Your previous edit was rejected because:");
+            user.AppendLine("  - oldString did not match file content, OR");
+            user.AppendLine("  - newString was empty/missing, OR");
+            user.AppendLine("  - oldString and newString were identical");
+            user.AppendLine();
+            user.AppendLine("Fix ALL of these:");
+            user.AppendLine("  1. Copy oldString VERBATIM from FILE CONTENT (exact spaces/tabs/quotes)");
+            user.AppendLine("  2. newString MUST be present and MUST differ from oldString");
+            user.AppendLine("  3. Keep both short (2-4 lines, max 300 chars)");
         }
 
         if (!string.IsNullOrWhiteSpace(discoveryContext))
@@ -1034,11 +1056,58 @@ RULES FOR newString:
 
         try
         {
-            var (raw, parsed, err) = await CallLlmRaw(systemPrompt, user.ToString());
+            var baseUrl = GetLlamaBaseUrl();
+            var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+            var client = _clientFactory.CreateClient("llama");
+
+            var messages = new object[]
+            {
+                new { role = "system",  content = systemPrompt },
+                new { role = "user",    content = user.ToString() }
+            };
+
+            var requestBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = 2048 };
+            var contentJson = JsonSerializer.Serialize(requestBody);
+            var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
+
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent);
+            var respText = await resp.Content.ReadAsStringAsync();
+
+            var raw = ExtractLlmContent(respText);
+            if (string.IsNullOrWhiteSpace(raw))
+                return (respText, null, "Empty LLM response");
+
             var steps = ParseEditsFromLlmRaw(raw, relativePath);
+
             if (steps.Count > 0)
-                return (raw, new AgentResponse { Steps = steps, Summary = "Parsed edits" }, null);
-            return (raw, parsed as AgentResponse, err ?? "No edits in response");
+            {
+                // Phase 2: For steps with empty or identical newString, generate newString separately
+                foreach (var step in steps)
+                {
+                    if (string.IsNullOrWhiteSpace(step.NewString) ||
+                        string.Equals(NormalizeLineEndings(step.OldString ?? ""),
+                                      NormalizeLineEndings(step.NewString ?? ""),
+                                      StringComparison.Ordinal))
+                    {
+                        var generated = await GenerateNewString(
+                            step.OldString ?? "", taskPrompt, relativePath, fileContent);
+                        if (!string.IsNullOrWhiteSpace(generated))
+                            step.NewString = generated;
+                    }
+                }
+
+                // Re-filter — keep only steps with non-empty, non-identical newString
+                steps = steps.Where(s =>
+                    !string.IsNullOrWhiteSpace(s.NewString) &&
+                    !string.Equals(NormalizeLineEndings(s.OldString ?? ""),
+                                    NormalizeLineEndings(s.NewString ?? ""),
+                                    StringComparison.Ordinal)).ToList();
+
+                if (steps.Count > 0)
+                    return (raw, new AgentResponse { Steps = steps, Summary = "Parsed edits" }, null);
+            }
+
+            return (raw, null, "No edits in response — model did not return edit JSON");
         }
         catch (TaskCanceledException)
         {
@@ -1047,6 +1116,60 @@ RULES FOR newString:
         catch (Exception ex)
         {
             return ("", null, ex.Message);
+        }
+    }
+
+    private async Task<string?> GenerateNewString(string oldString, string taskPrompt,
+        string relativePath, string fileContent)
+    {
+        var systemPrompt = @"You are a code modifier. Given a code block and a task, modify the code block to implement the task.
+
+Return ONLY the modified code block — no JSON, no markdown fences, no explanation.";
+
+        var user = new StringBuilder();
+        user.AppendLine("Task: " + taskPrompt);
+        user.AppendLine();
+        user.AppendLine("Code block from " + relativePath + " to modify:");
+        user.AppendLine("```");
+        user.AppendLine(oldString);
+        user.AppendLine("```");
+        user.AppendLine();
+        user.AppendLine("Return ONLY the modified code block.");
+
+        try
+        {
+            var baseUrl = GetLlamaBaseUrl();
+            var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+            var client = _clientFactory.CreateClient("llama");
+
+            var messages = new object[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = user.ToString() }
+            };
+
+            var requestBody = new { model, messages, stream = false, temperature = 0.3, max_tokens = 2048 };
+            var contentJson = JsonSerializer.Serialize(requestBody);
+            var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
+
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent);
+            var respText = await resp.Content.ReadAsStringAsync();
+
+            var content = ExtractLlmContent(respText);
+            if (string.IsNullOrWhiteSpace(content)) return null;
+
+            content = content.Trim();
+            if (content.StartsWith("```"))
+            {
+                var m = Regex.Match(content, @"```(?:\w+)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) content = m.Groups[1].Value.Trim();
+            }
+
+            return content;
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -2036,9 +2159,9 @@ RULES FOR newString:
                 sb.Append(c); continue;
             }
 
+            // Inside a string — braces/brackets are content, not JSON structure.
+            // Do NOT adjust depth for them.
             if (c == '\\') { sb.Append(c); i++; if (i < json.Length) sb.Append(json[i]); continue; }
-            if (c == '{' || c == '[') { depth++; sb.Append(c); continue; }
-            if (c == '}' || c == ']') { depth--; sb.Append(c); continue; }
 
             if (c == '"')
             {

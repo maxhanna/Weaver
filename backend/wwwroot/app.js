@@ -205,6 +205,7 @@
     vm.openSettingsPanel = function() {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
+      alert('showSettingsPanel: ' + vm.showSettingsPanel);
     };
     vm.closeSettingsPanel = function() { vm.showSettingsPanel = false; };
 
@@ -290,9 +291,40 @@
       vm.deleteCardConfirm = null;
     };
 
-    vm.cancelDeleteCard = function() {
+    vm.closeDeleteCardConfirm = function() {
+      vm.confirmDeleteCardId = null;
       vm.deleteCardConfirm = null;
     };
+
+    // Close delete confirmation with Escape key
+    $scope.$watch(function() { return vm.confirmDeleteCardId; }, function(newVal) {
+      if (newVal !== null) {
+        $scope.$on('keydown', function(event) {
+          if (event.originalEvent.keyCode === 27) { // ESC key
+            vm.confirmDeleteCardId = null;
+            vm.deleteCardConfirm.show = false;
+          }
+        });
+      }
+    });
+
+    // Global ESC key listener for delete confirmation
+    angular.element($window).on('keydown', function(event) {
+      if (event.keyCode === 27 && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
+        vm.$apply(function() {
+          vm.confirmDeleteCardId = null;
+          vm.deleteCardConfirm.show = false;
+        });
+      }
+    });
+
+    // Additional ESC key listener for delete confirmation modal
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
+        vm.confirmDeleteCardId = null;
+        vm.deleteCardConfirm.show = false;
+      }
+    }); 
 
     vm.selectCard = function(card) {
       vm.selectedCardId = card.id;
