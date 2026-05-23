@@ -1456,18 +1456,30 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         result["path"] = path;
         result["linesRemoved"] = (oldStr ?? "").Split('\n').Length;
         result["linesAdded"] = (newStr ?? "").Split('\n').Length;
-        if (!string.IsNullOrEmpty(oldStr)) result["oldStringPreview"] = Truncate(oldStr, 300);
-        if (!string.IsNullOrEmpty(newStr)) result["newStringPreview"] = Truncate(newStr, 300);
+        result["oldStringPreview"] = Truncate(oldStr, 300);
+        result["newStringPreview"] = Truncate(newStr, 300);
         result["diffPreview"] = BuildDiffPreview(oldStr, newStr);
+        result["oldLines"] = (oldStr ?? "").Split('\n');
+        result["newLines"] = (newStr ?? "").Split('\n');
     }
 
     private static string BuildDiffPreview(string? oldStr, string? newStr)
     {
-        if (string.IsNullOrEmpty(oldStr) && !string.IsNullOrEmpty(newStr))
-            return "+ " + newStr.Replace("\n", "\n+ ").TrimEnd();
-        if (string.IsNullOrEmpty(newStr) && !string.IsNullOrEmpty(oldStr))
-            return "- " + oldStr.Replace("\n", "\n- ").TrimEnd();
-        return $"--- removed ({(oldStr ?? "").Split('\n').Length} lines)\n+++ added ({(newStr ?? "").Split('\n').Length} lines)";
+        if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr)) return "";
+        var oldLines = (oldStr ?? "").Split('\n');
+        var newLines = (newStr ?? "").Split('\n');
+        var sb = new StringBuilder();
+        for (int i = 0, j = 0; i < oldLines.Length || j < newLines.Length;)
+        {
+            if (i < oldLines.Length && j < newLines.Length && oldLines[i] == newLines[j])
+            { sb.Append("  "); sb.AppendLine(oldLines[i]); i++; j++; }
+            else
+            {
+                if (i < oldLines.Length) { sb.Append("- "); sb.AppendLine(oldLines[i]); i++; }
+                if (j < newLines.Length) { sb.Append("+ "); sb.AppendLine(newLines[j]); j++; }
+            }
+        }
+        return sb.ToString().TrimEnd();
     }
 
     /// <summary>

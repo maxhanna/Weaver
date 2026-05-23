@@ -299,11 +299,28 @@
     // Close delete confirmation with Escape key
     $scope.$watch(function() { return vm.confirmDeleteCardId; }, function(newVal) {
       if (newVal !== null) {
-        $scope.$on('keydown', function(event) {
-          if (event.originalEvent.keyCode === 27) { // ESC key
+        // Attach ESC key handler to document
+        const handleEscape = function(event) {
+          if (event.keyCode === 27) { // ESC key
             vm.confirmDeleteCardId = null;
             vm.deleteCardConfirm.show = false;
+            // Immediately hide modal and backdrop
+            const modal = document.querySelector('.delete-confirm-modal');
+            if (modal) {
+              modal.style.display = 'none';
+              modal.style.backdropFilter = 'none';
+            }
+            // Remove backdrop if it exists
+            const backdrop = document.querySelector('.modal-backdrop');
+            if (backdrop) {
+              backdrop.remove();
+            }
           }
+        };
+        document.addEventListener('keydown', handleEscape);
+        // Clean up event listener when scope is destroyed
+        $scope.$on('$destroy', function() {
+          document.removeEventListener('keydown', handleEscape);
         });
       }
     });
@@ -311,10 +328,19 @@
     // Global ESC key listener for delete confirmation
     angular.element($window).on('keydown', function(event) {
       if (event.keyCode === 27 && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
-        vm.$apply(function() {
-          vm.confirmDeleteCardId = null;
-          vm.deleteCardConfirm.show = false;
-        });
+        vm.confirmDeleteCardId = null;
+        vm.deleteCardConfirm = null;
+        // Immediately hide modal and backdrop
+        const modal = document.querySelector('.delete-confirm-modal');
+        if (modal) {
+          modal.style.display = 'none';
+          modal.style.backdropFilter = 'none';
+        }
+        // Remove backdrop if it exists
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) {
+          backdrop.remove();
+        }
       }
     });
 
@@ -322,9 +348,20 @@
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
         vm.confirmDeleteCardId = null;
-        vm.deleteCardConfirm.show = false;
+        vm.deleteCardConfirm = null;
+        // Immediately hide modal and backdrop
+        const modal = document.querySelector('.delete-confirm-modal');
+        if (modal) {
+          modal.style.display = 'none';
+          modal.style.backdropFilter = 'none';
+        }
+        // Remove backdrop if it exists
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) {
+          backdrop.remove();
+        }
       }
-    }); 
+    });
 
     vm.selectCard = function(card) {
       vm.selectedCardId = card.id;
@@ -554,6 +591,23 @@
         });
       });
       saveCards();
+    };
+
+    // === Diff display helpers ===
+
+    vm.buildDiffLines = function(oldLines, newLines) {
+      if (!oldLines) oldLines = [];
+      if (!newLines) newLines = [];
+      var maxLen = Math.max(oldLines.length, newLines.length);
+      var result = [];
+      for (var i = 0; i < maxLen; i++) {
+        var oldLine = i < oldLines.length ? oldLines[i] : null;
+        var newLine = i < newLines.length ? newLines[i] : null;
+        var bothExist = oldLine !== null && newLine !== null;
+        var changed = bothExist ? oldLine !== newLine : true;
+        result.push({ oldLine: oldLine, newLine: newLine, changed: changed, bothExist: bothExist });
+      }
+      return result;
     };
 
     // === Agent Execution (streaming) ===

@@ -680,7 +680,36 @@ main {
 
 .panel {
 	background: linear-gradient(180deg, #061025, #07132a);
-	padding: 12px;
+	padding: 16px;
+	border-radius: var(--radius);
+	border: var(--border);
+}
+
+.agent-log {
+	height: 300px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	font-family: ui-monospace, monospace;
+	font-size: 12px;
+	padding: 8px;
+	background: rgba(0, 0, 0, 0.2); 
+	border-radius: var(--radius);
+	border: var(--border);
+}
+
+.agent-log-container {
+	max-height: 300px;
+	overflow-y: auto;
+}
+
+.agent-log {
+	font-family: ui-monospace, monospace;
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.agent-log .log-entry {
+	padding: 4px 0; 
 	border-radius: 12px;
 	border: 1px solid rgba(255, 255, 255, 0.03);
 	box-shadow: var(--shadow);
@@ -1054,31 +1083,70 @@ main {
 	margin-top: 4px;
 }
 
-.agent-steps .edit-diff pre,
-.analysis-step .edit-diff pre {
-	font-size: 10px;
-	padding: 6px;
-	background: rgba(0, 0, 0, 0.25);
-	border-radius: 4px;
-	max-height: 120px;
-	overflow: auto;
-	white-space: pre-wrap;
-}
-
-.agent-steps .edit-diff .diff-old,
-.analysis-step .diff-old {
-	color: #f87171;
-}
-
-.agent-steps .edit-diff .diff-new,
-.analysis-step .diff-new {
-	color: #4ade80;
-}
-
-.agent-steps .edit-meta {
+.diff-meta {
 	font-size: 10px;
 	color: var(--muted);
-	margin-bottom: 2px;
+	margin-bottom: 4px;
+}
+
+.diff-sbs {
+	display: flex;
+	flex-direction: column;
+	font-size: 10px;
+	line-height: 1.4;
+	max-height: 200px;
+	overflow: auto;
+	border-radius: 4px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.diff-row {
+	display: flex;
+	min-height: 18px;
+}
+
+.diff-cell {
+	flex: 1;
+	padding: 1px 4px;
+	white-space: pre;
+	font-family: monospace;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.diff-cell-old {
+	background: rgba(248, 113, 113, 0.08);
+	border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.diff-cell-new {
+	background: rgba(74, 222, 128, 0.08);
+}
+
+.diff-cell.diff-changed {
+	background: rgba(250, 204, 21, 0.12);
+}
+
+.diff-cell.diff-removed {
+	background: rgba(248, 113, 113, 0.18);
+}
+
+.diff-cell.diff-added {
+	background: rgba(74, 222, 128, 0.18);
+}
+
+.diff-cell.diff-empty {
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.diff-lineno {
+	display: inline-block;
+	width: 24px;
+	text-align: right;
+	margin-right: 6px;
+	opacity: 0.4;
+	font-size: 9px;
+	user-select: none;
 }
 
 .agent-steps .step-err,

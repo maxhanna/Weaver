@@ -157,12 +157,23 @@
                       <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
                         s.url || ''}}</span>
                       <div class="edit-diff"
-                        ng-if="s.type==='edit' && (s.diffPreview || s.oldStringPreview || s.newStringPreview)">
-                        <pre ng-if="s.diffPreview">{{s.diffPreview}}</pre>
-                        <pre class="diff-old"
-                          ng-if="!s.diffPreview && s.oldStringPreview">− {{s.oldStringPreview}}</pre>
-                        <pre class="diff-new"
-                          ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
+                        ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
+                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
+                          −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-sbs">
+                          <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                            <div class="diff-cell diff-cell-old"
+                              ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                              <span class="diff-lineno">{{$index+1}}</span>
+                              <span>{{line.oldLine || ''}}</span>
+                            </div>
+                            <div class="diff-cell diff-cell-new"
+                              ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                              <span class="diff-lineno">{{$index+1}}</span>
+                              <span>{{line.newLine || ''}}</span>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
@@ -295,12 +306,23 @@
                   {{s.description || s.command || s.url || '' | limitTo:60}}</span>
               </summary>
               <div class="step-panel-body">
-                <div class="edit-diff" ng-if="s.type==='edit' && s.status==='done'">
-                  <div class="edit-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
+                <div class="edit-diff" ng-if="s.type==='edit' && s.status==='done' && (s.oldLines || s.newLines)">
+                  <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
                     −{{s.linesRemoved || 0}} lines</div>
-                  <pre ng-if="s.diffPreview">{{s.diffPreview}}</pre>
-                  <pre class="diff-old" ng-if="!s.diffPreview && s.oldStringPreview">− {{s.oldStringPreview}}</pre>
-                  <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
+                  <div class="diff-sbs">
+                    <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                      <div class="diff-cell diff-cell-old"
+                        ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                        <span class="diff-lineno">{{$index+1}}</span>
+                        <span>{{line.oldLine || ''}}</span>
+                      </div>
+                      <div class="diff-cell diff-cell-new"
+                        ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                        <span class="diff-lineno">{{$index+1}}</span>
+                        <span>{{line.newLine || ''}}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div class="step-detail" ng-if="s.output">
                   <pre>{{s.output | limitTo:24000}}</pre>
@@ -351,7 +373,7 @@
   </main>
 
   <!-- FILE PICKER MODAL -->
-  <div class="popup-overlay" ng-if="vm.showFilePicker">
+  <div class="popup-overlay" ng-if="vm.showFilePicker" ng-click="vm.closeFilePicker()">
     <div class="popup-panel" style="max-width:600px;">
       <div class="popup-header">
         <strong>Attach Files</strong>
