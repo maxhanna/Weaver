@@ -1020,11 +1020,14 @@ public class AgentController : ControllerBase
       ""type"": ""edit"",
       ""description"": ""what changed"",
       ""path"": ""exact/path/from/FILE/headers"",
-      ""oldString"": ""exact text copied from file (must match verbatim)"",
-      ""newString"": ""replacement text""
+      ""oldString"": ""verbatim text copied from the file — preserve every space, tab, newline; include 2-4 surrounding lines for context so the match is unique"",
+      ""newString"": ""full replacement text with correct indentation""
     }
   ]
-}";
+}
+
+CRITICAL — oldString must be a verbatim substring of the file.
+Never paraphrase, reformat, or shorten it. Copy it character-for-character.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -1069,19 +1072,30 @@ public class AgentController : ControllerBase
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0, string? discoveryContext = null)
     {
-        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON in the exact format:
-{""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}";
+        var systemPrompt = @"You are a precise code patch tool.
+
+OUTPUT FORMAT — output ONLY this JSON, nothing else, no markdown fences:
+{""edits"":[{""oldString"":""…"",""newString"":""…""}]}
+
+RULES FOR oldString (critical — mismatches cause patch failure):
+1. Copy character-for-character from the FILE CONTENT block below.
+2. Preserve every space, tab, and newline exactly as they appear in the file.
+3. Include 2-4 surrounding lines for uniqueness — never just one line.
+4. Never paraphrase, reformat, or summarise — it must be a verbatim substring.
+5. If the target region appears more than once, extend oldString until it is unique.
+
+RULES FOR newString:
+1. Write the full replacement text, including indentation that matches the file.
+2. Do NOT repeat lines that are above or below the changed region.";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
         user.AppendLine($"File path: {relativePath}");
         if (attempt > 0)
         {
-            // Check if we have the previous raw response to determine what went wrong
-            user.AppendLine("RETRY: Your previous attempt did not produce usable edits.");
-            user.AppendLine();
-            user.AppendLine("CRITICAL: You MUST output ONLY valid JSON in this exact format:");
-            user.AppendLine("{\"edits\":[{\"oldString\":\"EXACT text from file (copy verbatim)\",\"newString\":\"replacement text\"}]}");
+            user.AppendLine("RETRY: Your previous oldString did not match any text in the file.");
+            user.AppendLine("Re-read the FILE CONTENT below and copy the target lines verbatim.");
+            user.AppendLine("Check: indentation, quotes, semicolons — every character must match exactly.");
             user.AppendLine();
         }
         user.AppendLine();
@@ -2207,34 +2221,143 @@ Rules:
         return $"--- removed ({(oldStr ?? "").Split('\n').Length} lines)\n+++ added ({(newStr ?? "").Split('\n').Length} lines)";
     }
 
-    private static (bool ok, string content, string? error, string? snippet) TryReplace(string content, string oldString, string newString)
+    /// <summary>
+    /// Multi-pass string replacement with progressively looser matching.
+    /// Pass 1 – exact (after CRLF normalisation).
+    /// Pass 2 – per-line leading/trailing whitespace trim, ordinal.
+    /// Pass 3 – per-line trim, case-insensitive (catches CSS/HTML lowercase drift).
+    /// Pass 4 – skip blank lines on both sides while matching non-blank lines.
+    /// Pass 5 – single-line collapsed-whitespace match (handles inline spacing drift).
+    /// </summary>
+    private static (bool ok, string content, string? error, string? snippet) TryReplace(
+        string content, string oldString, string newString)
     {
-        var searchContent = NormalizeLineEndings(content);
-        var searchOld = NormalizeLineEndings(oldString);
-        var idx = searchContent.IndexOf(searchOld, StringComparison.Ordinal);
+        // Normalise line endings once up front.
+        content = NormalizeLineEndings(content);
+        oldString = NormalizeLineEndings(oldString);
+
+        // ── Pass 1: exact ───────────────────────────────────────────────────────
+        var idx = content.IndexOf(oldString, StringComparison.Ordinal);
         if (idx >= 0)
+            return (true, content[..idx] + newString + content[(idx + oldString.Length)..], null, null);
+
+        var fileLines = content.Split('\n');
+        var rawOldLines = oldString.Split('\n');
+
+        // Strip leading/trailing blank lines from the search pattern so the model
+        // can include context blank lines without breaking the match.
+        var coreFirst = 0;
+        var coreLast = rawOldLines.Length - 1;
+        while (coreFirst <= coreLast && string.IsNullOrWhiteSpace(rawOldLines[coreFirst])) coreFirst++;
+        while (coreLast >= coreFirst && string.IsNullOrWhiteSpace(rawOldLines[coreLast])) coreLast--;
+        var coreOld = (coreFirst <= coreLast)
+            ? rawOldLines[coreFirst..(coreLast + 1)]
+            : rawOldLines;
+
+        // ── Pass 2: per-line trim, ordinal ───────────────────────────────────────
         {
-            var result = searchContent.Substring(0, idx) + newString + searchContent.Substring(idx + searchOld.Length);
-            return (true, result, null, null);
+            var hit = FindTrimmedBlock(fileLines, coreOld, StringComparison.Ordinal);
+            if (hit >= 0)
+                return (true, ReplaceLineBlock(fileLines, hit, coreOld.Length, newString), null, null);
         }
 
-        // Whitespace-flexible fallback
-        var flexPattern = Regex.Escape(searchOld).Replace(@"\ ", @"\s+");
-        try
+        // ── Pass 3: per-line trim, case-insensitive ──────────────────────────────
         {
-            var m = Regex.Match(searchContent, flexPattern, RegexOptions.Multiline);
-            if (m.Success)
+            var hit = FindTrimmedBlock(fileLines, coreOld, StringComparison.OrdinalIgnoreCase);
+            if (hit >= 0)
+                return (true, ReplaceLineBlock(fileLines, hit, coreOld.Length, newString), null, null);
+        }
+
+        // ── Pass 4: skip blank lines while matching non-blank pattern lines ───────
+        {
+            var nonBlankOld = coreOld.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
+            if (nonBlankOld.Length > 0)
             {
-                var result = searchContent.Substring(0, m.Index) + newString + searchContent.Substring(m.Index + m.Length);
-                return (true, result, null, null);
+                for (var fi = 0; fi <= fileLines.Length - nonBlankOld.Length; fi++)
+                {
+                    int matched = 0, scan = fi, firstHit = fi, lastHit = fi;
+                    while (matched < nonBlankOld.Length && scan < fileLines.Length)
+                    {
+                        if (string.IsNullOrWhiteSpace(fileLines[scan])) { scan++; continue; }
+                        if (!string.Equals(fileLines[scan].Trim(), nonBlankOld[matched].Trim(),
+                                StringComparison.Ordinal))
+                            break;
+                        if (matched == 0) firstHit = scan;
+                        lastHit = scan;
+                        matched++; scan++;
+                    }
+                    if (matched == nonBlankOld.Length)
+                        return (true, ReplaceLineBlock(fileLines, firstHit, lastHit - firstHit + 1, newString), null, null);
+                }
             }
         }
-        catch { }
 
-        var lines = searchContent.Split('\n');
-        var oldLines = searchOld.Split('\n');
-        var hint = oldLines.Length > 0 ? string.Join("\n", lines.Where(l => l.Contains(oldLines[0].Trim(), StringComparison.OrdinalIgnoreCase)).Take(3)) : null;
-        return (false, content, $"oldString not found in file", hint != null ? Truncate(hint, 400) : null);
+        // ── Pass 5: collapsed-whitespace single-line match ───────────────────────
+        // Good for CSS/JS one-liners where the model omits/adds spaces.
+        {
+            static string Collapse(string s) => Regex.Replace(s.Trim(), @"\s+", " ");
+            var collapsedOld = Collapse(oldString);
+            if (!collapsedOld.Contains('\n')) // only useful for single-line patterns
+            {
+                for (var fi = 0; fi < fileLines.Length; fi++)
+                {
+                    if (string.Equals(Collapse(fileLines[fi]), collapsedOld, StringComparison.OrdinalIgnoreCase))
+                        return (true, ReplaceLineBlock(fileLines, fi, 1, newString), null, null);
+                }
+            }
+        }
+
+        // ── No match: build a diagnostic hint ───────────────────────────────────
+        var firstNonBlankPattern = coreOld.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+        var hint = firstNonBlankPattern.Length > 0
+            ? string.Join("\n", fileLines
+                .Where(l => l.Contains(firstNonBlankPattern, StringComparison.OrdinalIgnoreCase))
+                .Take(3))
+            : null;
+        return (false, content, "oldString not found in file",
+            !string.IsNullOrEmpty(hint) ? Truncate(hint, 400) : null);
+    }
+
+    /// <summary>
+    /// Find the first run of <paramref name="fileLines"/> (by index) whose trimmed values
+    /// equal the trimmed values of <paramref name="pattern"/>.
+    /// Returns -1 if not found.
+    /// </summary>
+    private static int FindTrimmedBlock(string[] fileLines, string[] pattern, StringComparison cmp)
+    {
+        if (pattern.Length == 0 || fileLines.Length < pattern.Length) return -1;
+        for (var i = 0; i <= fileLines.Length - pattern.Length; i++)
+        {
+            var ok = true;
+            for (var j = 0; j < pattern.Length; j++)
+            {
+                if (!string.Equals(fileLines[i + j].Trim(), pattern[j].Trim(), cmp))
+                { ok = false; break; }
+            }
+            if (ok) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Replace <paramref name="count"/> lines starting at <paramref name="start"/> with
+    /// <paramref name="replacement"/>, preserving the lines before and after.
+    /// </summary>
+    private static string ReplaceLineBlock(string[] fileLines, int start, int count, string replacement)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < start; i++)
+        {
+            sb.Append(fileLines[i]);
+            sb.Append('\n');
+        }
+        sb.Append(replacement);
+        for (var i = start + count; i < fileLines.Length; i++)
+        {
+            sb.Append('\n');
+            sb.Append(fileLines[i]);
+        }
+        return sb.ToString();
     }
 
     private async Task ExecuteCommandStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
