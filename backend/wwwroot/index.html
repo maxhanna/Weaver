@@ -106,7 +106,7 @@
               <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
               <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
                 Delete</button>
-            </div> 
+            </div>
           </div>
         </div>
       </div>
@@ -133,7 +133,7 @@
               <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                 <span>📎</span><span class="name">{{f}}</span>
               </div>
-            </div> 
+            </div>
             <!-- Agent analysis shown on Done cards -->
             <div class="card-analysis" ng-if="card.agentAnalysis">
               <details>
@@ -156,8 +156,7 @@
                     <div class="step-body">
                       <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
                         s.url || ''}}</span>
-                      <div class="edit-diff"
-                        ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
+                      <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
                         <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
                           −{{s.linesRemoved || 0}} lines</div>
                         <div class="diff-sbs">
@@ -167,7 +166,8 @@
                           </div>
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
-                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{$index+1}}</span>
@@ -176,7 +176,8 @@
                               </div>
                             </div>
                             <div class="diff-col diff-col-new">
-                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{$index+1}}</span>
@@ -331,7 +332,8 @@
                     </div>
                     <div class="diff-wrapper">
                       <div class="diff-col diff-col-old">
-                        <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                        <div class="diff-row"
+                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                           <div class="diff-cell diff-cell-old"
                             ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                             <span class="diff-lineno">{{$index+1}}</span>
@@ -340,7 +342,8 @@
                         </div>
                       </div>
                       <div class="diff-col diff-col-new">
-                        <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                        <div class="diff-row"
+                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                           <div class="diff-cell diff-cell-new"
                             ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                             <span class="diff-lineno">{{$index+1}}</span>
@@ -441,9 +444,9 @@
   </div>
 
   <!-- ADD/EDIT PROJECT MODAL -->
-<div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.cancelDeleteCard()">
-<div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;" tabindex="-1" ng-keydown="if ($event.key === 'Escape') { vm.closeDeleteCardConfirm($event); $event.stopPropagation(); $event.preventDefault(); }">
-<div class="popup-header">
+  <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel()">
+    <div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;">
+      <div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
         <button ng-click="vm.closeAddProjectPanel()">✕</button>
       </div>
@@ -470,7 +473,7 @@
   </div>
 
   <!-- SETTINGS MODAL -->
-  <div class="delete-confirm-modal" ng-if="vm.showSettingsPanel">
+  <div class="delete-confirm-modal" ng-if="vm.showSettingsPanel"  ng-click="vm.closeSettingsPanel()">
     <div class="popup-panel" style="max-width:480px;">
       <div class="popup-header">
         <strong>⚙ Settings</strong>
