@@ -22,7 +22,7 @@ public class AiController : ControllerBase
     [HttpPost("generate")]
     public async Task<IActionResult> Generate([FromBody] JsonElement payload)
     {
-        // Read LlamaUrl from config.json if available
+        // Read LlamaUrl from maestroconfig.json if available
         string baseUrl = GetBaseURL();
         var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
         var client = _clientFactory.CreateClient("llama");
@@ -75,10 +75,10 @@ public class AiController : ControllerBase
     }
 
     [HttpPost("proxy")]
-    public async Task<IActionResult> Proxy([FromQuery]string path)
+    public async Task<IActionResult> Proxy([FromQuery] string path)
     {
-        // Read LlamaUrl from config.json if available
-        string baseUrl = GetBaseURL(); 
+        // Read LlamaUrl from maestroconfig.json if available
+        string baseUrl = GetBaseURL();
         var target = baseUrl.TrimEnd('/') + "/" + (path ?? string.Empty).TrimStart('/');
         var client = _clientFactory.CreateClient("llama");
         var body = await new StreamReader(Request.Body).ReadToEndAsync();
@@ -96,7 +96,7 @@ public class AiController : ControllerBase
 
     private string GetBaseURL()
     {
-        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
         var baseUrl = "http://192.168.2.58:8080"; // default fallback
 
         if (System.IO.File.Exists(configPath))

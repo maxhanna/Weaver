@@ -441,8 +441,8 @@
   </div>
 
   <!-- ADD/EDIT PROJECT MODAL -->
-<div class="popup-overlay" ng-if="vm.deleteCardConfirm && vm.deleteCardConfirm.show" ng-click="vm.cancelDeleteCard()">
-  <div class="popup-panel" style="max-width:480px;">
+<div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.cancelDeleteCard()">
+<div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;">
       <div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
         <button ng-click="vm.closeAddProjectPanel()">✕</button>
@@ -489,7 +489,7 @@
         </div>
         <div class="form-row">
           <label>
-            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel (saved to config.json)
+            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel (saved to maestroconfig.json)
           </label>
         </div>
       </div>

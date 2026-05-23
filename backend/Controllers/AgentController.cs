@@ -216,9 +216,15 @@ public class AgentController : ControllerBase
     private static readonly HashSet<string> ExplorationStepTypes =
         new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
 
+    // FIX 2: Also count 'rename' steps as successful work so Phase 4 does not
+    // re-enter the plan+edit loop after a rename completes.  Previously only
+    // 'edit' was checked, so every rename caused two extra spurious LLM calls
+    // that would pick an unrelated file (e.g. app.js) and try to patch it.
     private static bool HasSuccessfulEdits(IEnumerable<object> steps) =>
         steps.OfType<Dictionary<string, object?>>().Any(s =>
-            s.TryGetValue("type", out var t) && string.Equals(t?.ToString(), "edit", StringComparison.OrdinalIgnoreCase) &&
+            s.TryGetValue("type", out var t) &&
+            (string.Equals(t?.ToString(), "edit", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(t?.ToString(), "rename", StringComparison.OrdinalIgnoreCase)) &&
             s.TryGetValue("status", out var st) && st?.ToString() == "done");
 
     private static bool TaskExpectsFileChanges(string prompt)
@@ -1036,7 +1042,7 @@ RULES:
     private string GetLlamaBaseUrl()
     {
         var configPath = Path.Combine(
-            _env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+            _env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
         var baseUrl = "http://192.168.2.58:8080";
         if (System.IO.File.Exists(configPath))
         {
@@ -1069,7 +1075,13 @@ RULES:
             new { role = "user",    content = userMessage  }
         };
 
-        return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, ct);
+        // FIX 1: Add a per-call timeout so the plan phase cannot hang indefinitely.
+        // CallLlmNonStreaming only passes the outer 'ct' (HTTP abort), which has
+        // no deadline of its own. If the LLM stalls, Phase 2 and Phase 4 retries
+        // would block forever.
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token);
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
@@ -1167,8 +1179,13 @@ RULES:
                                       NormalizeLineEndings(step.NewString ?? ""),
                                       StringComparison.Ordinal))
                     {
+                        // FIX 4: Pass the original request-abort 'ct', NOT 'combined'.
+                        // 'combined' is the 20s countdown from this file's edit call; if the
+                        // initial PostAsync used most of that budget, GenerateNewString inherits
+                        // a nearly-expired token and times out immediately.  Each helper should
+                        // own its own timeout window, linked only to the outer abort signal.
                         var generated = await GenerateNewString(
-                            step.OldString ?? "", taskPrompt, relativePath, fileContent, combined);
+                            step.OldString ?? "", taskPrompt, relativePath, fileContent, ct);
                         if (!string.IsNullOrWhiteSpace(generated))
                             step.NewString = generated;
                     }
@@ -1316,10 +1333,10 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         if (paths.Count == 0)
             paths = FindLikelyFiles(prompt, projectRoot);
 
-        if (prompt.Contains("config.json", StringComparison.OrdinalIgnoreCase) &&
-            !paths.Any(p => p.EndsWith("config.json", StringComparison.OrdinalIgnoreCase)))
+        if (prompt.Contains("maestroconfig.json", StringComparison.OrdinalIgnoreCase) &&
+            !paths.Any(p => p.EndsWith("maestroconfig.json", StringComparison.OrdinalIgnoreCase)))
         {
-            foreach (var p in new[] { "backend/wwwroot/config.json", "wwwroot/config.json" })
+            foreach (var p in new[] { "backend/wwwroot/maestroconfig.json", "wwwroot/maestroconfig.json" })
             {
                 var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
                 if (System.IO.File.Exists(full)) paths.Add(p);
@@ -1332,20 +1349,24 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
     //  RESULT HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
+    // FIX 3: Include 'rename' steps so the done SSE payload's filesEdited list
+    // is populated.  Without this the frontend overwrites its streaming-derived
+    // list with an empty array, and the card stays in Doing.
     private static List<object> ExtractFilesEdited(List<object> steps) =>
         steps.OfType<Dictionary<string, object?>>()
             .Where(s =>
-                s.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                s.TryGetValue("type", out var t) &&
+                (t?.ToString() == "edit" || t?.ToString() == "rename") &&
                 s.TryGetValue("status", out var st) && st?.ToString() == "done")
-            .Select(s => new
+            .Select(s => (object)new
             {
                 path = s.GetValueOrDefault("path"),
                 action = s.GetValueOrDefault("editAction"),
+                toPath = s.GetValueOrDefault("toPath"),
                 linesAdded = s.GetValueOrDefault("linesAdded"),
                 linesRemoved = s.GetValueOrDefault("linesRemoved"),
                 preview = s.GetValueOrDefault("diffPreview")
             })
-            .Cast<object>()
             .ToList();
 
     private static void AppendObservations(StringBuilder observations, List<object> batchResults)
@@ -1971,7 +1992,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         if (path.EndsWith("app.js"))
             return content.Contains("vm.showTerminal", StringComparison.OrdinalIgnoreCase) &&
                    content.Contains("cfg.showTerminal", StringComparison.OrdinalIgnoreCase);
-        if (path.EndsWith("config.json"))
+        if (path.EndsWith("maestroconfig.json"))
             return content.Contains("showTerminal", StringComparison.OrdinalIgnoreCase);
         return false;
     }
@@ -1994,7 +2015,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             if (!content.Contains("vm.showTerminal"))
             {
                 const string oldBlock = "        <div class=\"form-row\">\r\n          <label>\r\n            <input type=\"checkbox\" ng-model=\"vm.autoQueue\" /> Auto-queue: process next Todo card when one completes\r\n          </label>\r\n        </div>";
-                const string newBlock = oldBlock + "\r\n        <div class=\"form-row\">\r\n          <label>\r\n            <input type=\"checkbox\" ng-model=\"vm.showTerminal\" /> Show terminal panel (saved to config.json)\r\n          </label>\r\n        </div>";
+                const string newBlock = oldBlock + "\r\n        <div class=\"form-row\">\r\n          <label>\r\n            <input type=\"checkbox\" ng-model=\"vm.showTerminal\" /> Show terminal panel (saved to maestroconfig.json)\r\n          </label>\r\n        </div>";
                 if (content.Contains("vm.autoQueue") && content.Contains("Auto-queue"))
                     steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = NormalizeLineEndings(oldBlock), NewString = NormalizeLineEndings(newBlock), Description = "Add terminal toggle (heuristic)" });
             }
@@ -2010,17 +2031,17 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                 steps.Add(new AgentStep { Index = steps.Count, Type = "edit", Path = relativePath, OldString = "        vm.defaultProject = cfg.defaultProject;", NewString = "        vm.defaultProject = cfg.defaultProject;\r\n        if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;", Description = "Load showTerminal from config (heuristic)" });
         }
 
-        if (path.EndsWith("config.json"))
+        if (path.EndsWith("maestroconfig.json"))
         {
             if (string.IsNullOrWhiteSpace(content) || content.Trim() == "{}")
-                steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = "", NewString = "{\r\n  \"projects\": [],\r\n  \"defaultProject\": \"..\",\r\n  \"showTerminal\": true\r\n}\r\n", Description = "Create config.json with showTerminal (heuristic)" });
+                steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = "", NewString = "{\r\n  \"projects\": [],\r\n  \"defaultProject\": \"..\",\r\n  \"showTerminal\": true\r\n}\r\n", Description = "Create maestroconfig.json with showTerminal (heuristic)" });
             else if (!content.Contains("showTerminal"))
             {
                 var trimmed = content.TrimEnd();
                 if (trimmed.EndsWith("}"))
                 {
                     var insert = trimmed.TrimEnd('}').TrimEnd() + ",\r\n  \"showTerminal\": true\r\n}";
-                    steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = content, NewString = insert, Description = "Add showTerminal to config.json (heuristic)" });
+                    steps.Add(new AgentStep { Index = 0, Type = "edit", Path = relativePath, OldString = content, NewString = insert, Description = "Add showTerminal to maestroconfig.json (heuristic)" });
                 }
             }
         }

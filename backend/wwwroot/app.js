@@ -1,8 +1,8 @@
 ﻿angular.module('kanbanApp', [])
   .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', function($http, $interval, $window, $scope, $timeout) {
     const vm = this;
-    const STORAGE_KEY = 'maestro.cards';
-    const SETTINGS_KEY = 'maestro.settings';
+    const STORAGE_KEY = 'maestroconfig.cards';
+    const SETTINGS_KEY = 'maestroconfig.settings';
 
     // === State ===
     vm.selectedProject = '';
@@ -205,7 +205,6 @@
     vm.openSettingsPanel = function() {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
-      alert('showSettingsPanel: ' + vm.showSettingsPanel);
     };
     vm.closeSettingsPanel = function() { vm.showSettingsPanel = false; };
 
@@ -269,6 +268,12 @@
         modal.style.display = 'flex';
         // Ensure backdrop is properly applied
         modal.style.backdropFilter = 'blur(4px)';
+        // Add ESC key handler to modal
+        modal.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            vm.closeDeleteCardConfirm();
+          }
+        });
       }
     };
  
@@ -284,7 +289,7 @@
       }
       if (vm.deleteCardConfirm.dontShowAgain) {
         try {
-          $window.localStorage.setItem('maestro.deleteCardConfirm', 'false');
+          $window.localStorage.setItem('maestroconfig.deleteCardConfirm', 'false');
         } catch(e) {}
       }
       vm.confirmDeleteCardId = null;
@@ -294,6 +299,15 @@
     vm.closeDeleteCardConfirm = function() {
       vm.confirmDeleteCardId = null;
       vm.deleteCardConfirm = null;
+      // Remove ESC key handler from modal if it exists
+      const modal = document.querySelector('.delete-confirm-modal');
+      if (modal) {
+        const escHandler = modal.escHandler;
+        if (escHandler) {
+          modal.removeEventListener('keydown', escHandler);
+          modal.escHandler = null;
+        }
+      }
     };
 
     // Close delete confirmation with Escape key
@@ -313,6 +327,17 @@
           }
         };
         document.addEventListener('keydown', handleEscape);
+        // Also attach to delete confirm modal for immediate close
+        const modal = document.querySelector('.delete-confirm-modal');
+        if (modal) {
+          modal.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+              vm.confirmDeleteCardId = null;
+              vm.deleteCardConfirm = null;
+              $scope.$apply();
+            }
+          });
+        }
         // Clean up event listener when scope is destroyed
         $scope.$on('$destroy', function() {
           document.removeEventListener('keydown', handleEscape);

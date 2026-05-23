@@ -15,7 +15,7 @@ public class ConfigController : ControllerBase
     private readonly IWebHostEnvironment _env;
     public ConfigController(IWebHostEnvironment env) => _env = env;
 
-    private string ConfigPath => Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "config.json");
+    private string ConfigPath => Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
 
     public class ProjectDto { public string Name { get; set; } = ""; public string Path { get; set; } = ""; public string Description { get; set; } = ""; }
     public class FrontendConfig
