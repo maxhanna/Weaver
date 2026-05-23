@@ -39,8 +39,7 @@
           <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
                ng-class="{selected: card.id===vm.selectedCardId}" 
                ng-attr-id="card-{{card.id}}"
-               ng-click="vm.selectCard(card)"
-               ng-dblclick="vm.editCardText(card)">
+               ng-click="vm.selectCard(card)">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -95,6 +94,7 @@
                 <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive">✔ Done</button>
                 <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive">⏹ Stop</button>
                 <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
+                <button ng-click="vm.openDeleteCardConfirm(card.id)" class="small ghost" title="Delete card">✕ Delete</button>
             </div>
           </div>
         </div>
@@ -160,20 +160,14 @@
                   </details>
                 </div>
               </details>
-            </div>
-            <div class="card-actions">
-              <button ng-click="vm.reopenCard(card); $event.stopPropagation()" class="small">↺ Reopen</button>
-              <button ng-click="vm.deleteCardConfirm(card.id,'done'); $event.stopPropagation()" class="danger small">✕</button>
-            </div>
-            <div class="popup-panel" ng-if="vm.confirmDeleteCardId === card.id">
-              <div class="popup-content">
-                <p>Are you sure you want to delete this card?</p>
-                <div class="popup-actions">
-                  <button ng-click="vm.deleteCard(vm.confirmDeleteCardId); vm.confirmDeleteCardId = null" class="danger">Yes, Delete</button>
-                  <button ng-click="vm.confirmDeleteCardId = null" class="secondary">Cancel</button>
-                </div>
-              </div>
-            </div>
+            </div> 
+<div class="card-actions">
+  <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive">✔
+    Done</button>
+  <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive">⏹ Stop</button>
+  <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
+  <button ng-click="vm.deleteCardConfirm(card.id)" class="small ghost" title="Delete card">✕ Delete</button>
+</div>
           </div>
         </div>
       </div>
@@ -403,19 +397,18 @@
       </div>
     </div>
   </div>
-
-  <div class="popup-panel" ng-show="vm.showDeleteConfirm">
+  
+  <div class="popup-panel" ng-if="vm.confirmDeleteCardId">
     <div class="popup-content">
-      <h4>Delete this card?</h4>
-      <p>Are you sure you want to delete this card? This action cannot be undone.</p>
-      <label><input type="checkbox" ng-model="vm.dontShowDeleteConfirm"> Don't show this again</label>
+      <p>Are you sure you want to delete this card {{vm.confirmDeleteCardId}}?</p>
       <div class="popup-actions">
-        <button ng-click="vm.confirmDeleteCard()" class="danger">Delete</button>
-        <button ng-click="vm.cancelDeleteCard()">Cancel</button>
+        <button ng-click="vm.deleteCard(vm.confirmDeleteCardId);" class="danger">Yes,
+          Delete</button>
+        <button ng-click="vm.confirmDeleteCardId = null" class="secondary">Cancel</button>
       </div>
     </div>
-  </div>
+  </div> 
 
   <script src="/app.js"></script>
 </body>
-</html>
+</html>            

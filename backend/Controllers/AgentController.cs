@@ -767,9 +767,8 @@ public class AgentController : ControllerBase
                 }
 
                 var fileEdits = new List<AgentStep>();
-                var explicitSkip = false;
 
-                for (var attempt = 0; attempt < 2 && fileEdits.Count == 0 && !explicitSkip; attempt++)
+                for (var attempt = 0; attempt < 2 && fileEdits.Count == 0; attempt++)
                 {
                     await EmitLog(stream, "info", $"LLM edit: {path} (attempt {attempt + 1})", new { chars = content.Length });
                     var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
@@ -784,24 +783,14 @@ public class AgentController : ControllerBase
 
                     if (fileEdits.Count == 0)
                     {
-                        // Check if model explicitly said "no edits needed" vs a true parse failure
-                        explicitSkip = ReferenceEquals(fileEdits, NoEditsExplicit) ||
-                                       IsExplicitNoEditsResponse(raw ?? "");
-                        if (explicitSkip)
-                        {
-                            await EmitLog(stream, "info", $"Edit skipped for {path} — no changes needed");
-                        }
-                        else
-                        {
-                            var diag = DiagnoseJsonParseFailure(raw ?? "");
-                            await EmitLog(stream, "warn", $"Parse failed for {path}",
-                                new
-                                {
-                                    error = err,
-                                    diagnosis = diag,
-                                    raw = (raw?.Length ?? 0) > 800 ? raw.Substring(0, 400) + "\n... [truncated] ...\n" + raw.Substring(raw.Length - 400) : (raw ?? "")
-                                });
-                        }
+                        var diag = DiagnoseJsonParseFailure(raw ?? "");
+                        await EmitLog(stream, "warn", $"Parse failed for {path}",
+                            new
+                            {
+                                error = err,
+                                diagnosis = diag,
+                                raw = (raw?.Length ?? 0) > 800 ? raw.Substring(0, 400) + "\n... [truncated] ...\n" + raw.Substring(raw.Length - 400) : (raw ?? "")
+                            });
                     }
                     else
                     {
@@ -979,19 +968,16 @@ Rules:
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0)
     {
-        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation, no preamble.
+        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation. Keep patches SMALL (under 5 lines if possible).
 
 Format:
 {""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}
 
 Rules:
 - PREFER small targeted changes (1-3 lines) over large blocks.
-- oldString MUST be copied verbatim from the file — NEVER truncate it with '...' or cut it short.
-  Copy the complete lines you want to replace, including ALL punctuation and whitespace.
-- Include enough context (2-8 lines) so oldString appears exactly once in the file.
-- If no changes are needed, output: {""edits"":[]}
-- Do NOT wrap output in ``` fences.
-- Do NOT include any text before or after the JSON object.";
+- oldString MUST be copied verbatim from the file (2-8 lines with exact spaces).
+- Include at least one edit in the edits array.
+- Do not wrap in ``` fences.";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
@@ -1032,20 +1018,10 @@ Rules:
         }
     }
 
-    // Sentinel returned by ParseEditsFromLlmRaw when the model explicitly said "no edits".
-    // Callers treat this as "skip" rather than "parse failed / retry".
-    private static readonly List<AgentStep> NoEditsExplicit = new();
-
     private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath)
     {
         var steps = new List<AgentStep>();
         if (string.IsNullOrWhiteSpace(raw)) return steps;
-
-        // Quick check: did the model explicitly return an empty edits array?
-        // e.g. {"edits":[]} or {"steps":[]}  → model decided no changes are needed.
-        // Distinguish this from a genuine parse failure so callers can skip the retry.
-        var trimmedRaw = raw.Trim();
-        if (IsExplicitNoEditsResponse(trimmedRaw)) return NoEditsExplicit;
 
         var agent = ParseAgentResponse(raw);
         if (agent?.Steps != null)
@@ -1062,7 +1038,7 @@ Rules:
             if (steps.Count > 0) return steps;
         }
 
-        var jsonStr = trimmedRaw;
+        var jsonStr = raw.Trim();
         if (jsonStr.StartsWith("```"))
         {
             var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
@@ -1088,9 +1064,6 @@ Rules:
 
                     if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
                     {
-                        // Empty array → explicit "no edits" from this block
-                        if (editsEl.GetArrayLength() == 0) return NoEditsExplicit;
-
                         var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(candidate, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                         if (envelope?.Edits != null)
                         {
@@ -1137,28 +1110,6 @@ Rules:
         }
 
         return steps;
-    }
-
-    /// <summary>
-    /// Returns true when the LLM response is a valid JSON object/array with an
-    /// explicitly empty edits or steps list — meaning "nothing to change here".
-    /// </summary>
-    private static bool IsExplicitNoEditsResponse(string raw)
-    {
-        // Find the last JSON object in the text (model may prepend prose)
-        var blocks = ExtractJsonBlocks(raw);
-        var last = blocks.LastOrDefault();
-        if (last == null) return false;
-        try
-        {
-            var opts = new JsonDocumentOptions { AllowTrailingCommas = true };
-            using var doc = JsonDocument.Parse(last, opts);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("edits", out var e) && e.ValueKind == JsonValueKind.Array && e.GetArrayLength() == 0) return true;
-            if (root.TryGetProperty("steps", out var s) && s.ValueKind == JsonValueKind.Array && s.GetArrayLength() == 0) return true;
-        }
-        catch { }
-        return false;
     }
 
     private static Dictionary<string, object?> DiagnoseJsonParseFailure(string raw)
@@ -1375,11 +1326,10 @@ Rules:
 
     private static string? RepairJsonString(string json)
     {
-        // Simpler, more robust repair: no depth tracking (depth tracking breaks on CSS/code
-        // strings that contain unbalanced braces). Instead, use lookahead to decide if a
-        // quote character ends the string: after optional whitespace, must be , } ] or :
         var sb = new StringBuilder(json.Length);
         var inString = false;
+        var depth = 0;
+        var valueStartDepth = 0;
         var changed = false;
 
         for (var i = 0; i < json.Length; i++)
@@ -1388,12 +1338,19 @@ Rules:
 
             if (!inString)
             {
-                if (c == '"') inString = true;
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') depth--;
+
+                if (c == '"')
+                {
+                    inString = true;
+                    valueStartDepth = depth;
+                }
                 sb.Append(c);
                 continue;
             }
 
-            // Inside a string — handle escape sequences
+            // Inside a string
             if (c == '\\')
             {
                 sb.Append(c);
@@ -1402,39 +1359,69 @@ Rules:
                 continue;
             }
 
-            // Potential closing quote — look ahead past whitespace
+            if (c == '{' || c == '[')
+            {
+                depth++;
+                sb.Append(c);
+                continue;
+            }
+            if (c == '}' || c == ']')
+            {
+                depth--;
+                sb.Append(c);
+                continue;
+            }
+
             if (c == '"')
             {
                 var nextNonWs = -1;
                 for (var j = i + 1; j < json.Length; j++)
                 {
-                    if (!char.IsWhiteSpace(json[j])) { nextNonWs = j; break; }
+                    if (!char.IsWhiteSpace(json[j]))
+                    {
+                        nextNonWs = j;
+                        break;
+                    }
                 }
-                // End of input or followed by structural JSON char → this is the real closing quote
-                if (nextNonWs < 0 || json[nextNonWs] == ',' || json[nextNonWs] == '}' ||
-                    json[nextNonWs] == ']' || json[nextNonWs] == ':')
+
+                if (nextNonWs >= 0 && depth == valueStartDepth &&
+                    (json[nextNonWs] == ',' || json[nextNonWs] == '}' || json[nextNonWs] == ']' || json[nextNonWs] == ':'))
                 {
                     sb.Append(c);
                     inString = false;
                 }
                 else
                 {
-                    // Quote is embedded in string content — escape it
                     sb.Append("\\\"");
                     changed = true;
                 }
                 continue;
             }
 
-            // Escape bare control characters that break JSON parsing
-            if (c == '\n') { sb.Append("\\n"); changed = true; continue; }
-            if (c == '\r') { sb.Append("\\r"); changed = true; continue; }
-            if (c == '\t') { sb.Append("\\t"); changed = true; continue; }
+            if (c == '\n')
+            {
+                sb.Append("\\n");
+                changed = true;
+                continue;
+            }
+            if (c == '\r')
+            {
+                sb.Append("\\r");
+                changed = true;
+                continue;
+            }
+            if (c == '\t')
+            {
+                sb.Append("\\t");
+                changed = true;
+                continue;
+            }
 
             sb.Append(c);
         }
 
-        return changed ? sb.ToString() : null;
+        var result = sb.ToString();
+        return changed ? result : null;
     }
 
     private static List<string> ExtractJsonBlocks(string text)
@@ -1817,7 +1804,7 @@ Rules:
             messages,
             stream = false,
             temperature = 0.05,
-            max_tokens = 2048   // 1024 caused truncated mid-JSON responses on multi-edit outputs
+            max_tokens = 1024
         };
         var contentJson = JsonSerializer.Serialize(requestBody);
         var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
@@ -1906,23 +1893,6 @@ Rules:
         if (start >= 0 && end > start)
             jsonStr = jsonStr.Substring(start, end - start + 1);
 
-        // Try 1: direct parse
-        var direct = TryDeserializeAgentResponse(jsonStr);
-        if (direct != null) return direct;
-
-        // Try 2: repair bare control chars / unescaped quotes then parse
-        var repaired = RepairJsonString(jsonStr);
-        if (repaired != null)
-        {
-            var afterRepair = TryDeserializeAgentResponse(repaired);
-            if (afterRepair != null) return afterRepair;
-        }
-
-        return null;
-    }
-
-    private static AgentResponse? TryDeserializeAgentResponse(string jsonStr)
-    {
         try
         {
             var parsed = JsonSerializer.Deserialize<AgentResponse>(jsonStr, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -1933,8 +1903,7 @@ Rules:
 
         try
         {
-            var opts = new JsonDocumentOptions { AllowTrailingCommas = true };
-            using var doc = JsonDocument.Parse(jsonStr, opts);
+            using var doc = JsonDocument.Parse(jsonStr);
             var root = doc.RootElement;
             if (root.ValueKind == JsonValueKind.Array)
             {
@@ -2136,8 +2105,6 @@ Rules:
     {
         var searchContent = NormalizeLineEndings(content);
         var searchOld = NormalizeLineEndings(oldString);
-
-        // 1. Exact match (after line-ending normalisation)
         var idx = searchContent.IndexOf(searchOld, StringComparison.Ordinal);
         if (idx >= 0)
         {
@@ -2145,20 +2112,10 @@ Rules:
             return (true, result, null, null);
         }
 
-        // 2. Trim-each-line fuzzy match: handles the very common case where the model
-        //    copies lines with slightly different leading/trailing whitespace.
-        var trimResult = TryReplaceTrimmedLines(searchContent, searchOld, newString);
-        if (trimResult.ok) return trimResult;
-
-        // 3. Whitespace-flexible regex (FIXED: replace escaped newlines, not escaped spaces —
-        //    Regex.Escape does NOT escape spaces so @"\ " never matched anything before).
+        // Whitespace-flexible fallback
+        var flexPattern = Regex.Escape(searchOld).Replace(@"\ ", @"\s+");
         try
         {
-            var escapedOld = Regex.Escape(searchOld);
-            var flexPattern = escapedOld
-                .Replace(@"\r\n", @"[ \t]*[\r\n]+[ \t]*")
-                .Replace(@"\n", @"[ \t]*\n[ \t]*")
-                .Replace(@"\r", @"[ \t]*\r[ \t]*");
             var m = Regex.Match(searchContent, flexPattern, RegexOptions.Multiline);
             if (m.Success)
             {
@@ -2170,51 +2127,8 @@ Rules:
 
         var lines = searchContent.Split('\n');
         var oldLines = searchOld.Split('\n');
-        var firstLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
-        var hint = string.IsNullOrEmpty(firstLine) ? null :
-            string.Join("\n", lines.Where(l => l.Contains(firstLine, StringComparison.OrdinalIgnoreCase)).Take(3));
-        return (false, content, "oldString not found in file", hint != null ? Truncate(hint, 400) : null);
-    }
-
-    /// <summary>
-    /// Fuzzy match: compares lines after trimming both sides.
-    /// Handles models that copy lines with wrong indentation or trailing spaces.
-    /// The replaced region uses actual content lines, not the model's whitespace.
-    /// </summary>
-    private static (bool ok, string content, string? error, string? snippet) TryReplaceTrimmedLines(
-        string searchContent, string searchOld, string newString)
-    {
-        var contentLines = searchContent.Split('\n');
-        var trimmedOld = searchOld.Split('\n').Select(l => l.Trim()).ToArray();
-
-        // Strip blank-only lines at the edges of oldString
-        var firstNonEmpty = Array.FindIndex(trimmedOld, l => l.Length > 0);
-        var lastNonEmpty = Array.FindLastIndex(trimmedOld, l => l.Length > 0);
-        if (firstNonEmpty < 0) return (false, searchContent, null, null);
-        var coreOld = trimmedOld.Skip(firstNonEmpty).Take(lastNonEmpty - firstNonEmpty + 1).ToArray();
-        if (coreOld.Length == 0) return (false, searchContent, null, null);
-
-        for (var i = 0; i <= contentLines.Length - coreOld.Length; i++)
-        {
-            var match = true;
-            for (var j = 0; j < coreOld.Length; j++)
-            {
-                if (!contentLines[i + j].Trim().Equals(coreOld[j], StringComparison.Ordinal))
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (!match) continue;
-
-            var prefix = i > 0 ? string.Join("\n", contentLines.Take(i)) + "\n" : "";
-            var suffix = (i + coreOld.Length) < contentLines.Length
-                ? "\n" + string.Join("\n", contentLines.Skip(i + coreOld.Length))
-                : "";
-            return (true, prefix + newString + suffix, null, null);
-        }
-
-        return (false, searchContent, null, null);
+        var hint = oldLines.Length > 0 ? string.Join("\n", lines.Where(l => l.Contains(oldLines[0].Trim(), StringComparison.OrdinalIgnoreCase)).Take(3)) : null;
+        return (false, content, $"oldString not found in file", hint != null ? Truncate(hint, 400) : null);
     }
 
     private async Task ExecuteCommandStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
@@ -2525,13 +2439,5 @@ Rules:
         var json = JsonSerializer.Serialize(data);
         await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n");
         await response.Body.FlushAsync();
-    }
-
-    [HttpPost("cancel")]
-    public async Task<IActionResult> Cancel([FromBody] object? payload)
-    {
-        // This could be extended to cancel by card ID or session
-        // For now, we just return a 200 response
-        return Ok();
     }
 }

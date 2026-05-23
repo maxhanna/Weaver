@@ -210,11 +210,9 @@
     };
 
     vm.addCard = function(col) {
-      var text = $window.prompt('Card text:');
-      if (!text) return;
       vm.state[col].push({
         id: uid(),
-        text: text,
+        text: '',
         filePath: vm.selectedProject,
         createdAt: new Date().toISOString(),
         priority: 'medium',
@@ -229,9 +227,18 @@
       saveCards();
     };
 
-    vm.deleteCard = function(id, col) {
+    vm.openDeleteCardConfirm = function (id) {
+      alert("delet " + id);
+      vm.confirmDeleteCardId  = id; 
+    }
+
+    vm.deleteCard = function(id) {
+      var col = 'done';
       var card = vm.state[col].find(function(c) { return c.id === id; });
-      if (!card) return;
+      if (!card) {
+        alert('Card not found in Done column');
+        return;
+      }
       vm.deleteCardConfirm = {
         id: id,
         col: col,
@@ -239,20 +246,20 @@
         dontShowAgain: false
       };
       try {
-        var showConfirm = $window.localStorage.getItem('maestro.deleteCardConfirm');
-        if (showConfirm === 'false') {
-          vm.confirmDeleteCard();
-        }
-      } catch(e) {}
+        vm.confirmDeleteCard();
+      } catch(e) {
+        alert('Failed to delete card: ' + (e.message || e));
+      }
     };
 
     vm.confirmDeleteCard = function() {
-      if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
+      if (!vm.deleteCardConfirm.id) return;
       var id = vm.deleteCardConfirm.id;
       var col = vm.deleteCardConfirm.col;
       var idx = vm.state[col].findIndex(function(c) { return c.id === id; });
       if (idx !== -1) { 
         vm.state[col].splice(idx, 1); 
+        console.log('Deleted card with id', id);
         saveCards(); 
       }
       if (vm.deleteCardConfirm.dontShowAgain) {
@@ -260,6 +267,7 @@
           $window.localStorage.setItem('maestro.deleteCardConfirm', 'false');
         } catch(e) {}
       }
+      vm.confirmDeleteCardId = null
       vm.deleteCardConfirm = null;
     };
 
