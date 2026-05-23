@@ -29,6 +29,11 @@
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
     vm.abortController = null;
+    vm.lastStreamingSteps = [];
+    vm.lastStreamingPhase = '';
+    vm.lastStreamingSummary = '';
+    vm.lastStreamingThinking = '';
+    vm.streamingStepsCopy = [];
 
     // Debug logging for file size and token count
     vm.logFileSizeAndTokens = function (filePath, content) {
@@ -53,6 +58,11 @@
 
     // Auto-scroll agent log when new content is added
     vm.addLogEntry = function (entry) {
+      // Debounce log entries to prevent digest loop errors
+      if (vm.lastLogEntry && vm.lastLogEntry.message === entry.message) {
+        return;
+      }
+      vm.lastLogEntry = entry;
       vm.agentActivityLog.push(entry);
       vm.scrollToBottom();
     };

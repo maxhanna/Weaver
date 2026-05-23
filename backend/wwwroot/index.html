@@ -92,6 +92,7 @@
             <div class="card-text">{{card.text}}</div>
             <div class="card-tags" ng-if="card.priority">
               <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+              <span class="card-tag" ng-if="vm.selectedCardId === card.id">In Progress</span>
             </div>
             <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
               <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
