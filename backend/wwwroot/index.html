@@ -161,6 +161,10 @@
                         <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
                           −{{s.linesRemoved || 0}} lines</div>
                         <div class="diff-sbs">
+                          <div class="diff-header">
+                            <div class="diff-header-cell diff-header-old">Old</div>
+                            <div class="diff-header-cell diff-header-new">New</div>
+                          </div>
                           <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                             <div class="diff-cell diff-cell-old"
                               ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
@@ -174,6 +178,9 @@
                             </div>
                           </div>
                         </div>
+                      </div>
+                      <div class="rename-display" ng-if="s.type==='rename'">
+                        <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
@@ -310,6 +317,10 @@
                   <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
                     −{{s.linesRemoved || 0}} lines</div>
                   <div class="diff-sbs">
+                    <div class="diff-header">
+                      <div class="diff-header-cell diff-header-old">Old</div>
+                      <div class="diff-header-cell diff-header-new">New</div>
+                    </div>
                     <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                       <div class="diff-cell diff-cell-old"
                         ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
@@ -323,6 +334,9 @@
                       </div>
                     </div>
                   </div>
+                </div>
+                <div class="rename-display" ng-if="s.type==='rename' && s.status==='done'">
+                  <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                 </div>
                 <div class="step-detail" ng-if="s.output">
                   <pre>{{s.output | limitTo:24000}}</pre>
@@ -374,7 +388,7 @@
 
   <!-- FILE PICKER MODAL -->
   <div class="popup-overlay" ng-if="vm.showFilePicker" ng-click="vm.closeFilePicker()">
-    <div class="popup-panel" style="max-width:600px;">
+    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>Attach Files</strong>
         <button ng-click="vm.closeFilePicker()">✕</button>

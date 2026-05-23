@@ -1100,18 +1100,50 @@ main {
 	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.diff-header {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	position: sticky;
+	top: 0;
+	z-index: 1;
+}
+
+.diff-header-cell {
+	padding: 2px 4px;
+	font-size: 9px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	background: rgba(0, 0, 0, 0.35);
+}
+
+.diff-header-old {
+	color: #f87171;
+	border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.diff-header-new {
+	color: #4ade80;
+}
+
 .diff-row {
-	display: flex;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
 	min-height: 18px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.diff-row:last-child {
+	border-bottom: none;
 }
 
 .diff-cell {
-	flex: 1;
+	min-width: 0;
 	padding: 1px 4px;
 	white-space: pre;
 	font-family: monospace;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	overflow-x: auto;
+	overflow-y: hidden;
 }
 
 .diff-cell-old {
@@ -1147,6 +1179,19 @@ main {
 	opacity: 0.4;
 	font-size: 9px;
 	user-select: none;
+}
+
+.rename-display {
+	margin-top: 4px;
+	padding: 6px 8px;
+	background: rgba(96, 165, 250, 0.1);
+	border-radius: 4px;
+	font-size: 11px;
+}
+
+.rename-arrow {
+	font-family: ui-monospace, monospace;
+	color: #60a5fa;
 }
 
 .agent-steps .step-err,

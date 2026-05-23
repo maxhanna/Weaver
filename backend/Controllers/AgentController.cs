@@ -115,6 +115,7 @@ public class AgentController : ControllerBase
         public string? Pattern { get; set; }
         public string? Url { get; set; }
         public string? Query { get; set; }
+        public string? ToPath { get; set; }
         public bool? Complete { get; set; }
     }
 
@@ -348,6 +349,29 @@ public class AgentController : ControllerBase
         return found;
     }
 
+    private static string? ExtractTargetPath(string changeDesc, string currentRelPath, string projectRoot)
+    {
+        // Find "to" or "→" in the description, then extract the path after it
+        var idx = changeDesc.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) idx = changeDesc.LastIndexOf(" → ", StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) return null;
+
+        var after = changeDesc.Substring(idx + 4).Trim().Trim('.', ' ', '"', '\'');
+        if (string.IsNullOrWhiteSpace(after)) return null;
+
+        // If it's just a filename (no directory separators), inherit source directory
+        var dir = Path.GetDirectoryName(currentRelPath.Replace('/', Path.DirectorySeparatorChar)) ?? "";
+        var target = after.Contains('/') || after.Contains('\\')
+            ? after.Replace('\\', '/')
+            : (string.IsNullOrEmpty(dir) ? after : dir.Replace('\\', '/') + "/" + after);
+
+        // Validate it looks like a file path (has extension or doesn't start with special chars)
+        if (string.IsNullOrWhiteSpace(target) || target.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+            return null;
+
+        return target;
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  PHASE 1 — DISCOVER
     //  Purely deterministic; no LLM calls.  Builds a rich context string
@@ -518,7 +542,8 @@ RULES:
 - Maximum 5 files total.
 - If both HTML and CSS need changes, list them as separate plan items.
 - Priority 1 = most important file. Sort by priority ascending.
-- If the task is purely CSS, list only the CSS file. If purely JS, list only JS.";
+- If the task is purely CSS, list only the CSS file. If purely JS, list only JS.
+- For RENAME/MOVE tasks: list the source file. Set the ""change"" field to: 'Rename this file to <new/path>'.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -661,6 +686,31 @@ RULES:
             }
 
             var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+
+            // Detect rename/move operations — bypass LLM edit loop
+            var changeDesc = (item.ChangeDescription ?? "").Trim();
+            var isRename = changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase) ||
+                           changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase);
+            if (isRename)
+            {
+                var dstPath = ExtractTargetPath(changeDesc, relPath, projectRoot);
+                if (dstPath != null)
+                {
+                    var renameStep = new AgentStep
+                    {
+                        Index = 0,
+                        Type = "rename",
+                        Path = relPath,
+                        ToPath = dstPath,
+                        Description = $"Rename {relPath} → {dstPath}"
+                    };
+                    var singleResult = new List<object>();
+                    var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse);
+                    idx += results.Count;
+                    allResults.AddRange(results);
+                    continue;
+                }
+            }
 
             // Combine the original prompt with the file-specific change description
             var fileTask = string.IsNullOrWhiteSpace(item.ChangeDescription)
@@ -1340,6 +1390,9 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                         if (!terminalStarted) { _terminal.Start(); terminalStarted = true; }
                         await ExecuteCommandStep(step, projectRoot, result);
                         break;
+                    case "rename":
+                        await ExecuteRenameStep(step, projectRoot, result);
+                        break;
                     case "read":
                         await ExecuteReadStep(step, projectRoot, result);
                         break;
@@ -1447,6 +1500,42 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
     }
 
+    private async Task ExecuteRenameStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
+    {
+        var srcRel = (step.Path ?? "").Replace('\\', '/');
+        var dstRel = (step.ToPath ?? "").Replace('\\', '/');
+        var srcPath = Path.GetFullPath(Path.Combine(projectRoot, srcRel.Replace('/', Path.DirectorySeparatorChar)));
+        var dstPath = Path.GetFullPath(Path.Combine(projectRoot, dstRel.Replace('/', Path.DirectorySeparatorChar)));
+
+        result["path"] = srcRel;
+        result["toPath"] = dstRel;
+
+        if (!IsPathUnderRoot(srcPath, projectRoot) || !IsPathUnderRoot(dstPath, projectRoot))
+        { result["status"] = "error"; result["error"] = "Path outside project root"; return; }
+
+        if (!System.IO.File.Exists(srcPath))
+        { result["status"] = "error"; result["error"] = $"Source file not found: {srcRel}"; return; }
+
+        if (System.IO.File.Exists(dstPath))
+        { result["status"] = "error"; result["error"] = $"Destination already exists: {dstRel}"; return; }
+
+        try
+        {
+            var dir = Path.GetDirectoryName(dstPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            System.IO.File.Move(srcPath, dstPath);
+            result["status"] = "done";
+            result["editAction"] = "renamed";
+        }
+        catch (Exception ex)
+        {
+            result["status"] = "error";
+            result["error"] = ex.Message;
+        }
+    }
+
     private static void PopulateEditResult(
         Dictionary<string, object?> result, string action, string path,
         string? oldStr, string? newStr, string writtenContent)
@@ -1456,8 +1545,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         result["path"] = path;
         result["linesRemoved"] = (oldStr ?? "").Split('\n').Length;
         result["linesAdded"] = (newStr ?? "").Split('\n').Length;
-        result["oldStringPreview"] = Truncate(oldStr, 300);
-        result["newStringPreview"] = Truncate(newStr, 300);
+        if (!string.IsNullOrEmpty(oldStr)) result["oldStringPreview"] = Truncate(oldStr, 300);
+        if (!string.IsNullOrEmpty(newStr)) result["newStringPreview"] = Truncate(newStr, 300);
         result["diffPreview"] = BuildDiffPreview(oldStr, newStr);
         result["oldLines"] = (oldStr ?? "").Split('\n');
         result["newLines"] = (newStr ?? "").Split('\n');

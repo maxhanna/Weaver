@@ -542,9 +542,11 @@
 
     function refreshFilesEditedFromSteps() {
       vm.streamingFilesEdited = vm.streamingSteps.filter(function(s) {
-        return s.type === 'edit' && s.status === 'done' && s.path;
+        return (s.type === 'edit' || s.type === 'rename') && s.status === 'done' && s.path;
       }).map(function(s) {
-        return { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
+        var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
+        if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || '');
+        return info;
       });
     }
 
