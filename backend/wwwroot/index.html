@@ -42,7 +42,7 @@
         <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)">
+            ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)" draggable="true">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -84,7 +84,7 @@
         <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)">
+            ng-click="vm.selectCard(card)" draggable="true">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -106,7 +106,7 @@
               <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
               <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
                 Delete</button>
-            </div>
+            </div> 
           </div>
         </div>
       </div>
@@ -120,7 +120,7 @@
         <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}">
           <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)">
+            ng-click="vm.selectCard(card)" draggable="true">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -133,7 +133,7 @@
               <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
                 <span>📎</span><span class="name">{{f}}</span>
               </div>
-            </div>
+            </div> 
             <!-- Agent analysis shown on Done cards -->
             <div class="card-analysis" ng-if="card.agentAnalysis">
               <details>
@@ -165,16 +165,24 @@
                             <div class="diff-header-cell diff-header-old">Old</div>
                             <div class="diff-header-cell diff-header-new">New</div>
                           </div>
-                          <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
-                            <div class="diff-cell diff-cell-old"
-                              ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                              <span class="diff-lineno">{{$index+1}}</span>
-                              <span>{{line.oldLine || ''}}</span>
+                          <div class="diff-wrapper">
+                            <div class="diff-col diff-col-old">
+                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                                <div class="diff-cell diff-cell-old"
+                                  ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                                  <span class="diff-lineno">{{$index+1}}</span>
+                                  <span>{{line.oldLine || ''}}</span>
+                                </div>
+                              </div>
                             </div>
-                            <div class="diff-cell diff-cell-new"
-                              ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                              <span class="diff-lineno">{{$index+1}}</span>
-                              <span>{{line.newLine || ''}}</span>
+                            <div class="diff-col diff-col-new">
+                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                                <div class="diff-cell diff-cell-new"
+                                  ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                                  <span class="diff-lineno">{{$index+1}}</span>
+                                  <span>{{line.newLine || ''}}</span>
+                                </div>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -321,16 +329,24 @@
                       <div class="diff-header-cell diff-header-old">Old</div>
                       <div class="diff-header-cell diff-header-new">New</div>
                     </div>
-                    <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
-                      <div class="diff-cell diff-cell-old"
-                        ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                        <span class="diff-lineno">{{$index+1}}</span>
-                        <span>{{line.oldLine || ''}}</span>
+                    <div class="diff-wrapper">
+                      <div class="diff-col diff-col-old">
+                        <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                          <div class="diff-cell diff-cell-old"
+                            ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                            <span class="diff-lineno">{{$index+1}}</span>
+                            <span>{{line.oldLine || ''}}</span>
+                          </div>
+                        </div>
                       </div>
-                      <div class="diff-cell diff-cell-new"
-                        ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                        <span class="diff-lineno">{{$index+1}}</span>
-                        <span>{{line.newLine || ''}}</span>
+                      <div class="diff-col diff-col-new">
+                        <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                          <div class="diff-cell diff-cell-new"
+                            ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                            <span class="diff-lineno">{{$index+1}}</span>
+                            <span>{{line.newLine || ''}}</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -425,8 +441,8 @@
   </div>
 
   <!-- ADD/EDIT PROJECT MODAL -->
-  <div class="popup-overlay" ng-if="vm.showAddProjectPanel">
-    <div class="popup-panel" style="max-width:480px;">
+<div class="popup-overlay" ng-if="vm.deleteCardConfirm && vm.deleteCardConfirm.show" ng-click="vm.cancelDeleteCard()">
+  <div class="popup-panel" style="max-width:480px;">
       <div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
         <button ng-click="vm.closeAddProjectPanel()">✕</button>

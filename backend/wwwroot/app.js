@@ -302,18 +302,13 @@
         // Attach ESC key handler to document
         const handleEscape = function(event) {
           if (event.keyCode === 27) { // ESC key
-            vm.confirmDeleteCardId = null;
-            vm.deleteCardConfirm.show = false;
-            // Immediately hide modal and backdrop
-            const modal = document.querySelector('.delete-confirm-modal');
-            if (modal) {
-              modal.style.display = 'none';
-              modal.style.backdropFilter = 'none';
-            }
-            // Remove backdrop if it exists
-            const backdrop = document.querySelector('.modal-backdrop');
-            if (backdrop) {
-              backdrop.remove();
+            // Check if delete confirmation is visible before closing
+            if (vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
+              // Immediately set VM properties to null
+              vm.confirmDeleteCardId = null;
+              vm.deleteCardConfirm = null;
+              // Force immediate UI update
+              $scope.$apply();
             }
           }
         };
@@ -324,6 +319,36 @@
         });
       }
     });
+
+    // Drag and drop functionality
+    vm.dragStart = function(event, card, col) {
+      event.dataTransfer.setData('text/plain', JSON.stringify({ card, col }));
+    };
+
+    vm.dragOver = function(event) {
+      event.preventDefault();
+    };
+
+    vm.drop = function(event, targetCol) {
+      event.preventDefault();
+      var data = event.dataTransfer.getData('text/plain');
+      if (!data) return;
+      
+      var { card, col } = JSON.parse(data);
+      
+      // Remove card from source column
+      var sourceCol = vm.state[col];
+      var cardIndex = sourceCol.findIndex(c => c.id === card.id);
+      if (cardIndex !== -1) {
+        sourceCol.splice(cardIndex, 1);
+        
+        // Add card to target column
+        vm.state[targetCol].push(card);
+        
+        // Save updated state
+        saveCards();
+      }
+    };
 
     // Global ESC key listener for delete confirmation
     angular.element($window).on('keydown', function(event) {

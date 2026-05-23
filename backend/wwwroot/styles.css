@@ -1092,24 +1092,25 @@ main {
 .diff-sbs {
 	display: flex;
 	flex-direction: column;
-	font-size: 10px;
-	line-height: 1.4;
-	max-height: 200px;
-	overflow: auto;
+	font-size: 10px; 
+	overflow-y: auto;
+	overflow-x: hidden;
 	border-radius: 4px;
 	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .diff-header {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
+	display: flex;
 	position: sticky;
 	top: 0;
 	z-index: 1;
+	flex-shrink: 0;
 }
 
 .diff-header-cell {
+	flex: 1;
 	padding: 2px 4px;
+	min-width: 0;
 	font-size: 9px;
 	font-weight: 600;
 	text-transform: uppercase;
@@ -1126,9 +1127,29 @@ main {
 	color: #4ade80;
 }
 
+.diff-wrapper {
+	display: flex;
+	flex-direction: row;
+	min-height: 0;
+}
+
+.diff-col {
+	min-width: 0;
+	flex: 1;
+	overflow-x: auto;
+	overflow-y: hidden;
+}
+
+.diff-col-old {
+	border-right: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(248, 113, 113, 0.08);
+}
+
+.diff-col-new {
+	background: rgba(74, 222, 128, 0.08);
+}
+
 .diff-row {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
 	min-height: 18px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.03);
 }
@@ -1137,18 +1158,16 @@ main {
 	border-bottom: none;
 }
 
-.diff-cell {
-	min-width: 0;
-	padding: 1px 4px;
+.diff-cell { 
 	white-space: pre;
 	font-family: monospace;
-	overflow-x: auto;
-	overflow-y: hidden;
+	display: flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
 }
 
 .diff-cell-old {
 	background: rgba(248, 113, 113, 0.08);
-	border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .diff-cell-new {

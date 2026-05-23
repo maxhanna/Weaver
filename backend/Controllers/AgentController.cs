@@ -240,17 +240,17 @@ public class AgentController : ControllerBase
     //  SSE / LOGGING
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task EmitLog(bool emit, string level, string message, object? detail = null)
+    private async Task EmitLog(bool emit, string level, string message, object? detail = null, CancellationToken ct = default)
     {
         if (!emit) return;
-        await SendSse(Response, "log", new { ts = DateTime.UtcNow.ToString("o"), level, message, detail });
+        await SendSse(Response, "log", new { ts = DateTime.UtcNow.ToString("o"), level, message, detail }, ct);
     }
 
-    private static async Task SendSse(HttpResponse response, string eventName, object data)
+    private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
         var json = JsonSerializer.Serialize(data);
-        await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n");
-        await response.Body.FlushAsync();
+        await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
+        await response.Body.FlushAsync(ct);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -636,24 +636,25 @@ RULES:
 
     private async Task<List<object>> RunEditPhase(
         List<PlanItem> plan, string discoveryContext, string projectRoot,
-        int startIndex, bool emitSse, string originalPrompt)
+        int startIndex, bool emitSse, string originalPrompt, CancellationToken ct = default)
     {
         var allResults = new List<object>();
 
         if (plan.Count == 0)
         {
-            await EmitLog(emitSse, "warn", "Phase 3 — EDIT: plan is empty, nothing to edit");
+            await EmitLog(emitSse, "warn", "Phase 3 — EDIT: plan is empty, nothing to edit", ct: ct);
             return allResults;
         }
 
-        await EmitLog(emitSse, "info", $"Phase 3 — EDIT: applying edits to {plan.Count} planned file(s)");
+        await EmitLog(emitSse, "info", $"Phase 3 — EDIT: applying edits to {plan.Count} planned file(s)", ct: ct);
         if (emitSse)
-            await SendSse(Response, "phase", new { phase = "edit", message = $"Editing {plan.Count} file(s)…" });
+            await SendSse(Response, "phase", new { phase = "edit", message = $"Editing {plan.Count} file(s)…" }, ct);
 
         var idx = startIndex;
         foreach (var item in plan.OrderBy(p => p.Priority))
         {
             if (string.IsNullOrWhiteSpace(item.File)) continue;
+            ct.ThrowIfCancellationRequested();
 
             var relPath = item.File.Replace('\\', '/');
             var fullPath = Path.GetFullPath(
@@ -661,22 +662,20 @@ RULES:
 
             if (!IsPathUnderRoot(fullPath, projectRoot))
             {
-                await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root");
+                await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root", ct: ct);
                 continue;
             }
 
             if (emitSse)
-                await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" });
+                await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
 
             if (!System.IO.File.Exists(fullPath))
             {
-                await EmitLog(emitSse, "warn", $"Planned file not found: {relPath}");
-                // Suggest alternatives
+                await EmitLog(emitSse, "warn", $"Planned file not found: {relPath}", ct: ct);
                 var similar = FindSimilarFiles(relPath, projectRoot);
                 if (similar.Count > 0)
                 {
-                    await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}");
-                    // Retry with the first similar file
+                    await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
                     relPath = similar[0];
                     fullPath = Path.GetFullPath(
                         Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -704,8 +703,7 @@ RULES:
                         ToPath = dstPath,
                         Description = $"Rename {relPath} → {dstPath}"
                     };
-                    var singleResult = new List<object>();
-                    var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse);
+                    var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse, ct);
                     idx += results.Count;
                     allResults.AddRange(results);
                     continue;
@@ -719,18 +717,27 @@ RULES:
 
             // --- up to 2 attempts ---
             List<AgentStep> editSteps = new();
+            var timedOut = false;
             for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
             {
                 await EmitLog(emitSse, "info",
                     $"LLM edit call: {relPath} (attempt {attempt + 1})",
-                    new { chars = fileContent.Length, taskSummary = item.ChangeDescription });
+                    new { chars = fileContent.Length, taskSummary = item.ChangeDescription }, ct: ct);
 
                 var (raw, _, err) = await CallLlmSingleFileEdit(
-                    fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext);
+                    fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext, ct);
+
+                // Skip retry on timeout — won't help
+                if (err != null && err.StartsWith("Timed out", StringComparison.Ordinal))
+                {
+                    timedOut = true;
+                    await EmitLog(emitSse, "error", $"Timed out editing {relPath} — skipping", ct: ct);
+                    break;
+                }
 
                 await EmitLog(emitSse, "debug",
                     $"LLM raw ({raw?.Length ?? 0} chars)",
-                    new { raw });
+                    new { raw }, ct: ct);
 
                 editSteps = ParseEditsFromLlmRaw(raw, relPath);
 
@@ -738,7 +745,6 @@ RULES:
                 string? rejectReason = null;
                 if (editSteps.Count > 0)
                 {
-                    // Reject edits where newString is empty/missing (model returned oldString only)
                     var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
                     if (missingNew.Count > 0)
                     {
@@ -760,28 +766,29 @@ RULES:
 
                 if (editSteps.Count == 0)
                     await EmitLog(emitSse, "warn",
-                        $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}");
+                        $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
             }
+
+            if (timedOut) continue;
 
             if (editSteps.Count == 0)
             {
                 // Heuristic patches as last resort
                 editSteps = TryHeuristicPatches(fileTask, relPath, fileContent);
                 if (editSteps.Count > 0)
-                    await EmitLog(emitSse, "info", $"Applied {editSteps.Count} heuristic patch(es) for {relPath}");
+                    await EmitLog(emitSse, "info", $"Applied {editSteps.Count} heuristic patch(es) for {relPath}", ct: ct);
             }
 
             if (editSteps.Count == 0)
             {
-                await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping");
+                await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
                 continue;
             }
 
-            // Renumber steps for display
             for (var i = 0; i < editSteps.Count; i++)
                 editSteps[i].Index = i;
 
-            var batchResults = await ExecuteSteps(editSteps, projectRoot, idx, emitSse);
+            var batchResults = await ExecuteSteps(editSteps, projectRoot, idx, emitSse, ct);
             idx += batchResults.Count;
             allResults.AddRange(batchResults);
 
@@ -792,14 +799,13 @@ RULES:
             if (!fileEdited)
             {
                 await EmitLog(emitSse, "warn",
-                    $"All edits failed for {relPath} — running one retry with re-read content");
+                    $"All edits failed for {relPath} — running one retry with re-read content", ct: ct);
 
-                // Re-read after possible partial writes, retry once more with fresh content
                 if (System.IO.File.Exists(fullPath))
                 {
                     var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
                     var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                        fileTask, relPath, freshContent, projectRoot, 2, discoveryContext);
+                        fileTask, relPath, freshContent, projectRoot, 2, discoveryContext, ct);
                     var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
                         .Where(e => !string.Equals(
                             NormalizeLineEndings(e.OldString ?? ""),
@@ -810,7 +816,7 @@ RULES:
                     if (retrySteps.Count > 0)
                     {
                         for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
-                        var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse);
+                        var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
                         idx += retryResults.Count;
                         allResults.AddRange(retryResults);
                     }
@@ -827,7 +833,7 @@ RULES:
     // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<(List<object> allSteps, string summary, bool complete)> RunPhasedPipeline(
-        string prompt, string projectRoot, bool emitSse)
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
         var allSteps = new List<object>();
 
@@ -840,16 +846,16 @@ RULES:
         var plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
 
         // ── Phase 3: EDIT ────────────────────────────────────────────────────
-        var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt);
+        var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
 
         // ── Phase 4: VERIFY + RETRY LOOP ─────────────────────────────────────
         var editsApplied = HasSuccessfulEdits(allSteps);
         for (var retry = 0; retry < 2 && !editsApplied && TaskExpectsFileChanges(prompt); retry++)
         {
             await EmitLog(emitSse, "warn",
-                $"Phase 4 — VERIFY attempt {retry + 1}: no successful edits. Re-planning with stronger instructions…");
+                $"Phase 4 — VERIFY attempt {retry + 1}: no successful edits. Re-planning with stronger instructions…", ct: ct);
             plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse);
-            var retryEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt);
+            var retryEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
             allSteps.AddRange(retryEdits);
             editsApplied = HasSuccessfulEdits(allSteps);
         }
@@ -969,7 +975,7 @@ RULES:
                     })
                     .ToList();
 
-                var fastEdits = await RunEditPhase(fastPlan, discoveryText, projectRoot, allSteps.Count, emitSse: true, req.Prompt);
+                var fastEdits = await RunEditPhase(fastPlan, discoveryText, projectRoot, allSteps.Count, emitSse: true, req.Prompt, ct: Response.HttpContext.RequestAborted);
                 allSteps.AddRange(fastEdits);
 
                 complete = HasSuccessfulEdits(allSteps);
@@ -979,7 +985,7 @@ RULES:
             {
                 // ── Full phased pipeline ────────────────────────────────────
                 (allSteps, summary, complete) =
-                    await RunPhasedPipeline(req.Prompt, projectRoot, emitSse: true);
+                    await RunPhasedPipeline(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted);
             }
 
             var filesEdited = ExtractFilesEdited(allSteps);
@@ -1052,7 +1058,8 @@ RULES:
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent,
-        string projectRoot, int attempt = 0, string? discoveryContext = null)
+        string projectRoot, int attempt = 0, string? discoveryContext = null,
+        CancellationToken ct = default)
     {
         const string systemPrompt = @"You are a precise code patch tool. Your task is to output JSON with BOTH oldString and newString.
 
@@ -1120,8 +1127,12 @@ RULES:
             var contentJson = JsonSerializer.Serialize(requestBody);
             var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent);
-            var respText = await resp.Content.ReadAsStringAsync();
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            var combined = linkedCts.Token;
+
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, combined);
+            var respText = await resp.Content.ReadAsStringAsync(combined);
 
             var raw = ExtractLlmContent(respText);
             if (string.IsNullOrWhiteSpace(raw))
@@ -1140,7 +1151,7 @@ RULES:
                                       StringComparison.Ordinal))
                     {
                         var generated = await GenerateNewString(
-                            step.OldString ?? "", taskPrompt, relativePath, fileContent);
+                            step.OldString ?? "", taskPrompt, relativePath, fileContent, ct);
                         if (!string.IsNullOrWhiteSpace(generated))
                             step.NewString = generated;
                     }
@@ -1170,7 +1181,7 @@ RULES:
     }
 
     private async Task<string?> GenerateNewString(string oldString, string taskPrompt,
-        string relativePath, string fileContent)
+        string relativePath, string fileContent, CancellationToken ct = default)
     {
         var systemPrompt = @"You are a code modifier. Given a code block and a task, modify the code block to implement the task.
 
@@ -1202,8 +1213,12 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             var contentJson = JsonSerializer.Serialize(requestBody);
             var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent);
-            var respText = await resp.Content.ReadAsStringAsync();
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            var combined = linkedCts.Token;
+
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, combined);
+            var respText = await resp.Content.ReadAsStringAsync(combined);
 
             var content = ExtractLlmContent(respText);
             if (string.IsNullOrWhiteSpace(content)) return null;
@@ -1356,7 +1371,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
     // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<List<object>> ExecuteSteps(
-        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse)
+        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse, CancellationToken ct = default)
     {
         var results = new List<object>();
         var terminalStarted = false;
@@ -1375,8 +1390,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             if (emitSse)
             {
                 await EmitLog(emitSse, "step",
-                    $"▶ {step.Type}: {step.Description ?? step.Path ?? step.Command ?? step.Query ?? ""}");
-                await SendSse(Response, "step", result);
+                    $"▶ {step.Type}: {step.Description ?? step.Path ?? step.Command ?? step.Query ?? ""}", ct: ct);
+                await SendSse(Response, "step", result, ct);
             }
 
             try
@@ -1435,8 +1450,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                         oldStringPreview = result.GetValueOrDefault("oldStringPreview"),
                         snippet = result.GetValueOrDefault("snippet"),
                         suggestions = result.GetValueOrDefault("suggestions")
-                    });
-                await SendSse(Response, "step", result);
+                    }, ct: ct);
+                await SendSse(Response, "step", result, ct);
             }
         }
 
