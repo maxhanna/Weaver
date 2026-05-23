@@ -307,54 +307,24 @@
       vm.deleteCardConfirm = null;
     };
 
-    vm.closeDeleteCardConfirm = function() {
-      vm.confirmDeleteCardId = null;
-      vm.deleteCardConfirm = null;
-      // Remove ESC key handler from modal if it exists
-      const modal = document.querySelector('.delete-confirm-modal');
-      if (modal) {
-        const escHandler = modal.escHandler;
-        if (escHandler) {
-          modal.removeEventListener('keydown', escHandler);
-          modal.escHandler = null;
-        }
-      }
-    };
-
-    // Close delete confirmation with Escape key
-    $scope.$watch(function() { return vm.confirmDeleteCardId; }, function(newVal) {
-      if (newVal !== null) {
-        // Attach ESC key handler to document
-        const handleEscape = function(event) {
-          if (event.keyCode === 27) { // ESC key
-            // Check if delete confirmation is visible before closing
-            if (vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
-              // Immediately set VM properties to null
-              vm.confirmDeleteCardId = null;
-              vm.deleteCardConfirm = null;
-              // Force immediate UI update
-              $scope.$apply();
-            }
-          }
-        };
-        document.addEventListener('keydown', handleEscape);
-        // Also attach to delete confirm modal for immediate close
+    vm.closeDeleteCardConfirm = function(event) {
+      // Handle ESC key press directly
+      if (event && event.key === 'Escape') {
+        event.stopPropagation();
+        event.preventDefault();
+        vm.confirmDeleteCardId = null;
+        vm.deleteCardConfirm = null; 
         const modal = document.querySelector('.delete-confirm-modal');
         if (modal) {
-          modal.addEventListener('keydown', function(event) {
-            if (event.key === 'Escape') {
-              vm.confirmDeleteCardId = null;
-              vm.deleteCardConfirm = null;
-              $scope.$apply();
-            }
-          });
+          modal.style.display = 'none';
         }
-        // Clean up event listener when scope is destroyed
-        $scope.$on('$destroy', function() {
-          document.removeEventListener('keydown', handleEscape);
-        });
+       // $scope.$evalAsync();
+        return;
       }
-    });
+      vm.confirmDeleteCardId = null;
+      vm.deleteCardConfirm = null;
+    };
+ 
 
     // Drag and drop functionality
     vm.dragStart = function(event, card, col) {
@@ -384,46 +354,17 @@
         // Save updated state
         saveCards();
       }
-    };
-
-    // Global ESC key listener for delete confirmation
-    angular.element($window).on('keydown', function(event) {
-      if (event.keyCode === 27 && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
-        vm.confirmDeleteCardId = null;
-        vm.deleteCardConfirm = null;
-        // Immediately hide modal and backdrop
-        const modal = document.querySelector('.delete-confirm-modal');
-        if (modal) {
-          modal.style.display = 'none';
-          modal.style.backdropFilter = 'none';
-        }
-        // Remove backdrop if it exists
-        const backdrop = document.querySelector('.modal-backdrop');
-        if (backdrop) {
-          backdrop.remove();
-        }
+    }; 
+     
+    $document.on('keydown', function (event) {
+      if (event.key === 'Escape') {
+        $scope.$evalAsync(() => {
+          vm.confirmDeleteCardId = null;
+          vm.deleteCardConfirm = null;
+        });
       }
     });
-
-    // Additional ESC key listener for delete confirmation modal
-    document.addEventListener('keydown', function(event) {
-      if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
-        vm.confirmDeleteCardId = null;
-        vm.deleteCardConfirm = null;
-        // Immediately hide modal and backdrop
-        const modal = document.querySelector('.delete-confirm-modal');
-        if (modal) {
-          modal.style.display = 'none';
-          modal.style.backdropFilter = 'none';
-        }
-        // Remove backdrop if it exists
-        const backdrop = document.querySelector('.modal-backdrop');
-        if (backdrop) {
-          backdrop.remove();
-        }
-      }
-    });
-
+    
     vm.selectCard = function(card) {
       vm.selectedCardId = card.id;
       vm.aiPrompt = card.text;
@@ -852,14 +793,7 @@
         }
         readNext();
       }).catch(function(err) {
-        vm.streamingActive = false;
-        vm.abortController = null;
-        if (err.name === 'AbortError') {
-          vm.agentResult = { warning: 'Agent stopped by user.' };
-        } else {
-          vm.agentResult = { error: 'Connection failed: ' + err.message };
-        }
-        $scope.$digest();
+        console.error('Execution error', err);
       });
     };
 

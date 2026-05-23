@@ -442,8 +442,8 @@
 
   <!-- ADD/EDIT PROJECT MODAL -->
 <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.cancelDeleteCard()">
-<div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;">
-      <div class="popup-header">
+<div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;" tabindex="-1" ng-keydown="if ($event.key === 'Escape') { vm.closeDeleteCardConfirm($event); $event.stopPropagation(); $event.preventDefault(); }">
+<div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
         <button ng-click="vm.closeAddProjectPanel()">✕</button>
       </div>
