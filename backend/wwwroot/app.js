@@ -219,6 +219,11 @@
         attached: []
       });
       saveCards();
+      $timeout(function() {
+        var newCard = vm.state[col][vm.state[col].length - 1];
+        var textarea = document.querySelector('[data-card-id="' + newCard.id + '"] textarea');
+        if (textarea) textarea.focus();
+      }, 0);
     };
 
     vm.clearDoneCards = function() {
@@ -290,13 +295,25 @@
     vm.moveCard = function(id, from, to) {
       var idx = vm.state[from].findIndex(function(c) { return c.id === id; });
       if (idx === -1) return;
-      var card = vm.state[from].splice(idx, 1)[0];
+      var card = vm.state[from][idx];
+      if (from === 'todo' && to === 'doing' && !card.ready) {
+        return $window.alert('Mark the card as Ready first (press Start)');
+      }
+      vm.state[from].splice(idx, 1);
+      if (from === 'doing' && to === 'todo') {
+        card.ready = false;
+        delete card.agentAnalysis;
+      }
       vm.state[to].push(card);
+      if (from === 'todo' && to === 'doing' && card.ready) {
+        vm.executeAgent(card);
+      }
       saveCards();
     };
 
     vm.reopenCard = function(card) {
       // Clear analysis, move to todo
+      card.ready = false;
       delete card.agentAnalysis;
       delete card.agentSteps;
       var idx = vm.state.done.findIndex(function(c) { return c.id === card.id; });
@@ -693,14 +710,23 @@
 
     vm.startCard = function(card) {
       if (!card) return;
-      vm.executeAgent(card);
+      if (card.ready) {
+        moveCardToDoing(card.id);
+        vm.executeAgent(card);
+      } else {
+        card.ready = true;
+        saveCards();
+      }
     };
 
     // === Auto-queue ===
     vm.processQueue = function() {
       if (vm.streamingActive) return;
-      var next = vm.state.todo.filter(function(c) { return c.filePath === vm.selectedProject; })[0];
-      if (next) vm.executeAgent(next);
+      var next = vm.state.todo.filter(function(c) { return c.filePath === vm.selectedProject && c.ready; })[0];
+      if (next) {
+        moveCardToDoing(next.id);
+        vm.executeAgent(next);
+      }
     };
 
     // === AI Chat ===
@@ -822,11 +848,25 @@
               if (idx !== -1) fromCol = cn;
             });
             if (!fromCol || fromCol === targetCol) return;
-            // Remove from source, add to target
+            var cardObj = vm.state[fromCol].find(function(c) { return c.id === cardId; });
+            if (!cardObj) return;
+            if (fromCol === 'todo' && targetCol === 'doing' && !cardObj.ready) {
+              alert('Mark the card as Ready first (press Start)');
+              return;
+            }
+            if (fromCol === 'doing' && targetCol === 'todo') {
+              cardObj.ready = false;
+              delete cardObj.agentAnalysis;
+            }
             var idx = vm.state[fromCol].findIndex(function(c) { return c.id === cardId; });
             if (idx === -1) return;
-            var card = vm.state[fromCol].splice(idx, 1)[0];
-            vm.state[targetCol].push(card);
+            vm.state[fromCol].splice(idx, 1);
+            vm.state[targetCol].push(cardObj);
+            if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
+              saveCards();
+              vm.executeAgent(cardObj);
+              return;
+            }
             saveCards();
             $scope.$digest();
           });

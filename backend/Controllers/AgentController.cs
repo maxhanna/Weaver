@@ -536,6 +536,7 @@ public class AgentController : ControllerBase
         AgentResponse? lastResponse = null;
         string? lastError = null;
         var globalStepIndex = allSteps.Count;
+        var inlineEditAttempted = false;
 
         for (var iteration = 0; iteration < maxIterations; iteration++)
         {
@@ -620,8 +621,10 @@ public class AgentController : ControllerBase
 
             // Model returned exploration-only steps (read/grep/list etc.)
             // Run dedicated edit phase directly using file content from the read results
-            if (expectsEdits && !anyEditsDone && BatchWasExplorationOnly(batch))
+            // Only attempt once — if it produced no edits, don't re-trigger on subsequent iterations
+            if (expectsEdits && !anyEditsDone && !inlineEditAttempted && BatchWasExplorationOnly(batch))
             {
+                inlineEditAttempted = true;
                 await EmitLog(stream, "info", "Model returned read-only batch — running dedicated edit phase with file content");
                 var editPaths = ResolveEditTargetPaths(prompt, attachedFiles ?? new List<string>(), projectRoot);
                 if (editPaths.Count == 0 && batchResults.Count > 0)
@@ -819,7 +822,7 @@ public class AgentController : ControllerBase
                 for (var attempt = 0; attempt < 2 && fileEdits.Count == 0; attempt++)
                 {
                     await EmitLog(stream, "info", $"LLM edit: {path} (attempt {attempt + 1})", new { chars = content.Length });
-                    var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt);
+                    var (raw, _, err) = await CallLlmSingleFileEdit(prompt, path, content, projectRoot, attempt, discoveryContext);
 
                     var rawSnippet = (raw?.Length ?? 0) > 500
                         ? raw.Substring(0, 250) + "\n... [truncated] ...\n" + raw.Substring(raw.Length - 250)
@@ -828,6 +831,15 @@ public class AgentController : ControllerBase
                         new { raw = rawSnippet, error = err, totalLength = raw?.Length ?? 0 });
 
                     fileEdits = ParseEditsFromLlmRaw(raw, path);
+
+                    // Filter out edits where oldString == newString (model hallucination — would be skipped)
+                    var beforeFilter = fileEdits.Count;
+                    fileEdits = fileEdits
+                        .Where(e => !string.IsNullOrEmpty(e.OldString) && !string.IsNullOrEmpty(e.NewString) &&
+                                    !string.Equals(NormalizeLineEndings(e.OldString), NormalizeLineEndings(e.NewString), StringComparison.Ordinal))
+                        .ToList();
+                    if (beforeFilter > 0 && fileEdits.Count == 0)
+                        await EmitLog(stream, "warn", $"All {beforeFilter} edit(s) had oldString==newString — filtered out");
 
                     if (fileEdits.Count == 0)
                     {
@@ -915,15 +927,15 @@ public class AgentController : ControllerBase
             }
         }
 
-        // Optional: all-files batch only if per-file did nothing (smaller models may timeout on huge prompt)
-        if (!HasSuccessfulEdits(results) && targetPaths.Count == 1)
+        // Combined fallback: try all files together when per-file edits produced no real changes
+        if (!HasSuccessfulEdits(results) && targetPaths.Count > 0)
         {
             var fullFiles = await BuildFullFileContextAsync(targetPaths, projectRoot, maxTotalChars: 40000);
             if (!string.IsNullOrWhiteSpace(fullFiles))
             {
                 try
                 {
-                    await EmitLog(stream, "info", "Single-file combined edit attempt");
+                    await EmitLog(stream, "info", "Combined edit fallback — sending all files in one prompt");
                     var (raw, agentResp, err) = await CallLlmEditsOnly(prompt, fullFiles, discoveryContext, projectRoot, 0);
                     if (agentResp?.Steps != null)
                     {
@@ -934,10 +946,12 @@ public class AgentController : ControllerBase
                             results.AddRange(batchResults);
                         }
                     }
+                    if (!HasSuccessfulEdits(results))
+                        await EmitLog(stream, "warn", "Combined edit fallback also produced no changes");
                 }
                 catch (Exception ex)
                 {
-                    await EmitLog(stream, "error", $"Combined edit failed: {ex.Message}");
+                    await EmitLog(stream, "error", $"Combined edit fallback failed: {ex.Message}");
                 }
             }
         }
@@ -1014,9 +1028,9 @@ Rules:
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
-        string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0)
+        string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0, string? discoveryContext = null)
     {
-        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON, no markdown, no explanation. Keep patches SMALL (under 5 lines if possible).
+        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON. Keep patches SMALL (under 5 lines if possible).
 
 Format:
 {""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}
@@ -1024,15 +1038,23 @@ Format:
 Rules:
 - PREFER small targeted changes (1-3 lines) over large blocks.
 - oldString MUST be copied verbatim from the file (2-8 lines with exact spaces).
-- Include at least one edit in the edits array.
+- oldString and newString MUST be different for any real change.
+- If the file already contains the required change, return {""edits"":[]}.
+- Do NOT return edits where oldString equals newString.
 - Do not wrap in ``` fences.";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
         user.AppendLine($"File path: {relativePath}");
         if (attempt > 0)
-            user.AppendLine("RETRY: Your last reply was not valid JSON. Output ONLY the edits JSON object.");
+            user.AppendLine("RETRY: Your last reply was not valid JSON or oldString==newString. Output a real edit with different oldString and newString.");
         user.AppendLine();
+        if (!string.IsNullOrWhiteSpace(discoveryContext))
+        {
+            user.AppendLine("## Context (grep results, related functions, file structure)");
+            user.AppendLine(Truncate(discoveryContext, 5000));
+            user.AppendLine();
+        }
         user.AppendLine("FILE CONTENT:");
         user.AppendLine("```");
         user.AppendLine(Truncate(fileContent, 12000));

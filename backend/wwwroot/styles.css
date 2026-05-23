@@ -25,6 +25,8 @@ button:hover { border-color:var(--accent); }
 button:disabled { opacity:0.4; cursor:not-allowed; }
 button.primary { background:linear-gradient(90deg,var(--accent),#4dd0e1); border:none; color:#012; font-weight:600; }
 button.primary:hover { box-shadow:0 0 16px rgba(6,182,212,0.3); }
+button.btn-ready { background:linear-gradient(90deg,#f59e0b,#f97316); border:none; color:#012; font-weight:700; }
+button.btn-ready:hover { box-shadow:0 0 16px rgba(245,158,11,0.4); }
 button.danger { border-color:var(--error); color:var(--error); }
 button.danger:hover { background:rgba(248,113,113,0.1); }
 button.success { border-color:var(--success); color:var(--success); }
@@ -80,6 +82,7 @@ main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow
 .card .card-tag.priority-high { background:rgba(248,113,113,0.15); color:var(--error); }
 .card .card-tag.priority-medium { background:rgba(251,191,36,0.15); color:var(--warning); }
 .card .card-tag.priority-low { background:rgba(74,222,128,0.15); color:var(--success); }
+.card .card-tag.tag-ready { background:rgba(56,189,248,0.2); color:var(--accent); font-weight:700; letter-spacing:0.5px; }
 .card .attachments { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
 .card .attachments .attachment { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--muted); background:rgba(255,255,255,0.02); padding:3px 6px; border-radius:4px; }
 .card .attachments .attachment .remove { cursor:pointer; opacity:0.5; margin-left:auto; }
