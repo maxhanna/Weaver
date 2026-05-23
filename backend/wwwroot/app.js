@@ -14,6 +14,7 @@
     vm.termInput = '';
     vm.selectedCardId = null;
     vm.activeCardText = '';
+    vm.activeCardIds = new Set();
     vm.autoQueue = true;
     vm.showTerminal = true;
 
@@ -66,6 +67,13 @@
       if (vm.agentActivityLog.length > 0) {
         var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
         if (lastEntry.type === entry.type && lastEntry.message === entry.message) {
+          return;
+        }
+      }
+      // Prevent entries with same timestamp that could cause digest loops
+      if (vm.agentActivityLog.length > 0) {
+        var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
+        if (lastEntry.timestamp === entry.timestamp) {
           return;
         }
       }
@@ -675,8 +683,10 @@
       // Move to Doing
       moveCardToDoing(card.id);
 
-      if (!vm.activeCardIds) vm.activeCardIds = [];
-      vm.activeCardIds.push(card.id);
+      if (!vm.activeCardIds) {
+        vm.activeCardIds = [];
+      } 
+      vm.activeCardIds.add(card.id);
 
       vm.abortController = new AbortController();
 
