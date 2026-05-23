@@ -9,7 +9,7 @@ builder.Services.AddSingleton(new FileHintsManager(basePath));
 
 builder.Services.AddHttpClient("llama", client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(120);
+    client.Timeout = TimeSpan.FromMinutes(30);
 });
 builder.Services.AddControllers();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>

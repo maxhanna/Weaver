@@ -64,25 +64,35 @@ button:disabled {
 }
 
 button.primary {
-	background: linear-gradient(90deg, var(--brand-primary), var(--brand-accent));
+	background: var(--brand-gradient);
 	border: none;
 	color: #012;
 	font-weight: 600;
+	padding: 8px 16px;
+	border-radius: 8px;
+	transition: all 0.2s ease;
+	box-shadow: var(--brand-shadow);
 }
 
 button.primary:hover {
-	box-shadow: 0 0 16px rgba(6, 182, 212, 0.3);
+	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.4);
+	transform: translateY(-1px);
 }
 
 button.btn-ready {
-	background: linear-gradient(90deg, var(--brand-warning), #f97316);
+	background: var(--brand-gradient);
 	border: none;
 	color: #012;
 	font-weight: 700;
+	padding: 8px 16px;
+	border-radius: 8px;
+	transition: all 0.2s ease;
+	box-shadow: var(--brand-shadow);
 }
 
 button.btn-ready:hover {
-	box-shadow: 0 0 16px rgba(245, 158, 11, 0.4);
+	box-shadow: var(--brand-glow), 0 0 20px rgba(245, 158, 11, 0.5);
+	transform: translateY(-1px);
 }
 
 button.danger {
@@ -119,14 +129,16 @@ textarea {
 	border-radius: 8px;
 	font-size: 13px;
 	font-family: inherit;
+	transition: all 0.2s ease;
 }
 
 input:focus,
 select:focus,
 textarea:focus {
 	outline: none;
-	border-color: var(--accent);
-	box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12);
+	border-color: var(--brand-primary);
+	box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.12), var(--brand-glow);
+	background: rgba(255, 255, 255, 0.05);
 }
 
 select {
@@ -155,8 +167,9 @@ header {
 	justify-content: space-between;
 	padding: 10px 20px;
 	background: var(--brand-gradient);
-	box-shadow: var(--brand-shadow);
+	box-shadow: var(--brand-shadow), var(--brand-glow);
 	transition: all 0.3s ease;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 header h1 {
@@ -166,6 +179,8 @@ header h1 {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	font-weight: 700;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 header h1 span.brand-badge {
@@ -179,6 +194,7 @@ header h1 span.brand-badge {
 	letter-spacing: 0.5px;
 	box-shadow: var(--brand-glow);
 	transition: all 0.3s ease;
+	border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .project-picker {
@@ -427,13 +443,14 @@ main {
 	padding: 10px 12px;
 	margin-bottom: 10px;
 	border: 1px solid rgba(255, 255, 255, 0.03);
-	transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+	transition: all 0.2s ease;
 	cursor: default;
+	box-shadow: var(--brand-shadow);
 }
 
 .card:hover {
 	transform: translateY(-2px);
-	box-shadow: var(--shadow);
+	box-shadow: var(--brand-shadow), 0 8px 20px rgba(0, 0, 0, 0.2);
 }
 
 .card.selected {
