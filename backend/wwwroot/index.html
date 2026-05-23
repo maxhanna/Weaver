@@ -271,7 +271,7 @@
                 <span
                   class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
                 <span class="step-summary-title"><strong>{{s.type}}</strong> {{s.path || ''}}</span>
-                <span class="step-summary-desc" ng-title="s.description || s.command || s.url || ''">
+                <span class="step-summary-desc" title="{{s.description || s.command || s.url || ''}}">
                   {{s.description || s.command || s.url || '' | limitTo:60}}</span>
               </summary>
               <div class="step-panel-body">
@@ -283,7 +283,7 @@
                   <pre class="diff-new" ng-if="!s.diffPreview && s.newStringPreview">+ {{s.newStringPreview}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre>{{s.output | limitTo:12000}}</pre>
+                  <pre>{{s.output | limitTo:24000}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>

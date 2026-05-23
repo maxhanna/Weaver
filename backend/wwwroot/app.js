@@ -248,7 +248,7 @@
     };
 
     vm.confirmDeleteCard = function() {
-      if (!vm.deleteCardConfirm.id) return;
+      if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
       var id = vm.deleteCardConfirm.id;
       var col = vm.deleteCardConfirm.col;
       var idx = vm.state[col].findIndex(function(c) { return c.id === id; });

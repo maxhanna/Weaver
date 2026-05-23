@@ -10,10 +10,10 @@ public class AgentController : ControllerBase
 {
     private const int DefaultMaxIterations = 4;
     private const int DefaultMaxStepsPerBatch = 6;
-    private const int MaxFileContextChars = 12000;
-    private const int MaxObservationChars = 8000;
-    private const int MaxReadOutputChars = 6000;
-    private const int MaxWebResponseChars = 8000;
+    private const int MaxFileContextChars = 24000;
+    private const int MaxObservationChars = 24000;
+    private const int MaxReadOutputChars = 24000;
+    private const int MaxWebResponseChars = 24000;
 
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
@@ -618,6 +618,54 @@ public class AgentController : ControllerBase
                 continue;
             }
 
+            // Model returned exploration-only steps (read/grep/list etc.)
+            // Run dedicated edit phase directly using file content from the read results
+            if (expectsEdits && !anyEditsDone && BatchWasExplorationOnly(batch))
+            {
+                await EmitLog(stream, "info", "Model returned read-only batch — running dedicated edit phase with file content");
+                var editPaths = ResolveEditTargetPaths(prompt, attachedFiles ?? new List<string>(), projectRoot);
+                if (editPaths.Count == 0 && batchResults.Count > 0)
+                {
+                    editPaths = batchResults
+                        .OfType<Dictionary<string, object?>>()
+                        .Where(r => r.TryGetValue("path", out var p) && p != null)
+                        .Select(r => r["path"]?.ToString() ?? "")
+                        .Where(p => !string.IsNullOrEmpty(p))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
+                if (editPaths.Count > 0)
+                {
+                    var stepContext = new StringBuilder();
+                    foreach (var r in batchResults.OfType<Dictionary<string, object?>>())
+                    {
+                        if (r.TryGetValue("path", out var p) && p != null && r.TryGetValue("output", out var o) && o != null)
+                        {
+                            stepContext.AppendLine($"### FILE: {p}");
+                            stepContext.AppendLine("```");
+                            stepContext.AppendLine(o.ToString());
+                            stepContext.AppendLine("```");
+                            stepContext.AppendLine();
+                        }
+                    }
+                    var context = stepContext.Length > 0
+                        ? stepContext.ToString()
+                        : discoveryBuilder.ToString();
+                    var inlineEdits = await RunDedicatedEditPhase(
+                        prompt, editPaths, context,
+                        projectRoot, globalStepIndex, stream);
+                    globalStepIndex += inlineEdits.Count;
+                    allSteps.AddRange(inlineEdits);
+                    if (HasSuccessfulEdits(allSteps))
+                        break;
+                }
+                else
+                {
+                    await EmitLog(stream, "warn", "No file paths resolved — re-asking model");
+                }
+                // Even if edit phase produced no edits, fall through for remaining loop iterations
+            }
+
             // Small models often set complete:true after a read — ignore until edits land
             var modelSaysComplete = agentResp.Complete;
             if (modelSaysComplete && expectsEdits && !anyEditsDone)
@@ -632,18 +680,6 @@ public class AgentController : ControllerBase
             if (hasEditErrors)
                 continue;
 
-            // Model returned another read/grep batch — run dedicated edit phase immediately
-            if (expectsEdits && !anyEditsDone && BatchWasExplorationOnly(batch))
-            {
-                var inlineEdits = await RunDedicatedEditPhase(
-                    prompt, attachedFiles ?? new List<string>(), discoveryBuilder.ToString(),
-                    projectRoot, globalStepIndex, stream);
-                globalStepIndex += inlineEdits.Count;
-                allSteps.AddRange(inlineEdits);
-                if (HasSuccessfulEdits(allSteps))
-                    break;
-            }
-
             // Keep going: read-only batch but task still needs file changes
             if (expectsEdits && !anyEditsDone)
                 continue;
@@ -655,10 +691,22 @@ public class AgentController : ControllerBase
         }
 
         // Dedicated edit phase — full file bodies, edit-only JSON (models often skip edits in the main loop)
-        if (TaskExpectsFileChanges(prompt) && !HasSuccessfulEdits(allSteps))
+        if (!HasSuccessfulEdits(allSteps))
         {
+            // Collect file paths discovered during bootstrap + read steps
+            var discoveredFromSteps = allSteps
+                .OfType<Dictionary<string, object?>>()
+                .Where(r => r.TryGetValue("path", out var p) && p != null)
+                .Select(r => r["path"]?.ToString() ?? "")
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var fallbackFiles = (attachedFiles ?? new List<string>())
+                .Concat(discoveredFromSteps)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
             var editPhaseResults = await RunDedicatedEditPhase(
-                prompt, attachedFiles ?? new List<string>(), discoveryBuilder.ToString(),
+                prompt, fallbackFiles, discoveryBuilder.ToString(),
                 projectRoot, globalStepIndex, stream);
             globalStepIndex += editPhaseResults.Count;
             allSteps.AddRange(editPhaseResults);
