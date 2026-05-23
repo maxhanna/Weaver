@@ -162,11 +162,10 @@
               </details>
             </div> 
 <div class="card-actions">
-  <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive">✔
-    Done</button>
+  <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive">✔ Done</button>
   <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive">⏹ Stop</button>
   <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
-  <button ng-click="vm.deleteCardConfirm(card.id)" class="small ghost" title="Delete card">✕ Delete</button>
+  <button ng-click="vm.openDeleteCardConfirm(card.id)" class="small ghost" title="Delete card">✕ Delete</button>
 </div>
           </div>
         </div>
@@ -250,7 +249,8 @@
               <summary class="step-summary-row">
                 <span class="step-icon">{{s.status==='running'?'⏳':(s.status==='done'?'✓':(s.status==='error'?'✕':'○'))}}</span>
                 <span class="step-summary-title"><strong>{{s.type}}</strong> {{s.path || ''}}</span>
-                <span class="step-summary-desc">{{s.description || s.command || s.url || '' | limitTo:60}}</span>
+                <span class="step-summary-desc" ng-title="s.description || s.command || s.url || ''">
+                  {{s.description || s.command || s.url || '' | limitTo:60}}</span>
               </summary>
               <div class="step-panel-body">
                 <div class="edit-diff" ng-if="s.type==='edit' && s.status==='done'">

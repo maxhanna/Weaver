@@ -228,11 +228,7 @@
     };
 
     vm.openDeleteCardConfirm = function (id) {
-      alert("delet " + id);
-      vm.confirmDeleteCardId  = id; 
-    }
-
-    vm.deleteCard = function(id) {
+      vm.confirmDeleteCardId = id;
       var col = 'done';
       var card = vm.state[col].find(function(c) { return c.id === id; });
       if (!card) {
@@ -245,11 +241,10 @@
         show: true,
         dontShowAgain: false
       };
-      try {
-        vm.confirmDeleteCard();
-      } catch(e) {
-        alert('Failed to delete card: ' + (e.message || e));
-      }
+    };
+
+    vm.deleteCard = function(id) {
+      vm.openDeleteCardConfirm(id);
     };
 
     vm.confirmDeleteCard = function() {
@@ -267,7 +262,7 @@
           $window.localStorage.setItem('maestro.deleteCardConfirm', 'false');
         } catch(e) {}
       }
-      vm.confirmDeleteCardId = null
+      vm.confirmDeleteCardId = null;
       vm.deleteCardConfirm = null;
     };
 
