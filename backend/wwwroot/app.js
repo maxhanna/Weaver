@@ -51,9 +51,12 @@
       $timeout(function () {
         var logContainer = document.querySelector('.agent-log');
         if (logContainer) {
-          logContainer.scrollTop = logContainer.scrollHeight;
+          // Only scroll to bottom if already at bottom to prevent digest loop
+          if (logContainer.scrollHeight - logContainer.scrollTop <= logContainer.clientHeight + 10) {
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }
         }
-      }, 0);
+      }, 10);
     };
 
     // Auto-scroll agent log when new content is added
@@ -62,7 +65,22 @@
       if (vm.lastLogEntry && vm.lastLogEntry.message === entry.message) {
         return;
       }
+      // Prevent duplicate entries from triggering digest cycles
+      const existingEntry = vm.agentActivityLog.find(e => e.message === entry.message);
+      if (existingEntry) {
+        return;
+      }
+      // Prevent identical entries from causing infinite digest loops
+      if (vm.agentActivityLog.length > 0 && 
+          vm.agentActivityLog[vm.agentActivityLog.length - 1].message === entry.message) {
+        return;
+      }
+      // Add timeout-based debounce to prevent rapid successive calls
+      if (vm.lastLogEntryTime && (Date.now() - vm.lastLogEntryTime) < 50) {
+        return;
+      }
       vm.lastLogEntry = entry;
+      vm.lastLogEntryTime = Date.now();
       vm.agentActivityLog.push(entry);
       vm.scrollToBottom();
     };
@@ -669,6 +687,9 @@
       // Move to Doing
       moveCardToDoing(card.id);
 
+      if (!vm.activeCardIds) vm.activeCardIds = [];
+      vm.activeCardIds.push(card.id);
+
       vm.abortController = new AbortController();
 
       fetch('/api/agent/execute-stream', {
@@ -835,6 +856,9 @@
       if (idx === -1) return;
       var card = vm.state.doing.splice(idx, 1)[0];
       vm.state.done.push(card);
+
+      if (!vm.activeCardIds) vm.activeCardIds = [];
+      vm.activeCardIds = vm.activeCardIds.filter(function (id) { return id !== cardId; });
       saveCards();
     }
 
