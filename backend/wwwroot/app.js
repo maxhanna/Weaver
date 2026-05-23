@@ -48,20 +48,27 @@
       });
     };
 
-    // Scroll to bottom of agent log
+    // Scroll to bottom of agent log.
+    // IMPORTANT: pass `false` as the third arg (invokeApply) so $timeout does NOT
+    // call $apply/$digest after the DOM write.  Without it, every log entry pushed
+    // during an SSE chunk schedules a $timeout whose $apply fires *inside* the
+    // $digest that readNext() already triggered, causing the $rootScope:infdig loop
+    // (scrollHeight increments by ~12px each cycle as the container grows, the
+    // dirty-check sees it changed, reschedules another digest, forever).
     vm.scrollToBottom = function () {
       $timeout(function () {
         var logContainer = document.querySelector('.agent-log');
         if (logContainer) {
-          // Only scroll if we're not already at the bottom to prevent digest loops
-          if (logContainer.scrollHeight - logContainer.scrollTop < logContainer.clientHeight + 10) {
-            logContainer.scrollTop = logContainer.scrollHeight;
-          }
+          logContainer.scrollTop = logContainer.scrollHeight;
         }
-      }, 10);
+      }, 10, false);
     };
 
-    // Auto-scroll agent log when new content is added
+    // Auto-scroll agent log when new content is added.
+    // NOTE: scrollToBottom is called by pushAgentLog, which is the real entry point
+    // for all log pushes during streaming.  addLogEntry is kept for any direct
+    // external callers but must NOT call scrollToBottom itself, otherwise every
+    // pushAgentLog→addLogEntry chain would trigger two $timeout scroll calls.
     vm.addLogEntry = function (entry) {
       // Prevent duplicate entries that could cause digest loops
       if (vm.agentActivityLog.length > 0) {
@@ -78,7 +85,7 @@
         }
       }
       vm.agentActivityLog.push(entry);
-      vm.scrollToBottom();
+      // scrollToBottom intentionally omitted here — pushAgentLog handles it
     };
 
     // Project UI
@@ -246,8 +253,8 @@
         backdrop.style.display = 'block';
       }
     };
-    vm.closeSettingsPanel = function () { 
-      vm.showSettingsPanel = false; 
+    vm.closeSettingsPanel = function () {
+      vm.showSettingsPanel = false;
       // Hide backdrop when settings panel is closed
       var backdrop = document.getElementById('backdrop');
       if (backdrop) {
@@ -314,7 +321,7 @@
       if (modal) {
         modal.style.display = 'flex';
         // Ensure backdrop is properly applied
-        modal.style.backdropFilter = 'blur(4px)'; 
+        modal.style.backdropFilter = 'blur(4px)';
       }
     };
 
@@ -337,24 +344,24 @@
       vm.deleteCardConfirm = null;
     };
 
-    vm.closeDeleteCardConfirm = function(event) {
+    vm.closeDeleteCardConfirm = function (event) {
       // Handle ESC key press directly
       if (event && event.key === 'Escape') {
         event.stopPropagation();
         event.preventDefault();
         vm.confirmDeleteCardId = null;
-        vm.deleteCardConfirm = null; 
+        vm.deleteCardConfirm = null;
         const modal = document.querySelector('.delete-confirm-modal');
         if (modal) {
           modal.style.display = 'none';
         }
-       // $scope.$evalAsync();
+        // $scope.$evalAsync();
         return;
       }
       vm.confirmDeleteCardId = null;
       vm.deleteCardConfirm = null;
     };
- 
+
 
     // Drag and drop functionality
     vm.dragStart = function (event, card, col) {
@@ -386,10 +393,10 @@
       }
     };
 
- 
+
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
-       console.log('ESC pressed - closing delete confirmation');
+        console.log('ESC pressed - closing delete confirmation');
         vm.closeSettingsPanel();
         vm.closeAddProjectPanel();
         vm.closeFilePicker();
@@ -550,6 +557,9 @@
       };
       vm.agentActivityLog.push(entry);
       if (vm.agentActivityLog.length > 80) vm.agentActivityLog.shift();
+      // Scroll after every real push.  invokeApply=false (see scrollToBottom) keeps
+      // this DOM write out of Angular's digest cycle so no infdig is possible.
+      vm.scrollToBottom();
     }
 
     vm.getActiveStep = function () {
@@ -685,7 +695,7 @@
 
       if (!vm.activeCardIds) {
         vm.activeCardIds = [];
-      } 
+      }
       vm.activeCardIds.add(card.id);
 
       vm.abortController = new AbortController();
@@ -857,7 +867,6 @@
 
       if (!vm.activeCardIds) vm.activeCardIds = [];
       vm.activeCardIds = vm.activeCardIds.filter(function (id) { return id !== cardId; });
-    vm.activeCardIds.contains = function (id) { return this.indexOf(id) !== -1; };
       saveCards();
     }
 
