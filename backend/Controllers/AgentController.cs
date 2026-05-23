@@ -211,7 +211,7 @@ public class AgentController : ControllerBase
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s.Substring(0, max) + "\n…(truncated)";
     private static string NormalizeUiStatus(string? status) =>
-        status switch { "written" or "ok" or "created" => "done", "running" => "running", "error" => "error", _ => status ?? "pending" };
+        status switch { "written" or "ok" or "created" or "modified" => "done", "running" => "running", "error" => "error", _ => status ?? "pending" };
 
     private static readonly HashSet<string> ExplorationStepTypes =
         new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
@@ -1081,7 +1081,7 @@ RULES:
         // CallLlmNonStreaming only passes the outer 'ct' (HTTP abort), which has
         // no deadline of its own. If the LLM stalls, Phase 2 and Phase 4 retries
         // would block forever.
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token);
     }
@@ -1158,7 +1158,7 @@ RULES:
             var contentJson = JsonSerializer.Serialize(requestBody);
             var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(220));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
             var combined = linkedCts.Token;
 
@@ -1250,7 +1250,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             var contentJson = JsonSerializer.Serialize(requestBody);
             var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(220));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
             var combined = linkedCts.Token;
 
@@ -1864,7 +1864,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         try
         {
             var client = _clientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(30);
+            client.Timeout = TimeSpan.FromSeconds(220);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("Maestro-Agent/1.0");
             var resp = await client.GetAsync(uri);
             var body = await resp.Content.ReadAsStringAsync();

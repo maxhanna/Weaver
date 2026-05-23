@@ -1,4 +1,4 @@
-using MaestroBackend.Services;
+﻿using MaestroBackend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -9,7 +9,7 @@ builder.Services.AddSingleton(new FileHintsManager(basePath));
 
 builder.Services.AddHttpClient("llama", client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(20);
+    client.Timeout = TimeSpan.FromSeconds(120);
 });
 builder.Services.AddControllers();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>

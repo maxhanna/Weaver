@@ -501,7 +501,7 @@
 
     // === Agent helpers ===
     function normalizeStepStatus(status) {
-      if (status === 'written' || status === 'ok' || status === 'created') return 'done';
+      if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
       if (status === 'running' || status === 'error' || status === 'pending') return status;
       return status || 'pending';
     }
