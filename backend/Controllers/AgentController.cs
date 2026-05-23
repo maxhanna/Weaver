@@ -751,17 +751,9 @@ RULES:
 
                     editSteps = ParseEditsFromLlmRaw(raw, relPath);
 
-                    // Determine rejection reason for better logging
+                      // Determine rejection reason for better logging
                     string? rejectReason = null;
-                    if (editSteps.Count > 0)
-                    {
-                        var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
-                        if (missingNew.Count > 0)
-                        {
-                            rejectReason = "newString is empty — model returned oldString without replacement";
-                            editSteps = editSteps.Where(e => !string.IsNullOrWhiteSpace(e.NewString)).ToList();
-                        }
-                    }
+           
 
                     // Filter no-op edits (oldString == newString)
                     var identicalCount = editSteps.Count;
