@@ -56,6 +56,7 @@ header h1 span.badge { font-size:11px; background:rgba(255,255,255,0.04); paddin
 .delete-confirm-actions button { padding:8px 16px; }
 
 main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow:hidden; }
+@media (max-width: 1000px) { main { gap:8px; padding:8px; } }
 
 .board { display:flex; gap:16px; flex:1; overflow-x:auto; overflow-y:hidden; padding-bottom:8px; }
 .board::-webkit-scrollbar { height:8px; }
@@ -115,11 +116,15 @@ main { display:flex; gap:16px; padding:16px; height:calc(100vh - 56px); overflow
 .col-resizer:hover { background:rgba(255,255,255,0.04); }
 .col-resizer.active { background:linear-gradient(90deg,rgba(6,182,212,0.14),rgba(124,58,237,0.08)); box-shadow:0 0 12px rgba(6,182,212,0.12); }
 
-.right-panel { width:420px; display:flex; flex-direction:column; gap:12px; overflow-y:auto; flex-shrink:0; max-height:calc(100vh - 80px); }
+.right-panel { flex:1; min-width:360px; display:flex; flex-direction:column; gap:12px; overflow-y:auto; max-height:calc(100vh - 80px); }
 
 .panel { background:linear-gradient(180deg,#061025,#07132a); padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.03); box-shadow:var(--shadow); }
 .panel h3 { margin:0 0 8px 0; font-size:13px; color:var(--accent); text-transform:uppercase; letter-spacing:0.5px; }
 .panel .panel-body { font-size:13px; }
+@media (min-width: 1400px) {
+  .panel .panel-body { display:grid; grid-template-columns:1fr 1fr; gap:10px; align-content:start; }
+  .panel .panel-body > .span-full { grid-column:1 / -1; }
+}
 
 .agent-status { display:flex; align-items:center; gap:8px; padding:8px; border-radius:8px; background:linear-gradient(90deg,#06203a,#041827); }
 .agent-status.idle { background:transparent; border:1px dashed rgba(255,255,255,0.04); }

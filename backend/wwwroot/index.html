@@ -208,15 +208,15 @@
         <h3>🤖 Agent</h3>
         <div class="panel-body">
           <!-- Idle state -->
-          <div class="agent-status idle" ng-if="!vm.streamingActive && !vm.agentResult">
+          <div class="agent-status idle span-full" ng-if="!vm.streamingActive && !vm.agentResult">
             <span style="font-size:12px;color:var(--muted);">Select a card and press <strong>Start</strong></span>
           </div>
-          <div class="agent-status idle" ng-if="vm.selectedCardId && !vm.streamingActive && vm.agentResult">
+          <div class="agent-status idle span-full" ng-if="vm.selectedCardId && !vm.streamingActive && vm.agentResult">
             <span style="font-size:12px;color:var(--muted);">Agent completed</span>
           </div>
 
           <!-- Streaming state -->
-          <div class="agent-status" ng-if="vm.streamingActive">
+          <div class="agent-status span-full" ng-if="vm.streamingActive">
             <span class="pulse-dot"></span>
             <span class="status-text">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase"
                 class="phase-tag">{{vm.streamingPhase}}</span></span>
@@ -282,7 +282,7 @@
             <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited">{{f.path}}</div>
           </div>
 
-          <div class="agent-steps-list" ng-if="vm.streamingSteps.length">
+          <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length">
             <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"
               ng-class="s.status || 'pending'"
               ng-attr-open="{{(s.status==='running' || s.status==='error') ? 'open' : undefined}}">
@@ -316,7 +316,7 @@
             </details>
           </div>
 
-          <div class="agent-result" ng-if="!vm.streamingActive && vm.agentResult">
+          <div class="agent-result span-full" ng-if="!vm.streamingActive && vm.agentResult">
             <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
             <div class="agent-warning" ng-if="vm.agentResult.warning">{{vm.agentResult.warning}}</div>
             <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
