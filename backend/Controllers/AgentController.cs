@@ -847,6 +847,7 @@ RULES:
 
         // ── Phase 3: EDIT ────────────────────────────────────────────────────
         var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
+        allSteps.AddRange(editResults);
 
         // ── Phase 4: VERIFY + RETRY LOOP ─────────────────────────────────────
         var editsApplied = HasSuccessfulEdits(allSteps);

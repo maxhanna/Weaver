@@ -332,6 +332,7 @@ main {
 
 .board::-webkit-scrollbar {
 	height: 8px;
+	border: var(--accent);
 }
 
 .board::-webkit-scrollbar-thumb {
@@ -386,6 +387,8 @@ main {
 
 .cards::-webkit-scrollbar {
 	width: 4px;
+	border: var(--accent);
+	border-radius: 999px;
 }
 
 .cards::-webkit-scrollbar-thumb {
