@@ -19,13 +19,15 @@ public class AgentController : ControllerBase
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
     private readonly TerminalService _terminal;
+    private readonly FileHintsManager _fileHints;
 
-    public AgentController(IHttpClientFactory cf, IConfiguration config, IWebHostEnvironment env, TerminalService terminal)
+    public AgentController(IHttpClientFactory cf, IConfiguration config, IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints)
     {
         _clientFactory = cf;
         _config = config;
         _env = env;
         _terminal = terminal;
+        _fileHints = fileHints;
     }
 
     public class AgentRequest
@@ -190,12 +192,12 @@ public class AgentController : ControllerBase
         return result.Take(8).ToList();
     }
 
-    private static List<string> FindLikelyFiles(string prompt, string projectRoot)
+    private List<string> FindLikelyFiles(string prompt, string projectRoot)
     {
         var matches = new List<string>();
         if (!Directory.Exists(projectRoot)) return matches;
 
-        var lower = prompt.ToLowerInvariant();
+        // Add preset files if they exist
         var presets = new[]
         {
             "backend/wwwroot/app.js", "backend/wwwroot/index.html",
@@ -209,27 +211,40 @@ public class AgentController : ControllerBase
                 matches.Add(p.Replace('\\', '/'));
         }
 
-        var nameHints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (lower.Contains("setting") || lower.Contains("popup") || lower.Contains("panel") || lower.Contains("toggle"))
+        // Add files from dynamic file hints
+        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot);
+        foreach (var hf in hintedFiles)
         {
-            nameHints.Add("app.js"); nameHints.Add("index.html"); nameHints.Add("settings");
-        }
-        if (lower.Contains("terminal"))
-        {
-            nameHints.Add("app.js"); nameHints.Add("index.html"); nameHints.Add("terminal");
+            var full = Path.Combine(projectRoot, hf.Replace('/', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(full) && !matches.Contains(hf, StringComparer.OrdinalIgnoreCase))
+                matches.Add(hf);
         }
 
-        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages" };
+        // Fallback: scan for files matching any keyword in the prompt
+        var lower = prompt.ToLowerInvariant();
+        var keywords = lower.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 4 && !new HashSet<string> { "with", "that", "this", "from", "will", "have", "been", "when", "what", "which" }.Contains(w))
+            .Distinct()
+            .Take(5)
+            .ToList();
 
-        foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+        if (keywords.Count > 0)
         {
-            var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
-            if (skip.Any(s => rel.Contains("/" + s + "/", StringComparison.OrdinalIgnoreCase))) continue;
-            var name = Path.GetFileName(file);
-            if (nameHints.Any(h => rel.Contains(h, StringComparison.OrdinalIgnoreCase) || name.Contains(h, StringComparison.OrdinalIgnoreCase)))
-                matches.Add(rel);
-            if (matches.Count >= 12) break;
+            var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages" };
+
+            foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                if (skip.Any(s => rel.Contains("/" + s + "/", StringComparison.OrdinalIgnoreCase))) continue;
+                var name = Path.GetFileName(file);
+                if (keywords.Any(k => name.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (!matches.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                        matches.Add(rel);
+                }
+                if (matches.Count >= 12) break;
+            }
         }
 
         return matches.Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
@@ -306,6 +321,18 @@ public class AgentController : ControllerBase
         });
 
         var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
+
+        // Learn keyword→file associations from grep results
+        foreach (var item in steps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (type != "grep") continue;
+            var query = r.TryGetValue("query", out var q) ? q?.ToString() : r.TryGetValue("pattern", out var pt) ? pt?.ToString() : "";
+            var output = r.TryGetValue("output", out var o) ? o?.ToString() : "";
+            if (!string.IsNullOrWhiteSpace(query) && !string.IsNullOrWhiteSpace(output))
+                _fileHints.LearnFromGrepOutput(query, output, projectRoot);
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths like src/components/ unless listed.");
@@ -589,6 +616,18 @@ public class AgentController : ControllerBase
 
             AppendObservations(observations, batchResults);
 
+            // Learn keyword→file associations from grep results in this batch
+            foreach (var item in batchResults)
+            {
+                if (item is not Dictionary<string, object?> r) continue;
+                var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+                if (type != "grep") continue;
+                var query = r.TryGetValue("query", out var q) ? q?.ToString() : r.TryGetValue("pattern", out var pt) ? pt?.ToString() : "";
+                var output = r.TryGetValue("output", out var o) ? o?.ToString() : "";
+                if (!string.IsNullOrWhiteSpace(query) && !string.IsNullOrWhiteSpace(output))
+                    _fileHints.LearnFromGrepOutput(query, output, projectRoot);
+            }
+
             if (observations.Length > MaxObservationChars)
             {
                 var trimmed = observations.ToString();
@@ -696,10 +735,16 @@ public class AgentController : ControllerBase
         // Dedicated edit phase — full file bodies, edit-only JSON (models often skip edits in the main loop)
         if (!HasSuccessfulEdits(allSteps))
         {
-            // Collect file paths discovered during bootstrap + read steps
+            // Collect file paths discovered during bootstrap + read steps (only successful reads/edits)
             var discoveredFromSteps = allSteps
                 .OfType<Dictionary<string, object?>>()
-                .Where(r => r.TryGetValue("path", out var p) && p != null)
+                .Where(r =>
+                {
+                    var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+                    var status = r.TryGetValue("status", out var st) ? st?.ToString() : "";
+                    return (type == "read" || type == "edit") && status == "done" &&
+                           r.TryGetValue("path", out var p) && p != null;
+                })
                 .Select(r => r["path"]?.ToString() ?? "")
                 .Where(p => !string.IsNullOrEmpty(p))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -745,7 +790,7 @@ public class AgentController : ControllerBase
         return sb.ToString();
     }
 
-    private static List<string> ResolveEditTargetPaths(string prompt, List<string> attachedFiles, string projectRoot)
+    private List<string> ResolveEditTargetPaths(string prompt, List<string> attachedFiles, string projectRoot)
     {
         var paths = attachedFiles.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => f.Replace('\\', '/')).ToList();
         foreach (var likely in FindLikelyFiles(prompt, projectRoot))
@@ -790,8 +835,10 @@ public class AgentController : ControllerBase
         {
             if (!path.EndsWith(".js", StringComparison.OrdinalIgnoreCase) &&
                 !path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) &&
-                !path.EndsWith(".css", StringComparison.OrdinalIgnoreCase) &&
-                !path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                !path.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
+                !path.EndsWith("config.json", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var full = Path.GetFullPath(Path.Combine(projectRoot, path.Replace('/', Path.DirectorySeparatorChar)));
@@ -962,12 +1009,10 @@ public class AgentController : ControllerBase
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmEditsOnly(
         string taskPrompt, string fullFileContext, string discoveryContext, string projectRoot, int attempt)
     {
-        var systemPrompt = @"You MUST output file edits as JSON. Do not only plan or read — apply changes.
-
-Output ONLY this JSON (no markdown):
+        var systemPrompt = @"Output EXACTLY this JSON structure (no additional text before or after):
 {
-  ""thinking"": ""short"",
-  ""summary"": ""edits applied"",
+  ""thinking"": ""brief explanation of changes"",
+  ""summary"": ""summary of what was edited"",
   ""complete"": true,
   ""steps"": [
     {
@@ -975,17 +1020,11 @@ Output ONLY this JSON (no markdown):
       ""type"": ""edit"",
       ""description"": ""what changed"",
       ""path"": ""exact/path/from/FILE/headers"",
-      ""oldString"": ""verbatim text from file including whitespace"",
-      ""newString"": ""replacement""
+      ""oldString"": ""exact text copied from file (must match verbatim)"",
+      ""newString"": ""replacement text""
     }
   ]
-}
-
-Rules:
-- PREFER small targeted changes (1-5 lines) over large blocks.
-- steps must ALL be type ""edit"".
-- path must match a ### FILE: header path exactly.
-- oldString must appear exactly once in that file.";
+}";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -997,7 +1036,7 @@ Rules:
         {
             user.AppendLine();
             user.AppendLine("## Discovery notes");
-            user.AppendLine(Truncate(discoveryContext, 4000));
+            user.AppendLine(Truncate(discoveryContext, 6000));
         }
         user.AppendLine();
         user.AppendLine("## Full files to edit (copy oldString from here)");
@@ -1030,24 +1069,21 @@ Rules:
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
         string taskPrompt, string relativePath, string fileContent, string projectRoot, int attempt = 0, string? discoveryContext = null)
     {
-        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON. Keep patches SMALL (under 5 lines if possible).
-
-Format:
-{""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}
-
-Rules:
-- PREFER small targeted changes (1-3 lines) over large blocks.
-- oldString MUST be copied verbatim from the file (2-8 lines with exact spaces).
-- oldString and newString MUST be different for any real change.
-- If the file already contains the required change, return {""edits"":[]}.
-- Do NOT return edits where oldString equals newString.
-- Do not wrap in ``` fences.";
+        var systemPrompt = @"You are a code patch tool. Output ONLY valid JSON in the exact format:
+{""edits"":[{""oldString"":""exact text copied from file"",""newString"":""replacement""}]}";
 
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
         user.AppendLine($"File path: {relativePath}");
         if (attempt > 0)
-            user.AppendLine("RETRY: Your last reply was not valid JSON or oldString==newString. Output a real edit with different oldString and newString.");
+        {
+            // Check if we have the previous raw response to determine what went wrong
+            user.AppendLine("RETRY: Your previous attempt did not produce usable edits.");
+            user.AppendLine();
+            user.AppendLine("CRITICAL: You MUST output ONLY valid JSON in this exact format:");
+            user.AppendLine("{\"edits\":[{\"oldString\":\"EXACT text from file (copy verbatim)\",\"newString\":\"replacement text\"}]}");
+            user.AppendLine();
+        }
         user.AppendLine();
         if (!string.IsNullOrWhiteSpace(discoveryContext))
         {

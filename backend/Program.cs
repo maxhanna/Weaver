@@ -3,6 +3,9 @@ using MaestroBackend.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<TerminalService>();
+
+builder.Services.AddSingleton<FileHintsManager>();
+
 builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(3);

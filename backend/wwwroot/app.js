@@ -248,6 +248,9 @@
       };
       // Add backdrop class to body for blurred background
       document.body.classList.add('backdrop-active');
+      // Ensure modal is visible
+      const modal = document.querySelector('.delete-confirm-modal');
+      if (modal) modal.style.display = 'flex';
     };
  
     vm.confirmDeleteCard = function() {
