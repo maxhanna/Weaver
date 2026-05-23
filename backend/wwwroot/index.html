@@ -168,6 +168,21 @@
                     </div>
                   </div>
                 </div>
+                <div class="analysis-log" ng-if="card.agentLog && card.agentLog.length">
+                  <details>
+                    <summary>📋 Log ({{card.agentLog.length}})</summary>
+                    <div class="log-entries">
+                      <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                        <span class="log-ts">{{e.ts}}</span>
+                        <span class="log-msg">{{e.message}}</span>
+                        <details ng-if="e.detail" class="log-detail">
+                          <summary>detail</summary>
+                          <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                        </details>
+                      </div>
+                    </div>
+                  </details>
+                </div>
                 <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
                   <details>
                     <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>

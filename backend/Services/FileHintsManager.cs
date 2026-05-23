@@ -2,7 +2,12 @@ using System.Text.Json;
 
 namespace MaestroBackend.Services;
 
-public class FileHintsStore
+public class GlobalHintsStore
+{
+    public Dictionary<string, ProjectHints> Projects { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+public class ProjectHints
 {
     public List<KeywordHint> Hints { get; set; } = new();
     public List<LearnedAssociation> AutoLearned { get; set; } = new();
@@ -24,36 +29,49 @@ public class LearnedAssociation
 
 public class FileHintsManager
 {
+    private readonly string _basePath;
     private readonly object _lock = new();
 
-    private string HintsPath(string projectRoot) =>
-        Path.Combine(projectRoot, "filehints.json");
-
-    private FileHintsStore Load(string projectRoot)
+    public FileHintsManager(string basePath)
     {
-        var path = HintsPath(projectRoot);
+        _basePath = basePath;
+    }
+
+    private string HintsFilePath => Path.Combine(_basePath, "filehints.json");
+
+    private GlobalHintsStore LoadAll()
+    {
         try
         {
-            if (System.IO.File.Exists(path))
+            if (System.IO.File.Exists(HintsFilePath))
             {
-                var json = System.IO.File.ReadAllText(path);
-                return JsonSerializer.Deserialize<FileHintsStore>(json) ?? new FileHintsStore();
+                var json = System.IO.File.ReadAllText(HintsFilePath);
+                return JsonSerializer.Deserialize<GlobalHintsStore>(json) ?? new GlobalHintsStore();
             }
         }
         catch { }
-        return new FileHintsStore();
+        return new GlobalHintsStore();
     }
 
-    private void Save(string projectRoot, FileHintsStore store)
+    private void SaveAll(GlobalHintsStore store)
     {
-        var path = HintsPath(projectRoot);
         var json = JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true });
-        System.IO.File.WriteAllText(path, json);
+        System.IO.File.WriteAllText(HintsFilePath, json);
     }
 
-    private static FileHintsStore SeedDefaults()
+    private ProjectHints EnsureProject(string projectRoot, GlobalHintsStore store)
     {
-        return new FileHintsStore
+        if (!store.Projects.TryGetValue(projectRoot, out var proj))
+        {
+            proj = SeedDefaults();
+            store.Projects[projectRoot] = proj;
+        }
+        return proj;
+    }
+
+    private static ProjectHints SeedDefaults()
+    {
+        return new ProjectHints
         {
             Hints = new List<KeywordHint>
             {
@@ -66,31 +84,22 @@ public class FileHintsManager
         };
     }
 
-    private FileHintsStore LoadOrSeed(string projectRoot)
-    {
-        lock (_lock)
-        {
-            var store = Load(projectRoot);
-            if (store.Hints.Count == 0 && store.AutoLearned.Count == 0)
-            {
-                store = SeedDefaults();
-                Save(projectRoot, store);
-            }
-            return store;
-        }
-    }
-
     public List<string> GetFilesForPrompt(string prompt, string projectRoot)
     {
         var lower = prompt.ToLowerInvariant();
         var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var store = LoadOrSeed(projectRoot);
-        foreach (var hint in store.Hints)
+        lock (_lock)
         {
-            if (hint.Keywords.Any(k => lower.Contains(k, StringComparison.Ordinal)))
-                foreach (var f in hint.Files)
-                    files.Add(f);
+            var store = LoadAll();
+            var proj = EnsureProject(projectRoot, store);
+
+            foreach (var hint in proj.Hints)
+            {
+                if (hint.Keywords.Any(k => lower.Contains(k, StringComparison.Ordinal)))
+                    foreach (var f in hint.Files)
+                        files.Add(f);
+            }
         }
 
         return files.ToList();
@@ -100,11 +109,13 @@ public class FileHintsManager
     {
         lock (_lock)
         {
-            var store = LoadOrSeed(projectRoot);
+            var store = LoadAll();
+            var proj = EnsureProject(projectRoot, store);
+
             var normalizedKeyword = keyword.ToLowerInvariant();
             var normalizedFile = file.Replace('\\', '/').TrimStart('/');
 
-            var existing = store.AutoLearned.FirstOrDefault(a =>
+            var existing = proj.AutoLearned.FirstOrDefault(a =>
                 string.Equals(a.Keyword, normalizedKeyword, StringComparison.Ordinal) &&
                 string.Equals(a.File, normalizedFile, StringComparison.OrdinalIgnoreCase));
 
@@ -115,7 +126,7 @@ public class FileHintsManager
             }
             else
             {
-                store.AutoLearned.Add(new LearnedAssociation
+                proj.AutoLearned.Add(new LearnedAssociation
                 {
                     Keyword = normalizedKeyword,
                     File = normalizedFile,
@@ -125,7 +136,7 @@ public class FileHintsManager
             }
 
             // Promote to hint when score >= 3
-            var readyGroups = store.AutoLearned
+            var readyGroups = proj.AutoLearned
                 .Where(a => a.Score >= 3)
                 .GroupBy(a => a.Keyword)
                 .ToList();
@@ -135,7 +146,7 @@ public class FileHintsManager
                 var kw = group.Key;
                 var files = group.Select(a => a.File).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-                var existingHint = store.Hints.FirstOrDefault(h =>
+                var existingHint = proj.Hints.FirstOrDefault(h =>
                     h.Keywords.Contains(kw, StringComparer.OrdinalIgnoreCase));
 
                 if (existingHint != null)
@@ -146,19 +157,19 @@ public class FileHintsManager
                 }
                 else
                 {
-                    store.Hints.Add(new KeywordHint
+                    proj.Hints.Add(new KeywordHint
                     {
                         Keywords = new() { kw },
                         Files = files
                     });
                 }
 
-                store.AutoLearned.RemoveAll(a =>
+                proj.AutoLearned.RemoveAll(a =>
                     string.Equals(a.Keyword, kw, StringComparison.Ordinal) &&
                     files.Contains(a.File, StringComparer.OrdinalIgnoreCase));
             }
 
-            Save(projectRoot, store);
+            SaveAll(store);
         }
     }
 

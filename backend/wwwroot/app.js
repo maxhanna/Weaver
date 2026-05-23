@@ -30,6 +30,22 @@
     vm.agentResult = null;
     vm.abortController = null;
 
+    // Scroll to bottom of agent log
+    vm.scrollToBottom = function() {
+      $timeout(function() {
+        var logContainer = document.querySelector('.agent-log');
+        if (logContainer) {
+          logContainer.scrollTop = logContainer.scrollHeight;
+        }
+      }, 0);
+    };
+
+    // Auto-scroll agent log when new content is added
+    vm.addLogEntry = function(entry) {
+      vm.agentActivityLog.push(entry);
+      vm.scrollToBottom();
+    };
+
     // Project UI
     vm.showProjectOptions = false;
     vm.showAddProjectPanel = false;
@@ -246,11 +262,13 @@
         show: true,
         dontShowAgain: false
       };
-      // Add backdrop class to body for blurred background
-      document.body.classList.add('backdrop-active');
       // Ensure modal is visible
       const modal = document.querySelector('.delete-confirm-modal');
-      if (modal) modal.style.display = 'flex';
+      if (modal) {
+        modal.style.display = 'flex';
+        // Ensure backdrop is properly applied
+        modal.style.backdropFilter = 'blur(4px)';
+      }
     };
  
     vm.confirmDeleteCard = function() {
@@ -656,7 +674,10 @@
                       incomplete: incomplete
                     };
                     var doIdx = vm.state.doing.findIndex(function(c) { return c.id === card.id; });
-                    if (doIdx !== -1) vm.state.doing[doIdx].agentAnalysis = analysis;
+                    if (doIdx !== -1) {
+                      vm.state.doing[doIdx].agentAnalysis = analysis;
+                      vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
+                    }
                     if (incomplete) {
                       pushAgentLog('warn', 'Card kept in Doing — no files were modified');
                     } else {
