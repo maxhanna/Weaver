@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -255,7 +255,9 @@ public class AgentController : ControllerBase
     private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
         var json = JsonSerializer.Serialize(data);
-        await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
+        await response.WriteAsync($"event: {eventName}\n" +
+            $"data: {json}\n\n", ct);
+        await response.Body.FlushAsync(ct);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

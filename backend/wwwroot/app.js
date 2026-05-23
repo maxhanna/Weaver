@@ -30,6 +30,17 @@
     vm.agentResult = null;
     vm.abortController = null;
 
+    // Debug logging for file size and token count
+    vm.logFileSizeAndTokens = function(filePath, content) {
+      if (!filePath || !content) return;
+      const fileSize = content.length;
+      const tokenCount = Math.ceil(fileSize / 4); // Rough estimate
+      vm.addLogEntry({
+        type: 'debug',
+        message: `File: ${filePath} | Size: ${fileSize} chars | Tokens: ~${tokenCount}`
+      });
+    };
+
     // Scroll to bottom of agent log
     vm.scrollToBottom = function() {
       $timeout(function() {
