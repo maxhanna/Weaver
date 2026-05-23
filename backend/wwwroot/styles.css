@@ -336,7 +336,7 @@ main {
 }
 
 .board::-webkit-scrollbar-thumb {
-	background: rgba(255, 255, 255, 0.04);
+	background: var(--accent);
 	border-radius: 999px;
 }
 
@@ -392,7 +392,7 @@ main {
 }
 
 .cards::-webkit-scrollbar-thumb {
-	background: rgba(255, 255, 255, 0.03);
+	background: var(--accent);
 	border-radius: 999px;
 }
 

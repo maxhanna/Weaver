@@ -250,7 +250,6 @@ public class AgentController : ControllerBase
     {
         var json = JsonSerializer.Serialize(data);
         await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
-        await response.Body.FlushAsync(ct);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -477,17 +476,17 @@ public class AgentController : ControllerBase
     /// Returns an empty list if parsing fails (caller falls back to heuristics).
     /// </summary>
     private async Task<List<PlanItem>> RunPlanPhase(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse)
+        string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
-        await EmitLog(emitSse, "info", "Phase 2 — PLAN: asking model which files need to change…");
+        await EmitLog(emitSse, "info", "Phase 2 — PLAN: asking model which files need to change…", ct: ct);
         if (emitSse)
-            await SendSse(Response, "phase", new { phase = "plan", message = "Planning changes…" });
+            await SendSse(Response, "phase", new { phase = "plan", message = "Planning changes…" }, ct);
 
-        var (raw, plan, error) = await CallLlmForPlan(prompt, discoveryContext, projectRoot);
+        var (raw, plan, error) = await CallLlmForPlan(prompt, discoveryContext, projectRoot, ct);
 
         if (plan == null || plan.Plan.Count == 0)
         {
-            await EmitLog(emitSse, "warn", $"Plan phase produced no items — falling back to heuristic file list. Error: {error}");
+            await EmitLog(emitSse, "warn", $"Plan phase produced no items — falling back to heuristic file list. Error: {error}", ct: ct);
             // Fallback: use every .js/.html/.css candidate from discovery as the plan
             var fallbackFiles = FindLikelyFiles(prompt, projectRoot);
             return fallbackFiles
@@ -501,16 +500,16 @@ public class AgentController : ControllerBase
 
         await EmitLog(emitSse, "info",
             $"Plan: {plan.Plan.Count} file(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
-            new { thinking = plan.Thinking, summary = plan.Summary });
+            new { thinking = plan.Thinking, summary = plan.Summary }, ct: ct);
 
         if (emitSse)
-            await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan });
+            await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
 
         return plan.Plan.Take(MaxPlanFiles).ToList();
     }
 
     private async Task<(string raw, AgentPlan? parsed, string? error)> CallLlmForPlan(
-        string prompt, string discoveryContext, string projectRoot)
+        string prompt, string discoveryContext, string projectRoot, CancellationToken ct = default)
     {
         const string systemPrompt = @"You are a code-change planning agent.
 
@@ -555,7 +554,7 @@ RULES:
         user.AppendLine("## Project Discovery (ONLY use paths listed here)");
         user.AppendLine(Truncate(discoveryContext, 16_000));
 
-        var (raw, _, llmError) = await CallLlmRaw(systemPrompt, user.ToString());
+        var (raw, _, llmError) = await CallLlmRaw(systemPrompt, user.ToString(), ct);
 
         if (string.IsNullOrWhiteSpace(raw))
             return (raw ?? "", null, llmError ?? "Empty response");
@@ -653,174 +652,189 @@ RULES:
         var idx = startIndex;
         foreach (var item in plan.OrderBy(p => p.Priority))
         {
-            if (string.IsNullOrWhiteSpace(item.File)) continue;
-            ct.ThrowIfCancellationRequested();
-
-            var relPath = item.File.Replace('\\', '/');
-            var fullPath = Path.GetFullPath(
-                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-
-            if (!IsPathUnderRoot(fullPath, projectRoot))
+            try
             {
-                await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root", ct: ct);
-                continue;
-            }
+                ct.ThrowIfCancellationRequested();
 
-            if (emitSse)
-                await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
+                var relPath = (item.File ?? "").Replace('\\', '/');
+                if (string.IsNullOrWhiteSpace(relPath)) continue;
 
-            if (!System.IO.File.Exists(fullPath))
-            {
-                await EmitLog(emitSse, "warn", $"Planned file not found: {relPath}", ct: ct);
-                var similar = FindSimilarFiles(relPath, projectRoot);
-                if (similar.Count > 0)
+                var fullPath = Path.GetFullPath(
+                    Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+                if (!IsPathUnderRoot(fullPath, projectRoot))
                 {
-                    await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
-                    relPath = similar[0];
-                    fullPath = Path.GetFullPath(
-                        Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-                    if (!System.IO.File.Exists(fullPath)) continue;
-                }
-                else continue;
-            }
-
-            var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-
-            // Detect rename/move operations — bypass LLM edit loop
-            var changeDesc = (item.ChangeDescription ?? "").Trim();
-            var isRename = changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase) ||
-                           changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase);
-            if (isRename)
-            {
-                var dstPath = ExtractTargetPath(changeDesc, relPath, projectRoot);
-                if (dstPath != null)
-                {
-                    var renameStep = new AgentStep
-                    {
-                        Index = 0,
-                        Type = "rename",
-                        Path = relPath,
-                        ToPath = dstPath,
-                        Description = $"Rename {relPath} → {dstPath}"
-                    };
-                    var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse, ct);
-                    idx += results.Count;
-                    allResults.AddRange(results);
+                    await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root", ct: ct);
                     continue;
                 }
-            }
 
-            // Combine the original prompt with the file-specific change description
-            var fileTask = string.IsNullOrWhiteSpace(item.ChangeDescription)
-                ? originalPrompt
-                : $"{originalPrompt}\n\nSpecific change needed in {relPath}: {item.ChangeDescription}";
+                if (emitSse)
+                    await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
 
-            // --- up to 2 attempts ---
-            List<AgentStep> editSteps = new();
-            var timedOut = false;
-            for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
-            {
-                await EmitLog(emitSse, "info",
-                    $"LLM edit call: {relPath} (attempt {attempt + 1})",
-                    new { chars = fileContent.Length, taskSummary = item.ChangeDescription }, ct: ct);
-
-                var (raw, _, err) = await CallLlmSingleFileEdit(
-                    fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext, ct);
-
-                // Skip retry on timeout — won't help
-                if (err != null && err.StartsWith("Timed out", StringComparison.Ordinal))
+                if (!System.IO.File.Exists(fullPath))
                 {
-                    timedOut = true;
-                    await EmitLog(emitSse, "error", $"Timed out editing {relPath} — skipping", ct: ct);
-                    break;
+                    await EmitLog(emitSse, "warn", $"Planned file not found: {relPath}", ct: ct);
+                    var similar = FindSimilarFiles(relPath, projectRoot);
+                    if (similar.Count > 0)
+                    {
+                        await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
+                        relPath = similar[0];
+                        fullPath = Path.GetFullPath(
+                            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                        if (!System.IO.File.Exists(fullPath)) continue;
+                    }
+                    else continue;
                 }
 
-                await EmitLog(emitSse, "debug",
-                    $"LLM raw ({raw?.Length ?? 0} chars)",
-                    new { raw }, ct: ct);
+                var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
-                editSteps = ParseEditsFromLlmRaw(raw, relPath);
-
-                // Determine rejection reason for better logging
-                string? rejectReason = null;
-                if (editSteps.Count > 0)
+                // Detect rename/move operations — bypass LLM edit loop
+                var changeDesc = (item.ChangeDescription ?? "").Trim();
+                var isRename = changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase) ||
+                               changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase);
+                if (isRename)
                 {
-                    var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
-                    if (missingNew.Count > 0)
+                    var dstPath = ExtractTargetPath(changeDesc, relPath, projectRoot);
+                    if (dstPath != null)
                     {
-                        rejectReason = "newString is empty — model returned oldString without replacement";
-                        editSteps = editSteps.Where(e => !string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                        var renameStep = new AgentStep
+                        {
+                            Index = 0,
+                            Type = "rename",
+                            Path = relPath,
+                            ToPath = dstPath,
+                            Description = $"Rename {relPath} → {dstPath}"
+                        };
+                        var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse, ct);
+                        idx += results.Count;
+                        allResults.AddRange(results);
+                        continue;
                     }
                 }
 
-                // Filter no-op edits (oldString == newString)
-                var identicalCount = editSteps.Count;
-                editSteps = editSteps
-                    .Where(e => !string.Equals(
-                        NormalizeLineEndings(e.OldString ?? ""),
-                        NormalizeLineEndings(e.NewString ?? ""),
-                        StringComparison.Ordinal))
-                    .ToList();
-                if (identicalCount > 0 && editSteps.Count == 0)
-                    rejectReason = "oldString and newString are identical";
+                // Combine the original prompt with the file-specific change description
+                var fileTask = string.IsNullOrWhiteSpace(item.ChangeDescription)
+                    ? originalPrompt
+                    : $"{originalPrompt}\n\nSpecific change needed in {relPath}: {item.ChangeDescription}";
 
-                if (editSteps.Count == 0)
-                    await EmitLog(emitSse, "warn",
-                        $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
-            }
-
-            if (timedOut) continue;
-
-            if (editSteps.Count == 0)
-            {
-                // Heuristic patches as last resort
-                editSteps = TryHeuristicPatches(fileTask, relPath, fileContent);
-                if (editSteps.Count > 0)
-                    await EmitLog(emitSse, "info", $"Applied {editSteps.Count} heuristic patch(es) for {relPath}", ct: ct);
-            }
-
-            if (editSteps.Count == 0)
-            {
-                await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
-                continue;
-            }
-
-            for (var i = 0; i < editSteps.Count; i++)
-                editSteps[i].Index = i;
-
-            var batchResults = await ExecuteSteps(editSteps, projectRoot, idx, emitSse, ct);
-            idx += batchResults.Count;
-            allResults.AddRange(batchResults);
-
-            var fileEdited = batchResults.Any(r =>
-                r is Dictionary<string, object?> d &&
-                d.TryGetValue("status", out var st) && st?.ToString() == "done");
-
-            if (!fileEdited)
-            {
-                await EmitLog(emitSse, "warn",
-                    $"All edits failed for {relPath} — running one retry with re-read content", ct: ct);
-
-                if (System.IO.File.Exists(fullPath))
+                // --- up to 2 attempts ---
+                List<AgentStep> editSteps = new();
+                var timedOut = false;
+                for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
                 {
-                    var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-                    var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                        fileTask, relPath, freshContent, projectRoot, 2, discoveryContext, ct);
-                    var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
+                    await EmitLog(emitSse, "info",
+                        $"LLM edit call: {relPath} (attempt {attempt + 1})",
+                        new { chars = fileContent.Length, taskSummary = item.ChangeDescription }, ct: ct);
+
+                    var (raw, _, err) = await CallLlmSingleFileEdit(
+                        fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext, ct);
+
+                    // Skip retry on timeout — won't help
+                    if (err != null && err.StartsWith("Timed out", StringComparison.Ordinal))
+                    {
+                        timedOut = true;
+                        await EmitLog(emitSse, "error", $"Timed out editing {relPath} — skipping", ct: ct);
+                        break;
+                    }
+
+                    await EmitLog(emitSse, "debug",
+                        $"LLM raw ({raw?.Length ?? 0} chars)",
+                        new { raw }, ct: ct);
+
+                    editSteps = ParseEditsFromLlmRaw(raw, relPath);
+
+                    // Determine rejection reason for better logging
+                    string? rejectReason = null;
+                    if (editSteps.Count > 0)
+                    {
+                        var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                        if (missingNew.Count > 0)
+                        {
+                            rejectReason = "newString is empty — model returned oldString without replacement";
+                            editSteps = editSteps.Where(e => !string.IsNullOrWhiteSpace(e.NewString)).ToList();
+                        }
+                    }
+
+                    // Filter no-op edits (oldString == newString)
+                    var identicalCount = editSteps.Count;
+                    editSteps = editSteps
                         .Where(e => !string.Equals(
                             NormalizeLineEndings(e.OldString ?? ""),
                             NormalizeLineEndings(e.NewString ?? ""),
                             StringComparison.Ordinal))
                         .ToList();
+                    if (identicalCount > 0 && editSteps.Count == 0)
+                        rejectReason = "oldString and newString are identical";
 
-                    if (retrySteps.Count > 0)
+                    if (editSteps.Count == 0)
+                        await EmitLog(emitSse, "warn",
+                            $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
+                }
+
+                if (timedOut) continue;
+
+                if (editSteps.Count == 0)
+                {
+                    // Heuristic patches as last resort
+                    editSteps = TryHeuristicPatches(fileTask, relPath, fileContent);
+                    if (editSteps.Count > 0)
+                        await EmitLog(emitSse, "info", $"Applied {editSteps.Count} heuristic patch(es) for {relPath}", ct: ct);
+                }
+
+                if (editSteps.Count == 0)
+                {
+                    await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
+                    continue;
+                }
+
+                for (var i = 0; i < editSteps.Count; i++)
+                    editSteps[i].Index = i;
+
+                var batchResults = await ExecuteSteps(editSteps, projectRoot, idx, emitSse, ct);
+                idx += batchResults.Count;
+                allResults.AddRange(batchResults);
+
+                var fileEdited = batchResults.Any(r =>
+                    r is Dictionary<string, object?> d &&
+                    d.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+                if (!fileEdited)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"All edits failed for {relPath} — running one retry with re-read content", ct: ct);
+
+                    if (System.IO.File.Exists(fullPath))
                     {
-                        for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
-                        var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
-                        idx += retryResults.Count;
-                        allResults.AddRange(retryResults);
+                        var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+                        var (retryRaw, _, _) = await CallLlmSingleFileEdit(
+                            fileTask, relPath, freshContent, projectRoot, 2, discoveryContext, ct);
+                        var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
+                            .Where(e => !string.Equals(
+                                NormalizeLineEndings(e.OldString ?? ""),
+                                NormalizeLineEndings(e.NewString ?? ""),
+                                StringComparison.Ordinal))
+                            .ToList();
+
+                        if (retrySteps.Count > 0)
+                        {
+                            for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
+                            var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
+                            idx += retryResults.Count;
+                            allResults.AddRange(retryResults);
+                        }
                     }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                await EmitLog(emitSse, "error", $"Editing {item.File} was cancelled — aborting phase", ct: default);
+                break;
+            }
+            catch (Exception ex)
+            {
+                await EmitLog(emitSse, "error",
+                    $"Unexpected error editing {item.File}: {ex.Message}", ct: default);
+                continue;
             }
         }
 
@@ -1042,11 +1056,12 @@ RULES:
     /// Low-level LLM call — returns raw content string, no parsing.
     /// </summary>
     private async Task<(string raw, object? unused, string? error)> CallLlmRaw(
-        string systemPrompt, string userMessage)
+        string systemPrompt, string userMessage, CancellationToken ct = default)
     {
         var baseUrl = GetLlamaBaseUrl();
         var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
         var client = _clientFactory.CreateClient("llama");
+        client.Timeout = Timeout.InfiniteTimeSpan;
 
         var messages = new object[]
         {
@@ -1054,7 +1069,7 @@ RULES:
             new { role = "user",    content = userMessage  }
         };
 
-        return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages);
+        return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, ct);
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
@@ -1117,6 +1132,7 @@ RULES:
             var baseUrl = GetLlamaBaseUrl();
             var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
             var client = _clientFactory.CreateClient("llama");
+            client.Timeout = Timeout.InfiniteTimeSpan;
 
             var messages = new object[]
             {
@@ -1152,7 +1168,7 @@ RULES:
                                       StringComparison.Ordinal))
                     {
                         var generated = await GenerateNewString(
-                            step.OldString ?? "", taskPrompt, relativePath, fileContent, ct);
+                            step.OldString ?? "", taskPrompt, relativePath, fileContent, combined);
                         if (!string.IsNullOrWhiteSpace(generated))
                             step.NewString = generated;
                     }
@@ -1203,6 +1219,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             var baseUrl = GetLlamaBaseUrl();
             var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
             var client = _clientFactory.CreateClient("llama");
+            client.Timeout = Timeout.InfiniteTimeSpan;
 
             var messages = new object[]
             {
@@ -1240,7 +1257,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
-        HttpClient client, string target, string model, object messages)
+        HttpClient client, string target, string model, object messages, CancellationToken ct = default)
     {
         var requestBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = 2048 };
         var contentJson = JsonSerializer.Serialize(requestBody);
@@ -1248,8 +1265,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
 
         try
         {
-            var resp = await client.PostAsync(target, httpContent);
-            var respText = await resp.Content.ReadAsStringAsync();
+            var resp = await client.PostAsync(target, httpContent, ct);
+            var respText = await resp.Content.ReadAsStringAsync(ct);
 
             var llmContent = ExtractLlmContent(respText);
             if (string.IsNullOrWhiteSpace(llmContent))
