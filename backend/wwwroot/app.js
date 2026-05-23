@@ -49,15 +49,14 @@
     };
 
     // Scroll to bottom of agent log.
-    // IMPORTANT: pass `false` as the third arg (invokeApply) so $timeout does NOT
-    // call $apply/$digest after the DOM write.  Without it, every log entry pushed
-    // during an SSE chunk schedules a $timeout whose $apply fires *inside* the
-    // $digest that readNext() already triggered, causing the $rootScope:infdig loop
-    // (scrollHeight increments by ~12px each cycle as the container grows, the
-    // dirty-check sees it changed, reschedules another digest, forever).
+    // $timeout with invokeApply=false (third arg) so the DOM write never triggers
+    // a digest cycle.  Target '.log-entries' — that is the actual scrollable div
+    // inside the agent-activity-log <details> block.  '.agent-log' does not exist
+    // in the template and querySelector returned null, making scrollToBottom a
+    // silent no-op while still scheduling $timeout ticks that piled up.
     vm.scrollToBottom = function () {
       $timeout(function () {
-        var logContainer = document.querySelector('.agent-log');
+        var logContainer = document.querySelector('.log-entries');
         if (logContainer) {
           logContainer.scrollTop = logContainer.scrollHeight;
         }
@@ -678,6 +677,7 @@
       vm.lastPhaseLogged = '';
       _lastLogKey = '';
       vm.streamingActive = true;
+      pauseTerminalPolling();
       pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
       vm.activeCardText = card.text;
 
@@ -708,6 +708,7 @@
       }).then(function (response) {
         if (!response.ok) {
           vm.streamingActive = false;
+          resumeTerminalPolling();
           vm.agentResult = { error: 'Server error: ' + response.status };
           $scope.$digest();
           return;
@@ -720,6 +721,7 @@
           reader.read().then(function (result) {
             if (result.done) {
               vm.streamingActive = false;
+              resumeTerminalPolling();
               $scope.$digest();
               return;
             }
@@ -784,6 +786,7 @@
                     break;
                   case 'done':
                     vm.streamingActive = false;
+                    resumeTerminalPolling();
                     var editsApplied = parsed && parsed.editsApplied;
                     var incomplete = parsed && parsed.incomplete;
                     if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
@@ -827,6 +830,7 @@
                     break;
                   case 'error':
                     vm.streamingActive = false;
+                    resumeTerminalPolling();
                     pushAgentLog('error', parsed ? parsed.message : data);
                     vm.agentResult = { error: parsed ? parsed.message : data };
                     vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
@@ -841,6 +845,7 @@
         readNext();
       }).catch(function (err) {
         vm.streamingActive = false;
+        resumeTerminalPolling();
         vm.abortController = null;
         if (err.name === 'AbortError') {
           vm.agentResult = { warning: 'Agent stopped by user.' };
@@ -921,6 +926,7 @@
         vm.abortController.abort();
         vm.abortController = null;
         vm.streamingActive = false;
+        resumeTerminalPolling();
         pushAgentLog('warn', 'Agent stopped by user');
       }
     };
@@ -1037,6 +1043,19 @@
     };
     $timeout(function () { vm.setupDragDrop(); }, 500);
 
-    // Refresh terminal periodically
-    $interval(vm.refreshTerminal, 3000);
+    // Refresh terminal periodically — but NOT while the agent is streaming.
+    // $interval always calls $apply after each tick.  When the agent is active,
+    // $scope.$digest() is already being called manually in readNext() for every SSE
+    // chunk.  Two concurrent digest sources produce the $rootScope:infdig loop
+    // (Angular sees a watcher — the terminal output string length / scroll geometry —
+    // still dirty after 10 passes and throws).  Pausing the interval during streaming
+    // and resuming on done/error keeps exactly one digest source active at a time.
+    var _terminalInterval = $interval(vm.refreshTerminal, 3000);
+
+    function pauseTerminalPolling() {
+      if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+    }
+    function resumeTerminalPolling() {
+      if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000);
+    }
   }]);
