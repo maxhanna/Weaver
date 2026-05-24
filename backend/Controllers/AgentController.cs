@@ -452,7 +452,7 @@ public class AgentController : ControllerBase
     {
         await EmitLog(emitSse, "info", "Fast-path bootstrap: reading attached files only");
 
-        var plan = attachedFiles
+        var plan = (attachedFiles ?? new List<string>())
             .Where(f => !string.IsNullOrWhiteSpace(f))
             .Select((f, i) => new AgentStep { Index = i, Type = "read", Path = f.Replace('\\', '/'), Description = $"Read attached {f}" })
             .ToList();
@@ -462,7 +462,7 @@ public class AgentController : ControllerBase
         var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
         var sb = new StringBuilder();
         sb.AppendLine("Attached files (edit these paths only):");
-        foreach (var f in attachedFiles) sb.AppendLine($"  - {f.Replace('\\', '/')}");
+        foreach (var f in attachedFiles ?? new List<string>()) sb.AppendLine($"  - {f.Replace('\\', '/')}");
         foreach (var item in steps)
         {
             if (item is Dictionary<string, object?> r && r.TryGetValue("output", out var o) && o != null)
@@ -527,6 +527,9 @@ WHICH files need to be modified and WHAT specific change to make in each file.
 DO NOT write any code yet. DO NOT include oldString or newString.
 Your only job is to identify files and describe the change precisely.
 
+CRITICAL: You must ONLY reference functions, classes, IDs, or code elements that actually exist in the provided file contents.
+DO NOT hallucinate or invent code that doesn't appear in the discovery context.
+
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
 {
   ""thinking"": ""brief analysis of what the task requires"",
@@ -541,8 +544,8 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
 }
 
 The ""change"" field is CRITICAL — it will be passed directly to the edit model so it knows exactly what to do.
-Make it specific: e.g. 'Add a <div class=""popup-overlay""> before the closing </main> tag in index.html'
-NOT vague like 'modify the HTML file'.
+Make it specific and accurate: e.g. 'In the moveCardToDoing function in app.js, change the line ""vm.state.doing.push(card);"" to ""vm.state.todo.push(card);""'
+NOT vague like 'modify the moveCard function'.
 
 RULES:
 - Only list files that actually exist in the Project Discovery section below.
@@ -550,7 +553,9 @@ RULES:
 - If both HTML and CSS need changes, list them as separate plan items.
 - Priority 1 = most important file. Sort by priority ascending.
 - If the task is purely CSS, list only the CSS file. If purely JS, list only JS.
-- For RENAME/MOVE tasks: list the source file. Set the ""change"" field to: 'Rename this file to <new/path>'.";
+- For RENAME/MOVE tasks: list the source file. Set the ""change"" field to: 'Rename this file to <new/path>'.
+- When describing changes, quote exact existing code you want to modify and show exactly what it should become.
+- If you're unsure about exact code, describe the location and intent clearly rather than guessing.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -995,7 +1000,7 @@ RULES:
                 allSteps = new List<object>(bootstrapSteps);
 
                 // Build a targeted plan from the attached files
-                var fastPlan = req.Files
+                var fastPlan = (req.Files ?? new List<string>())
                     .Where(f => !string.IsNullOrWhiteSpace(f) &&
                                 (f.EndsWith(".js", StringComparison.OrdinalIgnoreCase) ||
                                  f.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
@@ -1552,10 +1557,25 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         var (replaced, newContent, matchError, snippet) = TryReplace(content, oldString, newString);
         if (!replaced)
         {
+            // Enhanced error reporting with context
             result["status"] = "error";
             result["error"] = matchError ?? "oldString not found";
             if (snippet != null) result["snippet"] = snippet;
             result["oldStringPreview"] = Truncate(oldString, 200);
+            
+            // Add helpful context about file content for debugging
+            var lines = content.Split('\n');
+            result["fileLineCount"] = lines.Length;
+            result["fileCharCount"] = content.Length;
+            
+
+            
+            // If the file is small, show more context
+            if (content.Length < 1000)
+            {
+                result["fileContentPreview"] = Truncate(content, 300);
+            }
+            
             return;
         }
 
@@ -1710,6 +1730,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         var hint = firstNonBlankPattern.Length > 0
             ? string.Join("\n", fileLines.Where(l => l.Contains(firstNonBlankPattern, StringComparison.OrdinalIgnoreCase)).Take(3))
             : null;
+        
         return (false, content, "oldString not found in file",
             !string.IsNullOrEmpty(hint) ? Truncate(hint, 400) : null);
     }

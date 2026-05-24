@@ -62,7 +62,7 @@ public class FileEditController : ControllerBase
         }
 
         var dir = Path.GetDirectoryName(targetFull);
-        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
         if (!System.IO.File.Exists(targetFull) && !req.CreateIfMissing)
         {
