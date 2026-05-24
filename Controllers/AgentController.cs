@@ -289,7 +289,7 @@ public class AgentController : ControllerBase
 
         var presets = new[]
         {
-            "backend/wwwroot/app.js", "backend/wwwroot/index.html", "backend/wwwroot/styles.css",
+            "wwwroot/app.js", "wwwroot/index.html", "wwwroot/styles.css",
             "wwwroot/app.js",          "wwwroot/index.html",          "wwwroot/styles.css",
             "app.js",                   "index.html",                  "styles.css"
         };
@@ -1415,7 +1415,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         if (prompt.Contains("maestroconfig.json", StringComparison.OrdinalIgnoreCase) &&
             !paths.Any(p => p.EndsWith("maestroconfig.json", StringComparison.OrdinalIgnoreCase)))
         {
-            foreach (var p in new[] { "backend/wwwroot/maestroconfig.json", "wwwroot/maestroconfig.json" })
+            foreach (var p in new[] { "wwwroot/maestroconfig.json", "wwwroot/maestroconfig.json" })
             {
                 var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
                 if (System.IO.File.Exists(full)) paths.Add(p);

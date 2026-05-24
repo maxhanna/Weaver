@@ -11,7 +11,8 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1 class="brand-logo" ng-click="vm.openAboutPanel()">Maestro <span class="badge brand-badge">Agentic Kanban</span>
+    <h1 class="brand-logo" ng-click="vm.openDiscordPanel()">Maestro <span class="badge brand-badge">Agentic
+        Kanban</span>
     </h1>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
@@ -23,9 +24,7 @@
         <button class="options-btn small" ng-click="vm.toggleProjectOptions()"
           ng-class="{active: vm.showProjectOptions}">Options ▾</button>
         <div class="options-menu" ng-if="vm.showProjectOptions">
-          <button ng-click="vm.editProjectUI(); vm.toggleProjectOptions()">✎ Edit Project</button>
-          <button ng-click="vm.addProjectUI(); vm.toggleProjectOptions()">＋ Add Project</button>
-          <button ng-click="vm.removeProjectUI(); vm.toggleProjectOptions()">✕ Remove Project</button>
+          <button ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit Projects</button>
           <button ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
         </div>
       </div>
@@ -33,219 +32,226 @@
   </header>
 
   <main>
-    <div class="search-container">
-      <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
-      <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
-    </div>
-    <!-- KANBAN BOARD -->
-    <div id="board" class="board">
-      <!-- TODO column -->
-      <div class="column" data-col="todo" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
-        <h3>
-          <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
-          <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
-        </h3>
-        <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}"
-          ondragover="event.preventDefault()">
-          <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
-            ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)" draggable="true"
-            ng-drag="vm.dragStart($event, card, 'todo')" ng-dragend="vm.dragEnd($event, card)"
-            data-card-id="{{card.id}}">
-            <div class="card-meta">
-              <span class="card-id">#{{card.id | limitTo:6}}</span>
-              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
-            </div>
-            <div class="card-text">
-              <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
-                ng-click="$event.stopPropagation()"
-                placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
-            </div>
-            <div class="card-tags">
-              <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-              <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            </div>
-            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
-              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-                <span>📎</span><span class="name">{{f}}</span>
-                <span class="remove" ng-click="vm.removeAttachment(card.id); $event.stopPropagation()">✕</span>
-              </div>
-            </div>
-            <div class="card-actions">
-              <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
-                title="Attach file">📎</button>
-              <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
-                title="Split into smaller tasks">✂ Split</button>
-              <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-                ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : '▶ Run'}}</button>
-              <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
-                Delete</button>
-            </div>
-          </div>
-        </div>
+    <div style="display: flex; flex-direction: column;" ng-if="vm.showKanban">
+      <div class="search-container">
+        <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
+        <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
       </div>
-
-      <!-- DOING column -->
-      <div class="column" data-col="doing" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
-        <h3>
-          <span class="col-header">⚡ Doing <span class="col-badge">{{vm.cardsForProject('doing').length}}</span></span>
-        </h3>
-        <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}"
-          ondragover="event.preventDefault()">
-          <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
-            ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
-            <div class="card-meta">
-              <span class="card-id">#{{card.id | limitTo:6}}</span>
-              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
-            </div>
-            <div class="card-text">{{card.text}}</div>
-            <div class="card-tags" ng-if="card.priority">
-              <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-              <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
-            </div>
-            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
-              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-                <span>📎</span><span class="name">{{f}}</span>
+      <!-- KANBAN BOARD -->
+      <div id="board" class="board">
+        <!-- TODO column -->
+        <div class="column" data-col="todo" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
+          <h3>
+            <span class="col-header">📋 To Do <span
+                class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
+            <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
+          </h3>
+          <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}"
+            ondragover="event.preventDefault()">
+            <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
+              ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
+              ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)" draggable="true"
+              ng-drag="vm.dragStart($event, card, 'todo')" ng-dragend="vm.dragEnd($event, card)"
+              data-card-id="{{card.id}}">
+              <div class="card-meta">
+                <span class="card-id">#{{card.id | limitTo:6}}</span>
+                <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
               </div>
-            </div>
-            <div class="card-actions">
-              <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small"
-                ng-disabled="vm.streamingActive && card.ready">✔ Done</button>
-              <button ng-click="vm.stopAgent(card)" class="small"
-                ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
-              <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
-              <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
-              <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
-                Delete</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- DONE column -->
-      <div class="column" data-col="done" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
-        <h3>
-          <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
-          <button class="small ghost" ng-click="vm.clearDoneCards()" title="Clear all done tasks">Clear</button>
-        </h3>
-        <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}"
-          ondragover="event.preventDefault()">
-          <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
-            ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
-            <div class="card-meta">
-              <span class="card-id">#{{card.id | limitTo:6}}</span>
-              <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
-            </div>
-            <div class="card-text">{{card.text}}</div>
-            <div class="card-tags" ng-if="card.priority">
-              <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            </div>
-            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
-              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-                <span>📎</span><span class="name">{{f}}</span>
+              <div class="card-text">
+                <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
+                  ng-click="$event.stopPropagation()"
+                  placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
               </div>
-            </div>
-            <!-- Agent analysis shown on Done cards -->
-            <div class="card-analysis" ng-if="card.agentAnalysis">
-              <details>
-                <summary>🤖 AI Analysis</summary>
-                <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
-                  <strong>Summary:</strong> {{card.agentAnalysis.summary}}
+              <div class="card-tags">
+                <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+                <span class="card-tag" ng-if="card.priority"
+                  ng-class="'priority-'+card.priority">{{card.priority}}</span>
+              </div>
+              <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+                <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                  <span>📎</span><span class="name">{{f}}</span>
+                  <span class="remove" ng-click="vm.removeAttachment(card.id); $event.stopPropagation()">✕</span>
                 </div>
-                <div class="analysis-files"
-                  ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
-                  <strong>Files changed:</strong>
-                  <div class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
-                    <span class="chip-path">{{f.path}}</span>
-                    <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
+              </div>
+              <div class="card-actions">
+                <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
+                  title="Attach file">📎</button>
+                <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
+                  title="Split into smaller tasks">✂ Split</button>
+                <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
+                  ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : '▶ Run'}}</button>
+                <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
+                  Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DOING column -->
+        <div class="column" data-col="doing" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
+          <h3>
+            <span class="col-header">⚡ Doing <span
+                class="col-badge">{{vm.cardsForProject('doing').length}}</span></span>
+          </h3>
+          <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}"
+            ondragover="event.preventDefault()">
+            <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
+              ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
+              ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
+              <div class="card-meta">
+                <span class="card-id">#{{card.id | limitTo:6}}</span>
+                <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+              </div>
+              <div class="card-text">{{card.text}}</div>
+              <div class="card-tags" ng-if="card.priority">
+                <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+                <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
+              </div>
+              <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+                <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                  <span>📎</span><span class="name">{{f}}</span>
+                </div>
+              </div>
+              <div class="card-actions">
+                <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small"
+                  ng-disabled="vm.streamingActive && card.ready">✔ Done</button>
+                <button ng-click="vm.stopAgent(card)" class="small"
+                  ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
+                <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
+                <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
+                <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
+                  Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DONE column -->
+        <div class="column" data-col="done" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
+          <h3>
+            <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
+            <button class="small ghost" ng-click="vm.clearDoneCards()" title="Clear all done tasks">Clear</button>
+          </h3>
+          <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}"
+            ondragover="event.preventDefault()">
+            <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
+              ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
+              ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
+              <div class="card-meta">
+                <span class="card-id">#{{card.id | limitTo:6}}</span>
+                <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+              </div>
+              <div class="card-text">{{card.text}}</div>
+              <div class="card-tags" ng-if="card.priority">
+                <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+              </div>
+              <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+                <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                  <span>📎</span><span class="name">{{f}}</span>
+                </div>
+              </div>
+              <!-- Agent analysis shown on Done cards -->
+              <div class="card-analysis" ng-if="card.agentAnalysis">
+                <details>
+                  <summary>🤖 AI Analysis</summary>
+                  <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
+                    <strong>Summary:</strong> {{card.agentAnalysis.summary}}
                   </div>
-                </div>
-                <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
-                  <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
-                    <span
-                      class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                    <div class="step-body">
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
-                      <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
-                          −{{s.linesRemoved || 0}} lines</div>
-                        <div class="diff-sbs">
-                          <div class="diff-header">
-                            <div class="diff-header-cell diff-header-old">Old</div>
-                            <div class="diff-header-cell diff-header-new">New</div>
-                          </div>
-                          <div class="diff-wrapper">
-                            <div class="diff-col diff-col-old">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
-                                <div class="diff-cell diff-cell-old"
-                                  ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                  <span class="diff-lineno">{{$index+1}} ({{line.oldLineNum || $index+1}})</span>
-                                  <span>{{line.oldLine || ''}}</span>
+                  <div class="analysis-files"
+                    ng-if="card.agentAnalysis.filesEdited && card.agentAnalysis.filesEdited.length">
+                    <strong>Files changed:</strong>
+                    <div class="file-edit-chip" ng-repeat="f in card.agentAnalysis.filesEdited">
+                      <span class="chip-path">{{f.path}}</span>
+                      <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
+                    </div>
+                  </div>
+                  <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
+                    <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <div class="step-body">
+                        <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                          s.url || ''}}</span>
+                        <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
+                          <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
+                            −{{s.linesRemoved || 0}} lines</div>
+                          <div class="diff-sbs">
+                            <div class="diff-header">
+                              <div class="diff-header-cell diff-header-old">Old</div>
+                              <div class="diff-header-cell diff-header-new">New</div>
+                            </div>
+                            <div class="diff-wrapper">
+                              <div class="diff-col diff-col-old">
+                                <div class="diff-row"
+                                  ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                                  <div class="diff-cell diff-cell-old"
+                                    ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                                    <span class="diff-lineno">{{$index+1}} ({{line.oldLineNum || $index+1}})</span>
+                                    <span>{{line.oldLine || ''}}</span>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                            <div class="diff-col diff-col-new">
-                              <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
-                                <div class="diff-cell diff-cell-new"
-                                  ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                                  <span class="diff-lineno">{{$index+1}}</span>
-                                  <span>{{line.newLine || ''}}</span>
+                              <div class="diff-col diff-col-new">
+                                <div class="diff-row"
+                                  ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                                  <div class="diff-cell diff-cell-new"
+                                    ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                                    <span class="diff-lineno">{{$index+1}}</span>
+                                    <span>{{line.newLine || ''}}</span>
+                                  </div>
                                 </div>
                               </div>
                             </div>
                           </div>
                         </div>
+                        <div class="rename-display" ng-if="s.type==='rename'">
+                          <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
+                        </div>
+                        <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
+                        <span class="step-err" ng-if="s.error">{{s.error}}</span>
                       </div>
-                      <div class="rename-display" ng-if="s.type==='rename'">
-                        <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
-                      </div>
-                      <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
-                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
                     </div>
                   </div>
-                </div>
-                <div class="analysis-log agent-log-container" ng-if="card.agentLog && card.agentLog.length">
-                  <details>
-                    <summary>📋 Log ({{card.agentLog.length}})</summary>
-                    <div class="log-entries">
-                      <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
-                        <span class="log-ts">{{e.ts}}</span>
-                        <span class="log-msg">{{e.message}}</span>
-                        <details ng-if="e.detail" class="log-detail">
-                          <summary>detail</summary>
-                          <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                        </details>
+                  <div class="analysis-log agent-log-container" ng-if="card.agentLog && card.agentLog.length">
+                    <details>
+                      <summary>📋 Log ({{card.agentLog.length}})</summary>
+                      <div class="log-entries">
+                        <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                          <span class="log-ts">{{e.ts}}</span>
+                          <span class="log-msg">{{e.message}}</span>
+                          <details ng-if="e.detail" class="log-detail">
+                            <summary>detail</summary>
+                            <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                          </details>
+                        </div>
                       </div>
-                    </div>
-                  </details>
-                </div>
-                <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
-                  <details>
-                    <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
-                    <pre>{{card.agentAnalysis.thinking}}</pre>
-                  </details>
-                </div>
-              </details>
-            </div>
-            <div class="card-actions">
-              <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
-              <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
-                Delete</button>
+                    </details>
+                  </div>
+                  <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
+                    <details>
+                      <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
+                      <pre>{{card.agentAnalysis.thinking}}</pre>
+                    </details>
+                  </div>
+                </details>
+              </div>
+              <div class="card-actions">
+                <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+                <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
+                  Delete</button>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </div>
 
+
     <!-- RIGHT PANEL: Agent + Terminal -->
-    <div class="right-panel">
+    <div class="right-panel" ng-class="{'full-width': !vm.showKanban}">
       <!-- Ask AI Chat Panel -->
-      <div class="panel ai-panel" ng-if="vm.showAI">
+      <div class="panel ai-panel" ng-if="vm.showAI" draggable="true" data-panel-type="ask-ai"
+        data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI</h3>
         <div class="panel-body ai-chat-body">
           <div class="ai-chat-messages">
@@ -266,9 +272,9 @@
           </div>
         </div>
       </div>
-      
+
       <!-- Agent Panel -->
-      <div class="panel">
+      <div class="panel" draggable="true" data-panel-type="agent" data-panel-id="agent-panel">
         <h3>🤖 Agent</h3>
         <div class="panel-body">
           <!-- Idle state -->
@@ -394,7 +400,7 @@
                   <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                 </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre>{{s.output | limitTo:24000}}</pre>
+                  <pre class="step-detail-data">{{s.output | limitTo:24000}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>
@@ -427,8 +433,8 @@
       </div>
 
       <!-- Terminal Panel -->
-      <div class="panel term-panel" ng-if="vm.showTerminal">
-        <h3>⌨ Terminal</h3>
+      <div class="panel terminal-panel" ng-if="vm.showTerminal" draggable="true" data-panel-type="terminal" data-panel-id="terminal-panel">
+        <h3>💻 Terminal</h3>
         <div class="panel-body">
           <div class="terminalOutput">{{vm.terminalOutput}}</div>
           <div class="term-input-row">
@@ -479,32 +485,37 @@
     </div>
   </div>
 
-  <!-- ADD/EDIT PROJECT MODAL -->
-  <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel($event)">
-    <div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;"
-      ng-click="$event.stopPropagation()">
+  <!-- EDIT PROJECTS MODAL -->
+  <div class="popup-overlay" ng-if="vm.showEditProjectsPanel" ng-click="vm.closeEditProjectsPanel()"></div>
+  <div class="delete-confirm-modal" ng-if="vm.showEditProjectsPanel">
+    <div class="popup-panel" style="max-width:650px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
-        <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
-        <button ng-click="vm.closeAddProjectPanel()">✕</button>
+        <strong>✎ Edit Projects</strong>
+        <button ng-click="vm.closeEditProjectsPanel()">✕</button>
       </div>
       <div class="popup-body">
-        <div class="form-row">
-          <label for="proj-name">Project Name</label>
-          <input id="proj-name" ng-model="vm.newProjectName" placeholder="My Project" />
+        <div ng-repeat="p in vm.projects track by $index"
+          style="padding:6px 0; border-bottom:1px solid var(--border,#e0e0e0);">
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input ng-model="p.Name" placeholder="Name" style="flex:2; min-width:0;" />
+            <input ng-model="p.Path" placeholder="Path" style="flex:3; min-width:0;" />
+            <input ng-model="p.Description" placeholder="Description" style="flex:3; min-width:0;" />
+            <button ng-click="vm.saveProject(p)" class="small primary" style="white-space:nowrap;">Save</button>
+            <button ng-click="vm.removeProject(p, $event)" class="small">Remove</button>
+          </div>
         </div>
-        <div class="form-row">
-          <label for="proj-path">Path (relative or absolute)</label>
-          <input id="proj-path" ng-model="vm.newProjectPath" placeholder="../my-project or C:/path" />
-        </div>
-        <div class="form-row">
-          <label for="proj-desc">Description</label>
-          <input id="proj-desc" ng-model="vm.newProjectDescription" placeholder="Short description shown in header" />
+        <div style="padding:10px 0;">
+          <strong>Add New Project</strong>
+          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+            <input ng-model="vm.newProjectName" placeholder="Name" style="flex:2; min-width:0;" />
+            <input ng-model="vm.newProjectPath" placeholder="Path" style="flex:3; min-width:0;" />
+            <input ng-model="vm.newProjectDescription" placeholder="Description" style="flex:3; min-width:0;" />
+            <button ng-click="vm.addProjectFromPanel()" class="primary">Add</button>
+          </div>
         </div>
       </div>
       <div class="popup-footer">
-        <button ng-if="!vm.editMode" ng-click="vm.addProjectFromPanel()" class="primary">Add Project</button>
-        <button ng-if="vm.editMode" ng-click="vm.updateProjectFromPanel()" class="primary">Save Changes</button>
-        <button ng-click="vm.closeAddProjectPanel()">Cancel</button>
+        <button ng-click="vm.closeEditProjectsPanel()">Done</button>
       </div>
     </div>
   </div>
@@ -512,7 +523,26 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()"></div>
-  <div class="popup-overlay" ng-if="vm.showAboutPanel" ng-click="vm.closeAboutPanel()"></div>
+  <div class="popup-overlay" ng-if="vm.showDiscordPanel" ng-click="vm.closeDiscordPanel()"></div>
+  <div class="delete-confirm-modal" ng-if="vm.showDiscordPanel">
+    <div class="popup-panel" style="max-width:420px;" ng-click="$event.stopPropagation()">
+      <div class="popup-header">
+        <strong>Join our Discord</strong>
+        <button ng-click="vm.closeDiscordPanel()">✕</button>
+      </div>
+      <div class="popup-body" style="text-align:center; padding:24px;">
+        <p style="font-size:1.1em; margin-bottom:16px;">Connect with the Maestro community!</p>
+        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer"
+          style="display:inline-block; padding:12px 32px; background:#5865F2; color:#fff; border-radius:6px; text-decoration:none; font-weight:bold; font-size:1.1em;">
+          Join Discord Server
+        </a>
+        <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
+      </div>
+      <div class="popup-footer">
+        <button ng-click="vm.closeDiscordPanel()">Close</button>
+      </div>
+    </div>
+  </div>
   <div class="delete-confirm-modal" ng-if="vm.showSettingsPanel">
     <div class="popup-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
@@ -539,6 +569,15 @@
           <label>
             <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel (saved to maestroconfig.json)
           </label>
+        </div>
+        <div class="form-row">
+          <label>
+            <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board (saved to maestroconfig.json)
+          </label>
+        </div>
+        <div class="form-row">
+          <label for="settings-llama">Llama.cpp / Ollama URL</label>
+          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://192.168.2.58:8080" />
         </div>
       </div>
       <div class="popup-footer">

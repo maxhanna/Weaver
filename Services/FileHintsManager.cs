@@ -75,11 +75,11 @@ public class FileHintsManager
         {
             Hints = new List<KeywordHint>
             {
-                new() { Keywords = new() { "terminal" }, Files = new() { "backend/wwwroot/app.js", "backend/wwwroot/index.html" } },
-                new() { Keywords = new() { "settings", "popup", "panel", "toggle" }, Files = new() { "backend/wwwroot/app.js", "backend/wwwroot/index.html", "backend/wwwroot/styles.css" } },
-                new() { Keywords = new() { "blur", "overlay", "background" }, Files = new() { "backend/wwwroot/styles.css" } },
-                new() { Keywords = new() { "delete", "remove" }, Files = new() { "backend/wwwroot/app.js", "backend/wwwroot/index.html" } },
-                new() { Keywords = new() { "card", "column" }, Files = new() { "backend/wwwroot/app.js", "backend/wwwroot/index.html", "backend/wwwroot/styles.css" } }
+                new() { Keywords = new() { "terminal" }, Files = new() { "wwwroot/app.js", "wwwroot/index.html" } },
+                new() { Keywords = new() { "settings", "popup", "panel", "toggle" }, Files = new() { "wwwroot/app.js", "wwwroot/index.html", "wwwroot/styles.css" } },
+                new() { Keywords = new() { "blur", "overlay", "background" }, Files = new() { "wwwroot/styles.css" } },
+                new() { Keywords = new() { "delete", "remove" }, Files = new() { "wwwroot/app.js", "wwwroot/index.html" } },
+                new() { Keywords = new() { "card", "column" }, Files = new() { "wwwroot/app.js", "wwwroot/index.html", "wwwroot/styles.css" } }
             }
         };
     }

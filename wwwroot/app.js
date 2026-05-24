@@ -94,17 +94,15 @@
 
     // Project UI
     vm.showProjectOptions = false;
-    vm.showAddProjectPanel = false;
+    vm.showEditProjectsPanel = false;
     vm.showSettingsPanel = false;
-    vm.showAboutPanel = false;
-    vm.showAboutPanel = false;
-    vm.showAboutPanel = false;
+    vm.showDiscordPanel = false;
     vm.showFilePicker = false;
-    vm.editMode = false;
     vm.newProjectName = '';
     vm.newProjectPath = '';
     vm.newProjectDescription = '';
-    vm.editingProjectPath = '';
+    vm.llamaUrl = 'http://192.168.2.58:8080';
+    vm.showKanban = true;
 
     // File picker
     vm.pickerCardId = null;
@@ -141,6 +139,8 @@
         cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
+        cfg.showKanban = vm.showKanban !== false;
+        cfg.LlamaUrl = vm.llamaUrl || "http://192.168.2.58:8080";
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -168,6 +168,8 @@
         vm.defaultProject = cfg.defaultProject;
         if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
         if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
+        if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
+        vm.llamaUrl = cfg.LlamaUrl || "http://192.168.2.58:8080";
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -185,15 +187,17 @@
     vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
     vm.changeProject = function () { };
 
-    vm.addProjectUI = function () {
-      vm.showAddProjectPanel = true;
-      vm.editMode = false;
+    vm.openEditProjectsPanel = function () {
       vm.newProjectName = '';
       vm.newProjectPath = '';
       vm.newProjectDescription = '';
+      vm.projects.forEach(function (p) { p._origPath = p.Path; });
+      vm.showEditProjectsPanel = true;
     };
 
-    vm.closeAddProjectPanel = function (event) { if (event && event.target.tagName === 'INPUT') return; if (event) event.stopPropagation(); vm.showAddProjectPanel = false; };
+    vm.closeEditProjectsPanel = function () {
+      vm.showEditProjectsPanel = false;
+    };
 
     vm.addProjectFromPanel = function () {
       if (!vm.newProjectName) return $window.alert('Project name is required');
@@ -204,57 +208,47 @@
         Description: vm.newProjectDescription || ''
       }).then(function () {
         vm.loadConfig();
-        vm.closeAddProjectPanel();
+        vm.newProjectName = '';
+        vm.newProjectPath = '';
+        vm.newProjectDescription = '';
       }, function (err) {
         $window.alert('Failed to add project: ' + (err.data || err.statusText));
       });
     };
 
-    vm.editProjectUI = function () {
-      if (!vm.selectedProject) return $window.alert('No project selected');
-      var p = vm.projects.find(function (p) { return (p.Path || p.path) === vm.selectedProject; });
-      if (!p) return;
-      vm.showAddProjectPanel = true;
-      vm.editMode = true;
-      vm.newProjectName = p.Name || '';
-      vm.newProjectPath = p.Path || '';
-      vm.newProjectDescription = p.Description || '';
-      vm.editingProjectPath = p.Path || '';
-    };
-
-    vm.updateProjectFromPanel = function () {
-      if (!vm.editMode) return vm.addProjectFromPanel();
-      if (!vm.newProjectName || !vm.newProjectPath) return $window.alert('Name and Path are required');
+    vm.saveProject = function (p) {
+      if (!p.Name || !p.Path) return $window.alert('Name and Path are required');
+      var originalPath = p._origPath || p.Path;
       $http.get('/api/config').then(function (resp) {
         var cfg = resp.data || { projects: [] };
         cfg.projects = cfg.projects || [];
-        var idx = cfg.projects.findIndex(function (p) { return (p.Path || p.path) === vm.editingProjectPath; });
-        if (idx === -1) return $window.alert('Original project not found');
-        var newPath = vm.newProjectPath.replace(/\\/g, '/');
-        if (newPath !== vm.editingProjectPath && cfg.projects.some(function (p) { return (p.Path || p.path) === newPath; }))
+        var idx = cfg.projects.findIndex(function (cp) { return (cp.Path || cp.path) === originalPath; });
+        if (idx === -1) return $window.alert('Project not found in config');
+        var newPath = p.Path.replace(/\\/g, '/');
+        if (newPath !== originalPath && cfg.projects.some(function (cp) { return (cp.Path || cp.path) === newPath; }))
           return $window.alert('A project with that path already exists');
-        cfg.projects[idx].Name = vm.newProjectName;
+        cfg.projects[idx].Name = p.Name;
         cfg.projects[idx].Path = newPath;
-        cfg.projects[idx].Description = vm.newProjectDescription || '';
+        cfg.projects[idx].Description = p.Description || '';
         $http.post('/api/config/save', cfg).then(function () {
           vm.loadConfig();
-          vm.closeAddProjectPanel();
-          vm.editMode = false;
-          vm.editingProjectPath = '';
         }, function (err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
       });
     };
 
-    vm.removeProjectUI = function () {
-      if (!vm.selectedProject) return $window.alert('No project selected');
-      var p = vm.projects.find(function (p) { return (p.Path || p.path) === vm.selectedProject; });
-      if (!p) return;
-      if (!$window.confirm('Remove project "' + (p.Name || '') + '" (' + vm.selectedProject + ')?')) return;
-      $http.post('/api/config/projects/remove', { Path: vm.selectedProject }).then(function () { vm.loadConfig(); });
+    vm.removeProject = function (p, event) {
+      if (event) event.stopPropagation();
+      if (!p || !p.Path) return;
+      if (!$window.confirm('Remove project "' + (p.Name || '') + '" (' + p.Path + ')?')) return;
+      $http.post('/api/config/projects/remove', { Path: p.Path }).then(function () { vm.loadConfig(); });
     };
 
-    vm.openAboutPanel = function () {
-      vm.showAboutPanel = true;
+    vm.openDiscordPanel = function () {
+      vm.showDiscordPanel = true;
+    };
+
+    vm.closeDiscordPanel = function () {
+      vm.showDiscordPanel = false;
     };
 
     vm.openSettingsPanel = function () {
@@ -414,73 +408,118 @@
 
     // Drag and drop functionality
     vm.dragStart = function (event, card, col) {
-      event.dataTransfer.setData('text/plain', JSON.stringify({ card, col }));
+      // Check if this is a panel drag (ask ai, agent, terminal)
+      var panelType = event.target.closest('[data-panel-type]');
+      if (panelType) {
+        event.dataTransfer.setData('text/plain', JSON.stringify({ 
+          panelType: panelType.dataset.panelType,
+          panelId: panelType.id
+        }));
+        event.dataTransfer.effectAllowed = 'move';
+      } else {
+        // Regular card drag
+        event.dataTransfer.setData('text/plain', JSON.stringify({ card, col }));
+        event.dataTransfer.effectAllowed = 'move';
+        event.target.classList.add('dragging');
+      }
     };
 
     vm.dragOver = function (event, targetCol) {
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
       
-      // Add visual indicator line when dragging within same column
-      var dragElement = document.querySelector('.dragging');
-      if (dragElement) {
-        var cards = document.querySelectorAll('[data-column="' + targetCol + '"] .card');
-        var rect = dragElement.getBoundingClientRect();
-        var mouseY = event.clientY;
-        
-        // Remove any existing indicator lines
-        var existingLines = document.querySelectorAll('.drag-indicator-line');
-        existingLines.forEach(line => line.remove());
-        
-        // Add new indicator line between cards
-        for (var i = 0; i < cards.length; i++) {
-          var cardRect = cards[i].getBoundingClientRect();
-          var cardTop = cardRect.top;
-          var cardBottom = cardRect.bottom;
+      // Check if this is a panel drag (ask ai, agent, terminal)
+      var dragData = event.dataTransfer.getData('text/plain');
+      if (dragData) {
+        var dragInfo = JSON.parse(dragData);
+        if (dragInfo.panelType) {
+          // Handle panel dragging
+          var panelContainers = document.querySelectorAll('[data-panel-type]');
+          var targetPanel = event.target.closest('[data-panel-type]');
           
-          // Check if mouse is over the space between this card and the next one
-          if (i === 0 && mouseY < cardTop) {
-            // Mouse is above first card
+          if (targetPanel) {
+            // Remove any existing indicator lines
+            var existingLines = document.querySelectorAll('.drag-indicator-line');
+            existingLines.forEach(line => line.remove());
+            
+            // Add visual indicator for panel drop position
+            var rect = targetPanel.getBoundingClientRect();
             var indicator = document.createElement('div');
             indicator.className = 'drag-indicator-line';
             indicator.style.position = 'absolute';
-            indicator.style.left = '0';
-            indicator.style.right = '0';
-            indicator.style.top = (cardTop - 2) + 'px';
+            indicator.style.left = (rect.left - 2) + 'px';
+            indicator.style.right = (rect.right - 2) + 'px';
+            indicator.style.top = (rect.top - 2) + 'px';
             indicator.style.height = '4px';
             indicator.style.backgroundColor = '#007bff';
             indicator.style.borderRadius = '2px';
             indicator.style.zIndex = '1000';
+            indicator.style.width = (rect.width + 4) + 'px';
             document.body.appendChild(indicator);
-            break;
-          } else if (i < cards.length - 1 && mouseY >= cardTop && mouseY < cardBottom) {
-            // Mouse is over a card, show line below it
-            var indicator = document.createElement('div');
-            indicator.className = 'drag-indicator-line';
-            indicator.style.position = 'absolute';
-            indicator.style.left = '0';
-            indicator.style.right = '0';
-            indicator.style.top = (cardBottom - 2) + 'px';
-            indicator.style.height = '4px';
-            indicator.style.backgroundColor = '#007bff';
-            indicator.style.borderRadius = '2px';
-            indicator.style.zIndex = '1000';
-            document.body.appendChild(indicator);
-            break;
-          } else if (i === cards.length - 1 && mouseY >= cardBottom) {
-            // Mouse is below last card
-            var indicator = document.createElement('div');
-            indicator.className = 'drag-indicator-line';
-            indicator.style.position = 'absolute';
-            indicator.style.left = '0';
-            indicator.style.right = '0';
-            indicator.style.top = (cardBottom - 2) + 'px';
-            indicator.style.height = '4px';
-            indicator.style.backgroundColor = '#007bff';
-            indicator.style.borderRadius = '2px';
-            indicator.style.zIndex = '1000';
-            document.body.appendChild(indicator);
-            break;
+          }
+        } else {
+          // Add visual indicator line when dragging within same column
+          var dragElement = document.querySelector('.dragging');
+          if (dragElement) {
+            var cards = document.querySelectorAll('[data-column="' + targetCol + '"] .card');
+            var rect = dragElement.getBoundingClientRect();
+            var mouseY = event.clientY;
+            
+            // Remove any existing indicator lines
+            var existingLines = document.querySelectorAll('.drag-indicator-line');
+            existingLines.forEach(line => line.remove());
+            
+            // Add new indicator line between cards
+            for (var i = 0; i < cards.length; i++) {
+              var cardRect = cards[i].getBoundingClientRect();
+              var cardTop = cardRect.top;
+              var cardBottom = cardRect.bottom;
+              
+              // Check if mouse is over the space between this card and the next one
+              if (i === 0 && mouseY < cardTop) {
+                // Mouse is above first card
+                var indicator = document.createElement('div');
+                indicator.className = 'drag-indicator-line';
+                indicator.style.position = 'absolute';
+                indicator.style.left = '0';
+                indicator.style.right = '0';
+                indicator.style.top = (cardTop - 2) + 'px';
+                indicator.style.height = '4px';
+                indicator.style.backgroundColor = '#007bff';
+                indicator.style.borderRadius = '2px';
+                indicator.style.zIndex = '1000';
+                document.body.appendChild(indicator);
+                break;
+              } else if (i < cards.length - 1 && mouseY >= cardTop && mouseY < cardBottom) {
+                // Mouse is over a card, show line below it
+                var indicator = document.createElement('div');
+                indicator.className = 'drag-indicator-line';
+                indicator.style.position = 'absolute';
+                indicator.style.left = '0';
+                indicator.style.right = '0';
+                indicator.style.top = (cardBottom - 2) + 'px';
+                indicator.style.height = '4px';
+                indicator.style.backgroundColor = '#007bff';
+                indicator.style.borderRadius = '2px';
+                indicator.style.zIndex = '1000';
+                document.body.appendChild(indicator);
+                break;
+              } else if (i === cards.length - 1 && mouseY >= cardBottom) {
+                // Mouse is below last card
+                var indicator = document.createElement('div');
+                indicator.className = 'drag-indicator-line';
+                indicator.style.position = 'absolute';
+                indicator.style.left = '0';
+                indicator.style.right = '0';
+                indicator.style.top = (cardBottom - 2) + 'px';
+                indicator.style.height = '4px';
+                indicator.style.backgroundColor = '#007bff';
+                indicator.style.borderRadius = '2px';
+                indicator.style.zIndex = '1000';
+                document.body.appendChild(indicator);
+                break;
+              }
+            }
           }
         }
       }
@@ -496,19 +535,55 @@
       var data = event.dataTransfer.getData('text/plain');
       if (!data) return;
 
-      var { card, col } = JSON.parse(data);
+      var dragData = JSON.parse(data);
+      
+      // Check if this is a panel drag (ask ai, agent, terminal)
+      if (dragData.panelType) {
+        // Handle panel reordering
+        var panelType = dragData.panelType;
+        var panelId = dragData.panelId;
+        
+        // Get all panel containers in the correct order
+        var panelContainers = document.querySelectorAll('[data-panel-type]');
+        var targetPanel = event.target.closest('[data-panel-type]');
+        
+        if (targetPanel) {
+          // Find the target panel's position
+          var targetIndex = Array.from(panelContainers).indexOf(targetPanel);
+          var sourceIndex = Array.from(panelContainers).indexOf(document.getElementById(panelId));
+          
+          if (targetIndex !== -1 && sourceIndex !== -1 && targetIndex !== sourceIndex) {
+            // Reorder panels by manipulating the DOM directly
+            var panelElements = Array.from(panelContainers);
+            var draggedPanel = panelElements[sourceIndex];
+            
+            // Remove the dragged panel from its current position
+            draggedPanel.remove();
+            
+            // Insert at new position
+            if (targetIndex < panelElements.length) {
+              panelElements[targetIndex].parentNode.insertBefore(draggedPanel, panelElements[targetIndex]);
+            } else {
+              panelElements[panelElements.length - 1].parentNode.appendChild(draggedPanel);
+            }
+          }
+        }
+      } else {
+        // Handle regular card drag and drop
+        var { card, col } = dragData;
 
-      // Remove card from source column
-      var sourceCol = vm.state[col];
-      var cardIndex = sourceCol.findIndex(c => c.id === card.id);
-      if (cardIndex !== -1) {
-        sourceCol.splice(cardIndex, 1);
+        // Remove card from source column
+        var sourceCol = vm.state[col];
+        var cardIndex = sourceCol.findIndex(c => c.id === card.id);
+        if (cardIndex !== -1) {
+          sourceCol.splice(cardIndex, 1);
 
-        // Add card to target column
-        vm.state[targetCol].push(card);
+          // Add card to target column
+          vm.state[targetCol].push(card);
 
-        // Save updated state
-        saveCards();
+          // Save updated state
+          saveCards();
+        }
       }
     };
 
@@ -517,7 +592,7 @@
       if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
         console.log('ESC pressed - closing delete confirmation');
         vm.closeSettingsPanel();
-        vm.closeAddProjectPanel();
+        vm.closeEditProjectsPanel();
         vm.closeFilePicker();
         vm.closeDeleteCardConfirm();
       }

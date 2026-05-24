@@ -180,6 +180,18 @@ button.small.ghost:hover {
 	background: rgba(6, 182, 212, 0.03);
 }
 
+/* Drag indicator line */
+.drag-indicator-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.8);
+  z-index: 1000;
+  pointer-events: none;
+}
+
 input,
 select,
 textarea {
@@ -1591,6 +1603,10 @@ h3 .small.ghost:hover {
     resize: horizontal;
 }
 
+.right-panel.full-width {
+    width: 100%;
+}
+
 .panel {
 	background: linear-gradient(180deg, #061025, #07132a);
 	padding: 16px;
@@ -2180,6 +2196,10 @@ h3 .small.ghost:hover {
 	color: var(--muted);
 }
 
+.step-detail-data {
+	overflow: auto;
+}
+
 .agent-steps .step .step-detail pre {
 	margin: 4px 0;
 	padding: 4px;
@@ -2229,7 +2249,7 @@ h3 .small.ghost:hover {
 	font-size: 12px;
 }
 
-.term-panel .terminalOutput {
+.terminal-panel .terminalOutput {
 	background: #021007;
 	color: #6ef26e;
 	height: 150px;
@@ -2241,13 +2261,13 @@ h3 .small.ghost:hover {
 	white-space: pre-wrap;
 }
 
-.term-panel .term-input-row {
+.terminal-panel .term-input-row {
 	display: flex;
 	gap: 6px;
 	margin-top: 6px;
 }
 
-.term-panel .term-input-row input {
+.terminal-panel .term-input-row input {
 	flex: 1;
 }
 

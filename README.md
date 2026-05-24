@@ -62,7 +62,7 @@ If `apply` is `true`, the server writes the file (creating directories if needed
 
 - `GET /api/editor/projects` — lists top-level folders under the workspace root so you can pick a `project` value.
 
-Configuration: set the workspace root in [backend/appsettings.json](backend/appsettings.json#L1-L20) via `Editor:WorkspaceRoot`. Relative paths are resolved from the `backend` folder; the default is `..` which points to the repository root.
+Configuration: set the workspace root in [appsettings.json](appsettings.json#L1-L20) via `Editor:WorkspaceRoot`. Relative paths are resolved from the `backend` folder; the default is `..` which points to the repository root.
 
 Security: the endpoint will reject any write that resolves outside the workspace root. Do NOT expose this API publicly without additional auth/ACL controls.
 

@@ -24,6 +24,8 @@ public class ConfigController : ControllerBase
         public string defaultProject { get; set; } = "";
         public bool showTerminal { get; set; } = true;
         public bool showAI { get; set; } = true;
+        public bool showKanban { get; set; } = true;
+        public string LlamaUrl { get; set; } = "http://192.168.2.58:8080";
     }
 
     private async Task<FrontendConfig> LoadConfigAsync()
