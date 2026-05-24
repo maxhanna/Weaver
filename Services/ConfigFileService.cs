@@ -29,9 +29,15 @@ public class ConfigFileService
         _configPath = Path.Combine(env.ContentRootPath, "maestroconfig.json");
     }
 
+    public async Task EnsureConfigAsync()
+    {
+        if (System.IO.File.Exists(_configPath)) return;
+        await WriteConfigAsync(new FrontendConfig());
+    }
+
     public async Task<FrontendConfig> LoadConfigAsync()
     {
-        if (!System.IO.File.Exists(_configPath)) return new FrontendConfig();
+        await EnsureConfigAsync();
         try
         {
             var text = await System.IO.File.ReadAllTextAsync(_configPath);
