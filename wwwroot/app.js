@@ -348,13 +348,14 @@
                 var indicator = document.createElement('div');
                 indicator.className = 'drag-indicator-line';
                 indicator.style.position = 'absolute';
-                indicator.style.left = '0';
-                indicator.style.right = '0';
+                indicator.style.left = (rect.left - 2) + 'px';
+                indicator.style.right = (rect.right - 2) + 'px';
                 indicator.style.top = (cardTop - 2) + 'px';
                 indicator.style.height = '4px';
                 indicator.style.backgroundColor = '#007bff';
                 indicator.style.borderRadius = '2px';
                 indicator.style.zIndex = '1000';
+                indicator.style.width = (rect.width + 4) + 'px';
                 document.body.appendChild(indicator);
                 break;
               } else if (i < cards.length - 1 && mouseY >= cardTop && mouseY < cardBottom) {
@@ -362,13 +363,14 @@
                 var indicator = document.createElement('div');
                 indicator.className = 'drag-indicator-line';
                 indicator.style.position = 'absolute';
-                indicator.style.left = '0';
-                indicator.style.right = '0';
+                indicator.style.left = (rect.left - 2) + 'px';
+                indicator.style.right = (rect.right - 2) + 'px';
                 indicator.style.top = (cardBottom - 2) + 'px';
                 indicator.style.height = '4px';
                 indicator.style.backgroundColor = '#007bff';
                 indicator.style.borderRadius = '2px';
                 indicator.style.zIndex = '1000';
+                indicator.style.width = (rect.width + 4) + 'px';
                 document.body.appendChild(indicator);
                 break;
               } else if (i === cards.length - 1 && mouseY >= cardBottom) {
@@ -376,13 +378,14 @@
                 var indicator = document.createElement('div');
                 indicator.className = 'drag-indicator-line';
                 indicator.style.position = 'absolute';
-                indicator.style.left = '0';
-                indicator.style.right = '0';
+                indicator.style.left = (rect.left - 2) + 'px';
+                indicator.style.right = (rect.right - 2) + 'px';
                 indicator.style.top = (cardBottom - 2) + 'px';
                 indicator.style.height = '4px';
                 indicator.style.backgroundColor = '#007bff';
                 indicator.style.borderRadius = '2px';
                 indicator.style.zIndex = '1000';
+                indicator.style.width = (rect.width + 4) + 'px';
                 document.body.appendChild(indicator);
                 break;
               }

@@ -39,7 +39,7 @@
     <!-- RIGHT PANEL: Agent + Terminal -->
     <div class="right-panel" ng-class="{'full-width': !vm.showKanban}">
       <!-- Ask AI Chat Panel -->
-      <div class="panel ai-panel" ng-if="vm.showAI" draggable="true" data-panel-type="ask-ai"
+      <div class="panel ai-panel" ng-if="vm.showAI"  data-panel-type="ask-ai"
         data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI</h3>
         <div class="panel-body ai-chat-body">
@@ -63,7 +63,7 @@
       </div>
 
       <!-- Agent Panel -->
-      <div class="panel" draggable="true" data-panel-type="agent" data-panel-id="agent-panel">
+      <div class="panel"  data-panel-type="agent" data-panel-id="agent-panel">
         <h3>🤖 Agent</h3>
         <div class="panel-body">
           <!-- Idle state -->
@@ -222,7 +222,7 @@
       </div>
 
       <!-- Terminal Panel -->
-      <div class="panel terminal-panel" ng-if="vm.showTerminal" draggable="true" data-panel-type="terminal" data-panel-id="terminal-panel">
+      <div class="panel terminal-panel" ng-if="vm.showTerminal" data-panel-type="terminal" data-panel-id="terminal-panel">
         <h3>💻 Terminal</h3>
         <div class="panel-body">
           <div class="terminalOutput">{{vm.terminalOutput}}</div>

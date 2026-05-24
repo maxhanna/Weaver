@@ -1,4 +1,4 @@
-/* === KANBAN BOARD === */
+﻿/* === KANBAN BOARD === */
 
 .board {
     display: flex;
@@ -102,7 +102,7 @@
 .card.dragging {
     opacity: 0.5;
     transform: scale(1.02);
-}
+} 
 
 .card .card-meta {
     display: flex;
