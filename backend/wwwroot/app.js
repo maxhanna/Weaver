@@ -17,6 +17,7 @@
     vm.activeCardIds = new Set();
     vm.autoQueue = true;
     vm.showTerminal = true;
+    vm.searchFilter = '';
 
     // Agent streaming state
     vm.streamingActive = false;
@@ -91,6 +92,9 @@
     vm.showProjectOptions = false;
     vm.showAddProjectPanel = false;
     vm.showSettingsPanel = false;
+    vm.showAboutPanel = false;
+    vm.showAboutPanel = false;
+    vm.showAboutPanel = false;
     vm.showFilePicker = false;
     vm.editMode = false;
     vm.newProjectName = '';
@@ -243,6 +247,10 @@
       $http.post('/api/config/projects/remove', { Path: vm.selectedProject }).then(function () { vm.loadConfig(); });
     };
 
+    vm.openAboutPanel = function () {
+      vm.showAboutPanel = true;
+    };
+
     vm.openSettingsPanel = function () {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
@@ -274,10 +282,19 @@
 
     vm.state = loadCards();
 
+    vm.filterCards = function (cards) {
+      if (!vm.searchFilter) return cards;
+      var filter = vm.searchFilter.toLowerCase();
+      return cards.filter(function (card) {
+        return card.id.toLowerCase().includes(filter) || card.text.toLowerCase().includes(filter);
+      });
+    };
+
     vm.cardsForProject = function (col) {
       var all = vm.state[col] || [];
       if (!vm.selectedProject) return all;
-      return all.filter(function (c) { return c.filePath === vm.selectedProject; });
+      var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
+      return vm.filterCards(filtered);
     };
 
     vm.addCard = function (col) {
@@ -396,6 +413,7 @@
 
     vm.dragOver = function (event) {
       event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
     };
 
     vm.drop = function (event, targetCol) {
@@ -1053,11 +1071,51 @@
         });
         var cols = document.querySelectorAll('.cards');
         cols.forEach(function (col) {
-          col.addEventListener('dragover', function (e) { e.preventDefault(); col.closest('.column').classList.add('drop-target'); });
-          col.addEventListener('dragleave', function (e) { col.closest('.column').classList.remove('drop-target'); });
+          col.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            col.closest('.column').classList.add('drop-target');
+            // Add visual feedback for where the card will be dropped
+            var targetCard = e.target.closest('.card');
+            if (targetCard) {
+              var rect = targetCard.getBoundingClientRect();
+              var y = e.clientY - rect.top;
+              var height = rect.height;
+              var halfHeight = height / 2;
+              
+              // Remove any existing drop indicators
+              var existingIndicators = col.querySelectorAll('.drop-indicator');
+              existingIndicators.forEach(function(indicator) {
+                indicator.remove();
+              });
+              
+              // Add drop indicator if needed
+              if (y < halfHeight) {
+                // Drop above the target card
+                targetCard.classList.add('drop-above');
+                targetCard.classList.remove('drop-below');
+              } else {
+                // Drop below the target card
+                targetCard.classList.add('drop-below');
+                targetCard.classList.remove('drop-above');
+              }
+            }
+          });
+          col.addEventListener('dragleave', function (e) {
+            col.closest('.column').classList.remove('drop-target');
+            // Remove any drop indicators
+            var targetCard = e.target.closest('.card');
+            if (targetCard) {
+              targetCard.classList.remove('drop-above', 'drop-below');
+            }
+          });
           col.addEventListener('drop', function (e) {
             e.preventDefault();
             col.closest('.column').classList.remove('drop-target');
+            // Remove any drop indicators
+            var targetCard = e.target.closest('.card');
+            if (targetCard) {
+              targetCard.classList.remove('drop-above', 'drop-below');
+            }
             var cardId = e.dataTransfer.getData('text/plain');
             var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
             if (!cardId || !targetCol) return;
@@ -1067,30 +1125,58 @@
               var idx = vm.state[cn].findIndex(function (c) { return c.id === cardId; });
               if (idx !== -1) fromCol = cn;
             });
-            if (!fromCol || fromCol === targetCol) return;
+            if (!fromCol) return;
             var cardObj = vm.state[fromCol].find(function (c) { return c.id === cardId; });
             if (!cardObj) return;
-            if (fromCol === 'todo' && targetCol === 'doing' && !cardObj.ready) {
-              alert('Mark the card as Ready first (press Start)');
-              return;
-            }
-            if (fromCol === 'doing' && targetCol === 'todo') {
-              cardObj.ready = false;
-              delete cardObj.agentAnalysis;
-            }
-            if (fromCol === 'done' && targetCol === 'todo') {
-              cardObj.ready = false;
-              delete cardObj.agentAnalysis;
-              delete cardObj.agentSteps;
-            }
-            var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
-            if (idx === -1) return;
-            vm.state[fromCol].splice(idx, 1);
-            vm.state[targetCol].push(cardObj);
-            if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
-              saveCards();
-              vm.executeAgent(cardObj);
-              return;
+            
+            // Handle reordering within the same column
+            if (fromCol === targetCol) {
+              var fromIndex = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
+              if (fromIndex === -1) return;
+              
+              // Remove card from its current position
+              vm.state[fromCol].splice(fromIndex, 1);
+              
+              // Find the drop position within the column
+              var targetCard = e.target.closest('.card');
+              var targetIndex = -1;
+              if (targetCard) {
+                var targetCardId = targetCard.id.replace('card-', '');
+                targetIndex = vm.state[targetCol].findIndex(function (c) { return c.id === targetCardId; });
+              }
+              
+              // Insert at the correct position (before or after the target card)
+              if (targetIndex !== -1) {
+                // Insert before the target card
+                vm.state[targetCol].splice(targetIndex, 0, cardObj);
+              } else {
+                // Insert at the end if no target card found
+                vm.state[targetCol].push(cardObj);
+              }
+            } else {
+              // Handle moving between columns
+              if (fromCol === 'todo' && targetCol === 'doing' && !cardObj.ready) {
+                alert('Mark the card as Ready first (press Start)');
+                return;
+              }
+              if (fromCol === 'doing' && targetCol === 'todo') {
+                cardObj.ready = false;
+                delete cardObj.agentAnalysis;
+              }
+              if (fromCol === 'done' && targetCol === 'todo') {
+                cardObj.ready = false;
+                delete cardObj.agentAnalysis;
+                delete cardObj.agentSteps;
+              }
+              var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
+              if (idx === -1) return;
+              vm.state[fromCol].splice(idx, 1);
+              vm.state[targetCol].push(cardObj);
+              if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
+                saveCards();
+                vm.executeAgent(cardObj);
+                return;
+              }
             }
             saveCards();
             $scope.$digest();

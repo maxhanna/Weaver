@@ -11,7 +11,7 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1><span class="brand-text"><span class="brand-m">M</span><span class="brand-a">a</span><span class="brand-estro">estro</span></span> <span class="badge brand-badge">Agentic Kanban</span></h1>
+    <h1 class="brand-logo" ng-click="vm.openAboutPanel()">Maestro <span class="badge brand-badge">Agentic Kanban</span></h1>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
@@ -31,18 +31,23 @@
   </header>
 
   <main>
+    <div class="search-container">
+      <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
+      <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
+    </div>
     <!-- KANBAN BOARD -->
     <div id="board" class="board">
       <!-- TODO column -->
-      <div class="column" data-col="todo">
+      <div class="column" data-col="todo" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
         <h3>
           <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
           <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
         </h3>
-        <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}">
+        <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}" ondragover="event.preventDefault()">
           <div class="card" ng-repeat="card in vm.cardsForProject('todo') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)" draggable="true">
+            ng-click="vm.selectCard(card)" ng-init="vm.focusCardTextarea(card)" draggable="true"
+            ng-drag="vm.dragStart($event, card, 'todo')" ng-dragend="vm.dragEnd($event, card)" data-card-id="{{card.id}}">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -67,8 +72,8 @@
                 title="Attach file">📎</button>
               <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
                 title="Split into smaller tasks">✂ Split</button>
-              <button ng-click="vm.startCard(card); $event.stopPropagation()" class="primary small"
-                ng-class="{'btn-ready': card.ready}">{{card.ready ? '▶ Run' : '▶ Start'}}</button>
+              <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
+                ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : '▶ Run'}}</button>
               <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
                 Delete</button>
             </div>
@@ -77,14 +82,14 @@
       </div>
 
       <!-- DOING column -->
-      <div class="column" data-col="doing">
+      <div class="column" data-col="doing" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
         <h3>
           <span class="col-header">⚡ Doing <span class="col-badge">{{vm.cardsForProject('doing').length}}</span></span>
         </h3>
-        <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}">
+        <div class="cards" id="col-doing" dropzone="move" ng-class="{empty: vm.cardsForProject('doing').length===0}" ondragover="event.preventDefault()">
           <div class="card" ng-repeat="card in vm.cardsForProject('doing') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" draggable="true">
+            ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -114,15 +119,15 @@
       </div>
 
       <!-- DONE column -->
-      <div class="column" data-col="done">
+      <div class="column" data-col="done" ng-dragover="vm.dragOver($event)" ng-drop="vm.drop($event)">
         <h3>
           <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
           <button class="small ghost" ng-click="vm.clearDoneCards()" title="Clear all done tasks">Clear</button>
         </h3>
-        <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}">
+        <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}" ondragover="event.preventDefault()">
           <div class="card" ng-repeat="card in vm.cardsForProject('done') track by card.id"
             ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-            ng-click="vm.selectCard(card)" draggable="true">
+            ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
             <div class="card-meta">
               <span class="card-id">#{{card.id | limitTo:6}}</span>
               <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
@@ -248,7 +253,7 @@
           <!-- Streaming state -->
           <div class="agent-status span-full" ng-if="vm.streamingActive">
             <span class="pulse-dot"></span>
-            <span class="status-text">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase"
+            <span class="status-text" title="{{vm.activeCardText | limitTo:4000}}">Agent: "{{vm.activeCardText | limitTo:40}}" <span ng-if="vm.streamingPhase"
                 class="phase-tag">{{vm.streamingPhase}}</span></span>
           </div>
 
@@ -309,7 +314,7 @@
 
           <div class="files-edited-panel" ng-if="vm.streamingFilesEdited.length">
             <strong>Files changed</strong>
-            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited">{{f.path}}</div>
+            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited | unique:'path'">{{f.path}}</div>
           </div>
 
           <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length">
@@ -476,6 +481,7 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()"></div>
+    <div class="popup-overlay" ng-if="vm.showAboutPanel" ng-click="vm.closeAboutPanel()"></div>
   <div class="delete-confirm-modal" ng-if="vm.showSettingsPanel"  ng-click="vm.closeSettingsPanel()">
     <div class="popup-panel" style="max-width:480px;">
       <div class="popup-header">
