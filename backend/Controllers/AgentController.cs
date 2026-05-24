@@ -829,8 +829,22 @@ RULES:
                     if (System.IO.File.Exists(fullPath))
                     {
                         var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+
+                        // Collect near-match snippets reported by TryReplace failures.
+                        var nearMatches = batchResults
+                            .OfType<Dictionary<string, object?>>()
+                            .Where(r => r.TryGetValue("status", out var st) && st?.ToString() == "error")
+                            .Select(r => r.TryGetValue("snippet", out var sn) ? sn?.ToString() : null)
+                            .Where(s => !string.IsNullOrWhiteSpace(s))
+                            .ToList();
+
                         var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                            fileTask, relPath, freshContent, projectRoot, 2, discoveryContext, ct);
+                            fileTask, relPath, freshContent, projectRoot,
+                            attempt: 2,                   // signals RETRY to the prompt
+                            discoveryContext,
+                            ct,
+                            nearMatchSnippets: nearMatches!);  // ← pass hints
+
                         var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
                             .Where(e => !string.Equals(
                                 NormalizeLineEndings(e.OldString ?? ""),
@@ -1124,62 +1138,91 @@ RULES:
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token);
     }
-
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
-        string taskPrompt, string relativePath, string fileContent,
-        string projectRoot, int attempt = 0, string? discoveryContext = null,
-        CancellationToken ct = default)
+         string taskPrompt, string relativePath, string fileContent,
+         string projectRoot, int attempt = 0, string? discoveryContext = null,
+         CancellationToken ct = default,
+         IEnumerable<string>? nearMatchSnippets = null)   // ← NEW parameter
     {
-        const string systemPrompt = @"You are a precise code patch tool. Your task is to output JSON with BOTH oldString and newString.
-
-FORMAT (output ONLY this JSON, no other text):
+        // ── System prompt ──────────────────────────────────────────────────────
+        const string systemPrompt =
+@"You are a precise code patch tool. Output ONLY the JSON below — no markdown, no explanation.
+ 
+FORMAT:
 {
   ""edits"": [
     {
-      ""oldString"": ""exact 2-4 lines from file (verbatim, max 300 chars)"",
-      ""newString"": ""replacement lines (MUST differ from oldString, never empty)""
+      ""oldString"": ""<exact text copied from FILE CONTENT — NEVER invent or paraphrase>"",
+      ""newString"": ""<replacement — MUST differ from oldString, never empty>""
     }
   ]
 }
+ 
+RULES FOR oldString:
+1. Copy it CHARACTER-FOR-CHARACTER from the FILE CONTENT shown below.
+   The content is prefixed with line numbers like '   42: code here'.
+   Do NOT include the line-number prefix in oldString — only the code after the colon+space.
+2. Prefer SHORT oldStrings: 1–3 lines that are UNIQUE in the file. Shorter = safer.
+3. Pick a line or block that contains the SPECIFIC thing you're changing, not a whole function.
+4. If you cannot see the relevant code in the content window, output {""edits"":[]} — do NOT guess.
+ 
+RULES FOR newString:
+1. MUST differ from oldString. NEVER identical or empty.
+2. Preserve surrounding indentation exactly.
+ 
+If no change is needed: {""edits"":[]}";
 
-RULES:
-- oldString = 2-4 lines copied VERBATIM from the FILE CONTENT below. Keep small.
-- newString = replacement text. MUST differ from oldString. NEVER empty or missing.
-- BOTH oldString and newString are REQUIRED. Every edit must have both.
-- For INSERTING new code: set oldString to existing nearby lines, newString to existing+new code.
-- If no change needed: {""edits"":[]}";
-
+        // ── Build user message ─────────────────────────────────────────────────
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
-        user.AppendLine($"File path: {relativePath}");
+        user.AppendLine($"File: {relativePath}");
 
         if (attempt > 0)
         {
             user.AppendLine();
-            user.AppendLine("RETRY: Your previous edit was rejected because:");
-            user.AppendLine("  - oldString did not match file content, OR");
-            user.AppendLine("  - newString was empty/missing, OR");
-            user.AppendLine("  - oldString and newString were identical");
+            user.AppendLine("## RETRY — your previous attempt failed because:");
+            user.AppendLine("  • oldString did not match any text in the file, OR");
+            user.AppendLine("  • newString was empty/identical to oldString.");
             user.AppendLine();
-            user.AppendLine("Fix ALL of these:");
-            user.AppendLine("  1. Copy oldString VERBATIM from FILE CONTENT (exact spaces/tabs/quotes)");
-            user.AppendLine("  2. newString MUST be present and MUST differ from oldString");
-            user.AppendLine("  3. Keep both short (2-4 lines, max 300 chars)");
+            user.AppendLine("Fix ALL of the following:");
+            user.AppendLine("  1. Copy oldString VERBATIM from the FILE CONTENT below (exact chars, no prefix).");
+            user.AppendLine("  2. Choose a SHORT unique oldString (1–2 lines is best).");
+            user.AppendLine("  3. newString MUST be present and MUST differ from oldString.");
+            user.AppendLine("  4. If the relevant code is NOT visible in the content window — output {\"edits\":[]}.");
+
+            // Forward near-match hints from previous execution failures.
+            var hints = nearMatchSnippets?.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            if (hints?.Count > 0)
+            {
+                user.AppendLine();
+                user.AppendLine("## Near-match context (lines found NEAR your previous oldString guess):");
+                user.AppendLine("Use these real lines as your oldString if they match what you want to change:");
+                foreach (var h in hints.Take(3))
+                {
+                    user.AppendLine("```");
+                    user.AppendLine(h.Trim());
+                    user.AppendLine("```");
+                }
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(discoveryContext))
         {
             user.AppendLine();
-            user.AppendLine("## Context (structure, grep results, related functions)");
-            user.AppendLine(Truncate(discoveryContext, 4000));
+            user.AppendLine("## Project context (grep results, structure)");
+            user.AppendLine(Truncate(discoveryContext, 3_000));
         }
 
+        // Smart windowed content with line numbers
+        var windowedContent = ExtractRelevantFileSection(fileContent, taskPrompt);
+
         user.AppendLine();
-        user.AppendLine("FILE CONTENT:");
+        user.AppendLine("## FILE CONTENT (line numbers prefixed — do NOT copy the prefix into oldString):");
         user.AppendLine("```");
-        user.AppendLine(Truncate(fileContent, 12_000));
+        user.Append(windowedContent);
         user.AppendLine("```");
 
+        // ── LLM call ───────────────────────────────────────────────────────────
         try
         {
             var baseUrl = GetLlamaBaseUrl();
@@ -1189,22 +1232,22 @@ RULES:
 
             var messages = new object[]
             {
-                new { role = "system",  content = systemPrompt },
-                new { role = "user",    content = user.ToString() }
+                new { role = "system", content = systemPrompt },
+                new { role = "user",   content = user.ToString() }
             };
 
-            var requestBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = 2048 };
+            // Low temperature for deterministic verbatim copies.
+            var requestBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = 2048 };
             var contentJson = JsonSerializer.Serialize(requestBody);
             var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
 
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            var combined = linkedCts.Token;
 
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, combined);
-            var respText = await resp.Content.ReadAsStringAsync(combined);
-
+            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, linkedCts.Token);
+            var respText = await resp.Content.ReadAsStringAsync(linkedCts.Token);
             var raw = ExtractLlmContent(respText);
+
             if (string.IsNullOrWhiteSpace(raw))
                 return (respText, null, "Empty LLM response");
 
@@ -1212,7 +1255,7 @@ RULES:
 
             if (steps.Count > 0)
             {
-                // Phase 2: For steps with empty or identical newString, generate newString separately
+                // For any step where newString is missing/identical, try to generate it.
                 foreach (var step in steps)
                 {
                     if (string.IsNullOrWhiteSpace(step.NewString) ||
@@ -1220,11 +1263,6 @@ RULES:
                                       NormalizeLineEndings(step.NewString ?? ""),
                                       StringComparison.Ordinal))
                     {
-                        // FIX 4: Pass the original request-abort 'ct', NOT 'combined'.
-                        // 'combined' is the 20s countdown from this file's edit call; if the
-                        // initial PostAsync used most of that budget, GenerateNewString inherits
-                        // a nearly-expired token and times out immediately.  Each helper should
-                        // own its own timeout window, linked only to the outer abort signal.
                         var generated = await GenerateNewString(
                             step.OldString ?? "", taskPrompt, relativePath, fileContent, ct);
                         if (!string.IsNullOrWhiteSpace(generated))
@@ -1232,12 +1270,12 @@ RULES:
                     }
                 }
 
-                // Re-filter — keep only steps with non-empty, non-identical newString
+                // Final filter: drop no-ops.
                 steps = steps.Where(s =>
                     !string.IsNullOrWhiteSpace(s.NewString) &&
                     !string.Equals(NormalizeLineEndings(s.OldString ?? ""),
-                                    NormalizeLineEndings(s.NewString ?? ""),
-                                    StringComparison.Ordinal)).ToList();
+                                   NormalizeLineEndings(s.NewString ?? ""),
+                                   StringComparison.Ordinal)).ToList();
 
                 if (steps.Count > 0)
                     return (raw, new AgentResponse { Steps = steps, Summary = "Parsed edits" }, null);
@@ -1681,6 +1719,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         return sb.ToString().TrimEnd();
     }
 
+
     /// <summary>
     /// Multi-pass string replacement with progressively looser matching.
     /// Pass 1 – exact (after CRLF normalisation).
@@ -1688,6 +1727,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
     /// Pass 3 – per-line trim, case-insensitive.
     /// Pass 4 – skip blank lines while matching non-blank pattern lines.
     /// Pass 5 – single-line collapsed-whitespace match.
+    /// Pass 6 – token-overlap similarity (≥85% of meaningful tokens match).
     /// </summary>
     private static (bool ok, string content, string? error, string? snippet) TryReplace(
         string content, string oldString, string newString)
@@ -1703,6 +1743,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         var fileLines = content.Split('\n');
         var rawOldLines = oldString.Split('\n');
 
+        // Strip leading/trailing blank lines from the pattern to get the "core".
         var coreFirst = 0;
         var coreLast = rawOldLines.Length - 1;
         while (coreFirst <= coreLast && string.IsNullOrWhiteSpace(rawOldLines[coreFirst])) coreFirst++;
@@ -1731,7 +1772,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                     while (matched < nonBlankOld.Length && scan < fileLines.Length)
                     {
                         if (string.IsNullOrWhiteSpace(fileLines[scan])) { scan++; continue; }
-                        if (!string.Equals(fileLines[scan].Trim(), nonBlankOld[matched].Trim(), StringComparison.Ordinal)) break;
+                        if (!string.Equals(fileLines[scan].Trim(), nonBlankOld[matched].Trim(),
+                                StringComparison.Ordinal)) break;
                         if (matched == 0) firstHit = scan;
                         lastHit = scan; matched++; scan++;
                     }
@@ -1750,14 +1792,65 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                         return (true, ReplaceLineBlock(fileLines, fi, 1, newString), null, null);
         }
 
-        var firstNonBlankPattern = coreOld.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+        // Pass 6: token-overlap similarity (new — catches minor whitespace/wording diffs)
+        // Only triggers when the pattern has ≥5 meaningful tokens, to avoid false positives.
+        {
+            var patternTokens = new HashSet<string>(
+                Regex.Matches(oldString, @"\b[a-zA-Z_$][\w$]*\b").Select(m => m.Value),
+                StringComparer.OrdinalIgnoreCase);
+
+            if (patternTokens.Count >= 5)
+            {
+                // Window size: number of non-blank pattern lines + small slack.
+                var nonBlankOld = coreOld.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
+                var windowLen = Math.Max(nonBlankOld.Length, 1);
+                const double threshold = 0.85;
+
+                for (var fi = 0; fi <= fileLines.Length - windowLen; fi++)
+                {
+                    // Gather the window's non-blank lines (up to windowLen of them).
+                    var windowLines = new List<string>();
+                    int lastWinIdx = fi;
+                    for (int si = fi; si < fileLines.Length && windowLines.Count < windowLen; si++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(fileLines[si]))
+                        {
+                            windowLines.Add(fileLines[si]);
+                            lastWinIdx = si;
+                        }
+                    }
+                    if (windowLines.Count < windowLen) break;
+
+                    var windowTokens = new HashSet<string>(
+                        Regex.Matches(string.Join("\n", windowLines), @"\b[a-zA-Z_$][\w$]*\b")
+                             .Select(m => m.Value),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    // Require high bidirectional overlap to avoid matching unrelated code.
+                    double overlap = patternTokens.Count(t => windowTokens.Contains(t));
+                    if (overlap / patternTokens.Count >= threshold &&
+                        overlap / Math.Max(windowTokens.Count, 1) >= threshold * 0.7)
+                    {
+                        return (true,
+                            ReplaceLineBlock(fileLines, fi, lastWinIdx - fi + 1, newString),
+                            null, null);
+                    }
+                }
+            }
+        }
+
+        // Build a hint showing lines that share at least one token with the pattern.
+        var firstNonBlankPattern = coreOld
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
         var hint = firstNonBlankPattern.Length > 0
-            ? string.Join("\n", fileLines.Where(l => l.Contains(firstNonBlankPattern, StringComparison.OrdinalIgnoreCase)).Take(3))
+            ? string.Join("\n", fileLines
+                .Where(l => l.Contains(firstNonBlankPattern, StringComparison.OrdinalIgnoreCase))
+                .Take(3))
             : null;
-        
+
         return (false, content, "oldString not found in file",
             !string.IsNullOrEmpty(hint) ? Truncate(hint, 400) : null);
-    }
+    } 
 
     private static int FindTrimmedBlock(string[] fileLines, string[] pattern, StringComparison cmp)
     {
@@ -2589,6 +2682,89 @@ Rules:
             sb.Append(c);
         }
         return changed ? sb.ToString() : null;
+    }
+    /// <summary>
+    /// Extracts a keyword-relevant section of a large file with line numbers.
+    /// Always includes the first <paramref name="headerLines"/> lines (globals,
+    /// imports, controller init) plus a window centred on the highest-scoring
+    /// anchor line.  Total output is kept within ~<paramref name="maxChars"/>.
+    /// </summary>
+    private static string ExtractRelevantFileSection(
+        string content, string taskHint, int maxChars = 16_000, int headerLines = 60)
+    {
+        var lines = content.Split('\n');
+
+        // Small file: number every line and return the whole thing.
+        if (content.Length <= maxChars)
+            return BuildNumberedLines(lines, 0, lines.Length - 1);
+
+        // Score each line by keyword overlap with the task description.
+        var keywords = ExtractTaskKeywords(taskHint);
+        int bestLine = 0, bestScore = -1;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            int score = keywords.Sum(kw =>
+                line.Contains(kw, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
+
+            // Extra weight for function declarations that mention a keyword.
+            if ((line.Contains("function") || line.Contains("= function")) && score > 0)
+                score += 2;
+
+            if (score > bestScore) { bestScore = score; bestLine = i; }
+        }
+
+        // Budget: header block + separator text + window block.
+        int headerEnd = Math.Min(headerLines - 1, lines.Length - 1);
+
+        // Window: 40 lines before the best anchor, up to ~200 lines total.
+        int windowSize = 200;
+        int winStart = Math.Max(headerEnd + 1, bestLine - 40);
+        int winEnd = Math.Min(lines.Length - 1, winStart + windowSize - 1);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"// ── file header (lines 1–{headerEnd + 1}) ─────────────");
+        sb.Append(BuildNumberedLines(lines, 0, headerEnd));
+
+        if (winStart > headerEnd + 1)
+            sb.AppendLine($"// ── … {winStart - headerEnd - 1} lines omitted … ──────────────");
+
+        sb.AppendLine($"// ── relevant section (lines {winStart + 1}–{winEnd + 1}) ───────────");
+        sb.Append(BuildNumberedLines(lines, winStart, winEnd));
+
+        if (winEnd < lines.Length - 1)
+            sb.AppendLine($"// ── … {lines.Length - 1 - winEnd} more lines not shown … ──────");
+
+        return sb.ToString();
+    }
+
+    /// <summary>Formats lines[from..to] with 1-based line-number prefixes.</summary>
+    private static string BuildNumberedLines(string[] lines, int from, int to)
+    {
+        var sb = new StringBuilder((to - from + 1) * 60);
+        for (int i = from; i <= to && i < lines.Length; i++)
+            sb.AppendLine($"{i + 1,5}: {lines[i]}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Splits a task hint into meaningful keyword tokens (≥3 chars, no stop words).
+    /// </summary>
+    private static string[] ExtractTaskKeywords(string hint)
+    {
+        var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "the","and","for","from","that","this","with","when","should","not",
+            "into","back","have","been","will","make","card","file","code","line",
+            "its","set","get","put","use","let","var","new","old","all","any","can"
+        };
+
+        return hint.Split(new[] { ' ', '\n', '\r', '.', ',', '(', ')', '{', '}', '[', ']', '"', '\'', ';' },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 3 && !stopWords.Contains(w))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(12)
+            .ToArray();
     }
 
     private static List<string> ExtractJsonBlocks(string text)

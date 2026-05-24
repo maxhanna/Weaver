@@ -11,7 +11,7 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1><span class="brand-text">Maestro</span> <span class="badge brand-badge">Agentic Kanban</span></h1>
+    <h1><span class="brand-text"><span class="brand-m">M</span><span class="brand-a">a</span><span class="brand-estro">estro</span></span> <span class="badge brand-badge">Agentic Kanban</span></h1>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
@@ -19,8 +19,8 @@
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
         {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
-        <button class="options-btn small" ng-click="vm.toggleProjectOptions()">Options ▾</button>
-        <div class="options-menu" ng-show="vm.showProjectOptions">
+        <button class="options-btn small" ng-click="vm.toggleProjectOptions()" ng-class="{active: vm.showProjectOptions}">Options ▾</button>
+        <div class="options-menu" ng-if="vm.showProjectOptions">
           <button ng-click="vm.editProjectUI(); vm.toggleProjectOptions()">✎ Edit Project</button>
           <button ng-click="vm.addProjectUI(); vm.toggleProjectOptions()">＋ Add Project</button>
           <button ng-click="vm.removeProjectUI(); vm.toggleProjectOptions()">✕ Remove Project</button>
@@ -105,6 +105,7 @@
               <button ng-click="vm.stopAgent(card)" class="small"
                 ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
               <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
+              <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
               <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
                 Delete</button>
             </div>
@@ -171,7 +172,7 @@
                                 ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                  <span class="diff-lineno">{{$index+1}}</span>
+                                  <span class="diff-lineno">{{$index+1}} ({{line.oldLineNum || $index+1}})</span>
                                   <span>{{line.oldLine || ''}}</span>
                                 </div>
                               </div>

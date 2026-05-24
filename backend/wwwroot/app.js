@@ -303,6 +303,31 @@
       saveCards();
     };
 
+    vm.copyCardText = function (card) {
+      if (!card || !card.text) return;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(card.text).then(function () {
+          // Optional: Show a visual feedback that text was copied
+          console.log('Card text copied to clipboard');
+        }).catch(function (err) {
+          console.error('Failed to copy card text: ', err);
+        });
+      } else {
+        // Fallback for browsers that don't support Clipboard API
+        var textArea = document.createElement('textarea');
+        textArea.value = card.text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          console.log('Card text copied to clipboard (fallback)');
+        } catch (err) {
+          console.error('Failed to copy card text (fallback): ', err);
+        }
+        document.body.removeChild(textArea);
+      }
+    };
+
     vm.openDeleteCardConfirm = function (id, col) {
       vm.confirmDeleteCardId = id;
       var col = col || 'done';
@@ -436,6 +461,18 @@
         vm.activeCardId = null;
       }
       if (from === 'doing' && to === 'done') {
+        vm.activeCardId = null;
+      }
+      if (from === 'done' && to === 'todo') {
+        card.ready = false;
+        delete card.agentAnalysis;
+        delete card.agentSteps;
+        vm.activeCardId = null;
+      } 
+      if (from === 'todo' && to === 'done') {
+        card.ready = false;
+        delete card.agentAnalysis;
+        delete card.agentSteps;
         vm.activeCardId = null;
       }
       vm.state[to].push(card);
@@ -1040,6 +1077,11 @@
             if (fromCol === 'doing' && targetCol === 'todo') {
               cardObj.ready = false;
               delete cardObj.agentAnalysis;
+            }
+            if (fromCol === 'done' && targetCol === 'todo') {
+              cardObj.ready = false;
+              delete cardObj.agentAnalysis;
+              delete cardObj.agentSteps;
             }
             var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
             if (idx === -1) return;
