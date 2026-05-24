@@ -17,6 +17,10 @@
     vm.activeCardIds = new Set();
     vm.autoQueue = true;
     vm.showTerminal = true;
+    vm.showAI = true;
+    vm.aiChatMessages = [];
+    vm.aiChatInput = '';
+    vm.aiChatLoading = false;
     vm.searchFilter = '';
 
     // Agent streaming state
@@ -136,6 +140,7 @@
         cfg.projects = cfg.projects || vm.projects;
         cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
         cfg.showTerminal = vm.showTerminal !== false;
+        cfg.showAI = vm.showAI !== false;
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -162,6 +167,7 @@
         vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
         vm.defaultProject = cfg.defaultProject;
         if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
+        if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -411,13 +417,82 @@
       event.dataTransfer.setData('text/plain', JSON.stringify({ card, col }));
     };
 
-    vm.dragOver = function (event) {
+    vm.dragOver = function (event, targetCol) {
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
+      
+      // Add visual indicator line when dragging within same column
+      var dragElement = document.querySelector('.dragging');
+      if (dragElement) {
+        var cards = document.querySelectorAll('[data-column="' + targetCol + '"] .card');
+        var rect = dragElement.getBoundingClientRect();
+        var mouseY = event.clientY;
+        
+        // Remove any existing indicator lines
+        var existingLines = document.querySelectorAll('.drag-indicator-line');
+        existingLines.forEach(line => line.remove());
+        
+        // Add new indicator line between cards
+        for (var i = 0; i < cards.length; i++) {
+          var cardRect = cards[i].getBoundingClientRect();
+          var cardTop = cardRect.top;
+          var cardBottom = cardRect.bottom;
+          
+          // Check if mouse is over the space between this card and the next one
+          if (i === 0 && mouseY < cardTop) {
+            // Mouse is above first card
+            var indicator = document.createElement('div');
+            indicator.className = 'drag-indicator-line';
+            indicator.style.position = 'absolute';
+            indicator.style.left = '0';
+            indicator.style.right = '0';
+            indicator.style.top = (cardTop - 2) + 'px';
+            indicator.style.height = '4px';
+            indicator.style.backgroundColor = '#007bff';
+            indicator.style.borderRadius = '2px';
+            indicator.style.zIndex = '1000';
+            document.body.appendChild(indicator);
+            break;
+          } else if (i < cards.length - 1 && mouseY >= cardTop && mouseY < cardBottom) {
+            // Mouse is over a card, show line below it
+            var indicator = document.createElement('div');
+            indicator.className = 'drag-indicator-line';
+            indicator.style.position = 'absolute';
+            indicator.style.left = '0';
+            indicator.style.right = '0';
+            indicator.style.top = (cardBottom - 2) + 'px';
+            indicator.style.height = '4px';
+            indicator.style.backgroundColor = '#007bff';
+            indicator.style.borderRadius = '2px';
+            indicator.style.zIndex = '1000';
+            document.body.appendChild(indicator);
+            break;
+          } else if (i === cards.length - 1 && mouseY >= cardBottom) {
+            // Mouse is below last card
+            var indicator = document.createElement('div');
+            indicator.className = 'drag-indicator-line';
+            indicator.style.position = 'absolute';
+            indicator.style.left = '0';
+            indicator.style.right = '0';
+            indicator.style.top = (cardBottom - 2) + 'px';
+            indicator.style.height = '4px';
+            indicator.style.backgroundColor = '#007bff';
+            indicator.style.borderRadius = '2px';
+            indicator.style.zIndex = '1000';
+            document.body.appendChild(indicator);
+            break;
+          }
+        }
+      }
     };
 
     vm.drop = function (event, targetCol) {
       event.preventDefault();
+      
+      // Remove any existing indicator lines
+      var existingLines = document.querySelectorAll('.drag-indicator-line');
+      existingLines.forEach(line => line.remove());
+      
       var data = event.dataTransfer.getData('text/plain');
       if (!data) return;
 
@@ -983,6 +1058,38 @@
           if (typeof resp.data === 'string') vm.aiResponse = resp.data;
           else vm.aiResponse = JSON.stringify(resp.data, null, 2);
         }, function (err) { vm.aiResponse = 'Error: ' + (err.statusText || err); });
+    };
+
+    vm.sendAiChat = function () {
+      if (!vm.aiChatInput || vm.aiChatLoading) return;
+      var userMsg = vm.aiChatInput;
+      vm.aiChatInput = '';
+      vm.aiChatMessages.push({ role: 'user', content: userMsg });
+      vm.aiChatLoading = true;
+      var messages = vm.aiChatMessages.map(function (m) { return { role: m.role, content: m.content }; });
+      $http.post('/api/ai/generate', { messages: messages })
+        .then(function (resp) {
+          var content = '';
+          if (resp.data && resp.data.choices && resp.data.choices[0] && resp.data.choices[0].message) {
+            content = resp.data.choices[0].message.content;
+          } else if (typeof resp.data === 'string') {
+            content = resp.data;
+          } else if (resp.data && resp.data.content) {
+            content = resp.data.content;
+          } else {
+            content = JSON.stringify(resp.data, null, 2);
+          }
+          vm.aiChatMessages.push({ role: 'assistant', content: content });
+          vm.aiChatLoading = false;
+        }, function (err) {
+          vm.aiChatMessages.push({ role: 'assistant', content: 'Error: ' + (err.statusText || err) });
+          vm.aiChatLoading = false;
+        });
+    };
+
+    vm.clearAiChat = function () {
+      vm.aiChatMessages = [];
+      vm.aiChatInput = '';
     };
 
     // === Terminal ===

@@ -23,6 +23,7 @@ public class ConfigController : ControllerBase
         public List<ProjectDto> projects { get; set; } = new List<ProjectDto>();
         public string defaultProject { get; set; } = "";
         public bool showTerminal { get; set; } = true;
+        public bool showAI { get; set; } = true;
     }
 
     private async Task<FrontendConfig> LoadConfigAsync()

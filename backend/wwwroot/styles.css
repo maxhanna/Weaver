@@ -2251,6 +2251,71 @@ h3 .small.ghost:hover {
 	flex: 1;
 }
 
+/* Ask AI Chat Panel */
+.ai-panel .ai-chat-body {
+	display: flex;
+	flex-direction: column;
+	max-height: 260px;
+}
+
+.ai-panel .ai-chat-messages {
+	flex: 1;
+	overflow-y: auto;
+	max-height: 180px;
+	padding: 4px 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.ai-panel .ai-msg {
+	padding: 6px 8px;
+	border-radius: 6px;
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+.ai-panel .ai-msg-user {
+	background: var(--accent);
+	color: var(--bg);
+	align-self: flex-end;
+	max-width: 85%;
+}
+
+.ai-panel .ai-msg-assistant {
+	background: var(--surface);
+	color: var(--fg);
+	align-self: flex-start;
+	max-width: 85%;
+}
+
+.ai-panel .ai-msg-role {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	opacity: 0.6;
+	margin-bottom: 2px;
+}
+
+.ai-panel .ai-msg-text {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.ai-panel .ai-input-row {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.ai-panel .ai-input-row input {
+	flex: 1;
+}
+
+.thinking-dots {
+	opacity: 0.7;
+}
+
 .popup-overlay {
 	position: fixed;
 	inset: 0;
