@@ -11,7 +11,7 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1>Maestro <span class="badge brand-badge">Agentic Kanban</span></h1>
+    <h1><span class="brand-text">Maestro</span> <span class="badge brand-badge">Agentic Kanban</span></h1>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
@@ -101,7 +101,7 @@
             </div>
             <div class="card-actions">
               <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small"
-                ng-disabled="vm.streamingActive">✔ Done</button>
+                ng-disabled="vm.streamingActive && card.ready">✔ Done</button>
               <button ng-click="vm.stopAgent(card)" class="small"
                 ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
               <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
@@ -445,8 +445,8 @@
   </div>
 
   <!-- ADD/EDIT PROJECT MODAL -->
-  <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel($event)">
-    <div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;">
+<div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel($event)">
+<div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
         <button ng-click="vm.closeAddProjectPanel()">✕</button>

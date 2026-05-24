@@ -2099,11 +2099,14 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
 
         const string reviewSystemPrompt = @"You are a code review agent. Given a task and the current file contents, determine if the task is COMPLETE.
 
-Output ONLY this JSON (no other text):
+Output ONLY valid JSON (no other text, no markdown fences):
 {
   ""complete"": true/false,
   ""feedback"": ""If incomplete, describe exactly what still needs to be changed and in which file. Be specific.""
 }
+
+CRITICAL: Property names MUST be double-quoted (like ""complete"": true), not bare names.
+Do NOT use trailing commas.
 
 Rules:
 - If ALL changes described in the task have been made, complete=true
@@ -2117,38 +2120,19 @@ Rules:
         if (string.IsNullOrWhiteSpace(raw))
             return (false, error ?? "Verification call returned empty");
 
-        try
+        var (complete, feedback) = TryParseReviewResponse(raw);
+        if (complete == null)
         {
-            var jsonStr = raw.Trim();
-            if (jsonStr.StartsWith("```"))
-            {
-                var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                if (m.Success) jsonStr = m.Groups[1].Value.Trim();
-            }
-            var start = jsonStr.IndexOf('{');
-            var end = jsonStr.LastIndexOf('}');
-            if (start >= 0 && end > start)
-                jsonStr = jsonStr.Substring(start, end - start + 1);
-
-            using var doc = JsonDocument.Parse(jsonStr);
-            var complete = doc.RootElement.TryGetProperty("complete", out var c) &&
-                           (c.ValueKind == JsonValueKind.True ||
-                            (c.ValueKind == JsonValueKind.String &&
-                             string.Equals(c.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
-            var feedback = doc.RootElement.TryGetProperty("feedback", out var f) ? f.GetString() : null;
-
-            if (complete)
-                await EmitLog(emitSse, "info", "Content review: task is complete ✓", ct: ct);
-            else
-                await EmitLog(emitSse, "warn", $"Content review: incomplete — {feedback}", ct: ct);
-
-            return (complete, feedback);
+            await EmitLog(emitSse, "error", $"Review parse failed — {feedback}", ct: ct);
+            return (false, feedback ?? "Failed to parse review response");
         }
-        catch (Exception ex)
-        {
-            await EmitLog(emitSse, "error", $"Review parse failed: {ex.Message}", ct: ct);
-            return (false, "Failed to parse review response");
-        }
+
+        if (complete.Value)
+            await EmitLog(emitSse, "info", "Content review: task is complete ✓", ct: ct);
+        else
+            await EmitLog(emitSse, "warn", $"Content review: incomplete — {feedback}", ct: ct);
+
+        return (complete.Value, feedback);
     }
 
     private static bool IsTaskAlreadySatisfied(string prompt, string relativePath, string content)
@@ -2466,6 +2450,104 @@ Rules:
             }
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Tries to parse a review response JSON from the LLM, with
+    /// multiple fallback strategies for common malformed outputs.
+    /// Returns (null, errorMessage) on failure.
+    /// </summary>
+    private static (bool? complete, string? feedback) TryParseReviewResponse(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return (null, "Empty response");
+
+        // Strategy 1: Try direct parse with repair
+        foreach (var candidate in GetReviewJsonCandidates(raw))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(candidate);
+                var c = doc.RootElement.TryGetProperty("complete", out var cp) &&
+                        (cp.ValueKind == JsonValueKind.True ||
+                         (cp.ValueKind == JsonValueKind.String &&
+                          string.Equals(cp.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
+                var f = doc.RootElement.TryGetProperty("feedback", out var fb) ? fb.GetString() : null;
+                return (c, f);
+            }
+            catch { }
+        }
+
+        return (null, "Failed to parse review JSON");
+    }
+
+    /// <summary>
+    /// Generates candidate JSON strings from raw LLM output,
+    /// trying increasingly aggressive repair strategies.
+    /// </summary>
+    private static IEnumerable<string> GetReviewJsonCandidates(string raw)
+    {
+        var trimmed = raw.Trim();
+
+        // Strip markdown fences
+        if (trimmed.StartsWith("```"))
+        {
+            var m = Regex.Match(trimmed, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) trimmed = m.Groups[1].Value.Trim();
+        }
+
+        // Extract JSON object
+        var start = trimmed.IndexOf('{');
+        var end = trimmed.LastIndexOf('}');
+        if (start < 0 || end <= start) yield break;
+        var json = trimmed.Substring(start, end - start + 1);
+
+        // Candidate 1: raw extracted JSON
+        yield return json;
+
+        // Candidate 2: run existing repair
+        var repaired = RepairJsonString(json);
+        if (repaired != null) yield return repaired;
+
+        // Candidate 3: quote unquoted property names
+        var quoted = QuoteJsonKeys(json);
+        if (quoted != json) yield return quoted;
+
+        // Candidate 4: repair + quote
+        if (repaired != null)
+        {
+            var quotedRepaired = QuoteJsonKeys(repaired);
+            if (quotedRepaired != repaired) yield return quotedRepaired;
+        }
+
+        // Candidate 5: try extracting JSON blocks
+        foreach (var block in ExtractJsonBlocks(trimmed))
+        {
+            yield return block;
+            var br = RepairJsonString(block);
+            if (br != null) yield return br;
+            var bq = QuoteJsonKeys(block);
+            if (bq != block) yield return bq;
+        }
+    }
+
+    /// <summary>
+    /// Quotes unquoted JSON property names (e.g. {error: "msg"} → {"error": "msg"}).
+    /// </summary>
+    private static string QuoteJsonKeys(string json)
+    {
+        // Match property names that are NOT already quoted:
+        // After { or , skip whitespace, capture identifier chars, then must be followed by :
+        var result = Regex.Replace(json,
+            @"(?<=[\{\,])\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=:)",
+            m =>
+            {
+                var val = m.Value;
+                var name = m.Groups[1].Value;
+                // Preserve leading whitespace, add quotes around name, no trailing space
+                return val.Substring(0, m.Groups[1].Index - m.Index) + "\"" + name + "\"";
+            });
+        return result;
     }
 
     private static string? RepairJsonString(string json)

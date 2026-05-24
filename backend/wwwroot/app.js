@@ -183,7 +183,7 @@
       vm.newProjectDescription = '';
     };
 
-    vm.closeAddProjectPanel = function (event) { event.preventDefault(); vm.showAddProjectPanel = false; };
+    vm.closeAddProjectPanel = function (event) { if (event && event.target.tagName === 'INPUT') return; if (event) event.stopPropagation(); vm.showAddProjectPanel = false; };
 
     vm.addProjectFromPanel = function () {
       if (!vm.newProjectName) return $window.alert('Project name is required');
@@ -252,7 +252,9 @@
         backdrop.style.display = 'block';
       }
     };
-    vm.closeSettingsPanel = function () {
+    vm.closeSettingsPanel = function (event) {
+      if (event && event.target.tagName === 'INPUT') return;
+      if (event) event.stopPropagation();
       vm.showSettingsPanel = false;
       // Hide backdrop when settings panel is closed
       var backdrop = document.getElementById('backdrop');

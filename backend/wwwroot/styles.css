@@ -105,6 +105,25 @@ button.brand-enhanced {
 button.brand-enhanced:hover {
 	box-shadow: var(--brand-glow), 0 0 25px rgba(6, 182, 212, 0.5);
 	transform: translateY(-2px);
+	transition: all 0.2s ease;
+}
+
+button.brand-button {
+	background: var(--brand-gradient);
+	border: none;
+	color: #012;
+	font-weight: 700;
+	padding: 10px 20px;
+	border-radius: 12px;
+	transition: all 0.3s ease;
+	box-shadow: var(--brand-shadow), 0 4px 15px rgba(6, 182, 212, 0.3);
+	transform: translateY(0);
+}
+
+button.brand-button:hover {
+	box-shadow: var(--brand-glow), 0 0 25px rgba(6, 182, 212, 0.5);
+	transform: translateY(-2px);
+	transition: all 0.2s ease;
 }
 
 button.btn-ready:hover {
@@ -193,6 +212,14 @@ header.brand-enhanced {
 	background: linear-gradient(135deg, var(--brand-primary), var(--brand-secondary), var(--brand-accent));
 	box-shadow: var(--brand-shadow), var(--brand-glow), 0 0 30px rgba(6, 182, 212, 0.2);
 	transition: all 0.4s ease;
+	border-radius: 12px;
+}
+
+header.brand-header {
+	background: linear-gradient(135deg, var(--brand-primary), var(--brand-secondary), var(--brand-accent));
+	box-shadow: var(--brand-shadow), var(--brand-glow), 0 0 30px rgba(6, 182, 212, 0.2);
+	transition: all 0.4s ease;
+	border-radius: 12px;
 }
 
 header.brand-enhanced h1 {
@@ -203,6 +230,12 @@ header.brand-enhanced h1 span.brand-badge {
 	background: rgba(255, 255, 255, 0.15);
 	box-shadow: var(--brand-glow), 0 0 10px rgba(6, 182, 212, 0.3);
 	border: 1px solid rgba(255, 255, 255, 0.15);
+	transition: all 0.3s ease;
+	transform: scale(1);
+}
+
+header.brand-enhanced h1 span.brand-badge:hover {
+	transform: scale(1.05);
 }
 
 header h1 {
@@ -214,6 +247,10 @@ header h1 {
 	gap: 8px;
 	font-weight: 700;
 	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+h1 .brand-text {
+	color: black;
 }
 
 header h1 span.brand-badge {
@@ -496,6 +533,21 @@ main {
 .card.brand-enhanced:hover {
 	box-shadow: var(--brand-glow), 0 8px 25px rgba(6, 182, 212, 0.3);
 	transform: translateY(-3px);
+	transition: all 0.2s ease;
+}
+
+.card.brand-card {
+	background: linear-gradient(145deg, rgba(6, 182, 212, 0.05), rgba(124, 58, 237, 0.05));
+	border: 1px solid rgba(6, 182, 212, 0.1);
+	box-shadow: var(--brand-shadow), 0 4px 15px rgba(6, 182, 212, 0.2);
+	transition: all 0.3s ease;
+	border-radius: 12px;
+}
+
+.card.brand-card:hover {
+	box-shadow: var(--brand-glow), 0 8px 25px rgba(6, 182, 212, 0.3);
+	transform: translateY(-3px);
+	transition: all 0.2s ease;
 }
 
 .card.selected {
