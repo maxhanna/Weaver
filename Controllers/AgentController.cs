@@ -57,16 +57,19 @@ public class AgentController : ControllerBase
     private readonly IWebHostEnvironment _env;
     private readonly TerminalService _terminal;
     private readonly FileHintsManager _fileHints;
+    private readonly ConfigFileService _configFile;
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
-        IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints)
+        IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
+        ConfigFileService configFile)
     {
         _clientFactory = cf;
         _config = config;
         _env = env;
         _terminal = terminal;
         _fileHints = fileHints;
+        _configFile = configFile;
     }
 
     // ── request / response DTOs ───────────────────────────────────────────────
@@ -1094,23 +1097,10 @@ RULES:
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    private string GetLlamaBaseUrl()
+    private async Task<string> GetLlamaBaseUrl()
     {
-        var configPath = Path.Combine(
-            _env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
-        var baseUrl = "http://192.168.2.58:8080";
-        if (System.IO.File.Exists(configPath))
-        {
-            try
-            {
-                var configText = System.IO.File.ReadAllText(configPath);
-                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
-                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlEl))
-                    baseUrl = llamaUrlEl.GetString() ?? baseUrl;
-            }
-            catch { }
-        }
-        return baseUrl.TrimEnd('/');
+        var cfg = await _configFile.LoadConfigAsync();
+        return (cfg.LlamaUrl ?? "http://localhost:8080").TrimEnd('/');
     }
 
     /// <summary>
@@ -1119,10 +1109,10 @@ RULES:
     private async Task<(string raw, object? unused, string? error)> CallLlmRaw(
         string systemPrompt, string userMessage, CancellationToken ct = default)
     {
-        var baseUrl = GetLlamaBaseUrl();
-        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-        var client = _clientFactory.CreateClient("llama");
-        client.Timeout = Timeout.InfiniteTimeSpan;
+            var baseUrl = await GetLlamaBaseUrl();
+            var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+            var client = _clientFactory.CreateClient("llama");
+            client.Timeout = Timeout.InfiniteTimeSpan;
 
         var messages = new object[]
         {
@@ -1225,7 +1215,7 @@ If no change is needed: {""edits"":[]}";
         // ── LLM call ───────────────────────────────────────────────────────────
         try
         {
-            var baseUrl = GetLlamaBaseUrl();
+            var baseUrl = await GetLlamaBaseUrl();
             var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
             var client = _clientFactory.CreateClient("llama");
             client.Timeout = Timeout.InfiniteTimeSpan;
@@ -1312,7 +1302,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
 
         try
         {
-            var baseUrl = GetLlamaBaseUrl();
+            var baseUrl = await GetLlamaBaseUrl();
             var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
             var client = _clientFactory.CreateClient("llama");
             client.Timeout = Timeout.InfiniteTimeSpan;
@@ -1415,7 +1405,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         if (prompt.Contains("maestroconfig.json", StringComparison.OrdinalIgnoreCase) &&
             !paths.Any(p => p.EndsWith("maestroconfig.json", StringComparison.OrdinalIgnoreCase)))
         {
-            foreach (var p in new[] { "wwwroot/maestroconfig.json", "wwwroot/maestroconfig.json" })
+            foreach (var p in new[] { "maestroconfig.json", "maestroconfig.json" })
             {
                 var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
                 if (System.IO.File.Exists(full)) paths.Add(p);

@@ -3,12 +3,12 @@
 This is a lightweight ASP.NET Core backend that:
 
 - Spawns a shell-like terminal and exposes simple HTTP APIs to start it, run commands, and read output.
-- Proxies AI requests to a llama.cpp HTTP server (default at `http://192.168.2.58:8080`).
+- Proxies AI requests to a llama.cpp HTTP server (ie: `http://localhost:8080`).
 - Serves a small AngularJS-based Kanban frontend from `wwwroot/` that interacts with the above APIs.
 
 ## Requirements
 
-- .NET 7 SDK (or compatible runtime)
+- .NET 10 SDK (or compatible runtime)
 
 ## Run
 
@@ -23,7 +23,7 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 ## Configuration
 
-`appsettings.json` contains `LlamaUrl` (defaults to `http://192.168.2.58:8080`). Edit if your llama server is at a different address.
+`maestroconfig.json` contains `LlamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address.
 
 ## API Endpoints
 

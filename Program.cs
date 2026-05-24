@@ -3,6 +3,7 @@
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<TerminalService>();
+builder.Services.AddSingleton<ConfigFileService>();
 
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));

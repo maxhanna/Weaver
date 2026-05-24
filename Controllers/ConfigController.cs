@@ -1,61 +1,19 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Hosting;
-using System.IO;
 using System.Text.Json;
-using System.Text;
-using System.Threading.Tasks;
-using System;
-using System.Collections.Generic;
-using System.Linq;
+using MaestroBackend.Services;
 
 [ApiController]
 [Route("api/config")]
 public class ConfigController : ControllerBase
 {
-    private readonly IWebHostEnvironment _env;
-    public ConfigController(IWebHostEnvironment env) => _env = env;
+    private readonly ConfigFileService _configFile;
 
-    private string ConfigPath => Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
-
-    public class ProjectDto { public string Name { get; set; } = ""; public string Path { get; set; } = ""; public string Description { get; set; } = ""; }
-    public class FrontendConfig
-    {
-        public List<ProjectDto> projects { get; set; } = new List<ProjectDto>();
-        public string defaultProject { get; set; } = "";
-        public bool showTerminal { get; set; } = true;
-        public bool showAI { get; set; } = true;
-        public bool showKanban { get; set; } = true;
-        public string LlamaUrl { get; set; } = "http://192.168.2.58:8080";
-    }
-
-    private async Task<FrontendConfig> LoadConfigAsync()
-    {
-        if (!System.IO.File.Exists(ConfigPath)) return new FrontendConfig();
-        try
-        {
-            var text = await System.IO.File.ReadAllTextAsync(ConfigPath);
-            var cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return cfg ?? new FrontendConfig();
-        }
-        catch
-        {
-            return new FrontendConfig();
-        }
-    }
-
-    private async Task WriteConfigAsync(FrontendConfig cfg)
-    {
-        var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
-        var tmp = ConfigPath + ".tmp";
-        await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8);
-        System.IO.File.Copy(tmp, ConfigPath, true);
-        System.IO.File.Delete(tmp);
-    }
+    public ConfigController(ConfigFileService configFile) => _configFile = configFile;
 
     [HttpGet]
     public async Task<IActionResult> Get()
     {
-        var cfg = await LoadConfigAsync();
+        var cfg = await _configFile.LoadConfigAsync();
         return Ok(cfg);
     }
 
@@ -65,14 +23,14 @@ public class ConfigController : ControllerBase
         if (proj == null || string.IsNullOrWhiteSpace(proj.Name) || string.IsNullOrWhiteSpace(proj.Path))
             return BadRequest("Name and Path are required");
 
-        var cfg = await LoadConfigAsync();
+        var cfg = await _configFile.LoadConfigAsync();
         cfg.projects ??= new List<ProjectDto>();
         if (cfg.projects.Any(p => string.Equals(p.Path, proj.Path, StringComparison.OrdinalIgnoreCase)))
             return Conflict("Project path already exists");
 
         cfg.projects.Add(proj);
         if (setDefault) cfg.defaultProject = proj.Path;
-        await WriteConfigAsync(cfg);
+        await _configFile.WriteConfigAsync(cfg);
         return Ok(cfg);
     }
 
@@ -82,14 +40,14 @@ public class ConfigController : ControllerBase
         if (proj == null || string.IsNullOrWhiteSpace(proj.Path))
             return BadRequest("Path is required");
 
-        var cfg = await LoadConfigAsync();
+        var cfg = await _configFile.LoadConfigAsync();
         cfg.projects ??= new List<ProjectDto>();
         var removed = cfg.projects.RemoveAll(p => string.Equals(p.Path, proj.Path, StringComparison.OrdinalIgnoreCase)
                                                  || string.Equals(p.Name, proj.Name, StringComparison.OrdinalIgnoreCase)) > 0;
         if (removed)
         {
             if (cfg.defaultProject == proj.Path) cfg.defaultProject = cfg.projects.Count > 0 ? cfg.projects[0].Path : string.Empty;
-            await WriteConfigAsync(cfg);
+            await _configFile.WriteConfigAsync(cfg);
             return Ok(cfg);
         }
         return NotFound("Project not found");
@@ -101,7 +59,7 @@ public class ConfigController : ControllerBase
         try
         {
             var cfg = JsonSerializer.Deserialize<FrontendConfig>(body.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
-            await WriteConfigAsync(cfg);
+            await _configFile.WriteConfigAsync(cfg);
             return Ok(cfg);
         }
         catch (Exception ex) { return StatusCode(500, ex.Message); }
@@ -113,12 +71,12 @@ public class ConfigController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.ProjectPath))
             return BadRequest("Project path is required");
 
-        var cfg = await LoadConfigAsync();
+        var cfg = await _configFile.LoadConfigAsync();
         if (cfg.projects == null || !cfg.projects.Any(p => string.Equals(p.Path, request.ProjectPath, StringComparison.OrdinalIgnoreCase)))
             return NotFound("Project not found");
 
         cfg.defaultProject = request.ProjectPath;
-        await WriteConfigAsync(cfg);
+        await _configFile.WriteConfigAsync(cfg);
         return Ok(cfg);
     }
 }

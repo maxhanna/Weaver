@@ -1131,17 +1131,7 @@ header h1 span.brand-badge {
 	z-index: 1999;
 }
 
-.delete-confirm-modal {
-	position: fixed;
-	top: 50%;
-	left: 50%;
-	background: rgba(0, 0, 0, 0.9);
-	backdrop-filter: blur(10px);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	z-index: 2000;
-}
+/* delete-confirm-modal removed — use .popup-overlay > .popup-panel instead */
 
 main {
 	display: flex;
@@ -2339,7 +2329,9 @@ h3 .small.ghost:hover {
 .popup-overlay {
 	position: fixed;
 	inset: 0;
-	background: linear-gradient(180deg, rgba(2, 6, 23, 0.6), rgba(2, 6, 23, 0.7));
+	background: rgba(0, 0, 0, 0.7);
+	backdrop-filter: blur(6px);
+	-webkit-backdrop-filter: blur(6px);
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -2347,48 +2339,38 @@ h3 .small.ghost:hover {
 }
 
 .popup-panel {
-	max-height: 80vh;
-	max-height: 80dvh;
-	position: fixed;
-	top: 50%;
-	left: 50%;
-	transform: translate(-50%, -50%);
-	background: linear-gradient(180deg, #071426, #071428);
-	z-index: 1000 !important;
+	background: var(--surface);
 	border: var(--border);
-	border-radius: 8px;
+	border-radius: var(--radius);
+	box-shadow: var(--shadow);
+	max-width: 90vw;
+	width: auto;
+	min-width: 300px;
+	max-height: 90vh;
 	overflow: auto;
-	padding: 20px;
-	display: flex;
-	flex-direction: column;
-	flex-wrap: nowrap;
-	align-content: center;
-	justify-content: space-evenly;
-	align-items: center;
-	cursor: default;
 	animation: popupFadeIn 0.2s ease-out;
+	z-index: 1201;
 }
 
 .popup-header {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.02);
-	padding-bottom: 10px;
-	margin-bottom: 10px;
+	padding: 16px 20px;
+	border-bottom: var(--border);
+}
+
+.popup-body {
+	padding: 20px;
+	font-size: 13px;
 }
 
 .popup-footer {
 	display: flex;
 	gap: 8px;
 	justify-content: flex-end;
-	padding-top: 10px;
-	border-top: 1px solid rgba(255, 255, 255, 0.02);
-	margin-top: 12px;
-}
-
-.popup-body {
-	font-size: 13px;
+	padding: 16px 20px;
+	border-top: var(--border);
 }
 
 .popup-body .form-row {

@@ -1,0 +1,19 @@
+﻿{
+  "projects": [
+    {
+      "Name": "Maestro",
+      "Path": "C:/Users/Saint/Desktop/Repos/Maestro",
+      "Description": "Agentic Kanban"
+    },
+    {
+      "Name": "BugHosted",
+      "Path": "C:/Users/Saint/Desktop/Repos/BugHosted",
+      "Description": "UnSocial Platform"
+    }
+  ],
+  "defaultProject": "C:/Users/Saint/Desktop/Repos/Maestro",
+  "showTerminal": true,
+  "showAI": true,
+  "showKanban": true,
+  "LlamaUrl": "http://192.168.2.58:8081"
+}

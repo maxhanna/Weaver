@@ -1,0 +1,521 @@
+/* === KANBAN BOARD === */
+
+.board {
+    display: flex;
+    gap: 16px;
+    overflow: auto;
+    padding-bottom: 8px;
+    resize: horizontal;
+}
+
+.column {
+    position: relative;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.01));
+    min-width: 280px;
+    width: 320px;
+    max-height: 100%;
+}
+
+.column > h3 {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: var(--muted);
+    padding: 10px 12px 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.column .col-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.col-badge {
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.cards {
+    overflow-y: auto;
+    flex: 1;
+    padding-right: 4px;
+    min-height: 200px;
+    max-height: calc(99vh - 150px);
+    max-height: calc(99dvh - 150px);
+    resize: vertical;
+}
+
+.cards::-webkit-scrollbar {
+    width: 4px;
+}
+
+.cards::-webkit-scrollbar-thumb {
+    background: var(--accent);
+    border-radius: 2px;
+}
+
+.card {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.06));
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: var(--transition);
+    cursor: default;
+    border: 1px solid transparent;
+}
+
+.card:hover {
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+
+.card.brand-enhanced {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.02));
+    border: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+.card.brand-enhanced:hover {
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.2);
+}
+
+.card.brand-card {
+    background: linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(14, 165, 233, 0.02));
+    border: 1px solid rgba(6, 182, 212, 0.1);
+}
+
+.card.brand-card:hover {
+    box-shadow: 0 4px 20px rgba(6, 182, 212, 0.2);
+}
+
+.card.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(99, 102, 241, 0.2);
+}
+
+.card.dragging {
+    opacity: 0.5;
+    transform: scale(1.02);
+}
+
+.card .card-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    opacity: 0.8;
+}
+
+.card .card-meta .card-id {
+    opacity: 0.5;
+}
+
+.card .card-text {
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100px;
+}
+
+.card .card-text textarea {
+    background: transparent;
+    border: none;
+    color: inherit;
+    width: 100%;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    padding: 0;
+    min-height: 60px;
+}
+
+.card .card-text textarea:focus {
+    outline: none;
+}
+
+.card .card-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+
+.card .card-tag {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 1px 8px;
+    border-radius: 4px;
+    color: #aaa;
+}
+
+.card .card-tag.priority-high { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.card .card-tag.priority-medium { background: rgba(234, 179, 8, 0.15); color: #fbbf24; }
+.card .card-tag.priority-low { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+
+.card .card-tag.tag-ready {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.card .attachments {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.card .attachments .attachment {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 2px 0;
+}
+
+.card .attachments .attachment .remove {
+    opacity: 0.4;
+    cursor: pointer;
+    margin-left: auto;
+}
+
+.card .attachments .attachment .remove:hover {
+    opacity: 1;
+    color: var(--error);
+}
+
+.card .card-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+/* Card analysis (Done column) */
+.card .card-analysis {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.card .card-analysis summary {
+    cursor: pointer;
+    opacity: 0.6;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.card .card-analysis .analysis-summary {
+    font-size: 12px;
+    color: #bbb;
+    margin-bottom: 6px;
+    line-height: 1.5;
+}
+
+.card .card-analysis .analysis-steps {
+    margin-top: 4px;
+}
+
+.card .card-analysis .analysis-step {
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    font-size: 11px;
+    padding: 3px 0;
+    line-height: 1.4;
+}
+
+.card .card-analysis .analysis-step .step-status {
+    width: 14px;
+    flex-shrink: 0;
+}
+
+.card .card-analysis .analysis-step .step-status.ok { color: #4ade80; }
+.card .card-analysis .analysis-step .step-status.error { color: #f87171; }
+.card .card-analysis .analysis-step .step-status.pending { color: #666; }
+
+.card .card-analysis .analysis-thinking {
+    margin-top: 4px;
+}
+
+.card .card-analysis .analysis-thinking pre {
+    font-size: 10px;
+    background: rgba(0, 0, 0, 0.15);
+    padding: 6px;
+    border-radius: 4px;
+    max-height: 120px;
+    overflow-y: auto;
+    color: #999;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.card .card-analysis .analysis-log {
+    margin-top: 4px;
+}
+
+.card .card-analysis .analysis-log .log-entries {
+    max-height: 100px;
+    overflow-y: auto;
+    font-size: 10px;
+}
+
+.card .card-analysis .analysis-log .log-entry {
+    padding: 1px 0;
+    color: #888;
+}
+
+.card .card-analysis .analysis-log .log-entry.error { color: #f87171; }
+.card .card-analysis .analysis-log .log-entry.warn { color: #fbbf24; }
+
+.card .card-analysis .analysis-log .log-ts {
+    margin-right: 4px;
+    opacity: 0.6;
+}
+
+.card .card-analysis .analysis-log .log-detail-raw {
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 9px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 4px;
+    border-radius: 2px;
+    margin: 2px 0;
+}
+
+.card .card-analysis .analysis-files {
+    margin-bottom: 6px;
+    font-size: 11px;
+}
+
+.card .card-analysis .analysis-step .step-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.card .card-analysis .analysis-step .step-output {
+    font-size: 10px;
+    background: rgba(0, 0, 0, 0.15);
+    padding: 4px 6px;
+    border-radius: 4px;
+    margin-top: 2px;
+    max-height: 60px;
+    overflow-y: auto;
+    color: #aaa;
+}
+
+.card .card-analysis .analysis-step .step-err {
+    color: #f87171;
+    font-size: 10px;
+    display: block;
+    margin-top: 2px;
+}
+
+.analysis-step .edit-diff {
+    margin: 4px 0;
+}
+
+.diff-meta {
+    font-size: 10px;
+    color: #888;
+    margin-bottom: 2px;
+}
+
+.diff-sbs {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+    overflow: hidden;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.diff-header {
+    display: flex;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.diff-header-cell {
+    flex: 1;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    padding: 2px 6px;
+    background: rgba(0, 0, 0, 0.3);
+    color: #888;
+    font-weight: 600;
+}
+
+.diff-header-old { border-right: 1px solid rgba(255, 255, 255, 0.04); background: rgba(239, 68, 68, 0.06); }
+.diff-header-new { background: rgba(34, 197, 94, 0.06); }
+
+.diff-wrapper {
+    display: flex;
+}
+
+.diff-col {
+    flex: 1;
+    min-width: 0;
+}
+
+.diff-col-old {
+    border-right: 1px solid rgba(255, 255, 255, 0.04);
+    background: rgba(239, 68, 68, 0.02);
+}
+
+.diff-col-new {
+    background: rgba(34, 197, 94, 0.02);
+}
+
+.diff-row {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+}
+
+.diff-row:last-child {
+    border-bottom: none;
+}
+
+.diff-cell {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    padding: 1px 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.diff-cell-old {
+    background: transparent;
+}
+
+.diff-cell-new {
+    background: transparent;
+}
+
+.diff-cell.diff-changed {
+    background: rgba(234, 179, 8, 0.08);
+}
+
+.diff-cell.diff-removed {
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.diff-cell.diff-added {
+    background: rgba(34, 197, 94, 0.1);
+}
+
+.diff-cell.diff-empty {
+    background: rgba(255, 255, 255, 0.01);
+}
+
+.diff-lineno {
+    color: rgba(255, 255, 255, 0.15);
+    font-size: 9px;
+    min-width: 28px;
+    text-align: right;
+    user-select: none;
+}
+
+/* Rename display */
+.rename-display {
+    font-size: 11px;
+    color: #fbbf24;
+    padding: 2px 0;
+}
+
+.rename-arrow {
+    opacity: 0.8;
+}
+
+/* Drag & drop visual feedback */
+.column.drop-target {
+    background: rgba(99, 102, 241, 0.03);
+    border-radius: 8px;
+}
+
+.col-resizer {
+    position: absolute;
+    top: 0;
+    right: -8px;
+    width: 8px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.col-resizer::after {
+    content: '';
+    width: 2px;
+    height: 40px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 1px;
+    transition: background 0.2s;
+}
+
+.col-resizer:hover::after {
+    background: var(--accent);
+}
+
+.col-resizer.active::after {
+    background: var(--accent);
+}
+
+/* Search */
+.search-container {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.search-input {
+    flex: 1;
+    max-width: 280px;
+}
+
+.clear-button {
+    padding: 4px 8px;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
+.clear-button:hover {
+    opacity: 1;
+}
+
+/* Responsive */
+@media (max-width:1100px) {
+    .board {
+        flex: 0 0 auto;
+    }
+}
+
+@media (max-width:900px) {
+    .board {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .column {
+        width: 100%;
+        min-width: 0;
+    }
+    .col-resizer {
+        display: none;
+    }
+}

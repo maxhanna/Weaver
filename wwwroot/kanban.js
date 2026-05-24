@@ -1,0 +1,464 @@
+'use strict';
+
+angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
+  var STORAGE_KEY = 'maestroconfig.cards';
+
+  function uid() { return Math.random().toString(36).slice(2, 9); }
+
+  function loadCards() {
+    var raw = $window.localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : { todo: [], doing: [], done: [] };
+  }
+
+  return {
+    init: function(vm, $scope) {
+      vm.state = loadCards();
+
+      vm.saveCards = function() {
+        $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state));
+      };
+
+      vm.filterCards = function (cards) {
+        if (!vm.searchFilter) return cards;
+        var filter = vm.searchFilter.toLowerCase();
+        return cards.filter(function (card) {
+          return card.id.toLowerCase().includes(filter) || card.text.toLowerCase().includes(filter);
+        });
+      };
+
+      vm.cardsForProject = function (col) {
+        var all = vm.state[col] || [];
+        if (!vm.selectedProject) return all;
+        var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
+        return vm.filterCards(filtered);
+      };
+
+      vm.addCard = function (col) {
+        vm.state[col].push({
+          id: uid(),
+          text: '',
+          filePath: vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: 'medium',
+          attached: []
+        });
+        vm.saveCards();
+        $timeout(function () {
+          var cards = vm.state[col];
+          if (cards.length) {
+            var newCard = cards[cards.length - 1];
+            var textarea = document.querySelector('[data-card-id="' + newCard.id + '"] textarea');
+            if (textarea) textarea.focus();
+          }
+        }, 0);
+      };
+
+      vm.clearDoneCards = function () {
+        if (!$window.confirm('Delete all done tasks?')) return;
+        vm.state.done = [];
+        vm.saveCards();
+      };
+
+      vm.copyCardText = function (card) {
+        if (!card || !card.text) return;
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(card.text).then(function () {
+            console.log('Card text copied to clipboard');
+          }).catch(function (err) {
+            console.error('Failed to copy card text: ', err);
+          });
+        } else {
+          var textArea = document.createElement('textarea');
+          textArea.value = card.text;
+          document.body.appendChild(textArea);
+          textArea.select();
+          try {
+            document.execCommand('copy');
+            console.log('Card text copied to clipboard (fallback)');
+          } catch (err) {
+            console.error('Failed to copy card text (fallback): ', err);
+          }
+          document.body.removeChild(textArea);
+        }
+      };
+
+      vm.openDeleteCardConfirm = function (id, col) {
+        vm.confirmDeleteCardId = id;
+        var col = col || 'done';
+        var card = vm.state[col].find(function (c) { return c.id === id; });
+        if (!card) {
+          alert('Card not found in ' + col + ' column');
+          return;
+        }
+        vm.deleteCardConfirm = {
+          id: id,
+          col: col,
+          show: true,
+          dontShowAgain: false
+        };
+      };
+
+      vm.confirmDeleteCard = function () {
+        if (!vm.deleteCardConfirm || !vm.deleteCardConfirm.id) return;
+        var id = vm.deleteCardConfirm.id;
+        var col = vm.deleteCardConfirm.col;
+        var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
+        if (idx !== -1) {
+          vm.state[col].splice(idx, 1);
+          console.log('Deleted card with id', id);
+          vm.saveCards();
+        }
+        if (vm.deleteCardConfirm.dontShowAgain) {
+          try { $window.localStorage.setItem('maestroconfig.deleteCardConfirm', 'false'); } catch (e) { }
+        }
+        vm.confirmDeleteCardId = null;
+        vm.deleteCardConfirm = null;
+      };
+
+      vm.closeDeleteCardConfirm = function (event) {
+        if (event && event.key === 'Escape') {
+          event.stopPropagation();
+          event.preventDefault();
+          vm.confirmDeleteCardId = null;
+          vm.deleteCardConfirm = null;
+          return;
+        }
+        vm.confirmDeleteCardId = null;
+        vm.deleteCardConfirm = null;
+      };
+
+      vm.toggleCardReady = function (card) {
+        card.ready = !card.ready;
+        if (card.ready && vm.activeCardIds.size === 0) {
+          vm.startCard(card);
+        }
+      };
+
+      vm.moveCard = function (id, from, to) {
+        var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
+        if (idx === -1) return;
+        var card = vm.state[from][idx];
+        if (from === 'todo' && to === 'doing' && !card.ready) {
+          return $window.alert('Mark the card as Ready first (press Start)');
+        }
+        vm.state[from].splice(idx, 1);
+        if (from === 'doing' && to === 'todo') {
+          card.ready = false;
+          delete card.agentAnalysis;
+          vm.activeCardId = null;
+        }
+        if (from === 'doing' && to === 'done') {
+          vm.activeCardId = null;
+        }
+        if (from === 'done' && to === 'todo') {
+          card.ready = false;
+          delete card.agentAnalysis;
+          delete card.agentSteps;
+          vm.activeCardId = null;
+        }
+        if (from === 'todo' && to === 'done') {
+          card.ready = false;
+          delete card.agentAnalysis;
+          delete card.agentSteps;
+          vm.activeCardId = null;
+        }
+        vm.state[to].push(card);
+        if (from === 'todo' && to === 'doing' && card.ready) {
+          vm.executeAgent(card);
+        }
+        vm.saveCards();
+      };
+
+      vm.reopenCard = function (card) {
+        card.ready = false;
+        delete card.agentAnalysis;
+        delete card.agentSteps;
+        var idx = vm.state.done.findIndex(function (c) { return c.id === card.id; });
+        if (idx === -1) return;
+        vm.state.done.splice(idx, 1);
+        vm.state.todo.push(card);
+        vm.saveCards();
+      };
+
+      vm.getAttachedFiles = function (card) {
+        if (Array.isArray(card.attached)) return card.attached;
+        if (card.attached) return [card.attached];
+        return [];
+      };
+
+      vm.removeAttachment = function (cardId) {
+        ['todo', 'doing', 'done'].forEach(function (col) {
+          var cards = vm.state[col];
+          for (var i = 0; i < cards.length; i++) {
+            if (cards[i].id === cardId) {
+              cards[i].attached = [];
+              break;
+            }
+          }
+        });
+        vm.saveCards();
+      };
+
+      vm.editCardText = function (card) {
+        var newText = $window.prompt('Edit task:', card.text);
+        if (newText !== null && newText !== card.text) {
+          card.text = newText;
+          vm.saveCards();
+        }
+      };
+
+      vm.saveCardText = function (card) {
+        vm.saveCards();
+      };
+
+      vm.splitCardIntoSubtasks = function (card) {
+        if (!card || !card.text) return;
+        var lines = card.text.split(/\n+/).map(function (l) { return l.trim(); }).filter(Boolean);
+        if (lines.length <= 1) {
+          var parts = card.text.split(/[.;]\s+/).filter(function (p) { return p.length > 10; });
+          if (parts.length <= 1) return $window.alert('Task is already small. Add line breaks or bullet points to split.');
+          lines = parts;
+        }
+        if (!$window.confirm('Split into ' + lines.length + ' smaller Todo cards?')) return;
+        var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
+        if (idx === -1) {
+          ['doing', 'done'].forEach(function (col) {
+            var i = vm.state[col].findIndex(function (c) { return c.id === card.id; });
+            if (i !== -1) { vm.state[col].splice(i, 1); idx = -2; }
+          });
+        } else {
+          vm.state.todo.splice(idx, 1);
+        }
+        lines.forEach(function (line, i) {
+          vm.state.todo.push({
+            id: uid(),
+            text: line.charAt(0).toUpperCase() + line.slice(1),
+            filePath: card.filePath || vm.selectedProject,
+            createdAt: new Date().toISOString(),
+            priority: card.priority || 'medium',
+            attached: i === 0 ? angular.copy(card.attached || []) : []
+          });
+        });
+        vm.saveCards();
+      };
+
+      vm.buildDiffLines = function (oldLines, newLines) {
+        if (!oldLines) oldLines = [];
+        if (!newLines) newLines = [];
+        var maxLen = Math.max(oldLines.length, newLines.length);
+        var result = [];
+        for (var i = 0; i < maxLen; i++) {
+          var oldLine = i < oldLines.length ? oldLines[i] : null;
+          var newLine = i < newLines.length ? newLines[i] : null;
+          var bothExist = oldLine !== null && newLine !== null;
+          var changed = bothExist ? oldLine !== newLine : true;
+          result.push({ oldLine: oldLine, newLine: newLine, changed: changed, bothExist: bothExist });
+        }
+        return result;
+      };
+
+      vm.moveCardToDoing = function (cardId) {
+        var idx = vm.state.todo.findIndex(function (c) { return c.id === cardId; });
+        if (idx === -1) return;
+        var card = vm.state.todo.splice(idx, 1)[0];
+        vm.state.doing.push(card);
+        vm.saveCards();
+      };
+
+      vm.moveCardToDone = function (cardId) {
+        var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
+        if (idx === -1) return;
+        var card = vm.state.doing.splice(idx, 1)[0];
+        vm.state.done.push(card);
+        vm.activeCardId = null;
+        if (!vm.activeCardIds) vm.activeCardIds = new Set();
+        vm.activeCardIds.delete(cardId);
+        vm.saveCards();
+      };
+
+      vm.startCard = function (card) {
+        if (!card) return;
+        if (card.ready) {
+          vm.moveCardToDoing(card.id);
+          vm.executeAgent(card);
+        } else {
+          card.ready = true;
+          vm.saveCards();
+        }
+      };
+
+      vm.processQueue = function () {
+        if (vm.streamingActive) return;
+        var readyCards = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready; });
+        if (!readyCards.length) return;
+        var next = readyCards[readyCards.length - 1];
+        vm.moveCardToDoing(next.id);
+        vm.executeAgent(next);
+      };
+
+      vm.focusCardTextarea = function (card) {
+        if (!card) return;
+        var el = document.querySelector('[data-card-id="' + card.id + '"] textarea');
+        if (el && !card.text.trim()) {
+          $timeout(function () { el.focus(); }, 50);
+        }
+      };
+
+      vm.initColumnResizers = function () {
+        try {
+          var existing = document.querySelectorAll('.col-resizer');
+          existing.forEach(function (el) { el.remove(); });
+          var cols = Array.prototype.slice.call(document.querySelectorAll('#board .column'));
+          for (var i = 0; i < cols.length - 1; i++) {
+            (function (leftCol) {
+              var resizer = document.createElement('div');
+              resizer.className = 'col-resizer';
+              leftCol.appendChild(resizer);
+              resizer.addEventListener('pointerdown', function startDrag(e) {
+                e.preventDefault();
+                var rightCol = leftCol.nextElementSibling;
+                if (!rightCol) return;
+                var startX = e.clientX;
+                var leftRect = leftCol.getBoundingClientRect();
+                var rightRect = rightCol.getBoundingClientRect();
+                var leftW = leftRect.width;
+                var rightW = rightRect.width;
+                var min = 200;
+                document.body.style.userSelect = 'none';
+                resizer.classList.add('active');
+                function onMove(ev) {
+                  var dx = ev.clientX - startX;
+                  var nl = leftW + dx;
+                  var nr = rightW - dx;
+                  var total = leftW + rightW;
+                  if (nl < min) { nl = min; nr = total - min; }
+                  if (nr < min) { nr = min; nl = total - min; }
+                  leftCol.style.flex = '0 0 ' + Math.round(nl) + 'px';
+                  rightCol.style.flex = '0 0 ' + Math.round(nr) + 'px';
+                }
+                function stopDrag() {
+                  document.removeEventListener('pointermove', onMove);
+                  document.removeEventListener('pointerup', stopDrag);
+                  document.body.style.userSelect = '';
+                  resizer.classList.remove('active');
+                }
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', stopDrag);
+              });
+              resizer.addEventListener('dblclick', function () {
+                cols.forEach(function (c) { c.style.flex = ''; c.style.width = ''; });
+              });
+            })(cols[i]);
+          }
+        } catch (e) { console.error('resizer error', e); }
+      };
+
+      vm.setupDragDrop = function () {
+        try {
+          var cards = document.querySelectorAll('.card[draggable]');
+          cards.forEach(function (c) {
+            c.addEventListener('dragstart', function (e) {
+              e.dataTransfer.setData('text/plain', c.id.replace('card-', ''));
+              c.classList.add('dragging');
+            });
+            c.addEventListener('dragend', function (e) {
+              c.classList.remove('dragging');
+            });
+          });
+          var cols = document.querySelectorAll('.cards');
+          cols.forEach(function (col) {
+            col.addEventListener('dragover', function (e) {
+              e.preventDefault();
+              col.closest('.column').classList.add('drop-target');
+              var targetCard = e.target.closest('.card');
+              if (targetCard) {
+                var rect = targetCard.getBoundingClientRect();
+                var y = e.clientY - rect.top;
+                var height = rect.height;
+                var halfHeight = height / 2;
+                var existingIndicators = col.querySelectorAll('.drop-indicator');
+                existingIndicators.forEach(function (indicator) { indicator.remove(); });
+                if (y < halfHeight) {
+                  targetCard.classList.add('drop-above');
+                  targetCard.classList.remove('drop-below');
+                } else {
+                  targetCard.classList.add('drop-below');
+                  targetCard.classList.remove('drop-above');
+                }
+              }
+            });
+            col.addEventListener('dragleave', function (e) {
+              col.closest('.column').classList.remove('drop-target');
+              var targetCard = e.target.closest('.card');
+              if (targetCard) {
+                targetCard.classList.remove('drop-above', 'drop-below');
+              }
+            });
+            col.addEventListener('drop', function (e) {
+              e.preventDefault();
+              col.closest('.column').classList.remove('drop-target');
+              var targetCard = e.target.closest('.card');
+              if (targetCard) {
+                targetCard.classList.remove('drop-above', 'drop-below');
+              }
+              var cardId = e.dataTransfer.getData('text/plain');
+              var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
+              if (!cardId || !targetCol) return;
+              var fromCol = null;
+              ['todo', 'doing', 'done'].forEach(function (cn) {
+                var idx = vm.state[cn].findIndex(function (c) { return c.id === cardId; });
+                if (idx !== -1) fromCol = cn;
+              });
+              if (!fromCol) return;
+              var cardObj = vm.state[fromCol].find(function (c) { return c.id === cardId; });
+              if (!cardObj) return;
+              if (fromCol === targetCol) {
+                var fromIndex = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
+                if (fromIndex === -1) return;
+                vm.state[fromCol].splice(fromIndex, 1);
+                var targetIndex = -1;
+                if (targetCard) {
+                  var targetCardId = targetCard.id.replace('card-', '');
+                  targetIndex = vm.state[targetCol].findIndex(function (c) { return c.id === targetCardId; });
+                }
+                if (targetIndex !== -1) {
+                  vm.state[targetCol].splice(targetIndex, 0, cardObj);
+                } else {
+                  vm.state[targetCol].push(cardObj);
+                }
+              } else {
+                if (fromCol === 'todo' && targetCol === 'doing' && !cardObj.ready) {
+                  alert('Mark the card as Ready first (press Start)');
+                  return;
+                }
+                if (fromCol === 'doing' && targetCol === 'todo') {
+                  cardObj.ready = false;
+                  delete cardObj.agentAnalysis;
+                }
+                if (fromCol === 'done' && targetCol === 'todo') {
+                  cardObj.ready = false;
+                  delete cardObj.agentAnalysis;
+                  delete cardObj.agentSteps;
+                }
+                var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
+                if (idx === -1) return;
+                vm.state[fromCol].splice(idx, 1);
+                vm.state[targetCol].push(cardObj);
+                if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
+                  vm.saveCards();
+                  vm.executeAgent(cardObj);
+                  return;
+                }
+              }
+              vm.saveCards();
+              if ($scope) { try { $scope.$digest(); } catch (e) {} }
+            });
+          });
+        } catch (e) { console.error('dragdrop error', e); }
+      };
+
+      $timeout(function () { vm.initColumnResizers(); }, 300);
+      $timeout(function () { vm.setupDragDrop(); }, 500);
+    }
+  };
+});

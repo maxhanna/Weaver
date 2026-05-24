@@ -1,8 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using System.Text;
 using System.Text.Json;
+using MaestroBackend.Services;
 
 [ApiController]
 [Route("api/ai")]
@@ -10,20 +10,19 @@ public class AiController : ControllerBase
 {
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
-    private readonly IWebHostEnvironment _env;
+    private readonly ConfigFileService _configFile;
 
-    public AiController(IHttpClientFactory cf, IConfiguration config, IWebHostEnvironment env)
+    public AiController(IHttpClientFactory cf, IConfiguration config, ConfigFileService configFile)
     {
         _clientFactory = cf;
         _config = config;
-        _env = env;
+        _configFile = configFile;
     }
 
     [HttpPost("generate")]
     public async Task<IActionResult> Generate([FromBody] JsonElement payload)
     {
-        // Read LlamaUrl from maestroconfig.json if available
-        string baseUrl = GetBaseURL();
+        string baseUrl = await GetBaseURL();
         var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
         var client = _clientFactory.CreateClient("llama");
 
@@ -77,8 +76,7 @@ public class AiController : ControllerBase
     [HttpPost("proxy")]
     public async Task<IActionResult> Proxy([FromQuery] string path)
     {
-        // Read LlamaUrl from maestroconfig.json if available
-        string baseUrl = GetBaseURL();
+        string baseUrl = await GetBaseURL();
         var target = baseUrl.TrimEnd('/') + "/" + (path ?? string.Empty).TrimStart('/');
         var client = _clientFactory.CreateClient("llama");
         var body = await new StreamReader(Request.Body).ReadToEndAsync();
@@ -94,28 +92,9 @@ public class AiController : ControllerBase
         }
     }
 
-    private string GetBaseURL()
+    private async Task<string> GetBaseURL()
     {
-        var configPath = Path.Combine(_env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot"), "maestroconfig.json");
-        var baseUrl = "http://192.168.2.58:8080"; // default fallback
-
-        if (System.IO.File.Exists(configPath))
-        {
-            try
-            {
-                var configText = System.IO.File.ReadAllText(configPath);
-                var configJson = JsonSerializer.Deserialize<JsonElement>(configText);
-                if (configJson.TryGetProperty("LlamaUrl", out var llamaUrlElement))
-                {
-                    baseUrl = llamaUrlElement.GetString() ?? baseUrl;
-                }
-            }
-            catch
-            {
-                // Use default if parsing fails
-            }
-        }
-
-        return baseUrl;
+        var cfg = await _configFile.LoadConfigAsync();
+        return cfg.LlamaUrl;
     }
 }
