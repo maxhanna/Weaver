@@ -1143,25 +1143,30 @@ RULES:
         // ── System prompt ──────────────────────────────────────────────────────
         const string systemPrompt =
 @"You are a precise code patch tool. Output ONLY the JSON below — no markdown, no explanation.
- 
+
 FORMAT:
 {
   ""edits"": [
     {
-      ""oldString"": ""<exact text copied from FILE CONTENT — NEVER invent or paraphrase>"",
-      ""newString"": ""<replacement — MUST differ from oldString, never empty>""
+      ""oldString"": ""<exact text copied CHARACTER-FOR-CHARACTER from FILE CONTENT>"",
+      ""newString"": ""<replacement — MUST differ from oldString>""
+    }, 
+    {
+      ""oldString"": ""<exact other text copied CHARACTER-FOR-CHARACTER from FILE CONTENT>"",
+      ""newString"": ""<replacement other string — MUST differ from oldString>""
     }
   ]
 }
- 
+
 RULES FOR oldString:
-1. Copy it CHARACTER-FOR-CHARACTER from the FILE CONTENT shown below.
-2. If you cannot see the relevant code in the content window, output {""edits"":[]} — do NOT guess.
- 
+1. Copy it CHARACTER-FOR-CHARACTER from the FILE CONTENT that follows.
+2. Use SHORT oldString: 1–3 lines is safest. A unique short string always matches.
+3. If the relevant code is NOT in the FILE CONTENT shown below → {""edits"":[]} — never guess.
+
 RULES FOR newString:
-1. MUST differ from oldString. NEVER identical or empty.
-2. Preserve surrounding indentation exactly.
- 
+1. MUST differ from oldString. Never empty, never identical.
+2. Preserve indentation exactly.
+
 If no change is needed: {""edits"":[]}";
 
         // ── Build user message ─────────────────────────────────────────────────
@@ -1735,6 +1740,24 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         var fileLines = content.Split('\n');
         var rawOldLines = oldString.Split('\n');
 
+        // Pass 1.5: whitespace-normalised (tabs→spaces, collapse runs) per each line
+        if (rawOldLines.Length > 0)
+        {
+            var wsFileLines = fileLines.Select(l => string.Join(" ", l.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))).ToArray();
+            var wsOldLines = rawOldLines.Select(l => string.Join(" ", l.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))).ToArray();
+            for (var fi = 0; fi <= fileLines.Length - rawOldLines.Length; fi++)
+            {
+                var match = true;
+                for (var li = 0; li < rawOldLines.Length; li++)
+                {
+                    if (!string.Equals(wsFileLines[fi + li], wsOldLines[li], StringComparison.OrdinalIgnoreCase))
+                    { match = false; break; }
+                }
+                if (match)
+                    return (true, ReplaceLineBlock(fileLines, fi, rawOldLines.Length, newString), null, null);
+            }
+        }
+
         // Strip leading/trailing blank lines from the pattern to get the "core".
         var coreFirst = 0;
         var coreLast = rawOldLines.Length - 1;
@@ -1796,7 +1819,7 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
                 // Window size: number of non-blank pattern lines + small slack.
                 var nonBlankOld = coreOld.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
                 var windowLen = Math.Max(nonBlankOld.Length, 1);
-                const double threshold = 0.85;
+                const double threshold = 0.65;
 
                 for (var fi = 0; fi <= fileLines.Length - windowLen; fi++)
                 {
@@ -2388,16 +2411,16 @@ Rules:
                         if (envelope?.Edits != null)
                         {
                             var i = 0;
-                            foreach (var e in envelope.Edits)
+                            foreach (var foundEdit in envelope.Edits)
                             {
-                                if (string.IsNullOrEmpty(e.OldString) && string.IsNullOrEmpty(e.NewString)) continue;
+                                if (string.IsNullOrEmpty(foundEdit.OldString) && string.IsNullOrEmpty(foundEdit.NewString)) continue;
                                 steps.Add(new AgentStep
                                 {
                                     Index = i++,
                                     Type = "edit",
-                                    Path = string.IsNullOrWhiteSpace(e.Path) ? defaultPath : e.Path,
-                                    OldString = e.OldString,
-                                    NewString = e.NewString,
+                                    Path = string.IsNullOrWhiteSpace(foundEdit.Path) ? defaultPath : foundEdit.Path,
+                                    OldString = foundEdit.OldString,
+                                    NewString = foundEdit.NewString,
                                     Description = "LLM edit"
                                 });
                             }

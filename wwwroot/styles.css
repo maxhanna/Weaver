@@ -561,17 +561,8 @@ header h1 {
 	line-height: 1.6;
 	color: var(--muted);
 }
-
-.popup-body.about-popup a {
-	color: var(--accent);
-	text-decoration: none;
-	transition: all 0.2s ease;
-}
-
-.popup-body.about-popup a:hover {
-	color: var(--brand-primary);
-	text-decoration: underline;
-}
+a:link, a:visited { color: var(--accent); transition: all 0.2s ease;}
+a:hover, a:active { color: var(--brand-secondary); text-decoration: underline; }
 
 .popup-footer.about-popup {
 	display: flex;
