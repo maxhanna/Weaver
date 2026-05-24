@@ -465,6 +465,13 @@
       saveCards();
     };
 
+    vm.toggleCardReady = function (card) {
+      card.ready = !card.ready;
+      if (card.ready && vm.activeCardIds.size === 0) {
+        vm.startCard(card);
+      }
+    };
+
     vm.moveCard = function (id, from, to) {
       var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
       if (idx === -1) return;
@@ -1075,6 +1082,30 @@
             e.preventDefault();
             col.closest('.column').classList.add('drop-target');
             // Add visual feedback for where the card will be dropped
+            var targetCard = e.target.closest('.card');
+            if (targetCard) {
+              var rect = targetCard.getBoundingClientRect();
+              var y = e.clientY - rect.top;
+              var height = rect.height;
+              var halfHeight = height / 2;
+              
+              // Remove any existing drop indicators
+              var existingIndicators = col.querySelectorAll('.drop-indicator');
+              existingIndicators.forEach(function(indicator) {
+                indicator.remove();
+              });
+              
+              // Add drop indicator if needed
+              if (y < halfHeight) {
+                // Drop above the target card
+                targetCard.classList.add('drop-above');
+                targetCard.classList.remove('drop-below');
+              } else {
+                // Drop below the target card
+                targetCard.classList.add('drop-below');
+                targetCard.classList.remove('drop-above');
+              }
+            }
             var targetCard = e.target.closest('.card');
             if (targetCard) {
               var rect = targetCard.getBoundingClientRect();

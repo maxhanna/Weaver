@@ -162,6 +162,24 @@ button.small.ghost:hover {
 	transform: translateY(-1px);
 }
 
+.card.drag-over {
+	box-shadow: 0 0 0 2px var(--accent), 0 0 20px rgba(6, 182, 212, 0.3);
+	transform: scale(1.02);
+	border-radius: 8px;
+}
+
+.column.drag-over {
+	box-shadow: inset 0 0 0 2px var(--accent);
+	background: rgba(6, 182, 212, 0.05);
+	border-radius: 8px;
+}
+
+.drop-target {
+	outline: 2px dashed var(--accent);
+	outline-offset: 4px;
+	background: rgba(6, 182, 212, 0.03);
+}
+
 input,
 select,
 textarea {
@@ -1177,8 +1195,8 @@ main {
 	flex: 1;
 	padding-right: 4px;
 	min-height: 200px;
-	max-height: 99vh;
-	max-height: 99dvh;
+	max-height: calc(99vh - 150px);
+	max-height: calc(99dvh - 150px);
 	resize: vertical;
 }
 
