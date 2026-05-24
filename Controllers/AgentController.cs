@@ -497,7 +497,8 @@ public class AgentController : ControllerBase
 
         if (plan == null || plan.Plan.Count == 0)
         {
-            await EmitLog(emitSse, "warn", $"Plan phase produced no items — falling back to heuristic file list. Error: {error}", ct: ct);
+            await EmitLog(emitSse, "warn", $"Plan phase produced no items — falling back to heuristic file list. Error: {error}",
+                new { raw }, ct: ct);
             // Fallback: use every .js/.html/.css candidate from discovery as the plan
             var fallbackFiles = FindLikelyFiles(prompt, projectRoot);
             return fallbackFiles
@@ -511,7 +512,7 @@ public class AgentController : ControllerBase
 
         await EmitLog(emitSse, "info",
             $"Plan: {plan.Plan.Count} file(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
-            new { thinking = plan.Thinking, summary = plan.Summary }, ct: ct);
+            new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan.Select(p => new { p.File, p.ChangeDescription }) }, ct: ct);
 
         if (emitSse)
             await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
@@ -542,12 +543,17 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
       ""file"":   ""relative/path/to/file"",
       ""change"": ""specific description of what to add/modify/remove in this file. Be very detailed."",
       ""priority"": 1
+    },
+    {
+      ""file"":   ""relative/path/to/file2"",
+      ""change"": ""specific description of what to add/modify/remove in file2. Be very detailed."",
+      ""priority"": 2
     }
   ]
 }
 
 The ""change"" field is CRITICAL — it will be passed directly to the edit model so it knows exactly what to do.
-Make it specific and accurate: e.g. 'In the moveCardToDoing function in app.js, change the line ""vm.state.doing.push(card);"" to ""vm.state.todo.push(card);""'
+Make it specific and accurate: e.g. 'In the moveCardToDoing function in app.js on line 439, change the line ""vm.state.doing.push(card);"" to ""vm.state.todo.push(card);""'
 NOT vague like 'modify the moveCard function'.
 
 RULES:
@@ -1150,11 +1156,7 @@ FORMAT:
  
 RULES FOR oldString:
 1. Copy it CHARACTER-FOR-CHARACTER from the FILE CONTENT shown below.
-   The content is prefixed with line numbers like '   42: code here'.
-   Do NOT include the line-number prefix in oldString — only the code after the colon+space.
-2. Prefer SHORT oldStrings: 1–3 lines that are UNIQUE in the file. Shorter = safer.
-3. Pick a line or block that contains the SPECIFIC thing you're changing, not a whole function.
-4. If you cannot see the relevant code in the content window, output {""edits"":[]} — do NOT guess.
+2. If you cannot see the relevant code in the content window, output {""edits"":[]} — do NOT guess.
  
 RULES FOR newString:
 1. MUST differ from oldString. NEVER identical or empty.

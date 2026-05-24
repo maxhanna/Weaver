@@ -231,30 +231,32 @@
             <button ng-click="vm.sendCmd()">Send</button>
             <button class="small ghost" ng-click="vm.startTerminal()">↻</button>
           </div>
+    <div class="popup-body">
+      <div class="form-row">
+        <label>Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
+      </div>
+      <div class="file-picker-nav">
+        <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
+        <span>{{vm.pickerPath || '/'}}</span>
+      </div>
+      <div class="file-picker-list">
+        <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
+          ng-click="vm.pickerEnterDir(e.path)">
+          <span>📁</span><span>{{e.name}}/</span>
         </div>
+        <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory"
+          ng-click="vm.pickerToggleFile(e.path)">
+          <span>📄</span><span>{{e.name}}</span>
+        </div>
+      </div>
+      <div class="form-row">
+        <button ng-click="vm.pickerAttachSelected()" ng-disabled="!vm.pickerSelected.length">Attach Selected</button>
+        <button ng-click="vm.closeFilePicker()">Cancel</button>
+      </div>
+      <div class="form-row">
+        <label>GitHub: <a href="https://github.com/maxhanna/Maestro" target="_blank">https://github.com/maxhanna/Maestro</a></label>
       </div>
     </div>
-  </main>
-
-  <!-- FILE PICKER MODAL -->
-  <div class="popup-overlay" ng-if="vm.showFilePicker" ng-click="vm.closeFilePicker()">
-    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
-      <div class="popup-header">
-        <strong>Attach Files</strong>
-        <button ng-click="vm.closeFilePicker()">✕</button>
-      </div>
-      <div class="popup-body">
-        <div class="form-row">
-          <label>Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
-        </div>
-        <div class="file-picker-nav">
-          <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
-          <span>{{vm.pickerPath || '/'}}</span>
-        </div>
-        <div class="file-picker-list">
-          <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
-            ng-click="vm.pickerEnterDir(e.path)">
-            <span>📁</span><span>{{e.name}}/</span>
           </div>
           <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory"
             ng-click="vm.pickerToggleFile(e.path)">
@@ -322,6 +324,9 @@
           Join Discord Server
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
+        <div style="margin-top:16px;">
+          <label>GitHub: <a href="https://github.com/maxhanna/Maestro" target="_blank">https://github.com/maxhanna/Maestro</a></label>
+        </div>
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeDiscordPanel()">Close</button>

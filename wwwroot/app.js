@@ -575,15 +575,15 @@
       if (typeof detail === 'object' && detail !== null) {
         var lines = [];
         var diagnosticKeys = ['hasUnquotedKeyNewString', 'hasUnquotedKeyOldString', 'extractJsonBlocks', 'repairChanged', 'endsWithClosingBrace', 'totalChars', 'hasMarkdownComment'];
-        for (var k = 0; k < diagnosticKeys.length; k++) {
-          var dk = diagnosticKeys[k];
-          if (detail.hasOwnProperty(dk) && detail[dk] !== null && detail[dk] !== undefined) {
-            lines.push(dk + ': ' + JSON.stringify(detail[dk]));
-          }
-        }
-        if (lines.length > 0) return lines.join('\n') + '\n' + JSON.stringify(detail, null, 0);
+  for (var k = 0; k < diagnosticKeys.length; k++) {
+      var dk = diagnosticKeys[k];
+      if (detail.hasOwnProperty(dk) && detail[dk] !== null && detail[dk] !== undefined) {
+        lines.push(dk + ': ' + JSON.stringify(detail[dk]));
       }
-      try { return JSON.stringify(detail, null, 0); } catch (e) { return String(detail); }
+    }
+    if (lines.length > 0) return lines.join('\n') + '\n' + JSON.stringify(detail, null, 2);
+  }
+  try { return JSON.stringify(detail, null, 2); } catch (e) { return String(detail); }
     }
 
     function refreshFilesEditedFromSteps() {

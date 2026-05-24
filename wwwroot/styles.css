@@ -460,6 +460,21 @@ header h1 {
 	transform: translateY(-2px);
 }
 
+.popup-body.about-panel .link-item.github-link {
+	flex-direction: column;
+	align-items: flex-start;
+}
+
+.popup-body.about-panel .link-item.github-link .link-url {
+	margin-top: 8px;
+	font-size: 14px;
+}
+
+.popup-body.about-panel .link-item.github-link .link-url {
+	margin-top: 8px;
+	font-size: 14px;
+}
+
 .popup-body.about-panel .link-item i {
 	font-size: 20px;
 	color: var(--accent);
