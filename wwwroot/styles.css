@@ -1504,9 +1504,10 @@ main {
 
 .card .card-analysis .analysis-log .log-detail-raw {
 	font-size: 9px;
-	max-height: 80px;
+	height: 80px;
 	overflow: auto;
 	white-space: pre-wrap;
+    resize: vertical;
 }
 
 .column.drop-target {
@@ -1898,9 +1899,10 @@ h3 .small.ghost:hover {
 
 .agent-activity-log .log-detail-raw {
 	font-size: 9px;
-	max-height: 100px;
+	height: 100px;
 	overflow: auto;
 	white-space: pre-wrap;
+    resize: vertical;
 }
 
 .agent-steps-list {
