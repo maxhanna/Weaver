@@ -886,18 +886,42 @@ RULES:
         var editResults = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
         allSteps.AddRange(editResults);
 
-        // ── Phase 4: VERIFY + RETRY LOOP ─────────────────────────────────────
+        // ── Phase 4: VERIFY + REVIEW LOOP ────────────────────────────────────
+        // Reads back edited files and asks the LLM whether the task is truly
+        // complete.  If not, loops back to re-plan + re-edit with specific
+        // feedback.  Capped at 3 review cycles.
         var editsApplied = HasSuccessfulEdits(allSteps);
-        for (var retry = 0; retry < 2 && !editsApplied && TaskExpectsFileChanges(prompt); retry++)
+        string? reviewFeedback = null;
+
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            await EmitLog(emitSse, "warn",
-                $"Phase 4 — VERIFY attempt {retry + 1}: no successful edits. Re-planning with stronger instructions…", ct: ct);
-            plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse, ct);
-            var retryEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, prompt, ct);
-            allSteps.AddRange(retryEdits);
             editsApplied = HasSuccessfulEdits(allSteps);
+
+            if (editsApplied)
+            {
+                var (complete, feedback) = await RunContentReview(
+                    prompt, allSteps, projectRoot, emitSse, ct);
+                if (complete) break;
+                reviewFeedback = feedback ?? "Task not yet complete";
+            }
+            else if (!TaskExpectsFileChanges(prompt))
+            {
+                break;
+            }
+
+            await EmitLog(emitSse, "warn",
+                $"Review attempt {attempt + 1}: {(editsApplied ? $"task not complete — {reviewFeedback}" : "no successful edits")}", ct: ct);
+
+            var revisedPrompt = editsApplied && !string.IsNullOrWhiteSpace(reviewFeedback)
+                ? $"{prompt}\n\nRemaining work: {reviewFeedback}"
+                : prompt;
+
+            plan = await RunPlanPhase(revisedPrompt, discoveryContext, projectRoot, emitSse, ct);
+            var reviewEdits = await RunEditPhase(plan, discoveryContext, projectRoot, allSteps.Count, emitSse, revisedPrompt, ct);
+            allSteps.AddRange(reviewEdits);
         }
 
+        editsApplied = HasSuccessfulEdits(allSteps);
         var summary = editsApplied
             ? $"Edits applied to {ExtractFilesEdited(allSteps).Count} file(s)"
             : "No edits were applied — check failed steps for details";
@@ -1767,7 +1791,20 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         if (string.IsNullOrWhiteSpace(command))
         { result["status"] = "error"; result["error"] = "No command provided"; return; }
         await _terminal.SendCommandAsync(command, projectRoot);
-        await Task.Delay(1000);
+        // Adaptive wait: poll output length every 500ms, stop when no growth for 2s, cap at 15s
+        var prevLen = _terminal.ReadAll().Length;
+        var stableMs = 0;
+        for (var i = 0; i < 30; i++)
+        {
+            await Task.Delay(500);
+            var curLen = _terminal.ReadAll().Length;
+            if (curLen == prevLen)
+            {
+                stableMs += 500;
+                if (stableMs >= 2000) break;
+            }
+            else { stableMs = 0; prevLen = curLen; }
+        }
         result["status"] = "done";
         result["command"] = command;
         result["output"] = Truncate(_terminal.ReadLastLines(200), MaxReadOutputChars);
@@ -2012,6 +2049,106 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
             if (!IsTaskAlreadySatisfied(prompt, rel, content)) return false;
         }
         return targetPaths.Count > 0;
+    }
+
+    /// <summary>
+    /// Reads back edited files and asks the LLM whether the task is truly complete.
+    /// This lets the agent review its work and either conclude or loop back for more edits.
+    /// </summary>
+    private async Task<(bool complete, string? feedback)> RunContentReview(
+        string prompt, List<object> allSteps, string projectRoot,
+        bool emitSse, CancellationToken ct = default)
+    {
+        var editedPaths = allSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(s =>
+            {
+                if (!s.TryGetValue("type", out var t) || t?.ToString() != "edit") return false;
+                if (!s.TryGetValue("status", out var st) || st?.ToString() != "done") return false;
+                return s.TryGetValue("path", out var p) && p != null && !string.IsNullOrWhiteSpace(p?.ToString());
+            })
+            .Select(s => s["path"]?.ToString() ?? "")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(5)
+            .ToList();
+
+        if (editedPaths.Count == 0)
+            return (false, "No files were edited");
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Task");
+        sb.AppendLine(prompt);
+        sb.AppendLine();
+        sb.AppendLine("## Current file contents after edits");
+        foreach (var relPath in editedPaths)
+        {
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(fullPath))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+                sb.AppendLine($"### {relPath}");
+                sb.AppendLine("```");
+                sb.AppendLine(Truncate(content, MaxFileContextChars));
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+        }
+
+        await EmitLog(emitSse, "info", "Reviewing edited files for completeness…", ct: ct);
+
+        const string reviewSystemPrompt = @"You are a code review agent. Given a task and the current file contents, determine if the task is COMPLETE.
+
+Output ONLY this JSON (no other text):
+{
+  ""complete"": true/false,
+  ""feedback"": ""If incomplete, describe exactly what still needs to be changed and in which file. Be specific.""
+}
+
+Rules:
+- If ALL changes described in the task have been made, complete=true
+- If the task is ONLY partially implemented or incorrectly implemented, complete=false and explain what's missing
+- Do NOT suggest new features or improvements beyond the original task
+- Only review what the task explicitly asks for
+- Be honest — if the task is not done, say so";
+
+        var (raw, _, error) = await CallLlmRaw(reviewSystemPrompt, sb.ToString(), ct);
+
+        if (string.IsNullOrWhiteSpace(raw))
+            return (false, error ?? "Verification call returned empty");
+
+        try
+        {
+            var jsonStr = raw.Trim();
+            if (jsonStr.StartsWith("```"))
+            {
+                var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) jsonStr = m.Groups[1].Value.Trim();
+            }
+            var start = jsonStr.IndexOf('{');
+            var end = jsonStr.LastIndexOf('}');
+            if (start >= 0 && end > start)
+                jsonStr = jsonStr.Substring(start, end - start + 1);
+
+            using var doc = JsonDocument.Parse(jsonStr);
+            var complete = doc.RootElement.TryGetProperty("complete", out var c) &&
+                           (c.ValueKind == JsonValueKind.True ||
+                            (c.ValueKind == JsonValueKind.String &&
+                             string.Equals(c.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
+            var feedback = doc.RootElement.TryGetProperty("feedback", out var f) ? f.GetString() : null;
+
+            if (complete)
+                await EmitLog(emitSse, "info", "Content review: task is complete ✓", ct: ct);
+            else
+                await EmitLog(emitSse, "warn", $"Content review: incomplete — {feedback}", ct: ct);
+
+            return (complete, feedback);
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "error", $"Review parse failed: {ex.Message}", ct: ct);
+            return (false, "Failed to parse review response");
+        }
     }
 
     private static bool IsTaskAlreadySatisfied(string prompt, string relativePath, string content)

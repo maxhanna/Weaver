@@ -445,7 +445,7 @@
   </div>
 
   <!-- ADD/EDIT PROJECT MODAL -->
-  <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel()">
+  <div class="popup-overlay" ng-if="vm.showAddProjectPanel" ng-click="vm.closeAddProjectPanel($event)">
     <div class="popup-panel delete-confirm-modal" data-modal-type="delete-confirm" style="max-width:480px;">
       <div class="popup-header">
         <strong>{{vm.editMode ? 'Edit Project' : 'Add Project'}}</strong>
@@ -508,7 +508,7 @@
   <div class="popup-overlay" ng-if="vm.confirmDeleteCardId">
     <div class="popup-panel" ng-if="vm.confirmDeleteCardId">
       <div class="popup-content">
-        <p>Are you sure you want to delete this card {{vm.confirmDeleteCardId}}?</p>
+        <p>Are you sure you want to delete this card?</p>
         <div class="popup-actions">
           <button ng-click="vm.confirmDeleteCard();" class="danger">Yes,
             Delete</button>

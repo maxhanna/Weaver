@@ -183,7 +183,7 @@
       vm.newProjectDescription = '';
     };
 
-    vm.closeAddProjectPanel = function () { vm.showAddProjectPanel = false; };
+    vm.closeAddProjectPanel = function (event) { event.preventDefault(); vm.showAddProjectPanel = false; };
 
     vm.addProjectFromPanel = function () {
       if (!vm.newProjectName) return $window.alert('Project name is required');
@@ -431,6 +431,10 @@
       if (from === 'doing' && to === 'todo') {
         card.ready = false;
         delete card.agentAnalysis;
+        vm.activeCardId = null;
+      }
+      if (from === 'doing' && to === 'done') {
+        vm.activeCardId = null;
       }
       vm.state[to].push(card);
       if (from === 'todo' && to === 'doing' && card.ready) {
@@ -693,8 +697,9 @@
       // Move to Doing
       moveCardToDoing(card.id);
 
+      vm.activeCardId = card.id;
       if (!vm.activeCardIds) {
-        vm.activeCardIds = [];
+        vm.activeCardIds = new Set();
       }
       vm.activeCardIds.add(card.id);
 
@@ -877,8 +882,9 @@
       var card = vm.state.doing.splice(idx, 1)[0];
       vm.state.done.push(card);
 
-      if (!vm.activeCardIds) vm.activeCardIds = [];
-      vm.activeCardIds = vm.activeCardIds.filter(function (id) { return id !== cardId; });
+      vm.activeCardId = null;
+      if (!vm.activeCardIds) vm.activeCardIds = new Set();
+      vm.activeCardIds.delete(cardId);
       saveCards();
     }
 
@@ -896,11 +902,11 @@
     // === Auto-queue ===
     vm.processQueue = function () {
       if (vm.streamingActive) return;
-      var next = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready; })[0];
-      if (next) {
-        moveCardToDoing(next.id);
-        vm.executeAgent(next);
-      }
+      var readyCards = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready; });
+      if (!readyCards.length) return;
+      var next = readyCards[readyCards.length - 1];
+      moveCardToDoing(next.id);
+      vm.executeAgent(next);
     };
 
     // === AI Chat ===
