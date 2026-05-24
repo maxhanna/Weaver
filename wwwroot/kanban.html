@@ -44,7 +44,7 @@
             <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
               title="Split into smaller tasks">✂ Split</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : '▶ Run'}}</button>
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run'}}</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>

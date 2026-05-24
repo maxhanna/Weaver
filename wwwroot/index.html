@@ -335,7 +335,7 @@
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
-    <div class="popup-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel settings-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>⚙ Settings</strong>
         <button ng-click="vm.closeSettingsPanel()">✕</button>
@@ -353,22 +353,26 @@
         </div>
         <div class="form-row">
           <label>
-            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel (saved to maestroconfig.json)
+            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
           </label>
         </div>
         <div class="form-row">
           <label>
-            <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel (saved to maestroconfig.json)
+            <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
           </label>
         </div>
         <div class="form-row">
           <label>
-            <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board (saved to maestroconfig.json)
+            <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
           </label>
         </div>
         <div class="form-row">
-          <label for="settings-llama">Llama.cpp / Ollama URL</label>
+          <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
           <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" />
+        </div>
+        <div class="form-row" style="display: flex; flex-direction: column;">
+          <label for="settings-build-commands" class="settings-header">Build Commands</label>
+          <textarea id="settings-build-commands" ng-model="vm.buildCommands" placeholder="Enter build commands, one per line" rows="4"></textarea>
         </div>
       </div>
       <div class="popup-footer">

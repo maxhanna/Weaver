@@ -17,6 +17,7 @@
     vm.autoQueue = true;
     vm.showTerminal = true;
     vm.showAI = true;
+    vm.buildCommands = "";
     vm.aiChatMessages = [];
     vm.aiChatInput = '';
     vm.aiChatLoading = false;
@@ -140,6 +141,7 @@
         cfg.showAI = vm.showAI !== false;
         cfg.showKanban = vm.showKanban !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+        cfg.buildCommands = vm.buildCommands;
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -169,6 +171,7 @@
         if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
+        vm.buildCommands = cfg.buildCommands || "";
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -865,6 +868,7 @@
 
     // === Terminal ===
     vm.startTerminal = function () { $http.post('/api/terminal/start').catch(function () { }); };
+    
     vm.sendCmd = function () {
       if (!vm.termInput) return;
       $http.post('/api/terminal/exec', { command: vm.termInput }).then(function () {
@@ -880,9 +884,20 @@
       if (vm.abortController) {
         vm.abortController.abort();
         vm.abortController = null;
-        vm.streamingActive = false;
-        resumeTerminalPolling();
-        pushAgentLog('warn', 'Agent stopped by user');
+      }
+      vm.streamingActive = false;
+      vm.agentResult = { warning: 'Agent stopped by user.' };
+      pushAgentLog('warn', 'Agent stopped by user');
+      if (card) {
+          vm.activeCardIds.delete(card.id);
+          vm.updateCardStatus(card.id, 'todo');
+      }
+      if (vm.activeCardIds.size === 0) {
+          vm.streamingActive = false;
+          vm.abortController = null;
+          if (vm.state.todo.length > 0 && !vm.activeCardIds.size) {
+              vm.moveCardToDoing(vm.state.todo[0].id);
+          }
       }
     };
 

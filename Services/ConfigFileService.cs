@@ -18,6 +18,7 @@ public class FrontendConfig
     public bool showAI { get; set; } = true;
     public bool showKanban { get; set; } = true;
     public string LlamaUrl { get; set; } = "http://localhost:8080";
+    public string buildCommands { get; set; } = "dotnet clean; dotnet build;";
 }
 
 public class ConfigFileService

@@ -302,16 +302,79 @@ header h1 {
 /* About Popup Panel */
 .popup-overlay.about-panel {
 	background: rgba(0, 0, 0, 0.7);
-	backdrop-filter: blur(4px);
 }
-
-.popup-panel.about-panel {
-	max-width: 500px;
+.settings-panel {
 	background: var(--surface);
 	border: var(--border);
 	box-shadow: var(--brand-shadow), 0 0 30px rgba(0, 0, 0, 0.5);
 	border-radius: 12px;
 	overflow: hidden;
+	padding: 20px;
+}
+
+.settings-panel input[type='checkbox'] {
+	width: 20px;
+	height: 20px;
+	margin-right: 12px;
+	flex-shrink: 0;
+	vertical-align: middle;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	transition: all 0.2s ease;
+	background: rgba(255, 255, 255, 0.03);
+	margin-top: 2px;
+}
+
+.settings-panel input[type='checkbox']:hover {
+	border-color: var(--accent);
+}
+
+.settings-panel input[type='checkbox']:checked {
+	background: var(--accent);
+	border-color: var(--accent);
+}
+
+.settings-panel input[type='checkbox']:checked::after {
+	content: '✓';
+	color: white;
+	font-size: 12px;
+	display: block;
+	text-align: center;
+	line-height: 1;
+}
+
+.settings-panel label {
+	display: flex;
+	align-items: center;
+	margin-bottom: 12px;
+	font-size: 14px;
+	cursor: pointer;
+	line-height: 1.4;
+	padding: 8px 0;
+	min-height: 36px;
+	width: 100%;
+}
+
+.settings-panel label:hover {
+	background: rgba(255, 255, 255, 0.03);
+	border-radius: 6px;
+}
+
+.settings-panel label span {
+	flex: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.settings-header {
+	font-weight: 700;
+	margin: 16px 0 8px 0;
+	padding: 8px 0;
+	font-size: 1.1em;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: var(--accent);
 }
 
 .popup-header.about-header {
@@ -2404,7 +2467,6 @@ h3 .small.ghost:hover {
 	margin-bottom: 4px;
 }
 
-.popup-body .form-row input,
 .popup-body .form-row select,
 .popup-body .form-row textarea {
 	width: 100%;
