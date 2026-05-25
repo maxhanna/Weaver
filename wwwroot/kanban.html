@@ -1,7 +1,8 @@
-<div style="display: flex; flex-direction: column;">
+﻿<div style="display: flex; flex-direction: column;">
   <div class="search-container">
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
+    <button ng-click="vm.exportKanbanData()" class="search-button">Export</button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
@@ -200,6 +201,7 @@
           </div>
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>

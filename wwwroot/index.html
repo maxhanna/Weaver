@@ -22,11 +22,11 @@
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
         {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
-        <button class="options-btn small" ng-click="vm.toggleProjectOptions()"
+        <button class="options-btn small brand-link" ng-click="vm.toggleProjectOptions()"
           ng-class="{active: vm.showProjectOptions}">Options ▾</button>
         <div class="options-menu" ng-if="vm.showProjectOptions">
-          <button ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit Projects</button>
-          <button ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
+          <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit Projects</button>
+          <button class="brand-link" ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
         </div>
       </div>
     </div>
@@ -55,8 +55,8 @@
           <div class="ai-input-row">
             <input ng-model="vm.aiChatInput" placeholder="Ask the AI agent..."
               ng-keydown="$event.key==='Enter' && vm.sendAiChat()" ng-disabled="vm.aiChatLoading" />
-            <button ng-click="vm.sendAiChat()" ng-disabled="vm.aiChatLoading || !vm.aiChatInput">Send</button>
-            <button class="small ghost" ng-click="vm.clearAiChat()" title="Clear chat">✕</button>
+            <button class="brand-link" ng-click="vm.sendAiChat()" ng-disabled="vm.aiChatLoading || !vm.aiChatInput">Send</button>
+            <button class="small ghost brand-link" ng-click="vm.clearAiChat()" title="Clear chat">✕</button>
           </div>
         </div>
       </div>

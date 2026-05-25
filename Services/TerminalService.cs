@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace MaestroBackend.Services;
 
@@ -46,7 +47,11 @@ public class TerminalService : IDisposable
         }
         if (_process?.StandardInput != null)
         {
-            await _process.StandardInput.WriteLineAsync(command);
+            // cmd.exe uses & as command separator, not ;. Translate for Windows.
+            var translated = command;
+            if (OperatingSystem.IsWindows())
+                translated = Regex.Replace(translated, @";\s*", " & ");
+            await _process.StandardInput.WriteLineAsync(translated);
             await _process.StandardInput.FlushAsync();
         }
     }

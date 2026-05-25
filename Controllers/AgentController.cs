@@ -1281,62 +1281,40 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
          string taskPrompt, string relativePath, string fileContent,
          string projectRoot, int attempt = 0, string? discoveryContext = null,
          CancellationToken ct = default,
-         IEnumerable<string>? nearMatchSnippets = null)   // ← NEW parameter
+         IEnumerable<string>? nearMatchSnippets = null)
     {
-        // ── System prompt ──────────────────────────────────────────────────────
-        const string systemPrompt =
-@"You are a precise code patch tool. Output ONLY the JSON below — no markdown, no explanation.
-
-FORMAT:
-{
-  ""edits"": [
-    {
-      ""oldString"": ""<exact text copied CHARACTER-FOR-CHARACTER from FILE CONTENT>"",
-      ""newString"": ""<replacement — MUST differ from oldString>""
-    }, 
-    {
-      ""oldString"": ""<exact other text copied CHARACTER-FOR-CHARACTER from FILE CONTENT>"",
-      ""newString"": ""<replacement other string — MUST differ from oldString>""
-    }
-  ]
-}
-
-RULES FOR oldString:
-1. Copy it CHARACTER-FOR-CHARACTER from the FILE CONTENT that follows.
-2. Use SHORT oldString: 1–3 lines is safest. A unique short string always matches.
-3. If the relevant code is NOT in the FILE CONTENT shown below → {""edits"":[]} — never guess.
-
-RULES FOR newString:
-1. MUST differ from oldString. Never empty, never identical.
-2. Preserve indentation exactly.
-
-If no change is needed: {""edits"":[]}";
+        // ── Use full file content so LLM can locate the right code ──────────
+        var fileForLlm = Truncate(fileContent, MaxFileContextChars);
 
         // ── Build user message ─────────────────────────────────────────────────
         var user = new StringBuilder();
         user.AppendLine($"Task: {taskPrompt}");
         user.AppendLine($"File: {relativePath}");
+        user.AppendLine();
+        user.AppendLine("Below is the ENTIRE file. Find the exact code that needs to change and plan small targeted edits.");
+        user.AppendLine();
+        user.AppendLine("## FULL FILE CONTENT:");
+        user.AppendLine("```");
+        user.AppendLine(fileForLlm);
+        user.AppendLine("```");
 
         if (attempt > 0)
         {
             user.AppendLine();
             user.AppendLine("## RETRY — your previous attempt failed because:");
-            user.AppendLine("  • oldString did not match any text in the file, OR");
-            user.AppendLine("  • newString was empty/identical to oldString.");
+            user.AppendLine("  • The edits you returned could not be matched in the file.");
+            user.AppendLine("  • oldString was too long or didn't exist literally in the code.");
             user.AppendLine();
-            user.AppendLine("Fix ALL of the following:");
-            user.AppendLine("  1. Copy oldString VERBATIM from the FILE CONTENT below (exact chars, no prefix).");
-            user.AppendLine("  2. Choose a SHORT unique oldString (1–2 lines is best).");
-            user.AppendLine("  3. newString MUST be present and MUST differ from oldString.");
-            user.AppendLine("  4. If the relevant code is NOT visible in the content window — output {\"edits\":[]}.");
+            user.AppendLine("Fix:");
+            user.AppendLine("  1. Each 'oldString' must be SHORT (1-5 lines max) and literally present in the code above.");
+            user.AppendLine("  2. Prefer MANY small edits over one large edit.");
+            user.AppendLine("  3. Double-check spelling and whitespace in oldString.");
 
-            // Forward near-match hints from previous execution failures.
             var hints = nearMatchSnippets?.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
             if (hints?.Count > 0)
             {
                 user.AppendLine();
-                user.AppendLine("## Near-match context (lines found NEAR your previous oldString guess):");
-                user.AppendLine("Use these real lines as your oldString if they match what you want to change:");
+                user.AppendLine("## Context lines near where a previous edit failed:");
                 foreach (var h in hints.Take(3))
                 {
                     user.AppendLine("```");
@@ -1349,18 +1327,9 @@ If no change is needed: {""edits"":[]}";
         if (!string.IsNullOrWhiteSpace(discoveryContext))
         {
             user.AppendLine();
-            user.AppendLine("## Project context (grep results, structure)");
+            user.AppendLine("## Project context");
             user.AppendLine(Truncate(discoveryContext, 3_000));
         }
-
-        // Smart windowed content with line numbers
-        var windowedContent = ExtractRelevantFileSection(fileContent, taskPrompt);
-
-        user.AppendLine();
-        user.AppendLine("## FILE CONTENT (line numbers prefixed — do NOT copy the prefix into oldString):");
-        user.AppendLine("```");
-        user.Append(windowedContent);
-        user.AppendLine("```");
 
         // ── LLM call ───────────────────────────────────────────────────────────
         try
@@ -1370,19 +1339,33 @@ If no change is needed: {""edits"":[]}";
             var client = _clientFactory.CreateClient("llama");
             client.Timeout = Timeout.InfiniteTimeSpan;
 
+            var systemMsg = @"You are a precise code modifier. Given code and a task, return a JSON object with an 'edits' array.
+Each edit must have:
+  - 'oldString': the EXACT existing code to replace (1-5 lines, must literally appear in the file)
+  - 'newString': the replacement code
+  - 'path' (optional): file path (omit unless different from context)
+
+RULES:
+  - oldString MUST be SHORT (1-5 lines max) and literally present in the code shown.
+  - Prefer MANY small targeted edits over one large edit.
+  - Preserve indentation exactly in both oldString and newString.
+  - Return ONLY valid JSON, no markdown fences, no explanation.
+  - If no changes are needed, return: {""edits"": []}
+
+Example:
+{""edits"":[{""oldString"":""<button class=\""foo\"">"",""newString"":""<button class=\""foo bar\"">""}]}";
+
             var messages = new object[]
             {
-                new { role = "system", content = systemPrompt },
+                new { role = "system", content = systemMsg },
                 new { role = "user",   content = user.ToString() }
             };
 
-            // Low temperature for deterministic verbatim copies.
-            var requestBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = 2048 };
-            var contentJson = JsonSerializer.Serialize(requestBody);
-            var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
-
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+            var reqBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = MaxFileContextChars / 2 };
+            var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
 
             var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, linkedCts.Token);
             var respText = await resp.Content.ReadAsStringAsync(linkedCts.Token);
@@ -1391,37 +1374,14 @@ If no change is needed: {""edits"":[]}";
             if (string.IsNullOrWhiteSpace(raw))
                 return (respText, null, "Empty LLM response");
 
-            var steps = ParseEditsFromLlmRaw(raw, relativePath);
-
-            if (steps.Count > 0)
+            var edited = raw.Trim();
+            if (edited.StartsWith("```"))
             {
-                // For any step where newString is missing/identical, try to generate it.
-                foreach (var step in steps)
-                {
-                    if (string.IsNullOrWhiteSpace(step.NewString) ||
-                        string.Equals(NormalizeLineEndings(step.OldString ?? ""),
-                                      NormalizeLineEndings(step.NewString ?? ""),
-                                      StringComparison.Ordinal))
-                    {
-                        var generated = await GenerateNewString(
-                            step.OldString ?? "", taskPrompt, relativePath, fileContent, ct);
-                        if (!string.IsNullOrWhiteSpace(generated))
-                            step.NewString = generated;
-                    }
-                }
-
-                // Final filter: drop no-ops.
-                steps = steps.Where(s =>
-                    !string.IsNullOrWhiteSpace(s.NewString) &&
-                    !string.Equals(NormalizeLineEndings(s.OldString ?? ""),
-                                   NormalizeLineEndings(s.NewString ?? ""),
-                                   StringComparison.Ordinal)).ToList();
-
-                if (steps.Count > 0)
-                    return (raw, new AgentResponse { Steps = steps, Summary = "Parsed edits" }, null);
+                var m = Regex.Match(edited, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) edited = m.Groups[1].Value.Trim();
             }
 
-            return (raw, null, "No edits in response — model did not return edit JSON");
+            return (edited, null, null);
         }
         catch (TaskCanceledException)
         {
@@ -2923,6 +2883,41 @@ Rules:
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(12)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Returns (startLine, endLine) of the most relevant contiguous block in
+    /// <paramref name="content"/> for <paramref name="taskHint"/>, using the
+    /// same keyword-scoring logic as ExtractRelevantFileSection.
+    /// Small files return the full range.  The caller may re-slice the original
+    /// lines array to obtain a raw code snippet — no line‑number prefixes.
+    /// </summary>
+    private static (int start, int end) FindRelevantLines(string content, string taskHint)
+    {
+        var lines = content.Split('\n');
+        if (lines.Length <= 200)
+            return (0, lines.Length - 1);
+
+        var keywords = ExtractTaskKeywords(taskHint);
+        if (keywords.Length == 0)
+            return (0, Math.Min(199, lines.Length - 1));
+
+        int bestLine = 0, bestScore = -1;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            int score = keywords.Sum(kw =>
+                lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
+            if ((lines[i].Contains("function") || lines[i].Contains("= function")) && score > 0)
+                score += 2;
+            if (score > bestScore) { bestScore = score; bestLine = i; }
+        }
+
+        if (bestScore <= 0)
+            return (0, Math.Min(199, lines.Length - 1));
+
+        var start = Math.Max(0, bestLine - 40);
+        var end = Math.Min(lines.Length - 1, start + 199);
+        return (start, end);
     }
 
     private static List<string> ExtractJsonBlocks(string text)

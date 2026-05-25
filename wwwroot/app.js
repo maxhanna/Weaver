@@ -54,6 +54,13 @@
       });
     };
 
+    // Export kanban data as JSON
+    vm.exportKanbanData = function () {
+      const data = JSON.stringify(vm.state);
+      alert(data);
+      return data;
+    };
+
     // Scroll to bottom of agent log.
     // $timeout with invokeApply=false (third arg) so the DOM write never triggers
     // a digest cycle.  Target '.log-entries' — that is the actual scrollable div
