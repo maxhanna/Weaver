@@ -12,9 +12,9 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1 class="brand-logo brand-link" ng-click="vm.openDiscordPanel()">Maestro <span class="badge brand-badge">Agentic
-        Kanban</span>
-    </h1>
+    <div class="brand-logo brand-link" ng-click="vm.openDiscordPanel()">
+      <span class="logo-text">Maestro</span>
+    </div>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
@@ -190,7 +190,7 @@
                   <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                 </div>
                 <div class="step-detail" ng-if="s.output">
-                  <pre class="step-detail-data">{{s.output | limitTo:24000}}</pre>
+                  <pre class="step-detail-data">{{s.output}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.error">
                   <span class="step-err">{{s.error}}</span>
@@ -319,7 +319,8 @@
       </div>
       <div class="popup-body" style="text-align:center;">
         <p style="font-size:1.1em; margin-bottom:16px;">Connect with the Maestro community!</p>
-        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer" class="brand-link">
+        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer"
+          style="display:inline-block; padding:12px 32px; background:#5865F2; color:#fff; border-radius:6px; text-decoration:none; font-weight:bold; font-size:1.1em;">
           Join Discord Server
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>

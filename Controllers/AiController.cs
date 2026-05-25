@@ -92,6 +92,31 @@ public class AiController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Checks if the LLM server is reachable via HTTP GET with a short timeout.
+    /// Returns 200 OK on success, or 502 Bad Gateway if the server is down.
+    /// </summary>
+    [HttpGet("ping")]
+    public async Task<IActionResult> Ping()
+    {
+        string baseUrl = await GetBaseURL();
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = TimeSpan.FromSeconds(5);
+        try
+        {
+            using var resp = await client.GetAsync(baseUrl.TrimEnd('/') + "/api/tags");
+            return Ok(new { reachable = true, statusCode = (int)resp.StatusCode });
+        }
+        catch (TaskCanceledException)
+        {
+            return StatusCode(502, new { reachable = false, error = "Connection timed out" });
+        }
+        catch (HttpRequestException ex)
+        {
+            return StatusCode(502, new { reachable = false, error = ex.Message });
+        }
+    }
+
     private async Task<string> GetBaseURL()
     {
         var cfg = await _configFile.LoadConfigAsync();

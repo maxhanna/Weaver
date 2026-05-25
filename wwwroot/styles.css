@@ -951,9 +951,30 @@ h1 .brand-e:hover::before {
 }
 
 h1 .brand-logo {
-	font-size: 24px;
-	font-weight: 700;
-	letter-spacing: -0.5px;
+	font-size: 28px;
+	font-weight: 800;
+	letter-spacing: -0.8px;
+	background: var(--brand-gradient);
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	background-clip: text;
+	text-shadow: 0 4px 12px rgba(6, 182, 212, 0.2), 0 0 20px rgba(6, 182, 212, 0.1);
+	transition: all 0.3s ease;
+	position: relative;
+	z-index: 1;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 16px;
+	border-radius: 12px;
+	background: var(--brand-gradient);
+	box-shadow: var(--brand-shadow), 0 0 15px rgba(6, 182, 212, 0.3);
+}
+
+.brand-icon {
+	font-size: 1.8em;
+	margin-right: 10px;
+	color: var(--brand-primary);
 }
 
 h1 .brand-text {
@@ -972,6 +993,9 @@ h1 .brand-badge {
 	transition: all 0.3s ease;
 	border: 1px solid rgba(255, 255, 255, 0.1);
 	margin-left: 8px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
 }
 
 /* Additional brand enhancements */

@@ -497,6 +497,14 @@ public class AgentController : ControllerBase
 
         if (plan == null || plan.Plan.Count == 0)
         {
+            // If the LLM is unreachable, abort immediately — don't fallback to heuristics.
+            if (!string.IsNullOrWhiteSpace(error) &&
+                (error.Contains("connect", StringComparison.OrdinalIgnoreCase) ||
+                 error.Contains("refused", StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException($"LLM server unreachable: {error}");
+            }
+
             await EmitLog(emitSse, "warn", $"Plan phase produced no items — falling back to heuristic file list. Error: {error}",
                 new { raw }, ct: ct);
             // Fallback: use every .js/.html/.css candidate from discovery as the plan
@@ -576,7 +584,7 @@ RULES:
         user.AppendLine("## Project Discovery (ONLY use paths listed here)");
         user.AppendLine(Truncate(discoveryContext, 16_000));
 
-        var (raw, _, llmError) = await CallLlmRaw(systemPrompt, user.ToString(), ct);
+        var (raw, _, llmError) = await CallLlmRaw(systemPrompt, user.ToString(), ct, requestTimeout: TimeSpan.FromSeconds(30));
 
         if (string.IsNullOrWhiteSpace(raw))
             return (raw ?? "", null, llmError ?? "Empty response");
@@ -902,6 +910,9 @@ RULES:
             await RunBootstrapDiscovery(prompt, projectRoot, emitSse);
         allSteps.AddRange(discoverySteps);
 
+        // ── Phase 1.5: Connectivity check ────────────────────────────────────
+        await CheckLlmConnectivity(projectRoot, emitSse, ct);
+
         // ── Phase 2: PLAN ────────────────────────────────────────────────────
         var plan = await RunPlanPhase(prompt, discoveryContext, projectRoot, emitSse, ct);
 
@@ -1099,7 +1110,7 @@ RULES:
         catch (Exception ex)
         {
             await SendSse(Response, "error", new { message = ex.Message });
-            await SendSse(Response, "done", new { });
+            await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
         }
     }
 
@@ -1246,6 +1257,53 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
+    private async Task CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var baseUrl = await GetLlamaBaseUrl();
+        var host = new Uri(baseUrl).Host;
+
+        // Build platform-appropriate ping command
+        var pingCmd = OperatingSystem.IsWindows()
+            ? $"ping {host} -n 1 -w 2000"
+            : $"ping -c 1 -W 2 {host}";
+
+        await EmitLog(emitSse, "info", $"Connectivity check: {pingCmd}", ct: ct);
+
+        // Run ping as a step through the shared terminal so output appears in the frontend
+        var pingStep = new AgentStep
+        {
+            Index = 0,
+            Type = "command",
+            Command = pingCmd,
+            Description = $"ping {host}"
+        };
+
+        var results = await ExecuteSteps(new List<AgentStep> { pingStep }, projectRoot, 0, emitSse, ct);
+
+        // Check result
+        var first = results.FirstOrDefault() as Dictionary<string, object?>;
+        var output = first?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
+        var status = first?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
+
+        // Ping success indicators: "Reply from" (Windows), "TTL" or "1 received" (cross-platform)
+        var pingSucceeded = status == "done" && (
+            output.Contains("Reply from", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("TTL", StringComparison.Ordinal) ||
+            output.Contains("1 packets received", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("1 received", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("1 packets transmitted, 1 received", StringComparison.OrdinalIgnoreCase));
+
+        if (pingSucceeded)
+        {
+            await EmitLog(emitSse, "info", $"Host {host} is reachable", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "error", $"Host {host} is unreachable — aborting", ct: ct);
+            throw new InvalidOperationException($"LLM server at {host} is not reachable (ping failed)");
+        }
+    }
+
     private async Task<string> GetLlamaBaseUrl()
     {
         var cfg = await _configFile.LoadConfigAsync();
@@ -1256,7 +1314,8 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
     /// Low-level LLM call — returns raw content string, no parsing.
     /// </summary>
     private async Task<(string raw, object? unused, string? error)> CallLlmRaw(
-        string systemPrompt, string userMessage, CancellationToken ct = default)
+        string systemPrompt, string userMessage, CancellationToken ct = default,
+        TimeSpan? requestTimeout = null)
     {
             var baseUrl = await GetLlamaBaseUrl();
             var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
@@ -1273,10 +1332,12 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
         // CallLlmNonStreaming only passes the outer 'ct' (HTTP abort), which has
         // no deadline of its own. If the LLM stalls, Phase 2 and Phase 4 retries
         // would block forever.
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token);
     }
+
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmSingleFileEdit(
          string taskPrompt, string relativePath, string fileContent,
          string projectRoot, int attempt = 0, string? discoveryContext = null,
@@ -2018,7 +2079,10 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         }
         result["status"] = "done";
         result["command"] = command;
-        result["output"] = Truncate(_terminal.ReadLastLines(200), MaxReadOutputChars);
+        var fullOutput = _terminal.ReadAll();
+        result["output"] = prevLen >= 0 && prevLen < fullOutput.Length
+            ? Truncate(fullOutput.Substring(prevLen), MaxReadOutputChars)
+            : "";
     }
 
     private async Task ExecuteReadStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)

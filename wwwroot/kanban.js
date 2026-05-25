@@ -360,47 +360,72 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
             c.addEventListener('dragstart', function (e) {
               e.dataTransfer.setData('text/plain', c.id.replace('card-', ''));
               c.classList.add('dragging');
+              document.body.classList.add('dragging-active');
             });
             c.addEventListener('dragend', function (e) {
               c.classList.remove('dragging');
+              document.body.classList.remove('dragging-active');
             });
           });
+
+          var indicatorEl = null;
+
+          function cleanupDropIndicators(col) {
+            if (indicatorEl) { indicatorEl.remove(); indicatorEl = null; }
+            col.querySelectorAll('.card.drop-above, .card.drop-below').forEach(function (c) {
+              c.classList.remove('drop-above', 'drop-below');
+            });
+          }
+
+          function positionDropIndicator(col, cursorY) {
+            // Only clear card classes — reuse the indicator element
+            col.querySelectorAll('.card.drop-above, .card.drop-below').forEach(function (c) {
+              c.classList.remove('drop-above', 'drop-below');
+            });
+
+            var cardEls = col.querySelectorAll('.card');
+            var colRect = col.getBoundingClientRect();
+
+            if (!indicatorEl) {
+              indicatorEl = document.createElement('div');
+              indicatorEl.className = 'drop-indicator';
+              col.appendChild(indicatorEl);
+            }
+            indicatorEl.style.display = '';
+
+            if (cardEls.length === 0) {
+              indicatorEl.style.top = '0px';
+              return;
+            }
+            for (var i = 0; i < cardEls.length; i++) {
+              var cardRect = cardEls[i].getBoundingClientRect();
+              var cardMid = cardRect.top + cardRect.height / 2;
+              if (cursorY < cardMid) {
+                cardEls[i].classList.add('drop-above');
+                indicatorEl.style.top = (cardRect.top - colRect.top) + 'px';
+                return;
+              }
+              cardEls[i].classList.add('drop-below');
+            }
+            var lastRect = cardEls[cardEls.length - 1].getBoundingClientRect();
+            indicatorEl.style.top = (lastRect.bottom - colRect.top) + 'px';
+          }
+
           var cols = document.querySelectorAll('.cards');
           cols.forEach(function (col) {
             col.addEventListener('dragover', function (e) {
               e.preventDefault();
               col.closest('.column').classList.add('drop-target');
-              var targetCard = e.target.closest('.card');
-              if (targetCard) {
-                var rect = targetCard.getBoundingClientRect();
-                var y = e.clientY - rect.top;
-                var height = rect.height;
-                var halfHeight = height / 2;
-                var existingIndicators = col.querySelectorAll('.drop-indicator');
-                existingIndicators.forEach(function (indicator) { indicator.remove(); });
-                if (y < halfHeight) {
-                  targetCard.classList.add('drop-above');
-                  targetCard.classList.remove('drop-below');
-                } else {
-                  targetCard.classList.add('drop-below');
-                  targetCard.classList.remove('drop-above');
-                }
-              }
+              positionDropIndicator(col, e.clientY);
             });
             col.addEventListener('dragleave', function (e) {
               col.closest('.column').classList.remove('drop-target');
-              var targetCard = e.target.closest('.card');
-              if (targetCard) {
-                targetCard.classList.remove('drop-above', 'drop-below');
-              }
+              cleanupDropIndicators(col);
             });
             col.addEventListener('drop', function (e) {
               e.preventDefault();
               col.closest('.column').classList.remove('drop-target');
-              var targetCard = e.target.closest('.card');
-              if (targetCard) {
-                targetCard.classList.remove('drop-above', 'drop-below');
-              }
+              cleanupDropIndicators(col);
               var cardId = e.dataTransfer.getData('text/plain');
               var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
               if (!cardId || !targetCol) return;
@@ -412,20 +437,31 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
               if (!fromCol) return;
               var cardObj = vm.state[fromCol].find(function (c) { return c.id === cardId; });
               if (!cardObj) return;
+
+              // Determine drop index from cursor Y position
+              var colRect = col.getBoundingClientRect();
+              var cursorY = e.clientY - colRect.top;
+              var cardEls = col.querySelectorAll('.card');
+              var dropIndex = vm.state[targetCol].length;
+
+              for (var i = 0; i < cardEls.length; i++) {
+                var cardRect = cardEls[i].getBoundingClientRect();
+                var cardMid = cardRect.top + cardRect.height / 2;
+                if (e.clientY < cardMid) {
+                  var targetCardId = cardEls[i].id.replace('card-', '');
+                  dropIndex = vm.state[targetCol].findIndex(function (c) { return c.id === targetCardId; });
+                  if (dropIndex < 0) dropIndex = i;
+                  break;
+                }
+              }
+
               if (fromCol === targetCol) {
                 var fromIndex = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
                 if (fromIndex === -1) return;
                 vm.state[fromCol].splice(fromIndex, 1);
-                var targetIndex = -1;
-                if (targetCard) {
-                  var targetCardId = targetCard.id.replace('card-', '');
-                  targetIndex = vm.state[targetCol].findIndex(function (c) { return c.id === targetCardId; });
-                }
-                if (targetIndex !== -1) {
-                  vm.state[targetCol].splice(targetIndex, 0, cardObj);
-                } else {
-                  vm.state[targetCol].push(cardObj);
-                }
+                // Adjust dropIndex if the card was removed from above it
+                if (fromIndex < dropIndex) dropIndex--;
+                vm.state[targetCol].splice(Math.max(0, dropIndex), 0, cardObj);
               } else {
                 if (fromCol === 'todo' && targetCol === 'doing' && !cardObj.ready) {
                   alert('Mark the card as Ready first (press Start)');
@@ -443,7 +479,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
                 var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
                 if (idx === -1) return;
                 vm.state[fromCol].splice(idx, 1);
-                vm.state[targetCol].push(cardObj);
+                vm.state[targetCol].splice(Math.max(0, dropIndex), 0, cardObj);
                 if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
                   vm.saveCards();
                   vm.executeAgent(cardObj);

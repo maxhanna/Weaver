@@ -43,6 +43,7 @@
 }
 
 .cards {
+    position: relative;
     overflow-y: auto;
     flex: 1;
     padding-right: 4px;
@@ -52,16 +53,30 @@
     resize: vertical;
 }
 
+/* Drop indicator line — dynamically inserted by JS at the exact drop position */
+.cards .drop-indicator {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    height: 3px;
+    background: var(--accent, #6366f1);
+    border-radius: 2px;
+    z-index: 10;
+    pointer-events: none;
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.6);
+}
+
 .cards::-webkit-scrollbar {
-    width: 4px;
+    width: 8px;
 }
 
 .cards::-webkit-scrollbar-thumb {
     background: var(--accent);
-    border-radius: 2px;
+    border-radius: 4px;
 }
 
 .card {
+    position: relative;
     background: linear-gradient(135deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.06));
     border-radius: 8px;
     padding: 10px 12px;
@@ -74,6 +89,11 @@
 
 .card:hover {
     box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Suppress card hover effects while a drag is in progress to prevent jitter */
+body.dragging-active .card:hover {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .card.brand-enhanced {
