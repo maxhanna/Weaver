@@ -45,6 +45,7 @@
     vm.streamingSteps = [];
     vm.streamingFilesEdited = [];
     vm.agentActivityLog = [];
+    vm.agentActivityLogLength = 0;
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
@@ -96,20 +97,21 @@
     // pushAgentLog→addLogEntry chain would trigger two $timeout scroll calls.
     vm.addLogEntry = function (entry) {
       // Prevent duplicate entries that could cause digest loops
-      if (vm.agentActivityLog.length > 0) {
-        var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
+      if (vm.agentActivityLogLength > 0) {
+        var lastEntry = vm.agentActivityLog[vm.agentActivityLogLength - 1];
         if (lastEntry.type === entry.type && lastEntry.message === entry.message) {
           return;
         }
       }
       // Prevent entries with same timestamp that could cause digest loops
-      if (vm.agentActivityLog.length > 0) {
-        var lastEntry = vm.agentActivityLog[vm.agentActivityLog.length - 1];
+      if (vm.agentActivityLogLength > 0) {
+        var lastEntry = vm.agentActivityLog[vm.agentActivityLogLength - 1];
         if (lastEntry.timestamp === entry.timestamp) {
           return;
         }
       }
       vm.agentActivityLog.push(entry);
+      vm.agentActivityLogLength = vm.agentActivityLog.length;
       // scrollToBottom intentionally omitted here — pushAgentLog handles it
     };
 
@@ -582,7 +584,8 @@
         detail: detail
       };
       vm.agentActivityLog.push(entry);
-      if (vm.agentActivityLog.length > 80) vm.agentActivityLog.shift();
+      vm.agentActivityLogLength = vm.agentActivityLog.length;
+      if (vm.agentActivityLogLength > 80) vm.agentActivityLog.shift();
       // Scroll after every real push.  invokeApply=false (see scrollToBottom) keeps
       // this DOM write out of Angular's digest cycle so no infdig is possible.
       vm.scrollToBottom();

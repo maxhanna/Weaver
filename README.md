@@ -25,6 +25,16 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 `maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address.
 
+
+## Currently supported agentic tools : 
+_git
+_package_install 
+_ping 
+_show / _display 
+_create_file 
+relative/path/to/file (for editing),
+_grep (future)
+
 ## Agentic Orchestration Router
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -54,6 +64,3 @@ The app serves static files and APIs. Open the URL shown in the console (usually
                 │• Return results     │
                 └─────────────────────┘
 ```
-
-Security: the endpoint will reject any write that resolves outside the workspace root. Do NOT expose this API publicly without additional auth/ACL controls.
-

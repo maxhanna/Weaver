@@ -101,7 +101,7 @@
 
           <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
             <details>
-              <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
+              <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
               <div class="log-entries">
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
