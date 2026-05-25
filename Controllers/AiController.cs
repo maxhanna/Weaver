@@ -95,6 +95,6 @@ public class AiController : ControllerBase
     private async Task<string> GetBaseURL()
     {
         var cfg = await _configFile.LoadConfigAsync();
-        return cfg.LlamaUrl;
+        return cfg.llamaUrl;
     }
 }

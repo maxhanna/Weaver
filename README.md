@@ -23,7 +23,7 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 ## Configuration
 
-`maestroconfig.json` contains `LlamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address.
+`maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address.
 
 ## API Endpoints
 

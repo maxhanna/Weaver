@@ -1079,6 +1079,9 @@ RULES:
                 ResolveEditTargetPaths(req.Prompt, req.Files ?? new List<string>(), projectRoot),
                 projectRoot, allSteps);
 
+            // ── Build verification ─────────────────────────────────────────────
+            var buildVerification = await RunBuildVerification(projectRoot, emitSse: true, allSteps, Response.HttpContext.RequestAborted);
+
             await SendSse(Response, "done", new
             {
                 summary,
@@ -1089,7 +1092,8 @@ RULES:
                                  ? "No files were modified. Check failed steps below."
                                  : (string?)null,
                 steps = allSteps,
-                filesEdited
+                filesEdited,
+                buildVerification
             });
         }
         catch (Exception ex)
@@ -1100,13 +1104,152 @@ RULES:
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  BUILD VERIFICATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<List<object>> RunBuildVerification(
+        string projectRoot, bool emitSse, List<object> existingSteps, CancellationToken ct)
+    {
+        var steps = new List<object>();
+        var config = await _configFile.LoadConfigAsync();
+        var cmd = config.buildCommands;
+        if (string.IsNullOrWhiteSpace(cmd)) return steps;
+
+        _terminal.Start();
+
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "build", message = "Running build verification…" }, ct);
+        await EmitLog(emitSse, "info", $"Build verification: {cmd}", ct: ct);
+
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (emitSse)
+                await SendSse(Response, "phase", new { phase = "build", message = $"Build cycle {cycle + 1}/3…" }, ct);
+
+            var beforeOutput = _terminal.ReadAll();
+            await _terminal.SendCommandAsync(cmd, projectRoot);
+
+            var output = await WaitForBuildOutput(beforeOutput);
+
+            var analysis = await CallLlmRaw(
+                "You are a build output analyzer. Respond with ONLY a single JSON object — no markdown, no explanation. " +
+                "{\"result\":\"SUCCESS\"} or {\"result\":\"FAILURE\",\"errors\":[\"error 1\",\"...\"]}",
+                $"Build command: {cmd}\n\nFull output:\n{output}", ct);
+
+            var rawResult = analysis.raw?.Trim() ?? "";
+            var isSuccess = rawResult.Contains("\"SUCCESS\"", StringComparison.Ordinal);
+
+            await EmitLog(emitSse, isSuccess ? "info" : "warn",
+                $"Build cycle {cycle + 1}: {(isSuccess ? "succeeded" : "failed")}",
+                new { result = rawResult }, ct: ct);
+
+            steps.Add(new
+            {
+                cycle = cycle + 1,
+                command = cmd,
+                output = Truncate(output, 3000),
+                result = isSuccess ? "success" : "failure"
+            });
+
+            if (isSuccess) break;
+
+            if (cycle < 2)
+            {
+                await EmitLog(emitSse, "warn", "Build failed — analyzing errors and planning fixes…", ct: ct);
+
+                var planPrompt = $@"The build command '{cmd}' failed with errors shown below.
+
+Output:
+{output}
+
+Create a plan to fix every build error. For each file that needs editing, specify the file path and what change to make.
+Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix the ... by ...""}}] — no markdown, no explanation.";
+
+                var planRaw = await CallLlmRaw(
+                    "You are a build error fixer. Output ONLY a JSON array.", planPrompt, ct);
+
+                var fixPlan = ParseBuildFixPlan(planRaw.raw);
+
+                if (fixPlan.Count > 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Applying {fixPlan.Count} build fix(es)…", ct: ct);
+
+                    var editResults = await RunEditPhase(
+                        fixPlan, "", projectRoot,
+                        existingSteps.Count + steps.Count,
+                        emitSse, "", ct);
+
+                    steps.Add(new { type = "build-fix", editsApplied = editResults.Count });
+                }
+            }
+        }
+
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "build-done", message = "Build verification complete" }, ct);
+
+        return steps;
+    }
+
+    private async Task<string> WaitForBuildOutput(string beforeOutput)
+    {
+        var timeout = TimeSpan.FromMinutes(3);
+        var started = DateTime.UtcNow;
+        var delay = 1000;
+
+        while (DateTime.UtcNow - started < timeout)
+        {
+            await Task.Delay(delay, CancellationToken.None);
+            var current = _terminal.ReadAll();
+            if (current.Length > beforeOutput.Length + 80)
+            {
+                var stable = _terminal.ReadAll();
+                if (stable == current)
+                    return current;
+            }
+            delay = Math.Min(delay + 1000, 8000);
+        }
+        return _terminal.ReadAll();
+    }
+
+    private static List<PlanItem> ParseBuildFixPlan(string raw)
+    {
+        var items = new List<PlanItem>();
+        if (string.IsNullOrWhiteSpace(raw)) return items;
+        try
+        {
+            var blocks = ExtractJsonBlocks(raw);
+            foreach (var block in blocks)
+            {
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<List<PlanItemDeserialized>>(block);
+                    if (parsed != null)
+                    {
+                        foreach (var p in parsed)
+                        {
+                            if (!string.IsNullOrWhiteSpace(p.file))
+                                items.Add(new PlanItem { File = p.file, ChangeDescription = p.change, Priority = items.Count + 1 });
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return items;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<string> GetLlamaBaseUrl()
     {
         var cfg = await _configFile.LoadConfigAsync();
-        return (cfg.LlamaUrl ?? "http://localhost:8080").TrimEnd('/');
+        return (cfg.llamaUrl ?? "http://localhost:8081").TrimEnd('/');
     }
 
     /// <summary>

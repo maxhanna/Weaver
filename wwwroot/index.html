@@ -12,7 +12,7 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <h1 class="brand-logo" ng-click="vm.openDiscordPanel()">Maestro <span class="badge brand-badge">Agentic
+    <h1 class="brand-logo brand-link" ng-click="vm.openDiscordPanel()">Maestro <span class="badge brand-badge">Agentic
         Kanban</span>
     </h1>
     <div class="project-picker">
@@ -323,9 +323,13 @@
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
       </div>
-      <div class="form-row">
-        <label>GitHub: <a href="https://github.com/maxhanna/Maestro"
-            target="_blank">https://github.com/maxhanna/Maestro</a></label>
+      <div class="popup-header">
+        <strong>GitHub</strong>
+      </div>
+      <div class="popup-body">
+        <div class="link-item github-link">
+          <a href="https://github.com/maxhanna/Maestro" target="_blank">https://github.com/maxhanna/Maestro</a>
+        </div>
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeDiscordPanel()">Close</button>

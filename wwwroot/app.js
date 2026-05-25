@@ -17,6 +17,7 @@
     vm.autoQueue = true;
     vm.showTerminal = true;
     vm.showAI = true;
+    vm.llamaUrl = "";
     vm.buildCommands = "";
     vm.aiChatMessages = [];
     vm.aiChatInput = '';
