@@ -1538,7 +1538,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
             // ── Build verification ─────────────────────────────────────────────
             var buildVerification = new List<object>();
-            if (HasSuccessfulEdits(allSteps))
+            if (HasSuccessfulEdits(allSteps) && !string.IsNullOrWhiteSpace(await GetBuildCommand()))
             {
                 buildVerification = await RunBuildVerification(projectRoot, emitSse: true, allSteps, Response.HttpContext.RequestAborted);
             }
@@ -3491,6 +3491,12 @@ Rules:
         return (start, end);
     }
 
+    private async Task<string?> GetBuildCommand()
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        return cfg.buildCommands;
+    }
+    
     private static List<string> ExtractJsonBlocks(string text)
     {
         var blocks = new List<string>();
