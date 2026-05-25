@@ -754,6 +754,12 @@
                       pushAgentLog('summary', parsed.text);
                     }
                     break;
+                  case 'show':
+                    if (parsed && parsed.text) {
+                      vm.aiResponse = parsed.text;
+                      pushAgentLog('info', '📄 ' + parsed.text);
+                    }
+                    break;
                   case 'step':
                     if (parsed) {
                       upsertStreamingStep(parsed);

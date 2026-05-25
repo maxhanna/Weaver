@@ -586,7 +586,29 @@ RULES:
   The agent will try multiple methods: Test-NetConnection with port → ICMP ping → HTTP GET.
   If a port is provided, TCP check via Test-NetConnection (Windows) or nc (Linux) is tried first.
   If ICMP ping is the goal, specify the ping command with -n (count) and -w (timeout) flags.
-  Default to 4 pings with 2s timeout.";
+   Default to 4 pings with 2s timeout.
+- For SHOWING INFORMATION to the user (e.g. ""show me what files changed"", ""display the git pull output"",
+  ""show the current status""): Set the ""file"" field to ""_show"". In the ""change"" field, put the exact text
+  to display. The agent will send this text directly to the frontend so the user can see it.
+  Use this when the user asks to see output, status, or results rather than edit files.
+  For example: if the user says ""pull changes and show what was pulled"", first use _git to pull then use
+  _show to display the pull output to the user.
+- For CREATING NEW FILES (e.g. "".editorconfig"", ""appsettings.Development.json"", ""Dockerfile""):
+  Set the ""file"" field to ""_create_file"". In the ""change"" field, describe what file to create and what it should
+  contain (e.g. ""Create a .editorconfig file in the root directory with standard C# formatting settings"").
+  Do NOT list any other files for creation tasks — the creation handler generates the content automatically.
+  IMPORTANT: Use the correct filename including the leading dot (e.g. "".editorconfig"", not ""_editorconfig"").
+- For GIT OPERATIONS (e.g. ""commit all changes"", ""revert all changes"", ""create a branch X"", ""sync"", ""pull all changes""):
+  Set the ""file"" field to ""_git"". In the ""change"" field, describe the git operation naturally.
+  The agent will detect the operation type from the description and run the appropriate git commands.
+  Valid operations: commit, revert (discard working tree changes), branch (create new), pull, sync (pull + push).
+  Examples:
+    - ""commit all changes with message 'WIP'"" → runs git add -A && git commit
+    - ""revert all changes"" → runs git checkout -- .
+    - ""create a branch called feature/new-feature"" → runs git checkout -b
+    - ""pull all changes"" → runs git pull
+    - ""sync with remote"" → runs git pull && git push
+  Do NOT list any other files for git operation tasks — the git command handles everything.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -800,6 +822,117 @@ Be concise — 2-4 sentences max.";
                     continue;
                 }
 
+                // Detect git operations — build git command from changeDesc and run via terminal
+                if (relPath.Equals("_git", StringComparison.OrdinalIgnoreCase))
+                {
+                    var gitDesc = (changeDesc.Trim().Trim('`', '"', '\'') + " ").ToLowerInvariant();
+                    string gitCmd;
+                    var gitOp = "";
+
+                    if (gitDesc.StartsWith("commit") || gitDesc.Contains("commit all"))
+                    {
+                        gitOp = "commit";
+                        var msgMatch = Regex.Match(gitDesc, @"""[^""]+""");
+                        var msg = msgMatch.Success
+                            ? msgMatch.Value.Trim('"')
+                            : $"Auto-commit {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                        gitCmd = $"git add -A && git commit -m \"{msg.Replace("\"", "\\\"")}\"";
+                    }
+                    else if (gitDesc.StartsWith("revert") || gitDesc.Contains("revert all") || gitDesc.Contains("discard"))
+                    {
+                        gitOp = "revert";
+                        gitCmd = "git checkout -- .";
+                    }
+                    else if (gitDesc.StartsWith("branch") || gitDesc.Contains("create branch") || gitDesc.Contains("new branch"))
+                    {
+                        gitOp = "branch";
+                        var branchMatch = Regex.Match(gitDesc, @"branch\s+(\S+)", RegexOptions.IgnoreCase);
+                        var branchName = branchMatch.Success ? branchMatch.Groups[1].Value : $"feature/{DateTime.Now:yyyyMMdd-HHmmss}";
+                        gitCmd = $"git checkout -b {branchName}";
+                    }
+                    else if (gitDesc.StartsWith("pull") || gitDesc.Contains("git pull"))
+                    {
+                        gitOp = "pull";
+                        gitCmd = "git pull";
+                    }
+                    else if (gitDesc.StartsWith("sync") || gitDesc.Contains("push") || gitDesc.Contains("git push"))
+                    {
+                        gitOp = "sync";
+                        gitCmd = "git pull && git push";
+                    }
+                    else
+                    {
+                        // Treat as raw git command
+                        gitOp = "exec";
+                        gitCmd = changeDesc.Trim().Trim('`', '"', '\'');
+                        if (!gitCmd.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
+                            gitCmd = "git " + gitCmd;
+                    }
+
+                    await EmitLog(emitSse, "info", $"Git {gitOp}: {gitCmd}", ct: ct);
+                    var gitStep = new AgentStep
+                    {
+                        Index = 0, Type = "command", Command = gitCmd,
+                        Description = $"git {gitOp}: {gitCmd}"
+                    };
+                    var gitResults = await ExecuteSteps(new List<AgentStep> { gitStep }, projectRoot, idx, emitSse, ct);
+                    idx += gitResults.Count;
+                    allResults.AddRange(gitResults);
+
+                    var gitFirst = gitResults.FirstOrDefault() as Dictionary<string, object?>;
+                    var gitOutput = gitFirst?.TryGetValue("output", out var go) == true ? go?.ToString() ?? "" : "";
+                    var gitStatus = gitFirst?.TryGetValue("status", out var gs) == true ? gs?.ToString() : "";
+
+                    // Extract commit hash for commit operations
+                    string? commitHash = null;
+                    if (gitOp == "commit")
+                    {
+                        var hashMatch = Regex.Match(gitOutput, @"\[[\w/]+ ([a-f0-9]{7,40})\]", RegexOptions.IgnoreCase);
+                        if (hashMatch.Success) commitHash = hashMatch.Groups[1].Value;
+                    }
+
+                    var gitSuccess = gitStatus == "done" && !gitOutput.Contains("fatal", StringComparison.OrdinalIgnoreCase);
+                    await EmitLog(emitSse, gitSuccess ? "success" : "warn",
+                        gitSuccess
+                            ? $"Git {gitOp} completed{(commitHash != null ? $" ({commitHash})" : "")}"
+                            : $"Git {gitOp} may have failed",
+                        new { output = Truncate(gitOutput, 2000) }, ct: ct);
+                    continue;
+                }
+
+                // Detect show/display — send text to frontend for user to see
+                if (relPath.Equals("_show", StringComparison.OrdinalIgnoreCase) ||
+                    relPath.Equals("_display", StringComparison.OrdinalIgnoreCase))
+                {
+                    var showText = (changeDesc.Trim().Trim('`', '"', '\'') + " ")
+                        .Replace("display", "", StringComparison.OrdinalIgnoreCase)
+                        .Replace("show", "", StringComparison.OrdinalIgnoreCase)
+                        .Trim();
+                    if (string.IsNullOrWhiteSpace(showText)) showText = changeDesc.Trim().Trim('`', '"', '\'');
+
+                    await EmitLog(emitSse, "info", showText, ct: ct);
+                    if (emitSse)
+                        await SendSse(Response, "show", new { text = showText }, ct);
+                    var showResult = new Dictionary<string, object?>
+                    {
+                        ["status"] = "done",
+                        ["type"] = "show",
+                        ["output"] = showText
+                    };
+                    allResults.Add(showResult);
+                    continue;
+                }
+
+                // Detect file creation — create new file with LLM-generated content
+                if (relPath.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
+                {
+                    await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
+                    var createResult = await HandleCreateFile(changeDesc, projectRoot, originalPrompt, discoveryContext, idx, emitSse, ct);
+                    idx += createResult.stepsCount;
+                    allResults.AddRange(createResult.results);
+                    continue;
+                }
+
                 var fullPath = Path.GetFullPath(
                     Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
 
@@ -814,17 +947,32 @@ Be concise — 2-4 sentences max.";
 
                 if (!System.IO.File.Exists(fullPath))
                 {
-                    await EmitLog(emitSse, "warn", $"Planned file not found: {relPath}", ct: ct);
-                    var similar = FindSimilarFiles(relPath, projectRoot);
-                    if (similar.Count > 0)
+                    await EmitLog(emitSse, "info", $"File does not exist yet: {relPath} — attempting to create it", ct: ct);
+                    var createResult = await HandleCreateFile(
+                        changeDesc, projectRoot, originalPrompt, discoveryContext, idx, emitSse, ct,
+                        explicitRelPath: relPath);
+                    idx += createResult.stepsCount;
+                    allResults.AddRange(createResult.results);
+                    // Re-read the file if it was created; otherwise re-check existence
+                    if (System.IO.File.Exists(fullPath))
                     {
-                        await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
-                        relPath = similar[0];
-                        fullPath = Path.GetFullPath(
-                            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-                        if (!System.IO.File.Exists(fullPath)) continue;
+                        await EmitLog(emitSse, "success", $"Created new file: {relPath}", ct: ct);
                     }
-                    else continue;
+                    else
+                    {
+                        // Fall back to similar-files search
+                        await EmitLog(emitSse, "warn", $"Could not create {relPath} — trying similar files", ct: ct);
+                        var similar = FindSimilarFiles(relPath, projectRoot);
+                        if (similar.Count > 0)
+                        {
+                            await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
+                            relPath = similar[0];
+                            fullPath = Path.GetFullPath(
+                                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                            if (!System.IO.File.Exists(fullPath)) continue;
+                        }
+                        else continue;
+                    }
                 }
 
                 var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
@@ -1080,6 +1228,117 @@ Be concise — 2-4 sentences max.";
         }
 
         return allResults;
+    }
+
+    /// <summary>
+    /// Create a new file with LLM-generated content.
+    /// The changeDesc describes what to create; the LLM generates full file content.
+    /// If explicitRelPath is provided, it overrides filename extraction from changeDesc.
+    /// </summary>
+    private async Task<(List<object> results, int stepsCount)> HandleCreateFile(
+        string changeDesc, string projectRoot, string originalPrompt, string discoveryContext,
+        int idx, bool emitSse, CancellationToken ct,
+        string? explicitRelPath = null)
+    {
+        var results = new List<object>();
+
+        // Extract the target filename from changeDesc or explicitRelPath
+        var targetRelPath = explicitRelPath;
+        if (string.IsNullOrWhiteSpace(targetRelPath))
+        {
+            // Try to extract path like "path/to/file.ext" from change description
+            var pathMatch = Regex.Match(changeDesc, @"[\w/\\]+\.[\w]+");
+            if (pathMatch.Success)
+                targetRelPath = pathMatch.Value.Replace('\\', '/');
+        }
+
+        if (string.IsNullOrWhiteSpace(targetRelPath))
+        {
+            // Try to find a filename pattern like ".editorconfig", "file.ext"
+            var fileMatch = Regex.Match(changeDesc, @"(\.?[\w-]+(?:\.[\w]+)+)");
+            if (fileMatch.Success)
+                targetRelPath = fileMatch.Groups[1].Value;
+        }
+
+        // Still empty — use a safe fallback name
+        if (string.IsNullOrWhiteSpace(targetRelPath))
+            targetRelPath = "newfile.txt";
+
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, targetRelPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        if (!IsPathUnderRoot(fullPath, projectRoot))
+        {
+            await EmitLog(emitSse, "error", $"Create target {targetRelPath} is outside project root", ct: ct);
+            return (results, 0);
+        }
+
+        await EmitLog(emitSse, "info", $"Generating content for new file: {targetRelPath}", ct: ct);
+
+        // Ask LLM to generate the full file content
+        var contentPrompt = $@"You are a file creation assistant. Generate the COMPLETE content for a new file based on the description below.
+
+Target file: {targetRelPath}
+Task: {originalPrompt}
+Description: {changeDesc}
+
+Project context:
+{Truncate(discoveryContext, 4000)}
+
+Respond with ONLY the raw file content — no markdown, no code fences, no explanation. The content will be written directly to the file.";
+
+        var (content, _, err) = await CallLlmRaw(
+            "You are a file creation assistant. Output ONLY the raw file content — no markdown, no code fences, no explanation.",
+            contentPrompt, ct, requestTimeout: TimeSpan.FromSeconds(30));
+
+        if (string.IsNullOrWhiteSpace(content) && err != null)
+        {
+            await EmitLog(emitSse, "error", $"Failed to generate content for {targetRelPath}: {err}", ct: ct);
+            return (results, 0);
+        }
+
+        // Clean up LLM output — remove markdown code fences if present
+        var cleaned = content?.Trim() ?? "";
+        if (cleaned.StartsWith("```"))
+        {
+            var firstNewline = cleaned.IndexOf('\n');
+            if (firstNewline > 0) cleaned = cleaned[(firstNewline + 1)..];
+            if (cleaned.EndsWith("```")) cleaned = cleaned[..^3].TrimEnd();
+        }
+
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            await EmitLog(emitSse, "warn", $"Generated empty content for {targetRelPath}", ct: ct);
+            return (results, 0);
+        }
+
+        // Ensure parent directory exists
+        var parentDir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(parentDir) && !Directory.Exists(parentDir))
+            Directory.CreateDirectory(parentDir);
+
+        // Write the file
+        await System.IO.File.WriteAllTextAsync(fullPath, cleaned, Encoding.UTF8);
+        await EmitLog(emitSse, "success", $"Created {targetRelPath} ({cleaned.Length} chars)", ct: ct);
+
+        if (emitSse)
+            await SendSse(Response, "result", new
+            {
+                type = "create",
+                path = targetRelPath,
+                chars = cleaned.Length
+            }, ct);
+
+        // Record as a step result (mimics edit step format)
+        var result = new Dictionary<string, object?>
+        {
+            ["status"] = "done",
+            ["path"] = targetRelPath,
+            ["output"] = Truncate(cleaned, 2000),
+            ["type"] = "create"
+        };
+        results.Add(result);
+
+        return (results, 1);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

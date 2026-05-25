@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using MaestroBackend.Services;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -339,5 +339,116 @@ public class TerminalController : ControllerBase
         public int MinLatency { get; set; }
         public int MaxLatency { get; set; }
         public int AvgLatency { get; set; }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  GIT PIPELINE TOOL SET
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public class GitRequest
+    {
+        public string Operation { get; set; } = "";  // commit, revert, branch, pull, sync
+        public string? Message { get; set; }
+        public string? BranchName { get; set; }
+        public string? ProjectPath { get; set; }
+    }
+
+    private async Task<string> RunGitCommand(string command, string? projectPath)
+    {
+        _terminal.Start();
+        var beforeLen = _terminal.ReadAll().Length;
+        await _terminal.SendCommandAsync(command, projectPath);
+        var prevLen = beforeLen;
+        var stableMs = 0;
+        for (var i = 0; i < 30; i++)
+        {
+            await Task.Delay(500);
+            var curLen = _terminal.ReadAll().Length;
+            if (curLen == prevLen) { stableMs += 500; if (stableMs >= 2000) break; }
+            else { stableMs = 0; prevLen = curLen; }
+        }
+        var fullOutput = _terminal.ReadAll();
+        var output = beforeLen >= 0 && beforeLen < fullOutput.Length
+            ? fullOutput.Substring(beforeLen)
+            : "";
+        if (output.Length > MaxOutputChars) output = output[..MaxOutputChars];
+        return output;
+    }
+
+    [HttpPost("git")]
+    public async Task<IActionResult> Git([FromBody] GitRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Operation))
+            return BadRequest(new { error = "Operation is required (commit, revert, branch, pull, sync)" });
+
+        return req.Operation.ToLowerInvariant() switch
+        {
+            "commit" => await GitCommit(req.Message, req.ProjectPath),
+            "revert" => await GitRevert(req.ProjectPath),
+            "branch" => await GitBranch(req.BranchName, req.ProjectPath),
+            "pull" => await GitPull(req.ProjectPath),
+            "sync" => await GitSync(req.ProjectPath),
+            _ => BadRequest(new { error = $"Unknown git operation: {req.Operation}. Valid: commit, revert, branch, pull, sync" })
+        };
+    }
+
+    private async Task<IActionResult> GitCommit(string? message, string? projectPath)
+    {
+        var msg = !string.IsNullOrWhiteSpace(message)
+            ? message.Replace("\"", "\\\"")
+            : $"Auto-commit {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+        var output = await RunGitCommand($"git add -A && git commit -m \"{msg}\"", projectPath);
+        var success = !output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) &&
+                      !output.Contains("nothing added", StringComparison.OrdinalIgnoreCase);
+        // Extract commit hash if present
+        var commitHash = ExtractCommitHash(output);
+        return Ok(new { success, output, operation = "commit", commitHash, message = msg });
+    }
+
+    private async Task<IActionResult> GitRevert(string? projectPath)
+    {
+        var output = await RunGitCommand("git checkout -- .", projectPath);
+        var success = !output.Contains("error", StringComparison.OrdinalIgnoreCase);
+        return Ok(new { success, output, operation = "revert" });
+    }
+
+    private async Task<IActionResult> GitBranch(string? branchName, string? projectPath)
+    {
+        var name = !string.IsNullOrWhiteSpace(branchName) ? branchName.Replace(" ", "-") : $"feature/{DateTime.Now:yyyyMMdd-HHmmss}";
+        var output = await RunGitCommand($"git checkout -b {name}", projectPath);
+        var success = !output.Contains("fatal", StringComparison.OrdinalIgnoreCase);
+        return Ok(new { success, output, operation = "branch", branchName = name });
+    }
+
+    private async Task<IActionResult> GitPull(string? projectPath)
+    {
+        try
+        {
+            var output = await RunGitCommand("git pull", projectPath);
+            var success = !output.Contains("fatal", StringComparison.OrdinalIgnoreCase) &&
+                          !output.Contains("error:", StringComparison.OrdinalIgnoreCase);
+            return Ok(new { success, output, operation = "pull" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, output = ex.Message, operation = "pull" });
+        }
+    }
+
+    private async Task<IActionResult> GitSync(string? projectPath)
+    {
+        var pullOutput = await RunGitCommand("git pull", projectPath);
+        var pushOutput = await RunGitCommand("git push", projectPath);
+        var combined = pullOutput + "\n" + pushOutput;
+        var success = !combined.Contains("fatal", StringComparison.OrdinalIgnoreCase);
+        return Ok(new { success, output = combined, operation = "sync" });
+    }
+
+    private static string? ExtractCommitHash(string output)
+    {
+        var m = Regex.Match(output, @"\[[\w/]+ ([a-f0-9]{7,40})\]", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+        m = Regex.Match(output, @"commit\s+([a-f0-9]{7,40})", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
     }
 }
