@@ -41,12 +41,19 @@
     <div class="right-panel" ng-class="{'full-width': !vm.showKanban}">
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
-        <h3>🤖 Ask AI</h3>
+        <h3>🤖 Ask AI <span class="mode-toggle" ng-click="vm.toggleChatMode()" style="cursor:pointer;font-size:11px;margin-left:8px;opacity:0.7">{{vm.chatMode === 'ask' ? 'Ask' : 'Build'}} ▾</span></h3>
         <div class="panel-body ai-chat-body">
+          <!-- Tool palette (build mode only) -->
+          <div class="tool-palette" ng-if="vm.chatMode === 'build'">
+            <div class="tool-chip" ng-repeat="t in vm.buildTools" ng-click="vm.useToolHint(t.hint)" title="{{t.desc}}">
+              <span class="tool-icon">{{t.icon}}</span>
+              <span class="tool-name">{{t.name}}</span>
+            </div>
+          </div>
           <div class="ai-chat-messages">
             <div class="ai-msg" ng-repeat="msg in vm.aiChatMessages track by $index" ng-class="'ai-msg-' + msg.role">
               <div class="ai-msg-role">{{msg.role === 'user' ? 'You' : 'AI'}}</div>
-              <div class="ai-msg-text">{{msg.content}}</div>
+              <div class="ai-msg-text"><pre style="white-space:pre-wrap;margin:0;font-size:inherit;background:transparent;padding:0">{{msg.content}}</pre></div>
             </div>
             <div class="ai-msg ai-msg-assistant" ng-if="vm.aiChatLoading">
               <div class="ai-msg-role">AI</div>
@@ -188,6 +195,10 @@
                 </div>
                 <div class="rename-display" ng-if="s.type==='rename' && s.status==='done'">
                   <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
+                </div>
+                <div class="step-detail ping-analysis" ng-if="s.pingAnalysis">
+                  <strong>Ping Analysis:</strong>
+                  <pre class="step-detail-data">{{s.pingAnalysis}}</pre>
                 </div>
                 <div class="step-detail" ng-if="s.output">
                   <pre class="step-detail-data">{{s.output}}</pre>

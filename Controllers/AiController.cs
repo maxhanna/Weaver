@@ -42,7 +42,8 @@ public class AiController : ControllerBase
             {
                 // Use provided messages but ensure model is present
                 var messagesRaw = messagesProp.GetRawText();
-                contentJson = $"{{\"model\":\"{model}\",\"messages\":{messagesRaw},\"stream\":false}}";
+                var toolsRaw = payload.TryGetProperty("tools", out var toolsProp) ? $",\"tools\":{toolsProp.GetRawText()}" : "";
+                contentJson = $"{{\"model\":\"{model}\",\"messages\":{messagesRaw}{toolsRaw},\"stream\":false}}";
             }
             else if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("prompt", out var promptProp))
             {

@@ -2369,6 +2369,42 @@ h3 .small.ghost:hover {
 	flex: 1;
 }
 
+/* Tool palette for build mode */
+.tool-palette {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 4px 0;
+	border-bottom: 1px solid var(--border);
+	margin-bottom: 4px;
+}
+
+.tool-chip {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	padding: 2px 8px;
+	border-radius: 12px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	cursor: pointer;
+	font-size: 11px;
+	transition: background 0.15s;
+}
+
+.tool-chip:hover {
+	background: var(--accent);
+	color: var(--bg);
+}
+
+.tool-icon {
+	font-size: 13px;
+}
+
+.tool-name {
+	font-weight: 500;
+}
+
 /* Ask AI Chat Panel */
 .ai-panel .ai-chat-body {
 	display: flex;

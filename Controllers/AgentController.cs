@@ -572,7 +572,21 @@ RULES:
 - If the task is purely CSS, list only the CSS file. If purely JS, list only JS.
 - For RENAME/MOVE tasks: list the source file. Set the ""change"" field to: 'Rename this file to <new/path>'.
 - When describing changes, quote exact existing code you want to modify and show exactly what it should become.
-- If you're unsure about exact code, describe the location and intent clearly rather than guessing.";
+- If you're unsure about exact code, describe the location and intent clearly rather than guessing.
+- For PACKAGE INSTALLATION tasks (e.g. ""install package X"", ""add NuGet package Y"", ""npm install Z""):
+  Set the ""file"" field to ""_package_install"". In the ""change"" field, specify the exact install command,
+  e.g. 'dotnet add package SonarAnalyzer.CSharp --version 9.0.0' or 'npm install lodash' or 'pip install requests'.
+  The agent will run this command in the terminal and verify the output. Do NOT list any other files for
+  package install tasks — the command handles everything.
+- For PING / NETWORK DIAGNOSTIC tasks (e.g. ""ping google.com"", ""check if server is reachable""):
+  Set the ""file"" field to ""_ping"". In the ""change"" field, specify the target and parameters.
+  Extract port number from the user's request (e.g. ""check 192.168.1.1:8080"" means port 8080).
+  If the user asks generically ""check if the host is reachable"" or ""ping the server"" without a specific
+  host, use the project's configured LLM URL as the target (e.g. ""ping <llamaUrl>"").
+  The agent will try multiple methods: Test-NetConnection with port → ICMP ping → HTTP GET.
+  If a port is provided, TCP check via Test-NetConnection (Windows) or nc (Linux) is tried first.
+  If ICMP ping is the goal, specify the ping command with -n (count) and -w (timeout) flags.
+  Default to 4 pings with 2s timeout.";
 
         var user = new StringBuilder();
         user.AppendLine("## Task");
@@ -680,6 +694,7 @@ RULES:
             await SendSse(Response, "phase", new { phase = "edit", message = $"Editing {plan.Count} file(s)…" }, ct);
 
         var idx = startIndex;
+        var editHistory = new List<(string path, string preContent)>();
         foreach (var item in plan.OrderBy(p => p.Priority))
         {
             try
@@ -688,6 +703,102 @@ RULES:
 
                 var relPath = (item.File ?? "").Replace('\\', '/');
                 if (string.IsNullOrWhiteSpace(relPath)) continue;
+
+                // Detect package install operations — run command step instead of edit
+                var changeDesc = (item.ChangeDescription ?? "").Trim();
+                if (relPath.Equals("_package_install", StringComparison.OrdinalIgnoreCase))
+                {
+                    var installCmd = changeDesc.Trim().Trim('`', '"', '\'');
+                    await EmitLog(emitSse, "info", $"Package install: {installCmd}", ct: ct);
+                    var cmdStep = new AgentStep
+                    {
+                        Index = 0, Type = "command", Command = installCmd,
+                        Description = $"install package: {installCmd}"
+                    };
+                    var cmdResults = await ExecuteSteps(new List<AgentStep> { cmdStep }, projectRoot, idx, emitSse, ct);
+                    idx += cmdResults.Count;
+                    allResults.AddRange(cmdResults);
+                    var firstResult = cmdResults.FirstOrDefault() as Dictionary<string, object?>;
+                    var output = firstResult?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
+                    var cmdStatus = firstResult?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
+                    var installOk = cmdStatus == "done" && (
+                        output.Contains("added", StringComparison.OrdinalIgnoreCase) ||
+                        output.Contains("successfully installed", StringComparison.OrdinalIgnoreCase) ||
+                        !output.Contains("error", StringComparison.OrdinalIgnoreCase));
+                    await EmitLog(emitSse, installOk ? "success" : "warn",
+                        installOk ? "Package installed successfully" : "Package install may have failed — check output", ct: ct);
+                    continue;
+                }
+
+                // Detect ping operations — run ping command and evaluate results
+                if (relPath.Equals("_ping", StringComparison.OrdinalIgnoreCase))
+                {
+                    var pingCmd = changeDesc.Trim().Trim('`', '"', '\'');
+                    // Resolve <llamaUrl> placeholder or generic request to configured LLM URL
+                    if (pingCmd.Contains("<llamaUrl>", StringComparison.OrdinalIgnoreCase) ||
+                        !pingCmd.Contains("ping", StringComparison.OrdinalIgnoreCase) &&
+                        !pingCmd.Contains("Test-NetConnection", StringComparison.OrdinalIgnoreCase) &&
+                        !pingCmd.Contains("nc ", StringComparison.OrdinalIgnoreCase) &&
+                        !pingCmd.Contains("Invoke-WebRequest", StringComparison.OrdinalIgnoreCase) &&
+                        !pingCmd.Contains("curl", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var baseUrl = await GetLlamaBaseUrl();
+                        var uri = new Uri(baseUrl);
+                        pingCmd = OperatingSystem.IsWindows()
+                            ? $"powershell -Command \"Test-NetConnection {uri.Host} -Port {uri.Port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded, SourceAddress, RemoteAddress | Format-List\""
+                            : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
+                    }
+                    await EmitLog(emitSse, "info", $"Ping: {pingCmd}", ct: ct);
+                    var cmdStep = new AgentStep
+                    {
+                        Index = 0, Type = "command", Command = pingCmd,
+                        Description = $"ping: {pingCmd}"
+                    };
+                    var cmdResults = await ExecuteSteps(new List<AgentStep> { cmdStep }, projectRoot, idx, emitSse, ct);
+                    idx += cmdResults.Count;
+                    allResults.AddRange(cmdResults);
+                    var firstResult = cmdResults.FirstOrDefault() as Dictionary<string, object?>;
+                    var output = firstResult?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
+                    var cmdStatus = firstResult?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
+
+                    // Evaluate ping results with LLM
+                    try
+                    {
+                        var evalPrompt = $@"You are a network diagnostics assistant. Analyze these ping results and provide a concise summary.
+
+Ping command: {pingCmd}
+
+Raw output:
+```
+{Truncate(output, 4000)}
+```
+
+Provide a brief analysis covering:
+1. Is the host reachable? (packet loss)
+2. What is the latency like? (min/max/avg)
+3. Any notable patterns or issues?
+
+Be concise — 2-4 sentences max.";
+                        var (analysis, _, _) = await CallLlmRaw(
+                            "You are a network diagnostics assistant. Respond concisely.",
+                            evalPrompt, ct, TimeSpan.FromSeconds(15));
+                        if (!string.IsNullOrWhiteSpace(analysis))
+                        {
+                            firstResult?["pingAnalysis"] = analysis.Trim();
+                            await EmitLog(emitSse, "info", $"Ping analysis: {analysis.Trim()}", ct: ct);
+                        }
+                    }
+                    catch { /* LLM evaluation is best-effort */ }
+
+                    var pingOk = cmdStatus == "done" && (
+                        output.Contains("Reply from", StringComparison.OrdinalIgnoreCase) ||
+                        output.Contains("TTL", StringComparison.Ordinal) ||
+                        output.Contains("1 received", StringComparison.OrdinalIgnoreCase) ||
+                        output.Contains("0% packet loss", StringComparison.OrdinalIgnoreCase));
+                    await EmitLog(emitSse, pingOk ? "success" : "warn",
+                        pingOk ? "Host is reachable" : "Host may be unreachable — check output", ct: ct);
+                    continue;
+                }
 
                 var fullPath = Path.GetFullPath(
                     Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -719,7 +830,6 @@ RULES:
                 var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
                 // Detect rename/move operations — bypass LLM edit loop
-                var changeDesc = (item.ChangeDescription ?? "").Trim();
                 var isRename = changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase) ||
                                changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase);
                 if (isRename)
@@ -838,6 +948,7 @@ RULES:
                     r is Dictionary<string, object?> d &&
                     d.TryGetValue("status", out var st) && st?.ToString() == "done");
 
+                var appliedEdit = fileEdited;
                 if (!fileEdited)
                 {
                     await EmitLog(emitSse, "warn",
@@ -875,6 +986,82 @@ RULES:
                             var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
                             idx += retryResults.Count;
                             allResults.AddRange(retryResults);
+                            appliedEdit = retryResults.Any(r =>
+                                r is Dictionary<string, object?> rd &&
+                                rd.TryGetValue("status", out var rs) && rs?.ToString() == "done");
+                        }
+                    }
+                }
+
+                // ── Build verification after each successful edit ──────────────
+                if (appliedEdit)
+                {
+                    editHistory.Add((relPath, fileContent));
+
+                    var config = await _configFile.LoadConfigAsync();
+                    var buildCmd = config.buildCommands;
+                    if (!string.IsNullOrWhiteSpace(buildCmd))
+                    {
+                        var buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+
+                        for (var retryLoop = 0; retryLoop < 2 && !buildOk && editHistory.Count > 0; retryLoop++)
+                        {
+                            // Undo edits (up to 2) until build passes
+                            var undoneCount = 0;
+                            while (undoneCount < 2 && editHistory.Count > 0 && !buildOk)
+                            {
+                                var (undoPath, undoContent) = editHistory[^1];
+                                editHistory.RemoveAt(editHistory.Count - 1);
+                                var undoFullPath = Path.GetFullPath(
+                                    Path.Combine(projectRoot, undoPath.Replace('/', Path.DirectorySeparatorChar)));
+                                if (System.IO.File.Exists(undoFullPath))
+                                {
+                                    await System.IO.File.WriteAllTextAsync(undoFullPath, undoContent, Encoding.UTF8);
+                                    await EmitLog(emitSse, "warn", $"Undid edit: {undoPath}", ct: ct);
+                                }
+                                undoneCount++;
+                                buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                            }
+
+                            if (buildOk && undoneCount > 0)
+                            {
+                                // Build passes with undo — retry the original file edit
+                                await EmitLog(emitSse, "info", $"Build passes after undo — retrying edit for {relPath}", ct: ct);
+
+                                var currentContent = System.IO.File.Exists(fullPath)
+                                    ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8)
+                                    : fileContent;
+
+                                var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
+                                    fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
+
+                                var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath)
+                                    .Where(e => !string.Equals(
+                                        NormalizeLineEndings(e.OldString ?? ""),
+                                        NormalizeLineEndings(e.NewString ?? ""),
+                                        StringComparison.Ordinal))
+                                    .ToList();
+
+                                if (retrySteps2.Count > 0)
+                                {
+                                    for (var i = 0; i < retrySteps2.Count; i++) retrySteps2[i].Index = i;
+                                    var retryResults2 = await ExecuteSteps(retrySteps2, projectRoot, idx, emitSse, ct);
+                                    idx += retryResults2.Count;
+                                    allResults.AddRange(retryResults2);
+
+                                    buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                                }
+                            }
+                        }
+
+                        if (!buildOk)
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"Build failing after edit/retry for {relPath} — restoring and skipping", ct: ct);
+                            // Restore current file to pre-edit state
+                            await System.IO.File.WriteAllTextAsync(fullPath, fileContent, Encoding.UTF8);
+                            editHistory.RemoveAll(e => e.path == relPath);
+                            continue;
                         }
                     }
                 }
@@ -1091,7 +1278,11 @@ RULES:
                 projectRoot, allSteps);
 
             // ── Build verification ─────────────────────────────────────────────
-            var buildVerification = await RunBuildVerification(projectRoot, emitSse: true, allSteps, Response.HttpContext.RequestAborted);
+            var buildVerification = new List<object>();
+            if (HasSuccessfulEdits(allSteps))
+            {
+                buildVerification = await RunBuildVerification(projectRoot, emitSse: true, allSteps, Response.HttpContext.RequestAborted);
+            }
 
             await SendSse(Response, "done", new
             {
@@ -1260,48 +1451,70 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
     private async Task CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
     {
         var baseUrl = await GetLlamaBaseUrl();
-        var host = new Uri(baseUrl).Host;
+        var uri = new Uri(baseUrl);
+        var host = uri.Host;
+        var port = uri.Port;
 
-        // Build platform-appropriate ping command
+        await EmitLog(emitSse, "info", $"Connectivity check: {host}:{port}", ct: ct);
+
+        // Build platform-appropriate commands for each strategy
+        var strategies = new List<(string name, string cmd)>();
+
+        // 1. TCP port check via Test-NetConnection (Windows) or nc (Linux)
+        var tcpCmd = OperatingSystem.IsWindows()
+            ? $"powershell -Command \"Test-NetConnection {host} -Port {port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded, SourceAddress, RemoteAddress | Format-List\""
+            : $"nc -zv -w 2 {host} {port} 2>&1";
+        strategies.Add(("tcp", tcpCmd));
+
+        // 2. ICMP ping
         var pingCmd = OperatingSystem.IsWindows()
             ? $"ping {host} -n 1 -w 2000"
             : $"ping -c 1 -W 2 {host}";
+        strategies.Add(("ping", pingCmd));
 
-        await EmitLog(emitSse, "info", $"Connectivity check: {pingCmd}", ct: ct);
+        // 3. HTTP GET via PowerShell or curl
+        var httpCmd = OperatingSystem.IsWindows()
+            ? $"powershell -Command \"try {{ $r = Invoke-WebRequest -Uri '{baseUrl}/api/tags' -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop; Write-Output ('HTTP ' + $r.StatusCode + ' OK') }} catch {{ Write-Output ('FAILED: ' + $_.Exception.Message) }}\""
+            : $"curl -s -o /dev/null -w 'HTTP %{{http_code}}' --connect-timeout 5 {baseUrl}/api/tags";
+        strategies.Add(("http", httpCmd));
 
-        // Run ping as a step through the shared terminal so output appears in the frontend
-        var pingStep = new AgentStep
+        foreach (var (name, cmd) in strategies)
         {
-            Index = 0,
-            Type = "command",
-            Command = pingCmd,
-            Description = $"ping {host}"
-        };
+            ct.ThrowIfCancellationRequested();
+            await EmitLog(emitSse, "info", $"Trying {name}: {cmd}", ct: ct);
 
-        var results = await ExecuteSteps(new List<AgentStep> { pingStep }, projectRoot, 0, emitSse, ct);
+            var step = new AgentStep
+            {
+                Index = 0,
+                Type = "command",
+                Command = cmd,
+                Description = $"{name}: {host}:{port}"
+            };
 
-        // Check result
-        var first = results.FirstOrDefault() as Dictionary<string, object?>;
-        var output = first?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
-        var status = first?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
+            var results = await ExecuteSteps(new List<AgentStep> { step }, projectRoot, 0, emitSse, ct);
+            var first = results.FirstOrDefault() as Dictionary<string, object?>;
+            var output = first?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
+            var status = first?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
 
-        // Ping success indicators: "Reply from" (Windows), "TTL" or "1 received" (cross-platform)
-        var pingSucceeded = status == "done" && (
-            output.Contains("Reply from", StringComparison.OrdinalIgnoreCase) ||
-            output.Contains("TTL", StringComparison.Ordinal) ||
-            output.Contains("1 packets received", StringComparison.OrdinalIgnoreCase) ||
-            output.Contains("1 received", StringComparison.OrdinalIgnoreCase) ||
-            output.Contains("1 packets transmitted, 1 received", StringComparison.OrdinalIgnoreCase));
+            var succeeded = status == "done" && (
+                output.Contains("TcpTestSucceeded : True", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("succeeded", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("Reply from", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("TTL", StringComparison.Ordinal) ||
+                output.Contains("1 packets received", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("1 received", StringComparison.OrdinalIgnoreCase) ||
+                output.Contains("HTTP 200", StringComparison.Ordinal) ||
+                output.Contains("HTTP 20", StringComparison.Ordinal));
 
-        if (pingSucceeded)
-        {
-            await EmitLog(emitSse, "info", $"Host {host} is reachable", ct: ct);
+            if (succeeded)
+            {
+                await EmitLog(emitSse, "info", $"Host {host}:{port} is reachable via {name}", ct: ct);
+                return;
+            }
         }
-        else
-        {
-            await EmitLog(emitSse, "error", $"Host {host} is unreachable — aborting", ct: ct);
-            throw new InvalidOperationException($"LLM server at {host} is not reachable (ping failed)");
-        }
+
+        await EmitLog(emitSse, "error", $"Host {host}:{port} is unreachable — aborting", ct: ct);
+        throw new InvalidOperationException($"LLM server at {host}:{port} is not reachable (tcp/ping/http all failed)");
     }
 
     private async Task<string> GetLlamaBaseUrl()
@@ -2064,7 +2277,8 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         { result["status"] = "error"; result["error"] = "No command provided"; return; }
         await _terminal.SendCommandAsync(command, projectRoot);
         // Adaptive wait: poll output length every 500ms, stop when no growth for 2s, cap at 15s
-        var prevLen = _terminal.ReadAll().Length;
+        var beforeLen = _terminal.ReadAll().Length;
+        var prevLen = beforeLen;
         var stableMs = 0;
         for (var i = 0; i < 30; i++)
         {
@@ -2080,9 +2294,43 @@ Return ONLY the modified code block — no JSON, no markdown fences, no explanat
         result["status"] = "done";
         result["command"] = command;
         var fullOutput = _terminal.ReadAll();
-        result["output"] = prevLen >= 0 && prevLen < fullOutput.Length
-            ? Truncate(fullOutput.Substring(prevLen), MaxReadOutputChars)
+        result["output"] = beforeLen >= 0 && beforeLen < fullOutput.Length
+            ? Truncate(fullOutput.Substring(beforeLen), MaxReadOutputChars)
             : "";
+    }
+
+    /// <summary>
+    /// Quick build check — runs the build command and returns success/failure.
+    /// Does NOT attempt LLM-based fix analysis (unlike RunBuildVerification).
+    /// </summary>
+    private async Task<bool> RunQuickBuild(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(buildCmd)) return true;
+        _terminal.Start();
+        var beforeLen = _terminal.ReadAll().Length;
+        await EmitLog(emitSse, "info", $"Build check: {buildCmd}", ct: ct);
+        await _terminal.SendCommandAsync(buildCmd, projectRoot);
+        var prevLen = beforeLen;
+        var stableMs = 0;
+        for (var i = 0; i < 30; i++)
+        {
+            await Task.Delay(500);
+            var curLen = _terminal.ReadAll().Length;
+            if (curLen == prevLen) { stableMs += 500; if (stableMs >= 2000) break; }
+            else { stableMs = 0; prevLen = curLen; }
+        }
+        var output = _terminal.ReadAll();
+        var fresh = beforeLen >= 0 && beforeLen < output.Length
+            ? output.Substring(beforeLen) : "";
+        var success = fresh.Contains("Build succeeded", StringComparison.OrdinalIgnoreCase) ||
+                      fresh.Contains("0 Error(s)", StringComparison.Ordinal) ||
+                      fresh.Contains("0 errors", StringComparison.OrdinalIgnoreCase) ||
+                      fresh.Contains("successfully", StringComparison.OrdinalIgnoreCase) ||
+                      !fresh.Contains("error", StringComparison.OrdinalIgnoreCase);
+        await EmitLog(emitSse, success ? "success" : "warn",
+            success ? "Build passes" : "Build failed",
+            new { output = fresh }, ct: ct);
+        return success;
     }
 
     private async Task ExecuteReadStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)

@@ -23,6 +23,19 @@
     vm.aiChatInput = '';
     vm.aiChatLoading = false;
     vm.searchFilter = '';
+    vm.chatMode = 'ask';
+
+    // Build mode tool definitions
+    vm.buildTools = [
+      { name: 'Ping', icon: '📡', desc: 'Check host connectivity (TCP/ping/HTTP)', hint: 'ping google.com -n 4' },
+      { name: 'Install Package', icon: '📦', desc: 'Install a NuGet/npm/pip package', hint: 'install package SonarAnalyzer.CSharp' },
+      { name: 'Build', icon: '🔨', desc: 'Run build verification', hint: 'build the project' },
+      { name: 'Full Agent', icon: '🤖', desc: 'Run the full agent pipeline', hint: 'refactor the login page' }
+    ];
+    vm.useToolHint = function (hint) { vm.aiChatInput = hint;
+      var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
+
+    vm.toggleChatMode = function () { vm.chatMode = vm.chatMode === 'ask' ? 'build' : 'ask'; };
 
     // Agent streaming state
     vm.streamingActive = false;
@@ -846,6 +859,70 @@
       if (!vm.aiChatInput || vm.aiChatLoading) return;
       var userMsg = vm.aiChatInput;
       vm.aiChatInput = '';
+
+      // Build mode — route to tools or agent pipeline
+      if (vm.chatMode === 'build') {
+        vm.aiChatMessages.push({ role: 'user', content: userMsg });
+        vm.aiChatLoading = true;
+        var lower = userMsg.toLowerCase();
+
+        // Ping
+        if (lower.includes('ping') || lower.includes('connect') || lower.includes('reachable')) {
+          var hostMatch = userMsg.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          var portMatch = userMsg.match(/:(\d+)/);
+          var payload = { host: hostMatch ? hostMatch[1] : 'localhost' };
+          if (portMatch) payload.port = parseInt(portMatch[1]);
+          $http.post('/api/terminal/ping', payload).then(function (resp) {
+            var d = resp.data;
+            var icon = d.success ? '✅' : '❌';
+            vm.aiChatMessages.push({ role: 'assistant', content: icon + ' ' + d.method + ' — ' + d.host + (d.port ? ':' + d.port : '') + '\n\n```\n' + (d.output || '').substring(0, 2000) + '\n```' });
+            vm.aiChatLoading = false;
+          }, function (err) {
+            vm.aiChatMessages.push({ role: 'assistant', content: '❌ Error: ' + (err.data?.error || err.statusText) }); vm.aiChatLoading = false;
+          });
+          return;
+        }
+
+        // Install package
+        var pkgMatch = userMsg.match(/(?:install|add)\s+(?:package\s+)?(\S+)/i);
+        if (pkgMatch) {
+          $http.post('/api/terminal/install-package', { packageName: pkgMatch[1] }).then(function (resp) {
+            var d = resp.data;
+            var icon = d.success ? '✅' : '⚠️';
+            vm.aiChatMessages.push({ role: 'assistant', content: icon + ' Package install ' + (d.success ? 'succeeded' : 'may have issues') + '\n\n```\n' + (d.output || '').substring(0, 2000) + '\n```' });
+            vm.aiChatLoading = false;
+          }, function (err) {
+            vm.aiChatMessages.push({ role: 'assistant', content: '❌ Error: ' + (err.data?.error || err.statusText) }); vm.aiChatLoading = false;
+          });
+          return;
+        }
+
+        // Build / default — route to agent pipeline
+        vm.aiChatLoading = false;
+        // Create a temporary card and run the agent
+        var tempCard = { id: 'chat-' + Date.now(), text: userMsg, project: vm.selectedProject, attached: [], ready: true };
+        if (!tempCard.project) { vm.aiChatMessages.push({ role: 'assistant', content: '⚠️ No project selected. Select a project first.' }); return; }
+        vm.streamingSummary = '';
+        vm.streamingPhase = '';
+        vm.streamingSteps = [];
+        vm.agentActivityLog = [];
+        vm.aiChatMessages.push({ role: 'assistant', content: '🤖 Starting agent pipeline...', _progress: true });
+        vm.executeAgent(tempCard);
+        // Poll for agent completion to show final result in chat
+        var unwatch = $scope.$watch(function () { return vm.agentResult; }, function (newVal) {
+          if (newVal) {
+            var lastMsg = vm.aiChatMessages[vm.aiChatMessages.length - 1];
+            if (lastMsg && lastMsg._progress) {
+              lastMsg.content = newVal.error ? '❌ ' + newVal.error : (newVal.summary ? '✅ ' + newVal.summary : '✅ Agent completed');
+              delete lastMsg._progress;
+            }
+            unwatch();
+          }
+        });
+        return;
+      }
+
+      // Ask mode — simple chat
       vm.aiChatMessages.push({ role: 'user', content: userMsg });
       vm.aiChatLoading = true;
       var messages = vm.aiChatMessages.map(function (m) { return { role: m.role, content: m.content }; });
