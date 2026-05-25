@@ -547,7 +547,7 @@ header h1 {
 }
 
 .brand-link:visited {
-	color: var(--brand-accent);
+	color: var(--brand-secondary);
 }
 
 /* About Popup Panel */

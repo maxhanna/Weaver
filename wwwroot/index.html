@@ -25,7 +25,8 @@
         <button class="options-btn small brand-link" ng-click="vm.toggleProjectOptions()"
           ng-class="{active: vm.showProjectOptions}">Options ▾</button>
         <div class="options-menu" ng-if="vm.showProjectOptions">
-          <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit Projects</button>
+          <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit
+            Projects</button>
           <button class="brand-link" ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
         </div>
       </div>
@@ -55,7 +56,8 @@
           <div class="ai-input-row">
             <input ng-model="vm.aiChatInput" placeholder="Ask the AI agent..."
               ng-keydown="$event.key==='Enter' && vm.sendAiChat()" ng-disabled="vm.aiChatLoading" />
-            <button class="brand-link" ng-click="vm.sendAiChat()" ng-disabled="vm.aiChatLoading || !vm.aiChatInput">Send</button>
+            <button class="brand-link" ng-click="vm.sendAiChat()"
+              ng-disabled="vm.aiChatLoading || !vm.aiChatInput">Send</button>
             <button class="small ghost brand-link" ng-click="vm.clearAiChat()" title="Clear chat">✕</button>
           </div>
         </div>
@@ -317,8 +319,7 @@
       </div>
       <div class="popup-body" style="text-align:center;">
         <p style="font-size:1.1em; margin-bottom:16px;">Connect with the Maestro community!</p>
-        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer"
-          style="display:inline-block; padding:12px 32px; background:#5865F2; color:#fff; border-radius:6px; text-decoration:none; font-weight:bold; font-size:1.1em;">
+        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer" class="brand-link">
           Join Discord Server
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
@@ -328,7 +329,8 @@
       </div>
       <div class="popup-body">
         <div class="link-item github-link">
-          <a href="https://github.com/maxhanna/Maestro" target="_blank">https://github.com/maxhanna/Maestro</a>
+          <a href="https://github.com/maxhanna/Maestro" target="_blank"
+            class="brand-link">https://github.com/maxhanna/Maestro</a>
         </div>
       </div>
       <div class="popup-footer">
@@ -376,7 +378,8 @@
         </div>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <label for="settings-build-commands" class="settings-header">Build Commands</label>
-          <textarea id="settings-build-commands" ng-model="vm.buildCommands" placeholder="Enter build commands, one per line" rows="4"></textarea>
+          <textarea id="settings-build-commands" ng-model="vm.buildCommands"
+            placeholder="Enter build commands, one per line" rows="4"></textarea>
         </div>
       </div>
       <div class="popup-footer">

@@ -128,27 +128,12 @@
 .card a {
     color: var(--brand-primary);
     text-decoration: none;
+    transition: color 0.2s;
 }
 
 .card a:hover {
     color: var(--brand-secondary);
     text-decoration: underline;
-}
-
-.card.brand-enhanced a {
-    color: var(--brand-secondary);
-}
-
-.card.brand-enhanced a:hover {
-    color: var(--brand-primary);
-}
-
-.card.brand-card a {
-    color: var(--brand-secondary);
-}
-
-.card.brand-card a:hover {
-    color: var(--brand-primary);
 }
 
 .card .card-text textarea {
