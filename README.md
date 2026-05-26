@@ -1,14 +1,11 @@
-# Maestro Backend
+﻿# Maestro Backend
 
-This is a lightweight ASP.NET Core backend that:
-
-- Spawns a shell-like terminal and exposes simple HTTP APIs to start it, run commands, and read output.
-- Proxies AI requests to a llama.cpp HTTP server (ie: `http://localhost:8080`).
-- Serves a small AngularJS-based Kanban frontend from `wwwroot/` that interacts with the above APIs.
+Maestro is an advanced agentic backend system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It serves as a powerful foundation for building AI-powered workflows that can execute complex tasks autonomously.
 
 ## Requirements
 
 - .NET 10 SDK (or compatible runtime)
+- llama.cpp server / Ollama 
 
 ## Run
 

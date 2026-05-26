@@ -12,7 +12,11 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-    <div class="brand-logo-container brand-logo-enhanced brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
+    <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
+      <svg class="logo-icon-enhanced" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="10" fill="currentColor" />
+        <path d="M12 6L12 18M6 12L18 12" stroke="white" stroke-width="2" stroke-linecap="round" />
+      </svg>
       <span class="logo-text-enhanced">Maestro</span>
     </div>
     <div class="project-picker">
@@ -216,51 +220,56 @@
           </div>
 
           <div class="agent-result span-full" ng-if="!vm.streamingActive && vm.agentResult">
-            <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
-            <div class="agent-warning" ng-if="vm.agentResult.warning">{{vm.agentResult.warning}}</div>
-            <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
-              {{vm.agentResult.summary}}</div>
-            <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
-              <strong>Files changed ({{vm.agentResult.filesEdited.length}})</strong>
-              <div class="file-edit-chip" ng-repeat="f in vm.agentResult.filesEdited">{{f.path}} <span
-                  class="chip-meta">{{f.editAction}}</span></div>
-            </div>
-            <details ng-if="vm.agentResult.thinking">
-              <summary>🧠 Reasoning</summary>
-              <pre class="streaming-text">{{vm.agentResult.thinking}}</pre>
-            </details>
-            <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
-              <details>
-                <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
-                <div class="log-entries">
-                  <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
-                    <span class="log-ts">{{e.ts}}</span>
-                    <span class="log-msg">{{e.message}}</span>
-                    <details ng-if="e.detail" class="log-detail">
-                      <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
-                          style="font-weight:600;color:var(--error);">!</span></summary>
-                      <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                      <div ng-if="e.detail.diagnosis" class="log-diagnosis">
-                        <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
-                          opening quote on "newString" key</div>
-                        <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing
-                          opening quote on "oldString" key</div>
-                        <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON
-                          blocks found in response</div>
-                        <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified
-                          the text</div>
-                        <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be
-                          truncated (no closing brace)</div>
-                        <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains
-                          markdown comments (## or ?)</div>
-                        <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
-                          <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
-                        </div>
-                      </div>
-                    </details>
-                  </div>
-                </div>
+            <!-- AI Analysis Section -->
+            <div class="agent-analysis-section">
+              <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
+              <div class="agent-warning" ng-if="vm.agentResult.warning">{{vm.agentResult.warning}}</div>
+              <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
+                {{vm.agentResult.summary}}</div>
+              <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
+                <strong>Files changed ({{vm.agentResult.filesEdited.length}})</strong>
+                <div class="file-edit-chip" ng-repeat="f in vm.agentResult.filesEdited">{{f.path}} <span
+                    class="chip-meta">{{f.editAction}}</span></div>
+              </div>
+              <details ng-if="vm.agentResult.thinking">
+                <summary>🧠 Reasoning</summary>
+                <pre class="streaming-text">{{vm.agentResult.thinking}}</pre>
               </details>
+              
+              <!-- Logs Section -->
+              <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
+                <details>
+                  <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
+                  <div class="log-entries">
+                    <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
+                      <span class="log-ts">{{e.ts}}</span>
+                      <span class="log-msg">{{e.message}}</span>
+                      <details ng-if="e.detail" class="log-detail">
+                        <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
+                            style="font-weight:600;color:var(--error);">!</span></summary>
+                        <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                        <div ng-if="e.detail.diagnosis" class="log-diagnosis">
+                          <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
+                            opening quote on "newString" key</div>
+                          <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing
+                            opening quote on "oldString" key</div>
+                          <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON
+                            blocks found in response</div>
+                          <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified
+                            the text</div>
+                          <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be
+                            truncated (no closing brace)</div>
+                          <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains
+                            markdown comments (## or ?)</div>
+                          <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
+                            <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </details>
+              </div>
             </div>
           </div>
         </div>

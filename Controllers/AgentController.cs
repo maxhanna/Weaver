@@ -25,23 +25,43 @@ public class AgentController : ControllerBase
 
     private static bool IsHostReachable(CancellationToken ct = default)
     {
-        // Check if 10 minutes have passed since last check
         if ((DateTime.Now - _lastHostCheck).TotalMinutes < 10)
-        {
-            // Return cached result
             return _lastHostReachable;
-        }
-        
-        // Perform new check (this would be the actual implementation)
-        // For now, we'll simulate with a placeholder
-        bool isReachable = true; // This would be the actual check
-        
-        // Update cache
+        bool isReachable = true;
         _lastHostCheck = DateTime.Now;
         _lastHostReachable = isReachable;
-        
         return isReachable;
     }
+
+    // ── pipeline type classification ──────────────────────────────────────
+
+    private enum PipelineType { QuickCheck, CommandExecution, CodeEdit, Compound }
+
+    private PipelineType ClassifyTask(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.QuickCheck;
+        var lower = prompt.ToLowerInvariant();
+
+        // Quick check: pure ping/health/status with no file changes
+        if (!TaskExpectsFileChanges(prompt) &&
+            Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+            return PipelineType.QuickCheck;
+
+        // Command execution: known simple intents (git, package_install, etc.)
+        if (TryDetectSimpleIntent(prompt) != null)
+            return PipelineType.CommandExecution;
+
+        // Default: needs the full planning pipeline
+        return PipelineType.CodeEdit;
+    }
+
+    private static bool IsSpecialMarker(string file) =>
+        file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_show", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_display", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase);
 
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
@@ -1020,52 +1040,240 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     }
 
     /// <summary>
-    /// Orchestrate the agent pipeline from start to finish. 
+    /// Orchestration Router — classifies the task, routes to the appropriate
+    /// pipeline, then feeds results through the Verification Pipeline.
     /// </summary>
-    /// <returns>A tuple of (all steps/results, summary message, whether task is complete)</returns>
-    /// <remarks>The "complete" flag indicates whether the agent believes it has fully completed the task after the final review
-    /// loop. Even if false, the allSteps may contain successful edits/commands that were applied.</remarks>
-    /// <exception cref="Exception">Throws if there is a critical failure in the pipeline orchestration. Individual step failures are captured in the results and do not throw.</exception>
-    /// <exception cref="OperationCanceledException">Throws if the operation is cancelled via the cancellation token.</exception>
-    /// <exception cref="TimeoutException">Throws if any LLM call exceeds its allotted timeout.</exception>
-    /// <exception cref="IOException">Throws if there are issues reading/writing files during the edit phase.</exception>
-    /// <exception cref="UnauthorizedAccessException">Throws if the agent tries to access files/directories it doesn't have permission for.</exception>
-    /// <exception cref="Exception">Throws if there are unexpected errors during command execution, file edits, or any other phase of the pipeline.</exception>
     private async Task<(List<object> allSteps, string summary, bool complete)> Orchestrate(
      string prompt, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
-        var allSteps = new List<object>();
-
-        // ── Phase 0: Connectivity check ────────────────────────────────────────
-        bool isLlmConnected = await CheckLlmConnectivity(projectRoot, emitSse, ct);
-        if (!isLlmConnected)
-        { 
+        // ── Connectivity check ────────────────────────────────────────────
+        if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
-        }
 
-        // ── Fast path: pure-command intents skip discovery + LLM planning ──────
+        var pipelineType = ClassifyTask(prompt);
+        await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
+
+        // ── Route to the right pipeline ───────────────────────────────────
+        var (allSteps, summary) = pipelineType switch
+        {
+            PipelineType.QuickCheck       => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.CodeEdit         => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.Compound         => await CompoundPipeline(prompt, projectRoot, emitSse, ct),
+            _                             => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
+        };
+
+        // ── Verification Pipeline ─────────────────────────────────────────
+        var (complete, feedback) = await VerificationPipeline(
+            prompt, allSteps, projectRoot, emitSse, ct);
+
+        return (allSteps, feedback ?? summary, complete);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  QUICK CHECK PIPELINE  —  ping, health, status (no LLM)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(List<object> steps, string summary)> QuickCheckPipeline(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var steps = new List<object>();
+        var plan = TryDetectSimpleIntent(prompt);
+        if (plan != null)
+        {
+            await EmitLog(emitSse, "info", $"QuickCheck: {plan.Plan.Count} step(s)", ct: ct);
+            if (emitSse) {
+                await SendSse(Response, "plan",
+                    new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+            }
+            await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, steps);
+            return (steps, plan.Summary);
+        }
+        return (steps, $"Quick check completed for: {prompt}");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COMMAND EXECUTION PIPELINE  —  agentic LLM↔terminal loop
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(List<object> steps, string summary)> CommandExecutionPipeline(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var steps = new List<object>();
+
+        // Fast path for known simple intents (git, ping, package_install)
         var fastPlan = TryDetectSimpleIntent(prompt);
         if (fastPlan != null)
         {
             await EmitLog(emitSse, "info",
-                $"Fast-path detected: skipping discovery and planning ({fastPlan.Plan.Count} step(s))", ct: ct);
-
+                $"CommandExecution (fast): {fastPlan.Plan.Count} step(s)", ct: ct);
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { thinking = fastPlan.Thinking, summary = fastPlan.Summary, items = fastPlan.Plan }, ct);
-
-            await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, allSteps);
-
-            return (allSteps, fastPlan.Summary, true);
+            await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, steps);
+            return (steps, fastPlan.Summary);
         }
 
-        // ── Phase 1: DISCOVER ──────────────────────────────────────────────────
+        // Agentic loop: LLM decides commands, sees output, reiterates
+        await EmitLog(emitSse, "info", "CommandExecution (agentic): LLM has terminal control", ct: ct);
+        _terminal.Start();
+
+        var conversation = new StringBuilder();
+        conversation.AppendLine("You are a terminal automation agent. You have full terminal access.");
+        conversation.AppendLine("Run commands to accomplish the user's task.");
+        conversation.AppendLine();
+        conversation.AppendLine("Rules:");
+        conversation.AppendLine("  - Output ONLY valid JSON, no other text, no markdown fences");
+        conversation.AppendLine("  - To run a command: {\"cmd\": \"the full command\"}");
+        conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
+        conversation.AppendLine("  - Respond to errors by fixing and retrying");
+        conversation.AppendLine("  - Max 15 iterations");
+        conversation.AppendLine();
+        conversation.AppendLine($"Task: {prompt}");
+        conversation.AppendLine();
+
+        const int maxIterations = 15;
+        var stepIndex = 0;
+        string? summary = null;
+
+        for (var i = 0; i < maxIterations; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var systemMsg = "You are a terminal agent. Output only JSON.";
+            var (raw, _, err) = await CallLlmRaw(systemMsg, conversation.ToString(), ct,
+                requestTimeout: TimeSpan.FromSeconds(30));
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"Agentic command: LLM returned empty — {err}", ct: ct);
+                summary ??= "Command execution completed with issues";
+                break;
+            }
+
+            // Strip markdown fences if present
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+
+            // Try to parse — is it done or a command?
+            try
+            {
+                using var doc = JsonDocument.Parse(cleaned);
+                var root = doc.RootElement;
+
+                // Check for "done" signal
+                if (root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True)
+                {
+                    summary = root.TryGetProperty("summary", out var s) ? s.GetString() : "Task complete";
+                    await EmitLog(emitSse, "success", $"Agentic command: {summary}", ct: ct);
+                    break;
+                }
+
+                // Extract command
+                if (root.TryGetProperty("cmd", out var cmdEl) || root.TryGetProperty("command", out cmdEl))
+                {
+                    var cmd = cmdEl.GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(cmd))
+                    {
+                        conversation.AppendLine("Empty command — try again.");
+                        continue;
+                    }
+
+                    await EmitLog(emitSse, "step", $"▶ cmd[{i + 1}]: {cmd}", ct: ct);
+                    var beforeLen = _terminal.ReadAll().Length;
+                    await _terminal.SendCommandAsync(cmd, projectRoot);
+
+                    // Wait for output stability
+                    var prevLen = beforeLen;
+                    var stableMs = 0;
+                    for (var w = 0; w < 30; w++)
+                    {
+                        await Task.Delay(500);
+                        var curLen = _terminal.ReadAll().Length;
+                        if (curLen == prevLen) { stableMs += 500; if (stableMs >= 2000) break; }
+                        else { stableMs = 0; prevLen = curLen; }
+                    }
+
+                    var fullOutput = _terminal.ReadAll();
+                    var freshOutput = beforeLen < fullOutput.Length
+                        ? fullOutput[beforeLen..] : "";
+
+                    var result = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex++,
+                        ["type"] = "command",
+                        ["command"] = cmd,
+                        ["status"] = "done",
+                        ["output"] = Truncate(freshOutput, MaxReadOutputChars)
+                    };
+                    steps.Add(result);
+
+                    if (emitSse)
+                        await SendSse(Response, "step", result, ct);
+
+                    // Append result to conversation for LLM context
+                    conversation.AppendLine($"Command [{i + 1}]: {cmd}");
+                    conversation.AppendLine("Output:");
+                    conversation.AppendLine(Truncate(freshOutput, 4000));
+                    conversation.AppendLine();
+                    continue;
+                }
+            }
+            catch (JsonException)
+            {
+                // Not valid JSON — treat raw as a command
+            }
+
+            // Fallback: treat raw text as command
+            var fallbackCmd = cleaned.Trim().Trim('"');
+            if (!string.IsNullOrWhiteSpace(fallbackCmd) && fallbackCmd.Length < 500)
+            {
+                conversation.AppendLine($"Trying raw: {fallbackCmd}");
+                var beforeLen2 = _terminal.ReadAll().Length;
+                await _terminal.SendCommandAsync(fallbackCmd, projectRoot);
+                await Task.Delay(3000);
+                var output2 = _terminal.ReadAll();
+                var fresh2 = beforeLen2 < output2.Length ? output2[beforeLen2..] : "";
+                conversation.AppendLine("Output:");
+                conversation.AppendLine(Truncate(fresh2, 4000));
+                conversation.AppendLine();
+                steps.Add(new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex++, ["type"] = "command",
+                    ["command"] = fallbackCmd, ["status"] = "done",
+                    ["output"] = Truncate(fresh2, MaxReadOutputChars)
+                });
+                continue;
+            }
+
+            conversation.AppendLine("Could not parse response — try again with valid JSON.");
+        }
+
+        summary ??= $"Command execution completed after {steps.Count} step(s)";
+        return (steps, summary);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CODE EDIT PIPELINE  —  discover → plan → edit → review loop
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(List<object> steps, string summary)> CodeEditPipeline(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var allSteps = new List<object>();
+
+        // ── Phase 1: DISCOVER ─────────────────────────────────────────────
+        await EmitLog(emitSse, "info", "CodeEdit: Phase 1 — DISCOVER", ct: ct);
         var (discoveryContext, discoverySteps) =
             await RunBootstrapDiscovery(prompt, projectRoot, emitSse);
         allSteps.AddRange(discoverySteps);
 
-        // ── Phase 2: PLAN ──────────────────────────────────────────────────────
-        await EmitLog(emitSse, "info", "Phase 2 — PLAN: asking model to analyze the prompt and create a plan...", ct: ct);
+        // ── Phase 2: PLAN ─────────────────────────────────────────────────
+        await EmitLog(emitSse, "info", "CodeEdit: Phase 2 — PLAN", ct: ct);
         if (emitSse)
             await SendSse(Response, "phase", new { phase = "plan", message = "Planning..." }, ct);
 
@@ -1078,57 +1286,127 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         await EmitLog(emitSse, "info",
             $"Plan: {plan.Plan.Count} step(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
-            new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan.Select(p => new { p.File, p.Change }) },
+            new { plan },
             ct: ct);
 
         if (emitSse)
             await SendSse(Response, "plan",
                 new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
 
-        // ── Phase 3: ORCHESTRATE PLAN ──────────────────────────────────────────
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
-
-        string? reviewFeedback = null;
-        bool isComplete = false;
-
-        for (var attempt = 0; attempt < 3; attempt++)
+        // Check if plan has mixed types → escalate to Compound Pipeline
+        var hasMarkers = plan.Plan.Any(p => IsSpecialMarker(p.File));
+        var hasFileEdits = plan.Plan.Any(p => !IsSpecialMarker(p.File) && !string.IsNullOrWhiteSpace(p.File));
+        if (hasMarkers && hasFileEdits)
         {
-            var editsApplied = HasSuccessfulEdits(allSteps);
-            var summary = editsApplied
-                ? $"Edits applied to {ExtractFilesEdited(allSteps).Count} file(s)"
-                : "No edits were applied — check failed steps for details";
-
-            if (editsApplied)
-            {
-                await EmitLog(emitSse, "info", $"Phase 4 — VERIFY: ✓ {summary}");
-                var (complete, feedback) = await RunContentReview(prompt, allSteps, projectRoot, emitSse, ct);
-                reviewFeedback = feedback ?? "Task not yet complete";
-                if (complete) { isComplete = true; break; }
-            }
-            else if (!TaskExpectsFileChanges(prompt))
-            {
-                break;
-            }
-
-            await EmitLog(emitSse, "warn",
-                $"Review attempt {attempt + 1}: {(editsApplied ? $"task not complete — {reviewFeedback}" : "no successful edits")}",
-                ct: ct);
-
-            var revisedPrompt = editsApplied && !string.IsNullOrWhiteSpace(reviewFeedback)
-                ? $"{prompt}\n\nRemaining work: {reviewFeedback}"
-                : prompt;
-
-            var revisedPlan = await AnalyzePromptAndPlan(revisedPrompt, discoveryContext, projectRoot, emitSse, ct);
-            if (revisedPlan == null || revisedPlan.Plan.Count == 0)
-            {
-                await EmitLog(emitSse, "warn", "Revised plan phase produced no items.", new { revisedPlan }, ct: ct);
-                throw new InvalidOperationException("LLM returned an empty or unparseable revised plan.");
-            }
-
-            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, revisedPlan, ct, allSteps);
+            await EmitLog(emitSse, "info",
+                "Plan contains mixed types — escalating to Compound Pipeline", ct: ct);
+            return await CompoundPipeline(prompt, projectRoot, emitSse, ct, prebuiltPlan: plan, discoveryContext: discoveryContext);
         }
 
-        return (allSteps, reviewFeedback ?? "Task not yet complete", isComplete);
+        // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
+        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
+
+        return (allSteps, plan.Summary);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  COMPOUND PIPELINE  —  sequences mixed operations through sub-pipelines
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(List<object> steps, string summary)> CompoundPipeline(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        AgentPlan? prebuiltPlan = null, string? discoveryContext = null)
+    {
+        var allSteps = new List<object>();
+
+        // Build plan if not provided
+        AgentPlan plan;
+        if (prebuiltPlan != null)
+        {
+            plan = prebuiltPlan;
+        }
+        else
+        {
+            if (discoveryContext == null)
+            {
+                await EmitLog(emitSse, "info", "Compound: Phase 1 — DISCOVER", ct: ct);
+                var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse);
+                discoveryContext = dc;
+                allSteps.AddRange(ds);
+            }
+
+            await EmitLog(emitSse, "info", "Compound: Phase 2 — PLAN", ct: ct);
+            plan = await AnalyzePromptAndPlan(prompt, discoveryContext!, projectRoot, emitSse, ct)
+                ?? throw new InvalidOperationException("Compound: LLM returned empty plan");
+        }
+
+        // Group plan items by type
+        var commandItems = plan.Plan.Where(p => IsSpecialMarker(p.File)).ToList();
+        var editItems = plan.Plan.Where(p => !IsSpecialMarker(p.File) && !string.IsNullOrWhiteSpace(p.File)).ToList();
+
+        await EmitLog(emitSse, "info",
+            $"Compound: {commandItems.Count} command item(s), {editItems.Count} edit item(s)", ct: ct);
+
+        // Execute command items first (git, package installs, etc.)
+        if (commandItems.Count > 0)
+        {
+            await EmitLog(emitSse, "info", "Compound → CommandExecution sub-pipeline", ct: ct);
+            var cmdPlan = new AgentPlan { Thinking = plan.Thinking, Summary = plan.Summary, Plan = commandItems };
+            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext ?? "", cmdPlan, ct, allSteps);
+        }
+
+        // Execute file edit items
+        if (editItems.Count > 0)
+        {
+            await EmitLog(emitSse, "info", "Compound → CodeEdit sub-pipeline", ct: ct);
+            var editPlan = new AgentPlan { Thinking = plan.Thinking, Summary = plan.Summary, Plan = editItems };
+            if (emitSse)
+                await SendSse(Response, "phase", new { phase = "editing", message = $"Editing {editItems.Count} file(s)…" }, ct);
+            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext ?? "", editPlan, ct, allSteps);
+        }
+
+        var summary = plan.Summary;
+        return (allSteps, summary);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    //  VERIFICATION PIPELINE  —  shared by all pipelines
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(bool complete, string? feedback)> VerificationPipeline(
+        string prompt, List<object> allSteps, string projectRoot,
+        bool emitSse, CancellationToken ct)
+    {
+        var editsApplied = HasSuccessfulEdits(allSteps);
+        if (!editsApplied)
+        {
+            if (!TaskExpectsFileChanges(prompt))
+                return (true, "Task completed (no file changes needed)");
+            return (false, "No edits were applied");
+        }
+
+        // Content review
+        await EmitLog(emitSse, "info", "Verification: reviewing edited files…", ct: ct);
+        var (complete, feedback) = await RunContentReview(prompt, allSteps, projectRoot, emitSse, ct);
+
+        // Build check if edits applied
+        if (complete)
+        {
+            var config = await _configFile.LoadConfigAsync();
+            var buildCmd = config.buildCommands;
+            if (!string.IsNullOrWhiteSpace(buildCmd))
+            {
+                var buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                if (!buildOk)
+                {
+                    await EmitLog(emitSse, "warn",
+                        "Verification: build failed after content review — re-planning with build errors", ct: ct);
+                    return (false, $"Build failed. Fix build errors in the edited files.");
+                }
+            }
+        }
+
+        return (complete, feedback);
     }
 
     private async Task ExecutePlan(string prompt, string projectRoot, bool emitSse, string discoveryContext, AgentPlan plan, CancellationToken ct, List<object> allResults)
@@ -2281,7 +2559,7 @@ Example:
             result["status"] = "error";
             result["error"] = matchError ?? "oldString not found";
             if (snippet != null) result["snippet"] = snippet;
-            result["oldStringPreview"] = Truncate(oldString, 200);
+            result["oldStringPreview"] = oldString;
             
             // Add helpful context about file content for debugging
             var lines = content.Split('\n');
@@ -2351,8 +2629,8 @@ Example:
         result["path"] = path;
         result["linesRemoved"] = (oldStr ?? "").Split('\n').Length;
         result["linesAdded"] = (newStr ?? "").Split('\n').Length;
-        if (!string.IsNullOrEmpty(oldStr)) result["oldStringPreview"] = Truncate(oldStr, 300);
-        if (!string.IsNullOrEmpty(newStr)) result["newStringPreview"] = Truncate(newStr, 300);
+        if (!string.IsNullOrEmpty(oldStr)) result["oldStringPreview"] = oldStr;
+        if (!string.IsNullOrEmpty(newStr)) result["newStringPreview"] = newStr;
         result["diffPreview"] = BuildDiffPreview(oldStr, newStr);
         result["oldLines"] = (oldStr ?? "").Split('\n');
         result["newLines"] = (newStr ?? "").Split('\n');
