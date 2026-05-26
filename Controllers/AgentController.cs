@@ -685,8 +685,8 @@ If unsure, use CodeEdit.";
         const string systemPrompt = @"You are a coding specialist agent.
 
 Given a task and the contents of project files, output a structured plan. 
-For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field.
-When describing changes, be very specific and detailed. The more precise you are, the better the agent can execute the plan.
+
+For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field. 
 
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
 {
@@ -701,15 +701,17 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
   ]
 }
 
-The ""change"" field is CRITICAL — it will be passed directly to the handler so it knows exactly what to do.
-Make it specific and accurate.
+Rules for the ""file"" field:
+- Must be an actual relative file path (e.g. ""src/app.js""). 
 
-FILE EDIT RULES (only when NOT using a special marker): 
-- Priority 1 = most important file. Sort by priority ascending.
-- When describing changes, quote exact existing code to modify.
-- DO NOT write any code yet. DO NOT include oldString or newString.
+Rules for the ""change"" field:
+- When describing changes, quote exact existing code to modify. Mention specific lines.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
-- If you're unsure about exact code, describe the location and intent clearly.";
+- If you're unsure about exact code, describe the location and intent clearly.
+
+Rules for the ""priority"" field:
+- Must be a positive integer.
+- Lower numbers indicate higher priority.";
 
         var analysisPrompt = new StringBuilder();
         analysisPrompt.AppendLine("## Task");
@@ -1205,7 +1207,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             else
             {
                 string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
-                await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
+                await EmitLog(emitSse, "info", "Starting reprisal attempt(s) based on feedback.", ct: ct);
                 int attempt = 0;
                 while (attempt < 5 && !complete)
                 {
@@ -1221,10 +1223,15 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             return t is "list" or "grep" or "glob" or "read";
                         }).ToList());
                     allSteps.AddRange(reprisalSteps);
-                    var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
+                    var (reprisalComplete, reprisalFeedback) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
                     if (!reprisalComplete)
                     {
                         await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+                    }
+                    if (feedback != reprisalFeedback)
+                    {
+                        await EmitLog(emitSse, "info", "Feedback updated after reprisal attempt.", new { oldFeedback = feedback, newFeedback = reprisalFeedback }, ct: ct);
+                        feedback = reprisalFeedback;
                     }
                     summary = reprisalSummary;
                     thinking = reprisalThinking;
