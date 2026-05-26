@@ -24,8 +24,8 @@ foreach (var filePath in jsFiles)
     {
         string jsContent = File.ReadAllText(filePath);
         
-        // Native C# interpreter parsing pass
-        engine.Modules.Add("temp_module", jsContent);
+        // Native C# interpreter parsing pass — use unique key per file
+        engine.Modules.Add(Path.GetFileNameWithoutExtension(filePath), jsContent);
     }
     catch (Exception ex)
     {
