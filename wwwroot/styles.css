@@ -90,6 +90,24 @@ button.btn-ready {
 	box-shadow: var(--brand-shadow);
 }
 
+button.brand-button {
+	background: var(--brand-gradient);
+	border: none;
+	color: #012;
+	font-weight: 700;
+	padding: 10px 20px;
+	border-radius: 12px;
+	transition: all 0.3s ease;
+	box-shadow: var(--brand-shadow), 0 4px 15px rgba(6, 182, 212, 0.3);
+	transform: translateY(0);
+}
+
+button.brand-button:hover {
+	box-shadow: var(--brand-glow), 0 0 25px rgba(6, 182, 212, 0.5);
+	transform: translateY(-2px);
+	transition: all 0.2s ease;
+}
+
 button.brand-enhanced {
 	background: var(--brand-gradient);
 	border: none;
@@ -102,9 +120,10 @@ button.brand-enhanced {
 	transform: translateY(0);
 	font-size: 14px;
 }
-.card.brand-enhanced:hover {
-	transform: translateY(-5px);
-	box-shadow: var(--brand-glow), 0 10px 25px rgba(6, 182, 212, 0.3), 0 0 30px rgba(6, 182, 212, 0.2);
+
+button.brand-enhanced:hover {
+	box-shadow: var(--brand-glow), 0 0 25px rgba(6, 182, 212, 0.5);
+	transform: translateY(-2px);
 	transition: all 0.2s ease;
 }
 
@@ -280,6 +299,16 @@ header.brand-enhanced h1 span.brand-badge {
 	border: 1px solid rgba(255, 255, 255, 0.15);
 	transition: all 0.3s ease;
 	transform: scale(1);
+	font-size: 11px;
+	padding: 4px 12px;
+	border-radius: 999px;
+	color: var(--accent);
+	font-weight: 700;
+	letter-spacing: 0.5px;
+	margin-left: 8px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
 }
 
 header.brand-enhanced h1 span.brand-badge:hover {
@@ -950,25 +979,66 @@ h1 .brand-e:hover::before {
 	opacity: 0.5;
 }
 
-h1 .brand-logo {
-	font-size: 28px;
-	font-weight: 800;
-	letter-spacing: -0.8px;
+.brand-logo-enhanced {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 20px;
+	border-radius: 16px;
 	background: var(--brand-gradient);
+	color: #012;
+	font-weight: 700;
+	font-size: 18px;
+	box-shadow: var(--brand-shadow);
+	transition: all 0.3s ease;
+	border: none;
+	cursor: pointer;
+	min-width: 180px;
+	justify-content: center;
+}
+
+.brand-logo-enhanced:hover {
+	transform: translateY(-3px);
+	box-shadow: var(--brand-glow), 0 12px 30px rgba(6, 182, 212, 0.4);
+	background: var(--brand-gradient);
+}
+
+.logo-icon-enhanced {
+	font-size: 24px;
+	transition: all 0.3s ease;
+}
+
+.logo-icon-enhanced:hover {
+	transform: scale(1.1);
+}
+
+.logo-text-enhanced {
+	font-size: 18px;
+	font-weight: 700;
+	background: linear-gradient(135deg, var(--brand-primary), var(--brand-secondary));
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
 	background-clip: text;
-	text-shadow: 0 4px 12px rgba(6, 182, 212, 0.2), 0 0 20px rgba(6, 182, 212, 0.1);
+	text-fill-color: transparent;
 	transition: all 0.3s ease;
-	position: relative;
-	z-index: 1;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 16px;
-	border-radius: 12px;
-	background: var(--brand-gradient);
-	box-shadow: var(--brand-shadow), 0 0 15px rgba(6, 182, 212, 0.3);
+	letter-spacing: 0.5px;
+	white-space: nowrap;
+}
+
+.logo-icon {
+	font-size: 20px;
+}
+
+.logo-text {
+	font-size: 16px;
+	font-weight: 700;
+	background: linear-gradient(135deg, var(--brand-primary), var(--brand-secondary));
+	-webkit-background-clip: text;
+	-webkit-text-fill-color: transparent;
+	background-clip: text;
+	text-fill-color: transparent;
+	transition: all 0.3s ease;
+	letter-spacing: 0.5px;
 }
 
 .brand-icon {
@@ -996,6 +1066,12 @@ h1 .brand-badge {
 	display: flex;
 	align-items: center;
 	gap: 4px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+h1 .brand-badge:hover {
+	transform: scale(1.05);
+	box-shadow: var(--brand-glow), 0 4px 12px rgba(6, 182, 212, 0.3);
 }
 
 /* Additional brand enhancements */

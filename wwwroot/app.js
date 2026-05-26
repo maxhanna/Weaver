@@ -135,6 +135,8 @@
 
     // Settings
     vm.settingsDefaultProject = '';
+    vm.fileHints = '';
+    vm.fileHintsJson = '';
 
     // === Load settings from localStorage ===
     function loadSettings() {
@@ -154,6 +156,11 @@
       } catch (e) { }
     }
 
+    function saveFileHints() {
+      var fileHintsJson = vm.fileHints || '';
+      return $http.post('/api/filehints', { fileHints: fileHintsJson });
+    }
+
     vm.saveSettings = function () {
       saveSettings();
       $http.get('/api/config').then(function (resp) {
@@ -163,8 +170,9 @@
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
         cfg.showKanban = vm.showKanban !== false;
-        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";  
         cfg.buildCommands = vm.buildCommands;
+        cfg.fileHints = vm.fileHints;
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -195,6 +203,7 @@
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
+        vm.fileHints = cfg.fileHints || "";
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -279,6 +288,10 @@
     vm.openSettingsPanel = function () {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
+      // Load file hints when opening settings panel
+      $http.get('/api/filehints').then(function (resp) {
+        vm.fileHints = resp.data || '';
+      });
       // Show backdrop when settings panel is opened
       var backdrop = document.getElementById('backdrop');
       if (backdrop) {

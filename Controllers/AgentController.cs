@@ -17,6 +17,7 @@ public class AgentController : ControllerBase
     private const int MaxReadOutputChars = 24_000;
     private const int MaxWebResponseChars = 24_000;
     private const int MaxPlanFiles = 5;   // plan phase: cap files to avoid token bloat
+    private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static DateTime _lastHostCheck = DateTime.MinValue;
@@ -181,6 +182,68 @@ public class AgentController : ControllerBase
     // ═════════════════════════════════════════════════════════════════════════
     //  PATH HELPERS
     // ═════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Infers the correct subfolder for a new file based on naming conventions
+    /// and content patterns discovered in the repo.
+    /// </summary>
+    private static string InferTargetFolder(string fileName, string projectRoot)
+    {
+        var name = Path.GetFileName(fileName.Replace('/', Path.DirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(name)) return "";
+
+        // If the path already includes a directory, respect it
+        var dir = Path.GetDirectoryName(fileName.Replace('/', Path.DirectorySeparatorChar)) ?? "";
+        if (!string.IsNullOrWhiteSpace(dir))
+            return dir.Replace('\\', '/') + "/";
+
+        // Controller files — *Controller.cs
+        if (name.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase))
+            return "Controllers/";
+
+        // Service files — *Service.cs, *Manager.cs
+        if (name.EndsWith("Service.cs", StringComparison.OrdinalIgnoreCase) ||
+            name.EndsWith("Manager.cs", StringComparison.OrdinalIgnoreCase))
+            return "Services/";
+
+        // Pipeline files
+        if (name.EndsWith("Pipeline.cs", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Pipeline", StringComparison.OrdinalIgnoreCase))
+            return "Pipelines/";
+
+        // Routing files
+        if (name.EndsWith("Router.cs", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Router", StringComparison.OrdinalIgnoreCase) ||
+            name.EndsWith("Routing.cs", StringComparison.OrdinalIgnoreCase))
+            return "Routing/";
+
+        // Frontend files — wwwroot
+        var frontendExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { ".html", ".js", ".css", ".mjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte" };
+        if (frontendExts.Contains(Path.GetExtension(name)))
+            return "wwwroot/";
+
+        // Config files — placed at root
+        var configFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "appsettings.json", "maestroconfig.json", "filehints.json", ".gitignore",
+              "appsettings.development.json", "appsettings.production.json" };
+        if (configFiles.Contains(name))
+            return "";
+
+        // Docs — .md files
+        if (name.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            return "Docs/";
+
+        // CS files with "Dto", "Model", "Entity" → Models/ (create if exists)
+        var modelsDir = Path.Combine(projectRoot, "Models");
+        if ((name.EndsWith("Dto.cs", StringComparison.OrdinalIgnoreCase) ||
+             name.EndsWith("Model.cs", StringComparison.OrdinalIgnoreCase) ||
+             name.EndsWith("Entity.cs", StringComparison.OrdinalIgnoreCase)) &&
+            Directory.Exists(modelsDir))
+            return "Models/";
+
+        return "";
+    }
 
     private string ResolveWorkspaceRoot()
     {
@@ -541,6 +604,14 @@ SHOWING INFORMATION to the user:
 CREATING NEW FILES:
   Set ""file"" to ""_create_file"". In ""change"", describe what file to create and its contents.
   IMPORTANT: Use correct filename with leading dot (e.g. "".editorconfig"", not ""_editorconfig"").
+  FOLDER CONVENTIONS — when describing a new file, mention its type so the system places it correctly:
+    • Controllers → file names ending with Controller.cs → e.g. ""Controllers/FooController.cs""
+    • Services → file names ending with Service.cs or Manager.cs → e.g. ""Services/FooService.cs""
+    • Frontend (.html, .js, .css) → wwwroot/ folder → e.g. ""wwwroot/foo.js""
+    • Docs (.md) → Docs/ folder → e.g. ""Docs/FEATURE.md""
+    • Pipelines → Pipelines/ folder
+    • Routing → Routing/ folder
+  If you don't specify a folder, the system infers it from the file name pattern above.
 
 FILE EDIT RULES (only when NOT using a special marker):
 - Only list files that actually exist in the Project Discovery section below.
@@ -706,537 +777,7 @@ FILE EDIT RULES (only when NOT using a special marker):
         }
         return changed ? sb.ToString() : null;
     }
-    
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PHASE 3 — EDIT
-    //  One focused LLM call per file from the plan.
-    //  The model receives the full file content + the plan's change description.
-    //  It MUST output {oldString, newString} patches — nothing else.
-    //  Up to 2 retries per file, with diagnostic hints on failure.
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private async Task<List<object>> RunEditPhase(
-        List<PlanItem> plan, string discoveryContext, string projectRoot,
-        int startIndex, bool emitSse, string originalPrompt, CancellationToken ct = default)
-    {
-        var allResults = new List<object>();
-
-        if (plan.Count == 0)
-        {
-            await EmitLog(emitSse, "warn", "Phase 3 — EDIT: plan is empty, nothing to edit", ct: ct);
-            return allResults;
-        }
-
-        await EmitLog(emitSse, "info", $"Phase 3 — EDIT: applying edits to {plan.Count} planned file(s)", ct: ct);
-        if (emitSse)
-            await SendSse(Response, "phase", new { phase = "edit", message = $"Editing {plan.Count} file(s)…" }, ct);
-
-        var idx = startIndex;
-        var editHistory = new List<(string path, string preContent)>();
-        foreach (var item in plan.OrderBy(p => p.Priority))
-        {
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-
-                var relPath = (item.File ?? "").Replace('\\', '/');
-                if (string.IsNullOrWhiteSpace(relPath)) continue;
-
-                // Detect package install operations — run command step instead of edit
-                var changeDesc = (item.Change ?? "").Trim();
-                if (relPath.Equals("_package_install", StringComparison.OrdinalIgnoreCase))
-                {
-                    var installCmd = changeDesc.Trim().Trim('`', '"', '\'');
-                    await EmitLog(emitSse, "info", $"Package install: {installCmd}", ct: ct);
-                    var cmdStep = new AgentStep
-                    {
-                        Index = 0, Type = "command", Command = installCmd,
-                        Description = $"install package: {installCmd}"
-                    };
-                    var cmdResults = await ExecuteSteps(new List<AgentStep> { cmdStep }, projectRoot, idx, emitSse, ct);
-                    idx += cmdResults.Count;
-                    allResults.AddRange(cmdResults);
-                    var firstResult = cmdResults.FirstOrDefault() as Dictionary<string, object?>;
-                    var output = firstResult?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
-                    var cmdStatus = firstResult?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
-                    var installOk = cmdStatus == "done" && (
-                        output.Contains("added", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("successfully installed", StringComparison.OrdinalIgnoreCase) ||
-                        !output.Contains("error", StringComparison.OrdinalIgnoreCase));
-                    await EmitLog(emitSse, installOk ? "success" : "warn",
-                        installOk ? "Package installed successfully" : "Package install may have failed — check output", ct: ct);
-                    continue;
-                }
-
-                // Detect ping operations — run ping command and evaluate results
-                if (relPath.Equals("_ping", StringComparison.OrdinalIgnoreCase))
-                {
-                    var pingCmd = changeDesc.Trim().Trim('`', '"', '\'');
-                    // Resolve <llamaUrl> placeholder or generic request to configured LLM URL
-                    if (pingCmd.Contains("<llamaUrl>", StringComparison.OrdinalIgnoreCase) ||
-                        !pingCmd.Contains("ping", StringComparison.OrdinalIgnoreCase) &&
-                        !pingCmd.Contains("Test-NetConnection", StringComparison.OrdinalIgnoreCase) &&
-                        !pingCmd.Contains("nc ", StringComparison.OrdinalIgnoreCase) &&
-                        !pingCmd.Contains("Invoke-WebRequest", StringComparison.OrdinalIgnoreCase) &&
-                        !pingCmd.Contains("curl", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var baseUrl = await GetLlamaBaseUrl();
-                        var uri = new Uri(baseUrl);
-                        pingCmd = OperatingSystem.IsWindows()
-                            ? $"powershell -Command \"Test-NetConnection {uri.Host} -Port {uri.Port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded, SourceAddress, RemoteAddress | Format-List\""
-                            : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
-                    }
-                    await EmitLog(emitSse, "info", $"Ping: {pingCmd}", ct: ct);
-                    var cmdStep = new AgentStep
-                    {
-                        Index = 0, Type = "command", Command = pingCmd,
-                        Description = $"ping: {pingCmd}"
-                    };
-                    var cmdResults = await ExecuteSteps(new List<AgentStep> { cmdStep }, projectRoot, idx, emitSse, ct);
-                    idx += cmdResults.Count;
-                    allResults.AddRange(cmdResults);
-                    var firstResult = cmdResults.FirstOrDefault() as Dictionary<string, object?>;
-                    var output = firstResult?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
-                    var cmdStatus = firstResult?.TryGetValue("status", out var s) == true ? s?.ToString() : "";
-
-                    // Evaluate ping results with LLM
-                    try
-                    {
-                        var evalPrompt = $@"You are a network diagnostics assistant. Analyze these ping results and provide a concise summary.
-
-Ping command: {pingCmd}
-
-Raw output:
-```
-{Truncate(output, 4000)}
-```
-
-Provide a brief analysis covering:
-1. Is the host reachable? (packet loss)
-2. What is the latency like? (min/max/avg)
-3. Any notable patterns or issues?
-
-Be concise — 2-4 sentences max.";
-                        var (analysis, _, _) = await CallLlmRaw(
-                            "You are a network diagnostics assistant. Respond concisely.",
-                            evalPrompt, ct, TimeSpan.FromSeconds(15));
-                        if (!string.IsNullOrWhiteSpace(analysis))
-                        {
-                            firstResult?["pingAnalysis"] = analysis.Trim();
-                            await EmitLog(emitSse, "info", $"Ping analysis: {analysis.Trim()}", ct: ct);
-                        }
-                    }
-                    catch { /* LLM evaluation is best-effort */ }
-
-                    var pingOk = cmdStatus == "done" && (
-                        output.Contains("Reply from", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("TTL", StringComparison.Ordinal) ||
-                        output.Contains("1 received", StringComparison.OrdinalIgnoreCase) ||
-                        output.Contains("0% packet loss", StringComparison.OrdinalIgnoreCase));
-                    await EmitLog(emitSse, pingOk ? "success" : "warn",
-                        pingOk ? "Host is reachable" : "Host may be unreachable — check output", ct: ct);
-                    continue;
-                }
-
-                // Detect git operations — build git command from changeDesc and run via terminal
-                if (relPath.Equals("_git", StringComparison.OrdinalIgnoreCase))
-                {
-                    var gitDesc = (changeDesc.Trim().Trim('`', '"', '\'') + " ").ToLowerInvariant();
-                    string gitCmd;
-                    var gitOp = "";
-
-                    if (gitDesc.StartsWith("commit") || gitDesc.Contains("commit all"))
-                    {
-                        gitOp = "commit";
-                        var msgMatch = Regex.Match(gitDesc, @"""[^""]+""");
-                        var msg = msgMatch.Success
-                            ? msgMatch.Value.Trim('"')
-                            : $"Auto-commit {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-                        gitCmd = $"git add -A && git commit -m \"{msg.Replace("\"", "\\\"")}\"";
-                    }
-                    else if (gitDesc.StartsWith("revert") || gitDesc.Contains("revert all") || gitDesc.Contains("discard"))
-                    {
-                        gitOp = "revert";
-                        gitCmd = "git checkout -- .";
-                    }
-                    else if (gitDesc.StartsWith("branch") || gitDesc.Contains("create branch") || gitDesc.Contains("new branch"))
-                    {
-                        gitOp = "branch";
-                        var branchMatch = Regex.Match(gitDesc, @"branch\s+(\S+)", RegexOptions.IgnoreCase);
-                        var branchName = branchMatch.Success ? branchMatch.Groups[1].Value : $"feature/{DateTime.Now:yyyyMMdd-HHmmss}";
-                        gitCmd = $"git checkout -b {branchName}";
-                    }
-                    else if (gitDesc.StartsWith("pull") || gitDesc.Contains("git pull"))
-                    {
-                        gitOp = "pull";
-                        gitCmd = "git pull";
-                    }
-                    else if (gitDesc.StartsWith("sync") || gitDesc.Contains("push") || gitDesc.Contains("git push"))
-                    {
-                        gitOp = "sync";
-                        gitCmd = "git pull && git push";
-                    }
-                    else
-                    {
-                        // Treat as raw git command
-                        gitOp = "exec";
-                        gitCmd = changeDesc.Trim().Trim('`', '"', '\'');
-                        if (!gitCmd.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
-                            gitCmd = "git " + gitCmd;
-                    }
-
-                    await EmitLog(emitSse, "info", $"Git {gitOp}: {gitCmd}", ct: ct);
-                    var gitStep = new AgentStep
-                    {
-                        Index = 0, Type = "command", Command = gitCmd,
-                        Description = $"git {gitOp}: {gitCmd}"
-                    };
-                    var gitResults = await ExecuteSteps(new List<AgentStep> { gitStep }, projectRoot, idx, emitSse, ct);
-                    idx += gitResults.Count;
-                    allResults.AddRange(gitResults);
-
-                    var gitFirst = gitResults.FirstOrDefault() as Dictionary<string, object?>;
-                    var gitOutput = gitFirst?.TryGetValue("output", out var go) == true ? go?.ToString() ?? "" : "";
-                    var gitStatus = gitFirst?.TryGetValue("status", out var gs) == true ? gs?.ToString() : "";
-
-                    // Extract commit hash for commit operations
-                    string? commitHash = null;
-                    if (gitOp == "commit")
-                    {
-                        var hashMatch = Regex.Match(gitOutput, @"\[[\w/]+ ([a-f0-9]{7,40})\]", RegexOptions.IgnoreCase);
-                        if (hashMatch.Success) commitHash = hashMatch.Groups[1].Value;
-                    }
-
-                    var gitSuccess = gitStatus == "done" && !gitOutput.Contains("fatal", StringComparison.OrdinalIgnoreCase);
-                    await EmitLog(emitSse, gitSuccess ? "success" : "warn",
-                        gitSuccess
-                            ? $"Git {gitOp} completed{(commitHash != null ? $" ({commitHash})" : "")}"
-                            : $"Git {gitOp} may have failed",
-                        new { output = Truncate(gitOutput, 2000) }, ct: ct);
-                    continue;
-                }
-
-                // Detect show/display — send text to frontend for user to see
-                if (relPath.Equals("_show", StringComparison.OrdinalIgnoreCase) ||
-                    relPath.Equals("_display", StringComparison.OrdinalIgnoreCase))
-                {
-                    var showText = (changeDesc.Trim().Trim('`', '"', '\'') + " ")
-                        .Replace("display", "", StringComparison.OrdinalIgnoreCase)
-                        .Replace("show", "", StringComparison.OrdinalIgnoreCase)
-                        .Trim();
-                    if (string.IsNullOrWhiteSpace(showText)) showText = changeDesc.Trim().Trim('`', '"', '\'');
-
-                    await EmitLog(emitSse, "info", showText, ct: ct);
-                    if (emitSse)
-                        await SendSse(Response, "show", new { text = showText }, ct);
-                    var showResult = new Dictionary<string, object?>
-                    {
-                        ["status"] = "done",
-                        ["type"] = "show",
-                        ["output"] = showText
-                    };
-                    allResults.Add(showResult);
-                    continue;
-                }
-
-                // Detect file creation — create new file with LLM-generated content
-                if (relPath.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
-                {
-                    await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
-                    var createResult = await HandleCreateFile(changeDesc, projectRoot, originalPrompt, discoveryContext, idx, emitSse, ct);
-                    idx += createResult.stepsCount;
-                    allResults.AddRange(createResult.results);
-                    continue;
-                }
-
-                var fullPath = Path.GetFullPath(
-                    Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-
-                if (!IsPathUnderRoot(fullPath, projectRoot))
-                {
-                    await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root", ct: ct);
-                    continue;
-                }
-
-                if (emitSse)
-                    await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
-
-                if (!System.IO.File.Exists(fullPath))
-                {
-                    await EmitLog(emitSse, "info", $"File does not exist yet: {relPath} — attempting to create it", ct: ct);
-                    var createResult = await HandleCreateFile(
-                        changeDesc, projectRoot, originalPrompt, discoveryContext, idx, emitSse, ct,
-                        explicitRelPath: relPath);
-                    idx += createResult.stepsCount;
-                    allResults.AddRange(createResult.results);
-                    // Re-read the file if it was created; otherwise re-check existence
-                    if (System.IO.File.Exists(fullPath))
-                    {
-                        await EmitLog(emitSse, "success", $"Created new file: {relPath}", ct: ct);
-                    }
-                    else
-                    {
-                        // Fall back to similar-files search
-                        await EmitLog(emitSse, "warn", $"Could not create {relPath} — trying similar files", ct: ct);
-                        var similar = FindSimilarFiles(relPath, projectRoot);
-                        if (similar.Count > 0)
-                        {
-                            await EmitLog(emitSse, "info", $"Similar files: {string.Join(", ", similar)}", ct: ct);
-                            relPath = similar[0];
-                            fullPath = Path.GetFullPath(
-                                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-                            if (!System.IO.File.Exists(fullPath)) continue;
-                        }
-                        else continue;
-                    }
-                }
-
-                var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-
-                // Detect rename/move operations — bypass LLM edit loop
-                var isRename = changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase) ||
-                               changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase);
-                if (isRename)
-                {
-                    var dstPath = ExtractTargetPath(changeDesc, relPath, projectRoot);
-                    if (dstPath != null)
-                    {
-                        var renameStep = new AgentStep
-                        {
-                            Index = 0,
-                            Type = "rename",
-                            Path = relPath,
-                            ToPath = dstPath,
-                            Description = $"Rename {relPath} → {dstPath}"
-                        };
-                        var results = await ExecuteSteps(new List<AgentStep> { renameStep }, projectRoot, idx, emitSse, ct);
-                        idx += results.Count;
-                        allResults.AddRange(results);
-                        continue;
-                    }
-                }
-
-                // Combine the original prompt with the file-specific change description
-                var fileTask = string.IsNullOrWhiteSpace(item.Change)
-                    ? originalPrompt
-                    : $"{originalPrompt}\n\nSpecific change needed in {relPath}: {item.Change}";
-
-                // --- up to 2 attempts ---
-                List<AgentStep> editSteps = new();
-                var timedOut = false;
-                for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"LLM edit call: {relPath} (attempt {attempt + 1})",
-                        new { chars = fileContent.Length, taskSummary = item.Change }, ct: ct);
-
-                    var (raw, _, err) = await CallLlmSingleFileEdit(
-                        fileTask, relPath, fileContent, projectRoot, attempt, discoveryContext, ct);
-
-                    // Skip retry on timeout — won't help
-                    if (err != null && err.StartsWith("Timed out", StringComparison.Ordinal))
-                    {
-                        timedOut = true;
-                        await EmitLog(emitSse, "error", $"Timed out editing {relPath} — skipping", ct: ct);
-                        break;
-                    }
-
-                    await EmitLog(emitSse, "debug",
-                        $"LLM raw ({raw?.Length ?? 0} chars)",
-                        new { raw }, ct: ct);
-
-                    editSteps = ParseEditsFromLlmRaw(raw, relPath);
-
-                     // Determine rejection reason for better logging
-                     string? rejectReason = null;
-                     if (editSteps.Count > 0)
-                     {
-                         var missingNew = editSteps.Where(e => string.IsNullOrWhiteSpace(e.NewString)).ToList();
-                         if (missingNew.Count > 0)
-                         {
-                             // We are not removing them, but we log why they might be problematic.
-                             rejectReason = "newString is empty — model returned oldString without replacement (treated as deletion)";
-                         }
-
-                         var identical = editSteps.Where(e => string.Equals(
-                             NormalizeLineEndings(e.OldString ?? ""),
-                             NormalizeLineEndings(e.NewString ?? ""),
-                             StringComparison.Ordinal)).ToList();
-                         if (identical.Count > 0)
-                         {
-                             // We are going to remove these in the next step.
-                             if (rejectReason == null)
-                                 rejectReason = "oldString and newString are identical";
-                             else
-                                 rejectReason += "; some edits are identical oldString/newString (no-op)";
-                         }
-                     }
-
-                     // Filter no-op edits (oldString == newString)
-                     editSteps = editSteps
-                         .Where(e => !string.Equals(
-                             NormalizeLineEndings(e.OldString ?? ""),
-                             NormalizeLineEndings(e.NewString ?? ""),
-                             StringComparison.Ordinal))
-                         .ToList();
-
-                     if (editSteps.Count == 0)
-                         await EmitLog(emitSse, "warn",
-                             $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
-                }
-
-                if (timedOut) continue;  
-                if (editSteps.Count == 0)
-                {
-                    await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
-                    continue;
-                }
-
-                for (var i = 0; i < editSteps.Count; i++)
-                    editSteps[i].Index = i;
-
-                var batchResults = await ExecuteSteps(editSteps, projectRoot, idx, emitSse, ct);
-                idx += batchResults.Count;
-                allResults.AddRange(batchResults);
-
-                var fileEdited = batchResults.Any(r =>
-                    r is Dictionary<string, object?> d &&
-                    d.TryGetValue("status", out var st) && st?.ToString() == "done");
-
-                var appliedEdit = fileEdited;
-                if (!fileEdited)
-                {
-                    await EmitLog(emitSse, "warn",
-                        $"All edits failed for {relPath} — running one retry with re-read content", ct: ct);
-
-                    if (System.IO.File.Exists(fullPath))
-                    {
-                        var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-
-                        // Collect near-match snippets reported by TryReplace failures.
-                        var nearMatches = batchResults
-                            .OfType<Dictionary<string, object?>>()
-                            .Where(r => r.TryGetValue("status", out var st) && st?.ToString() == "error")
-                            .Select(r => r.TryGetValue("snippet", out var sn) ? sn?.ToString() : null)
-                            .Where(s => !string.IsNullOrWhiteSpace(s))
-                            .ToList();
-
-                        var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                            fileTask, relPath, freshContent, projectRoot,
-                            attempt: 2,                   // signals RETRY to the prompt
-                            discoveryContext,
-                            ct,
-                            nearMatchSnippets: nearMatches!);  // ← pass hints
-
-                        var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
-                            .Where(e => !string.Equals(
-                                NormalizeLineEndings(e.OldString ?? ""),
-                                NormalizeLineEndings(e.NewString ?? ""),
-                                StringComparison.Ordinal))
-                            .ToList();
-
-                        if (retrySteps.Count > 0)
-                        {
-                            for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
-                            var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
-                            idx += retryResults.Count;
-                            allResults.AddRange(retryResults);
-                            appliedEdit = retryResults.Any(r =>
-                                r is Dictionary<string, object?> rd &&
-                                rd.TryGetValue("status", out var rs) && rs?.ToString() == "done");
-                        }
-                    }
-                }
-
-                // ── Build verification after each successful edit ──────────────
-                if (appliedEdit)
-                {
-                    editHistory.Add((relPath, fileContent));
-
-                    var config = await _configFile.LoadConfigAsync();
-                    var buildCmd = config.buildCommands;
-                    if (!string.IsNullOrWhiteSpace(buildCmd))
-                    {
-                        var buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
-
-                        for (var retryLoop = 0; retryLoop < 2 && !buildOk && editHistory.Count > 0; retryLoop++)
-                        {
-                            // Undo edits (up to 2) until build passes
-                            var undoneCount = 0;
-                            while (undoneCount < 2 && editHistory.Count > 0 && !buildOk)
-                            {
-                                var (undoPath, undoContent) = editHistory[^1];
-                                editHistory.RemoveAt(editHistory.Count - 1);
-                                var undoFullPath = Path.GetFullPath(
-                                    Path.Combine(projectRoot, undoPath.Replace('/', Path.DirectorySeparatorChar)));
-                                if (System.IO.File.Exists(undoFullPath))
-                                {
-                                    await System.IO.File.WriteAllTextAsync(undoFullPath, undoContent, Encoding.UTF8);
-                                    await EmitLog(emitSse, "warn", $"Undid edit: {undoPath}", ct: ct);
-                                }
-                                undoneCount++;
-                                buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
-                            }
-
-                            if (buildOk && undoneCount > 0)
-                            {
-                                // Build passes with undo — retry the original file edit
-                                await EmitLog(emitSse, "info", $"Build passes after undo — retrying edit for {relPath}", ct: ct);
-
-                                var currentContent = System.IO.File.Exists(fullPath)
-                                    ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8)
-                                    : fileContent;
-
-                                var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
-                                    fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
-
-                                var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath)
-                                    .Where(e => !string.Equals(
-                                        NormalizeLineEndings(e.OldString ?? ""),
-                                        NormalizeLineEndings(e.NewString ?? ""),
-                                        StringComparison.Ordinal))
-                                    .ToList();
-
-                                if (retrySteps2.Count > 0)
-                                {
-                                    for (var i = 0; i < retrySteps2.Count; i++) retrySteps2[i].Index = i;
-                                    var retryResults2 = await ExecuteSteps(retrySteps2, projectRoot, idx, emitSse, ct);
-                                    idx += retryResults2.Count;
-                                    allResults.AddRange(retryResults2);
-
-                                    buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
-                                }
-                            }
-                        }
-
-                        if (!buildOk)
-                        {
-                            await EmitLog(emitSse, "warn",
-                                $"Build failing after edit/retry for {relPath} — restoring and skipping", ct: ct);
-                            // Restore current file to pre-edit state
-                            await System.IO.File.WriteAllTextAsync(fullPath, fileContent, Encoding.UTF8);
-                            editHistory.RemoveAll(e => e.path == relPath);
-                            continue;
-                        }
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                await EmitLog(emitSse, "error", $"Editing {item.File} was cancelled — aborting phase", ct: default);
-                break;
-            }
-            catch (Exception ex)
-            {
-                await EmitLog(emitSse, "error",
-                    $"Unexpected error editing {item.File}: {ex.Message}", ct: default);
-                continue;
-            }
-        }
-
-        return allResults;
-    }
-
+     
     /// <summary>
     /// Create a new file with LLM-generated content.
     /// The changeDesc describes what to create; the LLM generates full file content.
@@ -1253,7 +794,24 @@ Be concise — 2-4 sentences max.";
         var targetRelPath = explicitRelPath;
         if (string.IsNullOrWhiteSpace(targetRelPath))
         {
-            // Try to extract path like "path/to/file.ext" from change description
+            // Strategy 1: "new file .editorconfig" or "file called filename.ext"
+            var namedMatch = Regex.Match(changeDesc,
+                @"(?:new\s+)?file\s+(?:called|named|`` `)?\s*([\w./\\-]+\.[\w.-]+)", RegexOptions.IgnoreCase);
+            if (namedMatch.Success)
+                targetRelPath = namedMatch.Groups[1].Value.Replace('\\', '/');
+        }
+
+        if (string.IsNullOrWhiteSpace(targetRelPath))
+        {
+            // Strategy 2: dotfiles like .editorconfig, .gitignore, .env
+            var dotMatch = Regex.Match(changeDesc, @"\.[\w-]+(?:\.[\w-]+)*");
+            if (dotMatch.Success)
+                targetRelPath = dotMatch.Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(targetRelPath))
+        {
+            // Strategy 3: standard path like "path/to/file.ext"
             var pathMatch = Regex.Match(changeDesc, @"[\w/\\]+\.[\w]+");
             if (pathMatch.Success)
                 targetRelPath = pathMatch.Value.Replace('\\', '/');
@@ -1261,7 +819,7 @@ Be concise — 2-4 sentences max.";
 
         if (string.IsNullOrWhiteSpace(targetRelPath))
         {
-            // Try to find a filename pattern like ".editorconfig", "file.ext"
+            // Strategy 4: "file.ext" or "name.min.ext"
             var fileMatch = Regex.Match(changeDesc, @"(\.?[\w-]+(?:\.[\w]+)+)");
             if (fileMatch.Success)
                 targetRelPath = fileMatch.Groups[1].Value;
@@ -1270,6 +828,15 @@ Be concise — 2-4 sentences max.";
         // Still empty — use a safe fallback name
         if (string.IsNullOrWhiteSpace(targetRelPath))
             targetRelPath = "newfile.txt";
+
+        // Infer folder placement when no directory is specified
+        targetRelPath = targetRelPath.Replace('\\', '/');
+        if (!targetRelPath.Contains('/'))
+        {
+            var folder = InferTargetFolder(targetRelPath, projectRoot);
+            if (!string.IsNullOrWhiteSpace(folder))
+                targetRelPath = folder + targetRelPath;
+        }
 
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, targetRelPath.Replace('/', Path.DirectorySeparatorChar)));
 
@@ -1470,7 +1037,11 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var allSteps = new List<object>();
 
         // ── Phase 0: Connectivity check ────────────────────────────────────────
-        await CheckLlmConnectivity(projectRoot, emitSse, ct);
+        bool isLlmConnected = await CheckLlmConnectivity(projectRoot, emitSse, ct);
+        if (!isLlmConnected)
+        { 
+            throw new InvalidOperationException("LLM connectivity check failed.");
+        }
 
         // ── Fast path: pure-command intents skip discovery + LLM planning ──────
         var fastPlan = TryDetectSimpleIntent(prompt);
@@ -2150,97 +1721,7 @@ Be concise — 2-4 sentences max.";
             await SendSse(Response, "error", new { message = ex.Message });
             await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
         }
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  BUILD VERIFICATION
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private async Task<List<object>> RunBuildVerification(
-        string projectRoot, bool emitSse, List<object> existingSteps, CancellationToken ct)
-    {
-        var steps = new List<object>();
-        var config = await _configFile.LoadConfigAsync();
-        var cmd = config.buildCommands;
-        if (string.IsNullOrWhiteSpace(cmd)) return steps;
-
-        _terminal.Start();
-
-        if (emitSse)
-            await SendSse(Response, "phase", new { phase = "build", message = "Running build verification…" }, ct);
-        await EmitLog(emitSse, "info", $"Build verification: {cmd}", ct: ct);
-
-        for (var cycle = 0; cycle < 3; cycle++)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            if (emitSse)
-                await SendSse(Response, "phase", new { phase = "build", message = $"Build cycle {cycle + 1}/3…" }, ct);
-
-            var beforeOutput = _terminal.ReadAll();
-            await _terminal.SendCommandAsync(cmd, projectRoot);
-
-            var output = await WaitForBuildOutput(beforeOutput);
-
-            var analysis = await CallLlmRaw(
-                "You are a build output analyzer. Respond with ONLY a single JSON object — no markdown, no explanation. " +
-                "{\"result\":\"SUCCESS\"} or {\"result\":\"FAILURE\",\"errors\":[\"error 1\",\"...\"]}",
-                $"Build command: {cmd}\n\nFull output:\n{output}", ct);
-
-            var rawResult = analysis.raw?.Trim() ?? "";
-            var isSuccess = rawResult.Contains("\"SUCCESS\"", StringComparison.Ordinal);
-
-            await EmitLog(emitSse, isSuccess ? "info" : "warn",
-                $"Build cycle {cycle + 1}: {(isSuccess ? "succeeded" : "failed")}",
-                new { result = rawResult }, ct: ct);
-
-            steps.Add(new
-            {
-                cycle = cycle + 1,
-                command = cmd,
-                output = Truncate(output, 3000),
-                result = isSuccess ? "success" : "failure"
-            });
-
-            if (isSuccess) break;
-
-            if (cycle < 2)
-            {
-                await EmitLog(emitSse, "warn", "Build failed — analyzing errors and planning fixes…", ct: ct);
-
-                var planPrompt = $@"The build command '{cmd}' failed with errors shown below.
-
-Output:
-{output}
-
-Create a plan to fix every build error. For each file that needs editing, specify the file path and what change to make.
-Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix the ... by ...""}}] — no markdown, no explanation.";
-
-                var planRaw = await CallLlmRaw(
-                    "You are a build error fixer. Output ONLY a JSON array.", planPrompt, ct);
-
-                var fixPlan = ParseBuildFixPlan(planRaw.raw);
-
-                if (fixPlan.Count > 0)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Applying {fixPlan.Count} build fix(es)…", ct: ct);
-
-                    var editResults = await RunEditPhase(
-                        fixPlan, "", projectRoot,
-                        existingSteps.Count + steps.Count,
-                        emitSse, "", ct);
-
-                    steps.Add(new { type = "build-fix", editsApplied = editResults.Count });
-                }
-            }
-        }
-
-        if (emitSse)
-            await SendSse(Response, "phase", new { phase = "build-done", message = "Build verification complete" }, ct);
-
-        return steps;
-    }
+    } 
 
     private async Task<string> WaitForBuildOutput(string beforeOutput)
     {
@@ -2295,23 +1776,26 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
+    private async Task<bool> CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
     {
-        DateTime now = DateTime.UtcNow;
-        if (now - _nextConnectivityCheck < TimeSpan.FromMinutes(5))
+        if (_nextConnectivityCheck != DateTime.MinValue)
         {
-            await EmitLog(emitSse, "info", "Skipping connectivity check (last check was less than 5 minutes ago)", ct: ct);
-            return;
+            DateTime now = DateTime.UtcNow;
+            if (now - _nextConnectivityCheck < TimeSpan.FromMinutes(5))
+            {
+                await EmitLog(emitSse, "info", "Skipping connectivity check (last check was less than 5 minutes ago)", ct: ct);
+                return _lastConnectionCheckResult;
+            }
         }
-        else
-        {
-            _nextConnectivityCheck = now.AddMinutes(5);
-        }
+        
         var baseUrl = await GetLlamaBaseUrl();
-        await CheckForConnectivity(projectRoot, emitSse, baseUrl, ct);
+        _lastConnectionCheckResult = await CheckForConnectivity(projectRoot, emitSse, baseUrl, ct);
+        _nextConnectivityCheck = DateTime.UtcNow.AddMinutes(5);
+
+        return _lastConnectionCheckResult;
     }
 
-    private async Task CheckForConnectivity(string projectRoot, bool emitSse, string baseUrl, CancellationToken ct)
+    private async Task<bool> CheckForConnectivity(string projectRoot, bool emitSse, string baseUrl, CancellationToken ct)
     {
         var uri = new Uri(baseUrl);
         var host = uri.Host;
@@ -2371,12 +1855,12 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
             if (succeeded)
             {
                 await EmitLog(emitSse, "info", $"Host {host}:{port} is reachable via {name}", ct: ct);
-                return;
+                return true;
             }
         }
 
         await EmitLog(emitSse, "error", $"Host {host}:{port} is unreachable — aborting", ct: ct);
-        throw new InvalidOperationException($"LLM server at {host}:{port} is not reachable (tcp/ping/http all failed)");
+        return false;
     }
 
     private async Task<string> GetLlamaBaseUrl()
@@ -2416,7 +1900,7 @@ Respond with ONLY a JSON array: [{{""file"":""path/to/file.cs"",""change"":""fix
          IEnumerable<string>? nearMatchSnippets = null)
     {
         // ── Use full file content so LLM can locate the right code ──────────
-        var fileForLlm = Truncate(fileContent, MaxFileContextChars);
+        var fileForLlm = fileContent;
 
         // ── Build user message ─────────────────────────────────────────────────
         var user = new StringBuilder();
@@ -2479,13 +1963,14 @@ Each edit must have:
 
 RULES:
   - oldString MUST be SHORT (1-5 lines max) and literally present in the code shown.
+  - oldString and newString must not be the same. You must make an edit.
   - Prefer MANY small targeted edits over one large edit.
   - Preserve indentation exactly in both oldString and newString.
   - Return ONLY valid JSON, no markdown fences, no explanation.
   - If no changes are needed, return: {""edits"": []}
 
 Example:
-{""edits"":[{""oldString"":""<button class=\""foo\"">"",""newString"":""<button class=\""foo bar\"">""}]}";
+{""edits"":[{""oldString"":""<button class=\""foo\"">"",""newString"":""<button class=\""foo bar\"">""},{""oldString"":""<button class=\""foo2\"">"",""newString"":""<button class=\""foo2 bar2\"">""}]}";
 
             var messages = new object[]
             {
