@@ -7,6 +7,8 @@
     padding-bottom: 8px;
     resize: both;
     flex: 1;
+    max-height: calc(100vh - 160px);
+    max-height: calc(100dvh - 160px);
 }
 
 .column {
@@ -500,10 +502,10 @@ body.dragging-active .card:hover {
 }
 
 .diff-lineno {
-    color: rgba(255, 255, 255, 0.15);
+    color: var(--text);
     font-size: 9px;
     min-width: 28px;
-    text-align: right;
+    text-align: left;
     user-select: none;
 }
 

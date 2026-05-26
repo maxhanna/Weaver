@@ -245,10 +245,7 @@ header {
 	align-items: center;
 	justify-content: space-between;
 	padding: 10px 20px;
-	background: var(--brand-gradient);
-	box-shadow: var(--brand-shadow), var(--brand-glow);
 	transition: all 0.3s ease;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 header.brand-enhanced {
@@ -954,44 +951,66 @@ h1 .brand-e:hover::before {
 .brand-logo-enhanced {
 	display: flex;
 	align-items: center;
-	gap: 12px;
-	padding: 10px 20px;
-	border-radius: 12px;
+	gap: 16px;
+	padding: 14px 26px;
+	border-radius: 18px;
 	background: var(--brand-gradient);
 	color: #012;
 	font-weight: 700;
-	font-size: 18px;
+	font-size: 22px;
 	box-shadow: var(--brand-shadow), var(--brand-glow);
 	transition: all 0.3s ease;
 	border: none;
 	cursor: pointer;
-	min-width: 180px;
+	min-width: 220px;
 	justify-content: center;
 	transform: translateY(0);
+	position: relative;
+	overflow: hidden;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	gap: 12px;
 }
 
 .brand-logo-enhanced:hover {
-	transform: translateY(-2px);
-	box-shadow: var(--brand-glow), 0 12px 30px rgba(6, 182, 212, 0.4), 0 0 25px rgba(6, 182, 212, 0.3);
+	transform: translateY(-3px);
+	box-shadow: var(--brand-glow), 0 15px 35px rgba(6, 182, 212, 0.5), 0 0 30px rgba(6, 182, 212, 0.4);
 	background: var(--brand-gradient);
 	transition: all 0.2s ease;
 }
 
+.brand-logo-enhanced::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: -100%;
+	width: 100%;
+	height: 100%;
+	background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+	transition: 0.5s;
+}
+
+.brand-logo-enhanced:hover::before {
+	left: 100%;
+}
+
 .logo-icon-enhanced {
-	font-size: 32px;
-	width: 32px;
-	height: 32px;
-	margin-right: 10px;
+	font-size: 24px;
+	width: 24px;
+	height: 24px;
+	margin-right: 12px;
 	transition: all 0.3s ease;
 	background: var(--brand-gradient);
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
 	background-clip: text;
-	filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+	filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
+	animation: pulseLogo 2s infinite;
+	box-shadow: var(--brand-glow);
 }
 
 .logo-icon-enhanced:hover {
-	transform: scale(1.1);
+	transform: scale(1.2);
+	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.6);
 }
 
 .logo-text-enhanced {

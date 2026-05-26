@@ -59,12 +59,14 @@
               </div>
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
-                  <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                  <div class="step-body">
-                    <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
-                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
-                    <span class="step-err" ng-if="s.error">{{s.error}}</span>
-                  </div>
+                  <details>
+                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
+                    <div class="step-body">
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
+                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                    </div>
+                  </details>
                 </div>
               </div> 
             </details>
@@ -122,12 +124,14 @@
               </div>
               <div class="analysis-steps" ng-if="vm.streamingSteps.length">
                 <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
-                  <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                  <div class="step-body">
-                    <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
-                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
-                    <span class="step-err" ng-if="s.error">{{s.error}}</span>
-                  </div>
+                  <details>
+                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
+                    <div class="step-body">
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
+                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                    </div>
+                  </details>
                 </div>
               </div>
             </details>
@@ -181,44 +185,46 @@
               </div>
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
-                  <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                  <div class="step-body">
-                    <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
-                    <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                      <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
-                      <div class="diff-sbs">
-                        <div class="diff-header">
-                          <div class="diff-header-cell diff-header-old">Old</div>
-                          <div class="diff-header-cell diff-header-new">New</div>
-                        </div>
-                        <div class="diff-wrapper">
-                          <div class="diff-col diff-col-old">
-                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
-                              <div class="diff-cell diff-cell-old"
-                                ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
-                                <span>{{line.oldLine || ''}}</span>
+                  <details>
+                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
+                    <div class="step-body">
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
+                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-sbs">
+                          <div class="diff-header">
+                            <div class="diff-header-cell diff-header-old">Old</div>
+                            <div class="diff-header-cell diff-header-new">New</div>
+                          </div>
+                          <div class="diff-wrapper">
+                            <div class="diff-col diff-col-old">
+                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                <div class="diff-cell diff-cell-old"
+                                  ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                                  <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
+                                  <span>{{line.oldLine || ''}}</span>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                          <div class="diff-col diff-col-new">
-                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
-                              <div class="diff-cell diff-cell-new"
-                                ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                                <span class="diff-lineno">{{line.newLineNum + 1}}</span>
-                                <span>{{line.newLine || ''}}</span>
+                            <div class="diff-col diff-col-new">
+                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                <div class="diff-cell diff-cell-new"
+                                  ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                                  <span class="diff-lineno">{{line.newLineNum + 1}}</span>
+                                  <span>{{line.newLine || ''}}</span>
+                                </div>
                               </div>
                             </div>
                           </div>
                         </div>
                       </div>
+                      <div class="rename-display" ng-if="s.type==='rename'">
+                        <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
+                      </div>
+                      <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
+                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
                     </div>
-                    <div class="rename-display" ng-if="s.type==='rename'">
-                      <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
-                    </div>
-                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
-                    <span class="step-err" ng-if="s.error">{{s.error}}</span>
-                  </div>
+                  </details>
                 </div>
               </div> 
               <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
@@ -301,48 +307,50 @@
               </div>
               <div class="analysis-steps log-entries" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
-                  <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                  <div class="step-body">
-                    <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                      s.url || ''}}</span>
-                    <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                      <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
-                        −{{s.linesRemoved || 0}} lines</div>
-                      <div class="diff-sbs">
-                        <div class="diff-header">
-                          <div class="diff-header-cell diff-header-old">Old</div>
-                          <div class="diff-header-cell diff-header-new">New</div>
-                        </div>
-                        <div class="diff-wrapper">
-                          <div class="diff-col diff-col-old">
-                            <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
-                              <div class="diff-cell diff-cell-old"
-                                ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
-                                <span>{{line.oldLine || ''}}</span>
+                  <details>
+                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
+                    <div class="step-body">
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}</span>
+                      <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
+                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
+                          −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-sbs">
+                          <div class="diff-header">
+                            <div class="diff-header-cell diff-header-old">Old</div>
+                            <div class="diff-header-cell diff-header-new">New</div>
+                          </div>
+                          <div class="diff-wrapper">
+                            <div class="diff-col diff-col-old">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                <div class="diff-cell diff-cell-old"
+                                  ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
+                                  <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
+                                  <span>{{line.oldLine || ''}}</span>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                          <div class="diff-col diff-col-new">
-                            <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
-                              <div class="diff-cell diff-cell-new"
-                                ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                                <span class="diff-lineno">{{line.newLineNum + 1}}</span>
-                                <span>{{line.newLine || ''}}</span>
+                            <div class="diff-col diff-col-new">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                <div class="diff-cell diff-cell-new"
+                                  ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
+                                  <span class="diff-lineno">{{line.newLineNum + 1}}</span>
+                                  <span>{{line.newLine || ''}}</span>
+                                </div>
                               </div>
                             </div>
                           </div>
                         </div>
                       </div>
+                      <div class="rename-display" ng-if="s.type==='rename'">
+                        <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
+                      </div>
+                      <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
+                      <span class="step-err" ng-if="s.error">{{s.error}}</span>
                     </div>
-                    <div class="rename-display" ng-if="s.type==='rename'">
-                      <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
-                    </div>
-                    <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
-                    <span class="step-err" ng-if="s.error">{{s.error}}</span>
-                  </div>
+                  </details>
                 </div>
               </div>
               <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">

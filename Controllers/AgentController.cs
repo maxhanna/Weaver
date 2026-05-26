@@ -229,9 +229,9 @@ public class AgentController : ControllerBase
 
 Types:
 - QuickCheck: ping, health, status, connectivity (no file changes)
-- CommandExecution: git, terminal, docker, file ops, network scan, system info, directory listing, package install
+- CommandExecution: anything that should be done in terminal, including git operations, directory listing, renames, system info queries, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
 - CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
-- Compound: mix of command execution and code edits
+- Compound: mix of command execution and code edits, prefer this if there are multiple distinct steps that should be executed separately for best results. The agent will decompose and orchestrate the steps.
 
 If unsure, use CodeEdit.";
 
@@ -1116,18 +1116,34 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         // ── Reprisal Pipeline ─────────────────────────────────────────
         if (!complete && !string.IsNullOrEmpty(feedback)) {
-            string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
-            await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
-            var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(reprisalPrompt, projectRoot, emitSse, ct);
-            allSteps.AddRange(reprisalSteps);
-            var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
-            if (!reprisalComplete)
+            var isBuildFailure = Regex.IsMatch(feedback, @"\berror\s+CS\d+\b", RegexOptions.IgnoreCase) ||
+                                 feedback.Contains("Build FAILED", StringComparison.OrdinalIgnoreCase);
+
+            if (isBuildFailure)
             {
-                await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+                await EmitLog(emitSse, "info", "Build failure detected — starting debug session", ct: ct);
+                var (debugSteps, debugSummary, debugComplete, debugThinking) =
+                    await DebugBuildPipeline(prompt, feedback, projectRoot, emitSse, ct);
+                allSteps.AddRange(debugSteps);
+                summary = debugSummary ?? summary;
+                thinking = debugThinking ?? thinking;
+                complete = debugComplete;
             }
-            summary = reprisalSummary;
-            thinking = reprisalThinking;
-            complete = reprisalComplete;
+            else
+            {
+                string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
+                await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
+                var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(reprisalPrompt, projectRoot, emitSse, ct);
+                allSteps.AddRange(reprisalSteps);
+                var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
+                if (!reprisalComplete)
+                {
+                    await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+                }
+                summary = reprisalSummary;
+                thinking = reprisalThinking;
+                complete = reprisalComplete;
+            }
         }
 
         return (allSteps, summary, complete, thinking);
@@ -1511,17 +1527,61 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             var buildCmd = config.buildCommands;
             if (!string.IsNullOrWhiteSpace(buildCmd))
             {
-                var buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                var (buildOk, buildOutput) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
                 if (!buildOk)
                 {
                     await EmitLog(emitSse, "warn",
                         "Verification: build failed after content review — re-planning with build errors", ct: ct);
-                    return (false, $"Build failed. Fix build errors in the edited files.");
+                    return (false, buildOutput);
                 }
             }
         }
 
         return (complete, feedback);
+    }
+
+    private async Task<(List<object> allSteps, string summary, bool complete, string thinking)> DebugBuildPipeline(
+        string originalPrompt, string buildOutput, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var allSteps = new List<object>();
+        var lastSummary = "";
+        var lastThinking = "";
+        var maxAttempts = 3;
+
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var debugPrompt = attempt == 0
+                ? $"The build failed after applying the user's request. User request: {originalPrompt}\n\nBuild errors:\n{buildOutput}\n\nFix these build errors. Do NOT change the logic or feature — only fix build/compilation errors."
+                : $"The build is still failing after fix attempt {attempt} of {maxAttempts}. Build errors:\n{buildOutput}\n\nFix these build errors. Do NOT change the logic or feature — only fix build/compilation errors.";
+
+            await EmitLog(emitSse, "info", $"Debug build attempt {attempt + 1}/{maxAttempts}", ct: ct);
+
+            var (steps, summary, thinking) = await CodeEditPipeline(debugPrompt, projectRoot, emitSse, ct);
+            allSteps.AddRange(steps);
+            lastSummary = summary ?? lastSummary;
+            lastThinking = thinking ?? lastThinking;
+
+            var config = await _configFile.LoadConfigAsync();
+            var buildCmd = config.buildCommands;
+            if (string.IsNullOrWhiteSpace(buildCmd))
+            {
+                await EmitLog(emitSse, "info", "No build command configured — debug session complete", ct: ct);
+                return (allSteps, summary ?? lastSummary, true, thinking ?? lastThinking);
+            }
+
+            var (buildOk, freshOutput) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+            if (buildOk)
+            {
+                await EmitLog(emitSse, "success", $"Debug build passes after attempt {attempt + 1}", ct: ct);
+                return (allSteps, lastSummary, true, lastThinking);
+            }
+
+            buildOutput = freshOutput;
+            await EmitLog(emitSse, "warn", $"Debug build still failing after attempt {attempt + 1}", ct: ct);
+        }
+
+        await EmitLog(emitSse, "warn", "Debug build exhausted all attempts", ct: ct);
+        return (allSteps, lastSummary, false, lastThinking);
     }
 
     private async Task ExecutePlan(string prompt, string projectRoot, bool emitSse, string discoveryContext, AgentPlan plan, CancellationToken ct, List<object> allResults)
@@ -2023,7 +2083,7 @@ Be concise — 2-4 sentences max.";
             var buildCmd = config.buildCommands;
             if (!string.IsNullOrWhiteSpace(buildCmd))
             {
-                var buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                var (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
 
                 for (var retryLoop = 0; retryLoop < 2 && !buildOk && editHistory.Count > 0; retryLoop++)
                 {
@@ -2041,7 +2101,7 @@ Be concise — 2-4 sentences max.";
                             await EmitLog(emitSse, "warn", $"Undid edit: {undoPath}", ct: ct);
                         }
                         undoneCount++;
-                        buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                        (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
                     }
 
                     if (buildOk && undoneCount > 0)
@@ -2070,7 +2130,7 @@ Be concise — 2-4 sentences max.";
                             idx += retryResults2.Count;
                             allResults.AddRange(retryResults2);
 
-                            buildOk = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                            (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
                         }
                     }
                 }
@@ -2168,20 +2228,18 @@ Be concise — 2-4 sentences max.";
                 await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted);
 
             var filesEdited = ExtractFilesEdited(allSteps);
-            var requirementsMet = complete || TaskRequirementsMet(
-                req.Prompt,
-                ResolveEditTargetPaths(req.Prompt, req.Files ?? new List<string>(), projectRoot),
-                projectRoot, allSteps);
+            var editsApplied = HasSuccessfulEdits(allSteps);
 
             await SendSse(Response, "done", new
             {
                 summary,
                 thinking,
-                complete = requirementsMet,
-                editsApplied = requirementsMet,
-                incomplete = TaskExpectsFileChanges(req.Prompt) && !requirementsMet,
-                warning = !requirementsMet && TaskExpectsFileChanges(req.Prompt)
-                                 ? "No files were modified. Check failed steps below."
+                complete,
+                editsApplied,
+                incomplete = TaskExpectsFileChanges(req.Prompt) && !complete,
+                warning = !complete && TaskExpectsFileChanges(req.Prompt)
+                                 ? (editsApplied ? "Task may be incomplete. Please review."
+                                                 : "No files were modified. Check failed steps below.")
                                  : (string?)null,
                 steps = allSteps,
                 filesEdited
@@ -3005,9 +3063,9 @@ Example:
     /// Quick build check — runs the build command and returns success/failure.
     /// Does NOT attempt LLM-based fix analysis (unlike RunBuildVerification).
     /// </summary>
-    private async Task<bool> RunQuickBuild(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
+    private async Task<(bool success, string freshOutput)> RunQuickBuild(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(buildCmd)) return true;
+        if (string.IsNullOrWhiteSpace(buildCmd)) return (true, "");
         _terminal.Start();
         var beforeLen = _terminal.ReadAll().Length;
         await EmitLog(emitSse, "info", $"Build check: {buildCmd}", ct: ct);
@@ -3032,7 +3090,7 @@ Example:
         await EmitLog(emitSse, success ? "success" : "warn",
             success ? "Build passes" : "Build failed",
             new { output = fresh }, ct: ct);
-        return success;
+        return (success, fresh);
     }
 
     private async Task ExecuteReadStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)

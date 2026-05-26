@@ -534,8 +534,13 @@
     }
 
     function refreshFilesEditedFromSteps() {
+      var seen = {};
       vm.streamingFilesEdited = vm.streamingSteps.filter(function (s) {
         return (s.type === 'edit' || s.type === 'rename') && s.status === 'done' && s.path;
+      }).filter(function (s) {
+        var already = seen[s.path];
+        seen[s.path] = true;
+        return !already;
       }).map(function (s) {
         var info = { path: s.path, editAction: s.editAction, linesAdded: s.linesAdded, linesRemoved: s.linesRemoved };
         if (s.type === 'rename') info.editAction = 'renamed → ' + (s.toPath || '');
@@ -672,7 +677,7 @@
                   case 'thinking':
                     if (parsed && parsed.text) {
                       vm.streamingThinking = parsed.text;
-                      pushAgentLog('think', 'Plan updated', { len: parsed.text.length });
+                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)');
                     }
                     break;
                   case 'summary':
@@ -708,7 +713,11 @@
                     var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                     var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                     var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                    vm.streamingFilesEdited = (parsed && parsed.filesEdited) || [];
+                    if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
+                      vm.streamingFilesEdited = parsed.filesEdited;
+                    } else {
+                      refreshFilesEditedFromSteps();
+                    }
                     vm.agentResult = {
                       summary: finalSummary,
                       thinking: finalThinking,

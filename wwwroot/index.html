@@ -16,18 +16,12 @@
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
       <svg class="logo-icon-enhanced" width="20" height="20" viewBox="0 0 24 24" fill="none"
         xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 2C13.1 2 14 2.9 14 4C14 5.1 13.1 6 12 6C10.9 6 10 5.1 10 4C10 2.9 10.9 2 12 2Z"
-          fill="currentColor" />
-        <path d="M12 8C13.1 8 14 8.9 14 10C14 11.1 13.1 12 12 12C10.9 12 10 11.1 10 10C10 8.9 10.9 8 12 8Z"
-          fill="currentColor" />
-        <path d="M12 14C13.1 14 14 14.9 14 16C14 17.1 13.1 18 12 18C10.9 18 10 17.1 10 16C10 14.9 10.9 14 12 14Z"
-          fill="currentColor" />
-        <path d="M12 20C13.1 20 14 20.9 14 22C14 23.1 13.1 24 12 24C10.9 24 10 23.1 10 22C10 20.9 10.9 20 12 20Z"
-          fill="currentColor" />
-        <path d="M6 12C6 13.1 6.9 14 8 14C9.1 14 10 13.1 10 12C10 10.9 9.1 10 8 10C6.9 10 6 10.9 6 12Z"
-          fill="currentColor" />
-        <path d="M18 12C18 13.1 18.9 14 20 14C21.1 14 22 13.1 22 12C22 10.9 21.1 10 20 10C18.9 10 18 10.9 18 12Z"
-          fill="currentColor" />
+        <path d="M12 2C13.1 2 14 2.9 14 4C14 5.1 13.1 6 12 6C10.9 6 10 5.1 10 4C10 2.9 10.9 2 12 2Z" fill="var(--brand-primary)" />
+        <path d="M12 6C13.1 6 14 6.9 14 8C14 9.1 13.1 10 12 10C10.9 10 10 9.1 10 8C10 6.9 10.9 6 12 6Z" fill="var(--brand-primary)" />
+        <path d="M12 10C13.1 10 14 10.9 14 12C14 13.1 13.1 14 12 14C10.9 14 10 13.1 10 12C10 10.9 10.9 10 12 10Z" fill="var(--brand-secondary)" />
+        <path d="M12 14C13.1 14 14 14.9 14 16C14 17.1 13.1 18 12 18C10.9 18 10 17.1 10 16C10 14.9 10.9 14 12 14Z" fill="var(--brand-secondary)" />
+        <path d="M12 18C13.1 18 14 18.9 14 20C14 21.1 13.1 22 12 22C10.9 22 10 21.1 10 20C10 18.9 10.9 18 12 18Z" fill="var(--brand-primary)" />
+        <path d="M12 22C13.1 22 14 22.9 14 24C14 25.1 13.1 26 12 26C10.9 26 10 25.1 10 24C10 22.9 10.9 22 12 22Z" fill="var(--brand-primary)" />
       </svg>
       <span class="logo-text-enhanced">Maestro</span>
     </div>
@@ -172,7 +166,7 @@
 
           <div class="files-edited-panel" ng-if="vm.streamingFilesEdited.length">
             <strong>Files changed</strong>
-            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited | unique:'path'">{{f.path}}</div>
+            <div class="file-edit-chip" ng-repeat="f in vm.streamingFilesEdited track by f.path">{{f.path}}</div>
           </div>
 
           <div>
