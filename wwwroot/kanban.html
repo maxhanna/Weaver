@@ -119,7 +119,7 @@
           </div>
           <!-- Live agent output on Doing cards -->
           <div class="card-analysis" ng-if="vm.streamingActive && vm.activeCardId === card.id">
-            <details open>
+            <details>
               <summary>🤖 Running…</summary>
               <div class="analysis-phase" ng-if="vm.streamingPhase">
                 <strong>Phase:</strong> {{vm.streamingPhase}}

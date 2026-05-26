@@ -222,7 +222,7 @@ public class AgentController : ControllerBase
         return PipelineType.CodeEdit;
     }
 
-    private async Task<PipelineType?> TryClassifyWithLlm(string prompt, CancellationToken ct)
+    private async Task<PipelineType?> TryClassifyWithLlm(string prompt, bool emitSse, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return null;
         var systemPrompt = @"Classify the user request into exactly one pipeline type. Respond with JSON only: {""pipeline"": ""<type>""}
@@ -237,6 +237,8 @@ If unsure, use CodeEdit.";
 
         var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
         if (err != null || string.IsNullOrWhiteSpace(raw)) return null;
+        await EmitLog(emitSse, "info", "LLM classified the prompt.", new { prompt, raw, err }, ct: ct);
+
         try
         {
             using var doc = JsonDocument.Parse(raw);
@@ -1092,7 +1094,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
-        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, ct);
+        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, emitSse, ct);
         if (pipelineType == null)
         {
             await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
