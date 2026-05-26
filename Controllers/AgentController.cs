@@ -4,10 +4,6 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using MaestroBackend.Services;
 
-// ╔══════════════════════════════════════════════════════════════════════════════╗
-// ║  MAESTRO AGENT  —  Pipeline Architecture                              ║ 
-// ╚══════════════════════════════════════════════════════════════════════════════╝
-
 [ApiController]
 [Route("api/agent")]
 public class AgentController : ControllerBase
@@ -16,52 +12,13 @@ public class AgentController : ControllerBase
     private const int MaxFileContextChars = 24_000;
     private const int MaxReadOutputChars = 24_000;
     private const int MaxWebResponseChars = 24_000;
-    private const int MaxPlanFiles = 5;   // plan phase: cap files to avoid token bloat
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
-    private static DateTime _lastHostCheck = DateTime.MinValue;
-    private static bool _lastHostReachable = false;
-
-    private static bool IsHostReachable(CancellationToken ct = default)
-    {
-        if ((DateTime.Now - _lastHostCheck).TotalMinutes < 10)
-            return _lastHostReachable;
-        bool isReachable = true;
-        _lastHostCheck = DateTime.Now;
-        _lastHostReachable = isReachable;
-        return isReachable;
-    }
 
     // ── pipeline type classification ──────────────────────────────────────
 
     private enum PipelineType { QuickCheck, CommandExecution, CodeEdit, Compound }
-
-    private PipelineType ClassifyTask(string prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.QuickCheck;
-        var lower = prompt.ToLowerInvariant();
-
-        // Quick check: pure ping/health/status with no file changes
-        if (!TaskExpectsFileChanges(prompt) &&
-            Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
-            return PipelineType.QuickCheck;
-
-        // Command execution: known simple intents (git, package_install, rename, etc.)
-        if (TryDetectSimpleIntent(prompt) != null)
-            return PipelineType.CommandExecution;
-
-        // Rename/move is always command-execution regardless of phrasing
-        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
-            return PipelineType.CommandExecution;
-
-        // Directory listing / exploration — needs agentic terminal control, not hallucination
-        if (Regex.IsMatch(lower, @"\b(list|show|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing))\b"))
-            return PipelineType.CommandExecution;
-
-        // Default: needs the full planning pipeline
-        return PipelineType.CodeEdit;
-    }
 
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
@@ -92,8 +49,6 @@ public class AgentController : ControllerBase
         _fileHints = fileHints;
         _configFile = configFile;
     }
-
-    // ── request / response DTOs ───────────────────────────────────────────────
 
     public class AgentRequest
     {
@@ -151,8 +106,6 @@ public class AgentController : ControllerBase
         public List<AgentStep> Steps { get; set; } = new();
     }
 
-    // ── plan phase DTOs ───────────────────────────────────────────────────────
-
     /// <summary>
     /// One item in the structured plan the LLM produces during Phase 2.
     /// </summary>
@@ -179,8 +132,7 @@ public class AgentController : ControllerBase
 
     /// <summary>
     /// The full plan envelope returned by the Phase-2 LLM call.
-    /// </summary>
-
+    /// </summary> 
     public class AgentPlan
     {
         public string Thinking { get; set; } = string.Empty;
@@ -211,7 +163,32 @@ public class AgentController : ControllerBase
 
     // ═════════════════════════════════════════════════════════════════════════
     //  PATH HELPERS
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════════ 
+    private PipelineType ClassifyTask(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.QuickCheck;
+        var lower = prompt.ToLowerInvariant();
+
+        // Quick check: pure ping/health/status with no file changes
+        if (!TaskExpectsFileChanges(prompt) &&
+            Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+            return PipelineType.QuickCheck;
+
+        // Command execution: known simple intents (git, package_install, rename, etc.)
+        if (TryDetectSimpleIntent(prompt) != null)
+            return PipelineType.CommandExecution;
+
+        // Rename/move is always command-execution regardless of phrasing
+        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
+            return PipelineType.CommandExecution;
+
+        // Directory listing / exploration — needs agentic terminal control, not hallucination
+        if (Regex.IsMatch(lower, @"\b(list|show|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing))\b"))
+            return PipelineType.CommandExecution;
+
+        // Default: needs the full planning pipeline
+        return PipelineType.CodeEdit;
+    }
 
     /// <summary>
     /// Infers the correct subfolder for a new file based on naming conventions
@@ -847,18 +824,18 @@ FILE EDIT RULES (only when NOT using a special marker):
 
         if (string.IsNullOrWhiteSpace(targetRelPath))
         {
-            // Strategy 2: dotfiles like .editorconfig, .gitignore, .env
-            var dotMatch = Regex.Match(changeDesc, @"\.[\w-]+(?:\.[\w-]+)*");
-            if (dotMatch.Success)
-                targetRelPath = dotMatch.Value;
+            // Strategy 2: standard path like "path/to/file.ext" (check BEFORE bare dotfiles)
+            var pathMatch = Regex.Match(changeDesc, @"[\w/\\]+\.[\w]+");
+            if (pathMatch.Success)
+                targetRelPath = pathMatch.Value.Replace('\\', '/');
         }
 
         if (string.IsNullOrWhiteSpace(targetRelPath))
         {
-            // Strategy 3: standard path like "path/to/file.ext"
-            var pathMatch = Regex.Match(changeDesc, @"[\w/\\]+\.[\w]+");
-            if (pathMatch.Success)
-                targetRelPath = pathMatch.Value.Replace('\\', '/');
+            // Strategy 3: dotfiles like .editorconfig, .gitignore, .env
+            var dotMatch = Regex.Match(changeDesc, @"\.[\w-]+(?:\.[\w-]+)*");
+            if (dotMatch.Success)
+                targetRelPath = dotMatch.Value;
         }
 
         if (string.IsNullOrWhiteSpace(targetRelPath))
@@ -906,7 +883,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         var (content, _, err) = await CallLlmRaw(
             "You are a file creation assistant. Output ONLY the raw file content — no markdown, no code fences, no explanation.",
-            contentPrompt, ct, requestTimeout: TimeSpan.FromSeconds(30));
+            contentPrompt, ct, requestTimeout: _infiniteTimeout);
 
         if (string.IsNullOrWhiteSpace(content) && err != null)
         {
@@ -2094,10 +2071,6 @@ Be concise — 2-4 sentences max.";
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PUBLIC ENDPOINTS
-    // ═════════════════════════════════════════════════════════════════════════
-
     [HttpPost("execute")]
     public async Task<IActionResult> Execute([FromBody] AgentRequest req)
     {
@@ -2202,55 +2175,6 @@ Be concise — 2-4 sentences max.";
             await SendSse(Response, "error", new { message = ex.Message });
             await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
         }
-    }
-
-    private async Task<string> WaitForBuildOutput(string beforeOutput)
-    {
-        var timeout = TimeSpan.FromMinutes(3);
-        var started = DateTime.UtcNow;
-        var delay = 1000;
-
-        while (DateTime.UtcNow - started < timeout)
-        {
-            await Task.Delay(delay, CancellationToken.None);
-            var current = _terminal.ReadAll();
-            if (current.Length > beforeOutput.Length + 80)
-            {
-                var stable = _terminal.ReadAll();
-                if (stable == current)
-                    return current;
-            }
-            delay = Math.Min(delay + 1000, 8000);
-        }
-        return _terminal.ReadAll();
-    }
-
-    private static List<PlanItem> ParseBuildFixPlan(string raw)
-    {
-        var items = new List<PlanItem>();
-        if (string.IsNullOrWhiteSpace(raw)) return items;
-        try
-        {
-            var blocks = ExtractJsonBlocks(raw);
-            foreach (var block in blocks)
-            {
-                try
-                {
-                    var parsed = JsonSerializer.Deserialize<List<PlanItemDeserialized>>(block);
-                    if (parsed != null)
-                    {
-                        foreach (var p in parsed)
-                        {
-                            if (!string.IsNullOrWhiteSpace(p.file))
-                                items.Add(new PlanItem { File = p.file, Change = p.change, Priority = items.Count + 1 });
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
-        catch { }
-        return items;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2537,10 +2461,6 @@ Example:
         return "";
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  DEDICATED EDIT PHASE  (kept for the fast-path fallback)
-    // ═════════════════════════════════════════════════════════════════════════
-
     private List<string> ResolveEditTargetPaths(string prompt, List<string> attachedFiles, string projectRoot)
     {
         var paths = attachedFiles.Where(f => !string.IsNullOrWhiteSpace(f))
@@ -2562,10 +2482,6 @@ Example:
         }
         return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  RESULT HELPERS
-    // ═════════════════════════════════════════════════════════════════════════
 
     private static List<object> ExtractFilesEdited(List<object> steps)
     {
@@ -2617,46 +2533,6 @@ Example:
 
         return result;
     }
-
-    private static void AppendObservations(StringBuilder observations, List<object> batchResults)
-    {
-        foreach (var item in batchResults)
-        {
-            if (item is not Dictionary<string, object?> r) continue;
-            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
-            var status = r.TryGetValue("status", out var st) ? st?.ToString() : "";
-            var desc = r.TryGetValue("description", out var d) ? d?.ToString() : "";
-
-            if (type == "edit" && status == "error")
-            {
-                observations.AppendLine($"EDIT FAILED: {r.GetValueOrDefault("path")} — {r.GetValueOrDefault("error")}");
-                if (r.TryGetValue("suggestions", out var sug) && sug != null)
-                {
-                    var paths = sug is IEnumerable<string> ss ? ss :
-                        (sug as System.Collections.IEnumerable)?.Cast<object>()
-                            .Select(x => x?.ToString() ?? "") ?? Array.Empty<string>();
-                    observations.AppendLine("USE THESE REAL PATHS INSTEAD: " + string.Join(", ", paths));
-                }
-                if (r.TryGetValue("snippet", out var sn) && sn != null)
-                    observations.AppendLine($"Near match context:\n{sn}");
-            }
-            else if (r.TryGetValue("output", out var output) && output != null)
-            {
-                var outStr = output.ToString() ?? "";
-                var maxOut = type == "read" ? 5000 : 2000;
-                var pathLabel = r.TryGetValue("path", out var p) && p != null ? $"FILE: {p}\n" : "";
-                observations.AppendLine($"[{type?.ToUpper()} {status}] {desc}\n{pathLabel}{Truncate(outStr, maxOut)}");
-            }
-            else if (type == "edit" && status == "done")
-            {
-                observations.AppendLine($"EDIT OK: {r.GetValueOrDefault("path")} — {desc}");
-            }
-        }
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  STEP EXECUTION ENGINE  (unchanged from original)
-    // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<List<object>> ExecuteSteps(
         List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse, CancellationToken ct = default)
@@ -3314,44 +3190,6 @@ Example:
         return results;
     }
 
-    private async Task<string> ReadAttachedFiles(List<string> files, string projectRoot)
-    {
-        var sb = new StringBuilder();
-        foreach (var filePath in files)
-        {
-            if (string.IsNullOrWhiteSpace(filePath)) continue;
-            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, filePath.Replace('/', Path.DirectorySeparatorChar)));
-            if (!IsPathUnderRoot(fullPath, projectRoot)) continue;
-            if (System.IO.File.Exists(fullPath))
-            {
-                var content = await System.IO.File.ReadAllTextAsync(fullPath);
-                sb.AppendLine($"\n### {filePath}\n```\n{Truncate(content, 4000)}\n```");
-            }
-        }
-        return sb.ToString();
-    }
-
-    private async Task<string> BuildFullFileContextAsync(
-        IEnumerable<string> relativePaths, string projectRoot, int maxTotalChars = 120_000)
-    {
-        var sb = new StringBuilder();
-        var total = 0;
-        foreach (var rel in relativePaths.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            if (string.IsNullOrWhiteSpace(rel)) continue;
-            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
-            if (!IsPathUnderRoot(full, projectRoot) || !System.IO.File.Exists(full)) continue;
-            var text = await System.IO.File.ReadAllTextAsync(full, Encoding.UTF8);
-            if (total + text.Length > maxTotalChars)
-                text = Truncate(text, Math.Max(2000, maxTotalChars - total));
-            sb.AppendLine($"### FILE: {rel.Replace('\\', '/')}");
-            sb.AppendLine("```"); sb.AppendLine(text); sb.AppendLine("```"); sb.AppendLine();
-            total += text.Length;
-            if (total >= maxTotalChars) break;
-        }
-        return sb.ToString();
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     //  TASK COMPLETION CHECK
     // ═════════════════════════════════════════════════════════════════════════
@@ -3857,130 +3695,6 @@ Rules:
             sb.Append(c);
         }
         return changed ? sb.ToString() : null;
-    }
-    /// <summary>
-    /// Extracts a keyword-relevant section of a large file with line numbers.
-    /// Always includes the first <paramref name="headerLines"/> lines (globals,
-    /// imports, controller init) plus a window centred on the highest-scoring
-    /// anchor line.  Total output is kept within ~<paramref name="maxChars"/>.
-    /// </summary>
-    private static string ExtractRelevantFileSection(
-        string content, string taskHint, int maxChars = 16_000, int headerLines = 60)
-    {
-        var lines = content.Split('\n');
-
-        // Small file: number every line and return the whole thing.
-        if (content.Length <= maxChars)
-            return BuildNumberedLines(lines, 0, lines.Length - 1);
-
-        // Score each line by keyword overlap with the task description.
-        var keywords = ExtractTaskKeywords(taskHint);
-        int bestLine = 0, bestScore = -1;
-        for (int i = 0; i < lines.Length; i++)
-        {
-            var line = lines[i];
-            int score = keywords.Sum(kw =>
-                line.Contains(kw, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
-
-            // Extra weight for function declarations that mention a keyword.
-            if ((line.Contains("function") || line.Contains("= function")) && score > 0)
-                score += 2;
-
-            if (score > bestScore) { bestScore = score; bestLine = i; }
-        }
-
-        // Budget: header block + separator text + window block.
-        int headerEnd = Math.Min(headerLines - 1, lines.Length - 1);
-
-        // Window: 40 lines before the best anchor, up to ~200 lines total.
-        int windowSize = 200;
-        int winStart = Math.Max(headerEnd + 1, bestLine - 40);
-        int winEnd = Math.Min(lines.Length - 1, winStart + windowSize - 1);
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"// ── file header (lines 1–{headerEnd + 1}) ─────────────");
-        sb.Append(BuildNumberedLines(lines, 0, headerEnd));
-
-        if (winStart > headerEnd + 1)
-            sb.AppendLine($"// ── … {winStart - headerEnd - 1} lines omitted … ──────────────");
-
-        sb.AppendLine($"// ── relevant section (lines {winStart + 1}–{winEnd + 1}) ───────────");
-        sb.Append(BuildNumberedLines(lines, winStart, winEnd));
-
-        if (winEnd < lines.Length - 1)
-            sb.AppendLine($"// ── … {lines.Length - 1 - winEnd} more lines not shown … ──────");
-
-        return sb.ToString();
-    }
-
-    /// <summary>Formats lines[from..to] with 1-based line-number prefixes.</summary>
-    private static string BuildNumberedLines(string[] lines, int from, int to)
-    {
-        var sb = new StringBuilder((to - from + 1) * 60);
-        for (int i = from; i <= to && i < lines.Length; i++)
-            sb.AppendLine($"{i + 1,5}: {lines[i]}");
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Splits a task hint into meaningful keyword tokens (≥3 chars, no stop words).
-    /// </summary>
-    private static string[] ExtractTaskKeywords(string hint)
-    {
-        var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "the","and","for","from","that","this","with","when","should","not",
-            "into","back","have","been","will","make","card","file","code","line",
-            "its","set","get","put","use","let","var","new","old","all","any","can"
-        };
-
-        return hint.Split(new[] { ' ', '\n', '\r', '.', ',', '(', ')', '{', '}', '[', ']', '"', '\'', ';' },
-                StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length >= 3 && !stopWords.Contains(w))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(12)
-            .ToArray();
-    }
-
-    /// <summary>
-    /// Returns (startLine, endLine) of the most relevant contiguous block in
-    /// <paramref name="content"/> for <paramref name="taskHint"/>, using the
-    /// same keyword-scoring logic as ExtractRelevantFileSection.
-    /// Small files return the full range.  The caller may re-slice the original
-    /// lines array to obtain a raw code snippet — no line‑number prefixes.
-    /// </summary>
-    private static (int start, int end) FindRelevantLines(string content, string taskHint)
-    {
-        var lines = content.Split('\n');
-        if (lines.Length <= 200)
-            return (0, lines.Length - 1);
-
-        var keywords = ExtractTaskKeywords(taskHint);
-        if (keywords.Length == 0)
-            return (0, Math.Min(199, lines.Length - 1));
-
-        int bestLine = 0, bestScore = -1;
-        for (int i = 0; i < lines.Length; i++)
-        {
-            int score = keywords.Sum(kw =>
-                lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase) ? 1 : 0);
-            if ((lines[i].Contains("function") || lines[i].Contains("= function")) && score > 0)
-                score += 2;
-            if (score > bestScore) { bestScore = score; bestLine = i; }
-        }
-
-        if (bestScore <= 0)
-            return (0, Math.Min(199, lines.Length - 1));
-
-        var start = Math.Max(0, bestLine - 40);
-        var end = Math.Min(lines.Length - 1, start + 199);
-        return (start, end);
-    }
-
-    private async Task<string?> GetBuildCommand()
-    {
-        var cfg = await _configFile.LoadConfigAsync();
-        return cfg.buildCommands;
     }
 
     /** <summary> Checks if a path is a relative path (not absolute) and contains directory separators, 
