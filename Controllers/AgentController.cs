@@ -222,6 +222,37 @@ public class AgentController : ControllerBase
         return PipelineType.CodeEdit;
     }
 
+    private async Task<PipelineType?> TryClassifyWithLlm(string prompt, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return null;
+        var systemPrompt = @"Classify the user request into exactly one pipeline type. Respond with JSON only: {""pipeline"": ""<type>""}
+
+Types:
+- QuickCheck: ping, health, status, connectivity (no file changes)
+- CommandExecution: git, terminal, docker, file ops, network scan, system info, directory listing, package install
+- CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
+- Compound: mix of command execution and code edits
+
+If unsure, use CodeEdit.";
+
+        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
+        if (err != null || string.IsNullOrWhiteSpace(raw)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var pipelineStr = doc.RootElement.TryGetProperty("pipeline", out var p) ? p.GetString() : null;
+            return pipelineStr switch
+            {
+                "QuickCheck" => PipelineType.QuickCheck,
+                "CommandExecution" => PipelineType.CommandExecution,
+                "CodeEdit" => PipelineType.CodeEdit,
+                "Compound" => PipelineType.Compound,
+                _ => null
+            };
+        }
+        catch { return null; }
+    }
+
     /// <summary>
     /// Infers the correct subfolder for a new file based on naming conventions
     /// and content patterns discovered in the repo.
@@ -1061,7 +1092,12 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
-        var pipelineType = ClassifyTask(prompt);
+        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, ct);
+        if (pipelineType == null)
+        {
+            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
+            pipelineType = ClassifyTask(prompt);
+        }
         await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
 
         // ── Route to the right pipeline ───────────────────────────────────
@@ -1078,7 +1114,23 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var (complete, feedback) = await VerificationPipeline(
             prompt, allSteps, projectRoot, emitSse, ct);
 
-        return (allSteps, feedback ?? summary, complete, thinking);
+        // ── Reprisal Pipeline ─────────────────────────────────────────
+        if (!complete && !string.IsNullOrEmpty(feedback)) {
+            string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
+            await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
+            var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(reprisalPrompt, projectRoot, emitSse, ct);
+            allSteps.AddRange(reprisalSteps);
+            var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
+            if (!reprisalComplete)
+            {
+                await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+            }
+            summary = reprisalSummary;
+            thinking = reprisalThinking;
+            complete = reprisalComplete;
+        }
+
+        return (allSteps, summary, complete, thinking);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
