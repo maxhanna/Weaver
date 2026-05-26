@@ -236,7 +236,10 @@ Types:
 If unsure, use CodeEdit.";
 
         var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
-        if (err != null || string.IsNullOrWhiteSpace(raw)) return null;
+        if (string.IsNullOrWhiteSpace(raw)) {
+            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, raw, err }, ct: ct);
+            return null;
+        }
         await EmitLog(emitSse, "info", "LLM classified the prompt.", new { prompt, raw, err }, ct: ct);
 
         try
@@ -2219,7 +2222,7 @@ Be concise — 2-4 sentences max.";
         {
             var projectRoot = GetProjectRoot(req.Project);
             await SendSse(Response, "phase", new { phase = "start", projectRoot });
-            await EmitLog(true, "info", "Agent run started (phased pipeline)",
+            await EmitLog(true, "info", "Agent run started",
                 new { projectRoot, task = req.Prompt });
 
             List<object> allSteps;
@@ -2348,7 +2351,7 @@ Be concise — 2-4 sentences max.";
     private async Task<string> GetLlamaBaseUrl()
     {
         var cfg = await _configFile.LoadConfigAsync();
-        return (cfg.llamaUrl ?? "http://localhost:8081").TrimEnd('/');
+        return (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
     }
 
     /// <summary>
@@ -3059,6 +3062,7 @@ Example:
         result["output"] = beforeLen >= 0 && beforeLen < fullOutput.Length
             ? Truncate(fullOutput.Substring(beforeLen), MaxReadOutputChars)
             : "";
+        result["snippet"] = Truncate((result["output"] as string) ?? "", 200);
     }
 
     /// <summary>
