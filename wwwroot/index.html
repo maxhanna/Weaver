@@ -26,7 +26,7 @@
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
         {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
-        <button class="options-btn small brand-link" ng-click="vm.toggleProjectOptions()"
+        <button class="options-btn small brand-link brand-enhanced" ng-click="vm.toggleProjectOptions()"
           ng-class="{active: vm.showProjectOptions}">Options ▾</button>
         <div class="options-menu" ng-if="vm.showProjectOptions">
           <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit

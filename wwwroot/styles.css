@@ -181,6 +181,23 @@ button.small.ghost:hover {
 	transform: translateY(-1px);
 }
 
+button.options-btn {
+	background: var(--brand-gradient);
+	border: none;
+	color: #012;
+	font-weight: 700;
+	padding: 8px 12px;
+	border-radius: 8px;
+	transition: all 0.2s ease;
+	box-shadow: var(--brand-shadow);
+	font-size: 13px;
+}
+
+button.options-btn:hover {
+	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.4);
+	transform: translateY(-1px);
+}
+
 .drag-indicator-line {
 	position: absolute;
 	left: 0;
@@ -689,6 +706,77 @@ header h1 {
 	overflow: hidden;
 	animation: popupFadeIn 0.3s ease-out;
 	z-index: 1001;
+}
+
+/* Edit Projects Popup Panel */
+.popup-overlay.edit-projects-panel {
+	background: rgba(0, 0, 0, 0.7);
+	backdrop-filter: blur(6px);
+}
+
+.popup-panel.edit-projects-panel {
+	background: var(--surface);
+	border: var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--brand-shadow), 0 0 30px rgba(0, 0, 0, 0.5);
+	max-width: 650px;
+	width: 90%;
+	max-height: 90vh;
+	overflow-y: auto;
+	padding: 24px;
+	position: relative;
+	transform: translateY(-20px);
+	opacity: 0;
+	visibility: hidden;
+	transition: all 0.3s ease;
+}
+
+.popup-panel.edit-projects-panel.active {
+	transform: translateY(0);
+	opacity: 1;
+	visibility: visible;
+}
+
+.popup-header.edit-projects-panel {
+	background: var(--panel);
+	padding: 16px 20px;
+	border-bottom: var(--border);
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 20px;
+}
+
+.popup-header.edit-projects-panel h2 {
+	margin: 0;
+	font-size: 20px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.popup-body.edit-projects-panel {
+	padding: 0;
+	margin-bottom: 24px;
+}
+
+.popup-body.edit-projects-panel .form-group {
+	margin-bottom: 16px;
+}
+
+.popup-body.edit-projects-panel label {
+	display: block;
+	margin-bottom: 6px;
+	font-size: 13px;
+	color: var(--muted);
+}
+
+.popup-footer.edit-projects-panel {
+	padding: 16px 20px;
+	border-top: var(--border);
+	background: var(--panel);
+	display: flex;
+	justify-content: flex-end;
+	gap: 10px;
 }
 
 @keyframes popupFadeIn {
