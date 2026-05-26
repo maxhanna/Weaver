@@ -144,7 +144,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         vm.state[from].splice(idx, 1);
         if (from === 'doing' && to === 'todo') {
           card.ready = false;
-          delete card.agentAnalysis;
+          // Preserve agentAnalysis/agentLog for previous-analysis display
           vm.activeCardId = null;
         }
         if (from === 'doing' && to === 'done') {
@@ -152,8 +152,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         }
         if (from === 'done' && to === 'todo') {
           card.ready = false;
-          delete card.agentAnalysis;
-          delete card.agentSteps;
+          // Preserve agentAnalysis/agentLog for previous-analysis display
           vm.activeCardId = null;
         }
         if (from === 'todo' && to === 'done') {
@@ -164,6 +163,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         }
         vm.state[to].push(card);
         if (from === 'todo' && to === 'doing' && card.ready) {
+          // Clear previous analysis when starting a fresh run
+          delete card.agentAnalysis;
+          delete card.agentLog;
           vm.executeAgent(card);
         }
         vm.saveCards();
@@ -171,8 +173,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
 
       vm.reopenCard = function (card) {
         card.ready = false;
-        delete card.agentAnalysis;
-        delete card.agentSteps;
+        // Preserve agentAnalysis/agentLog for previous-analysis display
         var idx = vm.state.done.findIndex(function (c) { return c.id === card.id; });
         if (idx === -1) return;
         vm.state.done.splice(idx, 1);
@@ -469,18 +470,20 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
                 }
                 if (fromCol === 'doing' && targetCol === 'todo') {
                   cardObj.ready = false;
-                  delete cardObj.agentAnalysis;
+                  // Preserve agentAnalysis/agentLog for previous-analysis display
                 }
                 if (fromCol === 'done' && targetCol === 'todo') {
                   cardObj.ready = false;
-                  delete cardObj.agentAnalysis;
-                  delete cardObj.agentSteps;
+                  // Preserve agentAnalysis/agentLog for previous-analysis display
                 }
                 var idx = vm.state[fromCol].findIndex(function (c) { return c.id === cardId; });
                 if (idx === -1) return;
                 vm.state[fromCol].splice(idx, 1);
                 vm.state[targetCol].splice(Math.max(0, dropIndex), 0, cardObj);
                 if (fromCol === 'todo' && targetCol === 'doing' && cardObj.ready) {
+                  // Clear previous analysis when starting a fresh run
+                  delete cardObj.agentAnalysis;
+                  delete cardObj.agentLog;
                   vm.saveCards();
                   vm.executeAgent(cardObj);
                   return;
@@ -493,7 +496,6 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         } catch (e) { console.error('dragdrop error', e); }
       };
 
-      $timeout(function () { vm.initColumnResizers(); }, 300);
       $timeout(function () { vm.setupDragDrop(); }, 500);
     }
   };

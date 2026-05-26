@@ -6,17 +6,20 @@
     overflow: auto;
     padding-bottom: 8px;
     resize: horizontal;
+    flex: 1;
 }
 
 .column {
     position: relative;
+    display: flex;
+    flex-direction: column;
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.01));
     min-width: 280px;
     width: 320px;
-    max-height: 100%;
+    height: 100%;
 }
 
-.column > h3 {
+.column>h3 {
     font-size: 13px;
     font-weight: 600;
     text-transform: uppercase;
@@ -47,10 +50,7 @@
     overflow-y: auto;
     flex: 1;
     padding-right: 4px;
-    min-height: 200px;
-    max-height: calc(99vh - 150px);
-    max-height: calc(99dvh - 150px);
-    resize: vertical;
+    min-height: 100px;
 }
 
 /* Drop indicator line — dynamically inserted by JS at the exact drop position */
@@ -122,7 +122,7 @@ body.dragging-active .card:hover {
 .card.dragging {
     opacity: 0.5;
     transform: scale(1.02);
-} 
+}
 
 .card .card-meta {
     display: flex;
@@ -189,9 +189,20 @@ body.dragging-active .card:hover {
     color: #aaa;
 }
 
-.card .card-tag.priority-high { background: rgba(239, 68, 68, 0.15); color: var(--brand-error); }
-.card .card-tag.priority-medium { background: rgba(234, 179, 8, 0.15); color: var(--brand-warning); }
-.card .card-tag.priority-low { background: rgba(34, 197, 94, 0.15); color: var(--brand-success); }
+.card .card-tag.priority-high {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--brand-error);
+}
+
+.card .card-tag.priority-medium {
+    background: rgba(234, 179, 8, 0.15);
+    color: var(--brand-warning);
+}
+
+.card .card-tag.priority-low {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--brand-success);
+}
 
 .card .card-tag.tag-ready {
     background: rgba(99, 102, 241, 0.15);
@@ -271,9 +282,17 @@ body.dragging-active .card:hover {
     flex-shrink: 0;
 }
 
-.card .card-analysis .analysis-step .step-status.ok { color: var(--brand-success); }
-.card .card-analysis .analysis-step .step-status.error { color: var(--brand-error); }
-.card .card-analysis .analysis-step .step-status.pending { color: #666; }
+.card .card-analysis .analysis-step .step-status.ok {
+    color: var(--brand-success);
+}
+
+.card .card-analysis .analysis-step .step-status.error {
+    color: var(--brand-error);
+}
+
+.card .card-analysis .analysis-step .step-status.pending {
+    color: #666;
+}
 
 .card .card-analysis .analysis-thinking {
     margin-top: 4px;
@@ -291,30 +310,36 @@ body.dragging-active .card:hover {
     word-break: break-all;
 }
 
-.card .card-analysis .analysis-log {
+
+.analysis-log {
     margin-top: 4px;
 }
 
-.card .card-analysis .analysis-log .log-entries {
+.log-entries {
     max-height: 100px;
     overflow-y: auto;
     font-size: 10px;
 }
 
-.card .card-analysis .analysis-log .log-entry {
+.log-entry {
     padding: 1px 0;
     color: #888;
 }
 
-.card .card-analysis .analysis-log .log-entry.error { color: #f87171; }
-.card .card-analysis .analysis-log .log-entry.warn { color: #fbbf24; }
+.log-entry.error {
+    color: #f87171;
+}
 
-.card .card-analysis .analysis-log .log-ts {
+.log-entry.warn {
+    color: #fbbf24;
+}
+
+.log-ts {
     margin-right: 4px;
     opacity: 0.6;
 }
 
-.card .card-analysis .analysis-log .log-detail-raw {
+.log-detail-raw {
     white-space: pre-wrap;
     word-break: break-all;
     font-size: 9px;
@@ -324,17 +349,17 @@ body.dragging-active .card:hover {
     margin: 2px 0;
 }
 
-.card .card-analysis .analysis-files {
+.analysis-files {
     margin-bottom: 6px;
     font-size: 11px;
 }
 
-.card .card-analysis .analysis-step .step-body {
+.step-body {
     flex: 1;
     min-width: 0;
 }
 
-.card .card-analysis .analysis-step .step-output {
+.step-output {
     font-size: 10px;
     background: rgba(0, 0, 0, 0.15);
     padding: 4px 6px;
@@ -345,7 +370,7 @@ body.dragging-active .card:hover {
     color: #aaa;
 }
 
-.card .card-analysis .analysis-step .step-err {
+.step-err {
     color: #f87171;
     font-size: 10px;
     display: block;
@@ -390,8 +415,14 @@ body.dragging-active .card:hover {
     font-weight: 600;
 }
 
-.diff-header-old { border-right: 1px solid rgba(255, 255, 255, 0.04); background: rgba(239, 68, 68, 0.06); }
-.diff-header-new { background: rgba(34, 197, 94, 0.06); }
+.diff-header-old {
+    border-right: 1px solid rgba(255, 255, 255, 0.04);
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.diff-header-new {
+    background: rgba(34, 197, 94, 0.06);
+}
 
 .diff-wrapper {
     display: flex;
@@ -542,10 +573,12 @@ body.dragging-active .card:hover {
         flex-direction: column;
         align-items: stretch;
     }
+
     .column {
         width: 100%;
         min-width: 0;
     }
+
     .col-resizer {
         display: none;
     }

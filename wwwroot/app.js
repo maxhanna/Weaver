@@ -312,189 +312,7 @@
     // === Cards (managed by KanbanMixin) ===
     KanbanMixin.init(vm, $scope);
 
-    // Drag and drop functionality
-    vm.dragStart = function (event, card, col) {
-      // Check if this is a panel drag (ask ai, agent, terminal)
-      var panelType = event.target.closest('[data-panel-type]');
-      if (panelType) {
-        event.dataTransfer.setData('text/plain', JSON.stringify({ 
-          panelType: panelType.dataset.panelType,
-          panelId: panelType.id
-        }));
-        event.dataTransfer.effectAllowed = 'move';
-      } else {
-        // Regular card drag
-        event.dataTransfer.setData('text/plain', JSON.stringify({ card, col }));
-        event.dataTransfer.effectAllowed = 'move';
-        event.target.classList.add('dragging');
-      }
-    };
 
-    vm.dragOver = function (event, targetCol) {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'move';
-      
-      // Check if this is a panel drag (ask ai, agent, terminal)
-      var dragData = event.dataTransfer.getData('text/plain');
-      if (dragData) {
-        var dragInfo = JSON.parse(dragData);
-        if (dragInfo.panelType) {
-          // Handle panel dragging
-          var panelContainers = document.querySelectorAll('[data-panel-type]');
-          var targetPanel = event.target.closest('[data-panel-type]');
-          
-          if (targetPanel) {
-            // Remove any existing indicator lines
-            var existingLines = document.querySelectorAll('.drag-indicator-line');
-            existingLines.forEach(line => line.remove());
-            
-            // Add visual indicator for panel drop position
-            var rect = targetPanel.getBoundingClientRect();
-            var indicator = document.createElement('div');
-            indicator.className = 'drag-indicator-line';
-            indicator.style.position = 'absolute';
-            indicator.style.left = (rect.left - 2) + 'px';
-            indicator.style.right = (rect.right - 2) + 'px';
-            indicator.style.top = (rect.top - 2) + 'px';
-            indicator.style.height = '4px';
-            indicator.style.backgroundColor = '#007bff';
-            indicator.style.borderRadius = '2px';
-            indicator.style.zIndex = '1000';
-            indicator.style.width = (rect.width + 4) + 'px';
-            document.body.appendChild(indicator);
-          }
-        } else {
-          // Add visual indicator line when dragging within same column
-          var dragElement = document.querySelector('.dragging');
-          if (dragElement) {
-            var cards = document.querySelectorAll('[data-column="' + targetCol + '"] .card');
-            var rect = dragElement.getBoundingClientRect();
-            var mouseY = event.clientY;
-            
-            // Remove any existing indicator lines
-            var existingLines = document.querySelectorAll('.drag-indicator-line');
-            existingLines.forEach(line => line.remove());
-            
-            // Add new indicator line between cards
-            for (var i = 0; i < cards.length; i++) {
-              var cardRect = cards[i].getBoundingClientRect();
-              var cardTop = cardRect.top;
-              var cardBottom = cardRect.bottom;
-              
-              // Check if mouse is over the space between this card and the next one
-              if (i === 0 && mouseY < cardTop) {
-                // Mouse is above first card
-                var indicator = document.createElement('div');
-                indicator.className = 'drag-indicator-line';
-                indicator.style.position = 'absolute';
-                indicator.style.left = (rect.left - 2) + 'px';
-                indicator.style.right = (rect.right - 2) + 'px';
-                indicator.style.top = (cardTop - 2) + 'px';
-                indicator.style.height = '4px';
-                indicator.style.backgroundColor = '#007bff';
-                indicator.style.borderRadius = '2px';
-                indicator.style.zIndex = '1000';
-                indicator.style.width = (rect.width + 4) + 'px';
-                document.body.appendChild(indicator);
-                break;
-              } else if (i < cards.length - 1 && mouseY >= cardTop && mouseY < cardBottom) {
-                // Mouse is over a card, show line below it
-                var indicator = document.createElement('div');
-                indicator.className = 'drag-indicator-line';
-                indicator.style.position = 'absolute';
-                indicator.style.left = (rect.left - 2) + 'px';
-                indicator.style.right = (rect.right - 2) + 'px';
-                indicator.style.top = (cardBottom - 2) + 'px';
-                indicator.style.height = '4px';
-                indicator.style.backgroundColor = '#007bff';
-                indicator.style.borderRadius = '2px';
-                indicator.style.zIndex = '1000';
-                indicator.style.width = (rect.width + 4) + 'px';
-                document.body.appendChild(indicator);
-                break;
-              } else if (i === cards.length - 1 && mouseY >= cardBottom) {
-                // Mouse is below last card
-                var indicator = document.createElement('div');
-                indicator.className = 'drag-indicator-line';
-                indicator.style.position = 'absolute';
-                indicator.style.left = (rect.left - 2) + 'px';
-                indicator.style.right = (rect.right - 2) + 'px';
-                indicator.style.top = (cardBottom - 2) + 'px';
-                indicator.style.height = '4px';
-                indicator.style.backgroundColor = '#007bff';
-                indicator.style.borderRadius = '2px';
-                indicator.style.zIndex = '1000';
-                indicator.style.width = (rect.width + 4) + 'px';
-                document.body.appendChild(indicator);
-                break;
-              }
-            }
-          }
-        }
-      }
-    };
-
-    vm.drop = function (event, targetCol) {
-      event.preventDefault();
-      
-      // Remove any existing indicator lines
-      var existingLines = document.querySelectorAll('.drag-indicator-line');
-      existingLines.forEach(line => line.remove());
-      
-      var data = event.dataTransfer.getData('text/plain');
-      if (!data) return;
-
-      var dragData = JSON.parse(data);
-      
-      // Check if this is a panel drag (ask ai, agent, terminal)
-      if (dragData.panelType) {
-        // Handle panel reordering
-        var panelType = dragData.panelType;
-        var panelId = dragData.panelId;
-        
-        // Get all panel containers in the correct order
-        var panelContainers = document.querySelectorAll('[data-panel-type]');
-        var targetPanel = event.target.closest('[data-panel-type]');
-        
-        if (targetPanel) {
-          // Find the target panel's position
-          var targetIndex = Array.from(panelContainers).indexOf(targetPanel);
-          var sourceIndex = Array.from(panelContainers).indexOf(document.getElementById(panelId));
-          
-          if (targetIndex !== -1 && sourceIndex !== -1 && targetIndex !== sourceIndex) {
-            // Reorder panels by manipulating the DOM directly
-            var panelElements = Array.from(panelContainers);
-            var draggedPanel = panelElements[sourceIndex];
-            
-            // Remove the dragged panel from its current position
-            draggedPanel.remove();
-            
-            // Insert at new position
-            if (targetIndex < panelElements.length) {
-              panelElements[targetIndex].parentNode.insertBefore(draggedPanel, panelElements[targetIndex]);
-            } else {
-              panelElements[panelElements.length - 1].parentNode.appendChild(draggedPanel);
-            }
-          }
-        }
-      } else {
-        // Handle regular card drag and drop
-        var { card, col } = dragData;
-
-        // Remove card from source column
-        var sourceCol = vm.state[col];
-        var cardIndex = sourceCol.findIndex(c => c.id === card.id);
-        if (cardIndex !== -1) {
-          sourceCol.splice(cardIndex, 1);
-
-          // Add card to target column
-          vm.state[targetCol].push(card);
-
-          // Save updated state
-          vm.saveCards();
-        }
-      }
-    };
 
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
@@ -658,6 +476,10 @@
       if (!card.text) return $window.alert('Card has no task text');
       var proj = card.filePath || vm.selectedProject;
       if (!proj) return $window.alert('No project assigned');
+
+      // Clear previous analysis for this fresh run
+      delete card.agentAnalysis;
+      delete card.agentLog;
 
       // Reset
       vm.agentResult = null;
@@ -1010,8 +832,6 @@
 
     vm.formatLogDetail = formatLogDetail;
     vm.refreshTerminal();
-
-    // Column resizers and drag-drop are managed by KanbanMixin in kanban.js
 
     // Refresh terminal periodically — but NOT while the agent is streaming.
     // $interval always calls $apply after each tick.  When the agent is active,

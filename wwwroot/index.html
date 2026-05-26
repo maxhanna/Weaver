@@ -234,42 +234,7 @@
               <details ng-if="vm.agentResult.thinking">
                 <summary>🧠 Reasoning</summary>
                 <pre class="streaming-text">{{vm.agentResult.thinking}}</pre>
-              </details>
-              
-              <!-- Logs Section -->
-              <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
-                <details>
-                  <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
-                  <div class="log-entries">
-                    <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
-                      <span class="log-ts">{{e.ts}}</span>
-                      <span class="log-msg">{{e.message}}</span>
-                      <details ng-if="e.detail" class="log-detail">
-                        <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
-                            style="font-weight:600;color:var(--error);">!</span></summary>
-                        <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                        <div ng-if="e.detail.diagnosis" class="log-diagnosis">
-                          <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
-                            opening quote on "newString" key</div>
-                          <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing
-                            opening quote on "oldString" key</div>
-                          <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON
-                            blocks found in response</div>
-                          <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified
-                            the text</div>
-                          <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be
-                            truncated (no closing brace)</div>
-                          <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains
-                            markdown comments (## or ?)</div>
-                          <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
-                            <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
-                          </div>
-                        </div>
-                      </details>
-                    </div>
-                  </div>
-                </details>
-              </div>
+              </details> 
             </div>
           </div>
         </div>

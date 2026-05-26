@@ -55,6 +55,10 @@ public class AgentController : ControllerBase
         if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
             return PipelineType.CommandExecution;
 
+        // Directory listing / exploration — needs agentic terminal control, not hallucination
+        if (Regex.IsMatch(lower, @"\b(list|show|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing))\b"))
+            return PipelineType.CommandExecution;
+
         // Default: needs the full planning pipeline
         return PipelineType.CodeEdit;
     }
@@ -636,7 +640,10 @@ PING / NETWORK DIAGNOSTIC:
 
 SHOWING INFORMATION to the user:
   Set ""file"" to ""_show"". In ""change"", put the exact text to display in the frontend.
-  Use this when the user asks to see output, status, or results.
+  Use this ONLY to display information you ALREADY know from discovery output.
+  CRITICAL: NEVER invent or hallucinate file contents, directory listings, or code.
+  If you need to discover what files exist or what a directory contains, use a command
+  (e.g. run `dir` or `ls` in the terminal) — do NOT use _show to fake the answer.
 
 CREATING NEW FILES:
   Set ""file"" to ""_create_file"". In ""change"", describe what file to create and its contents.
@@ -1105,7 +1112,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     /// Orchestration Router — classifies the task, routes to the appropriate
     /// pipeline, then feeds results through the Verification Pipeline.
     /// </summary>
-    private async Task<(List<object> allSteps, string summary, bool complete)> Orchestrate(
+    private async Task<(List<object> allSteps, string summary, bool complete, string thinking)> Orchestrate(
      string prompt, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
         // ── Connectivity check ────────────────────────────────────────────
@@ -1116,7 +1123,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
 
         // ── Route to the right pipeline ───────────────────────────────────
-        var (allSteps, summary) = pipelineType switch
+        var (allSteps, summary, thinking) = pipelineType switch
         {
             PipelineType.QuickCheck => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
             PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
@@ -1129,14 +1136,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var (complete, feedback) = await VerificationPipeline(
             prompt, allSteps, projectRoot, emitSse, ct);
 
-        return (allSteps, feedback ?? summary, complete);
+        return (allSteps, feedback ?? summary, complete, thinking);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  QUICK CHECK PIPELINE  —  ping, health, status (no LLM)
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, string summary)> QuickCheckPipeline(
+    private async Task<(List<object> steps, string summary, string thinking)> QuickCheckPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct)
     {
         var steps = new List<object>();
@@ -1150,16 +1157,16 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
             }
             await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, steps);
-            return (steps, plan.Summary);
+            return (steps, plan.Summary, plan.Thinking ?? "");
         }
-        return (steps, $"Quick check completed for: {prompt}");
+        return (steps, $"Quick check completed for: {prompt}", "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  COMMAND EXECUTION PIPELINE  —  agentic LLM↔terminal loop
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, string summary)> CommandExecutionPipeline(
+    private async Task<(List<object> steps, string summary, string thinking)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct)
     {
         var steps = new List<object>();
@@ -1174,7 +1181,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 await SendSse(Response, "plan",
                     new { thinking = fastPlan.Thinking, summary = fastPlan.Summary, items = fastPlan.Plan }, ct);
             await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, steps);
-            return (steps, fastPlan.Summary);
+            return (steps, fastPlan.Summary, fastPlan.Thinking ?? "");
         }
 
         // Agentic loop: LLM decides commands, sees output, reiterates
@@ -1319,14 +1326,16 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         summary ??= $"Command execution completed after {steps.Count} step(s)";
-        return (steps, summary);
+        return (steps, summary, "");
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    //  CODE EDIT PIPELINE  —  discover → plan → execute
     // ═════════════════════════════════════════════════════════════════════════
     //  CODE EDIT PIPELINE  —  discover → plan → edit → review loop
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, string summary)> CodeEditPipeline(
+    private async Task<(List<object> steps, string summary, string thinking)> CodeEditPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct)
     {
         var allSteps = new List<object>();
@@ -1348,6 +1357,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             await EmitLog(emitSse, "warn", "Plan phase produced no items.", new { plan }, ct: ct);
             throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
         }
+
+        // Emit thinking immediately
+        if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
+            await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
 
         await EmitLog(emitSse, "info",
             $"Plan: {plan.Plan.Count} step(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
@@ -1371,14 +1384,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
 
-        return (allSteps, plan.Summary);
+        return (allSteps, plan.Summary, plan.Thinking ?? "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  COMPOUND PIPELINE  —  sequences mixed operations through sub-pipelines
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, string summary)> CompoundPipeline(
+    private async Task<(List<object> steps, string summary, string thinking)> CompoundPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         AgentPlan? prebuiltPlan = null, string? discoveryContext = null)
     {
@@ -1404,6 +1417,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             plan = await AnalyzePromptAndPlan(prompt, discoveryContext!, projectRoot, emitSse, ct)
                 ?? throw new InvalidOperationException("Compound: LLM returned empty plan");
         }
+
+        // Emit thinking immediately
+        if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
+            await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
 
         // Group plan items by type
         var commandItems = plan.Plan.Where(p => IsSpecialMarker(p.File)).ToList();
@@ -1431,7 +1448,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         var summary = plan.Summary;
-        return (allSteps, summary);
+        return (allSteps, summary, plan.Thinking ?? "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -2089,11 +2106,12 @@ Be concise — 2-4 sentences max.";
 
         var projectRoot = GetProjectRoot(req.Project);
 
-        var (allSteps, summary, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
+        var (allSteps, summary, complete, thinking) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
 
         return Ok(new
         {
             summary,
+            thinking,
             complete,
             steps = allSteps,
             filesEdited = ExtractFilesEdited(allSteps)
@@ -2153,10 +2171,10 @@ Be concise — 2-4 sentences max.";
                 new { projectRoot, task = req.Prompt });
 
             List<object> allSteps;
-            string summary;
+            string summary, thinking;
             bool complete;
             // ── Full phased pipeline ────────────────────────────────────
-            (allSteps, summary, complete) =
+            (allSteps, summary, complete, thinking) =
                 await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted);
 
             var filesEdited = ExtractFilesEdited(allSteps);
@@ -2168,6 +2186,7 @@ Be concise — 2-4 sentences max.";
             await SendSse(Response, "done", new
             {
                 summary,
+                thinking,
                 complete = requirementsMet,
                 editsApplied = requirementsMet,
                 incomplete = TaskExpectsFileChanges(req.Prompt) && !requirementsMet,
@@ -2548,11 +2567,10 @@ Example:
     //  RESULT HELPERS
     // ═════════════════════════════════════════════════════════════════════════
 
-    // FIX 3: Include 'rename' steps so the done SSE payload's filesEdited list
-    // is populated.  Without this the frontend overwrites its streaming-derived
-    // list with an empty array, and the card stays in Doing.
-    private static List<object> ExtractFilesEdited(List<object> steps) =>
-        steps.OfType<Dictionary<string, object?>>()
+    private static List<object> ExtractFilesEdited(List<object> steps)
+    {
+        // Primary: Dictionary-based extraction
+        var result = steps.OfType<Dictionary<string, object?>>()
             .Where(s =>
                 s.TryGetValue("type", out var t) &&
                 (t?.ToString() == "edit" || t?.ToString() == "rename") &&
@@ -2567,6 +2585,38 @@ Example:
                 preview = s.GetValueOrDefault("diffPreview")
             })
             .ToList();
+
+        if (result.Count > 0) return result;
+
+        // Fallback: serialize non-Dictionary steps to JSON and re-parse
+        foreach (var step in steps)
+        {
+            if (step is Dictionary<string, object?>) continue;
+            try
+            {
+                var json = JsonSerializer.Serialize(step);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                var type = root.TryGetProperty("type", out var t) ? t.GetString() : "";
+                var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
+                if ((type == "edit" || type == "rename") && status == "done")
+                {
+                    result.Add(new
+                    {
+                        path = root.TryGetProperty("path", out var p) ? p.GetString() : null,
+                        action = root.TryGetProperty("editAction", out var a) ? a.GetString() : null,
+                        toPath = root.TryGetProperty("toPath", out var tp) ? tp.GetString() : null,
+                        linesAdded = root.TryGetProperty("linesAdded", out var la) ? la.GetInt32() : 0,
+                        linesRemoved = root.TryGetProperty("linesRemoved", out var lr) ? lr.GetInt32() : 0,
+                        preview = root.TryGetProperty("diffPreview", out var dp) ? dp.GetString() : null
+                    });
+                }
+            }
+            catch { }
+        }
+
+        return result;
+    }
 
     private static void AppendObservations(StringBuilder observations, List<object> batchResults)
     {
