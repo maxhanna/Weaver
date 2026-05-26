@@ -2,6 +2,17 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
+    <ImplicitUsings>enable</ImplicitUsings> 
   </PropertyGroup>
+
+  <!-- Automatically Runs the standalone C# Script script before compiling your backend -->
+  <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">
+    <Message Importance="high" Text="Preparing C# Script Environment for JS evaluation..." />
+    
+    <!-- 1. Install standard C# script runner locally if not present -->
+    <Exec Command="dotnet tool install --global dotnet-script" ContinueOnError="true" StandardOutputImportance="low" />
+    
+    <!-- 2. Execute the C# script (Build fails immediately if linting script returns exit code 1) -->
+    <Exec Command="dotnet-script lint.csx" ContinueOnError="false" />
+  </Target>
 </Project>
