@@ -987,6 +987,7 @@ h1 .brand-e:hover::before {
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
 	background-clip: text;
+	filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
 }
 
 .logo-icon-enhanced:hover {
