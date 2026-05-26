@@ -526,8 +526,12 @@ If unsure, use CodeEdit.";
     // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
-        string prompt, string projectRoot, bool emitSse)
+        string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null)
     {
+        // Fast path: if files are already attached, skip full discovery
+        if (attachedFiles != null && attachedFiles.Count > 0)
+            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
+
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: scanning project files…");
 
         var plan = new List<AgentStep>();
@@ -535,24 +539,51 @@ If unsure, use CodeEdit.";
 
         plan.Add(new AgentStep { Index = idx++, Type = "list", Path = "", Description = "Auto: list project root" });
 
-        foreach (var kw in ExtractSearchKeywords(prompt))
-            plan.Add(new AgentStep { Index = idx++, Type = "grep", Query = kw, Description = $"Auto: search codebase for '{kw}'" });
+        // ── Grep keywords, but skip ones already mapped by file hints ─────
+        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot);
+        var hintedKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var file in FindLikelyFiles(prompt, projectRoot))
-            plan.Add(new AgentStep { Index = idx++, Type = "read", Path = file, Description = $"Auto: read candidate file {file}" });
-
-        // Windows-friendly path finder
-        plan.Add(new AgentStep
+        foreach (var hf in hintedFiles)
         {
-            Index = idx++,
-            Type = "command",
-            Command = OperatingSystem.IsWindows()
-                ? "dir /s /b app.js index.html styles.css 2>nul | more"
-                : "find . \\( -name 'app.js' -o -name 'index.html' -o -name '*.css' \\) 2>/dev/null | head -20",
-            Description = "Auto: locate frontend files via shell"
-        });
+            // Infer keywords from hinted file paths (basename without extension)
+            var fileName = Path.GetFileNameWithoutExtension(hf);
+            if (!string.IsNullOrWhiteSpace(fileName))
+                hintedKeywords.Add(fileName);
+        }
 
-        var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
+        foreach (var kw in ExtractSearchKeywords(prompt))
+        {
+            var kwLower = kw.ToLowerInvariant();
+
+            // If file hints already know about this keyword, read hinted files directly
+            var knownPaths = hintedFiles
+                .Where(hf => hf.Contains(kwLower, StringComparison.OrdinalIgnoreCase) ||
+                             Path.GetFileNameWithoutExtension(hf).Contains(kwLower, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (knownPaths.Count > 0)
+            {
+                foreach (var kf in knownPaths)
+                {
+                    if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, kf, StringComparison.OrdinalIgnoreCase)))
+                        plan.Add(new AgentStep { Index = idx++, Type = "read", Path = kf, Description = $"Auto: read hinted file for '{kw}'" });
+                }
+            }
+            else
+            {
+                plan.Add(new AgentStep { Index = idx++, Type = "grep", Query = kw, Description = $"Auto: search codebase for '{kw}'" });
+            }
+        }
+
+        // Likely files (skip if already added via hinted path)
+        foreach (var file in FindLikelyFiles(prompt, projectRoot))
+        {
+            if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, file, StringComparison.OrdinalIgnoreCase)))
+                plan.Add(new AgentStep { Index = idx++, Type = "read", Path = file, Description = $"Auto: read candidate file {file}" });
+        }
+
+        // ── Execute all discovery steps in parallel ──────────────────────
+        var steps = await ExecuteDiscoveryStepsConcurrent(plan, projectRoot, 0, emitSse);
 
         // Teach the file-hints manager from grep results
         foreach (var item in steps)
@@ -566,6 +597,7 @@ If unsure, use CodeEdit.";
                 _fileHints.LearnFromGrepOutput(query, output, projectRoot);
         }
 
+        // ── Build discovery text with token budget ───────────────────────
         var sb = new StringBuilder();
         sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
         sb.AppendLine();
@@ -583,8 +615,13 @@ If unsure, use CodeEdit.";
                 sb.AppendLine("Suggestions: " + string.Join(", ", list));
         }
 
+        const int maxDiscoveryChars = 8000;
+        var discoveryText = sb.ToString();
+        if (discoveryText.Length > maxDiscoveryChars)
+            discoveryText = discoveryText[..maxDiscoveryChars] + "\n…(truncated)";
+
         await EmitLog(emitSse, "info", $"Phase 1 complete — {steps.Count} discovery steps");
-        return (sb.ToString(), steps);
+        return (discoveryText, steps);
     }
 
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
@@ -611,6 +648,36 @@ If unsure, use CodeEdit.";
         return (sb.ToString(), steps);
     }
 
+    /// <summary>
+    /// Rebuilds a discovery-context string from previously executed steps,
+    /// so the reprisal pipeline can skip Phase 1 (DISCOVER).
+    /// </summary>
+    private static string ReconstructDiscoveryContext(List<object> steps)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
+        sb.AppendLine();
+        foreach (var item in steps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (type is "list" or "grep" or "glob" or "read")
+            {
+                if (r.TryGetValue("output", out var output) && output != null)
+                {
+                    sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
+                    sb.AppendLine(Truncate(output.ToString() ?? "", type == "read" ? 4000 : 1500));
+                    sb.AppendLine();
+                }
+            }
+        }
+        const int maxDiscoveryChars = 8000;
+        var text = sb.ToString();
+        return text.Length > maxDiscoveryChars
+            ? text[..maxDiscoveryChars] + "\n…(truncated)"
+            : text;
+    }
+
 
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default)
@@ -623,8 +690,8 @@ When describing changes, be very specific and detailed. The more precise you are
 
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
 {
-  ""thinking"": ""analysis of what the task requires"",
-  ""summary"":  ""description of the overall changes"",
+  ""thinking"": ""Task Summary: <one-paragraph summary of what the user asked for, in your own words, referencing specific files, lines, or behaviors. Do NOT copy the user's prompt verbatim.>"",
+  ""summary"":  ""<concrete description of what changes will be made, to which files>"",
   ""plan"": [
     {
       ""file"": ""relative/path/to/file"",
@@ -1091,7 +1158,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     /// pipeline, then feeds results through the Verification Pipeline.
     /// </summary>
     private async Task<(List<object> allSteps, string summary, bool complete, string thinking)> Orchestrate(
-     string prompt, string projectRoot, bool emitSse, CancellationToken ct = default)
+     string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
+     List<string>? attachedFiles = null)
     {
         // ── Connectivity check ────────────────────────────────────────────
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
@@ -1110,9 +1178,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         {
             PipelineType.QuickCheck => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
             PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
-            PipelineType.CodeEdit => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
-            PipelineType.Compound => await CompoundPipeline(prompt, projectRoot, emitSse, ct),
-            _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.CodeEdit => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
+            PipelineType.Compound => await CompoundPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
+            _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
         };
 
         // ── Verification Pipeline ─────────────────────────────────────────
@@ -1138,16 +1206,30 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             {
                 string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
                 await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
-                var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(reprisalPrompt, projectRoot, emitSse, ct);
-                allSteps.AddRange(reprisalSteps);
-                var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
-                if (!reprisalComplete)
+                int attempt = 0;
+                while (attempt < 5 && !complete)
                 {
-                    await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+                    attempt++;
+                    await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt}", ct: ct);
+                    var reprisalContext = ReconstructDiscoveryContext(allSteps);
+                    var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(
+                        reprisalPrompt, projectRoot, emitSse, ct,
+                        prebuiltDiscoveryContext: reprisalContext,
+                        prebuiltDiscoverySteps: allSteps.Where(s => {
+                            if (s is not Dictionary<string, object?> r) return false;
+                            var t = r.TryGetValue("type", out var tv) ? tv?.ToString() : "";
+                            return t is "list" or "grep" or "glob" or "read";
+                        }).ToList());
+                    allSteps.AddRange(reprisalSteps);
+                    var (reprisalComplete, _) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
+                    if (!reprisalComplete)
+                    {
+                        await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct); 
+                    }
+                    summary = reprisalSummary;
+                    thinking = reprisalThinking;
+                    complete = reprisalComplete;
                 }
-                summary = reprisalSummary;
-                thinking = reprisalThinking;
-                complete = reprisalComplete;
             }
         }
 
@@ -1351,15 +1433,29 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     // ═════════════════════════════════════════════════════════════════════════
 
     private async Task<(List<object> steps, string summary, string thinking)> CodeEditPipeline(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct)
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        List<string>? attachedFiles = null,
+        string? prebuiltDiscoveryContext = null,
+        List<object>? prebuiltDiscoverySteps = null)
     {
         var allSteps = new List<object>();
 
-        // ── Phase 1: DISCOVER ─────────────────────────────────────────────
-        await EmitLog(emitSse, "info", "CodeEdit: Phase 1 — DISCOVER", ct: ct);
-        var (discoveryContext, discoverySteps) =
-            await RunBootstrapDiscovery(prompt, projectRoot, emitSse);
-        allSteps.AddRange(discoverySteps);
+        // ── Phase 1: DISCOVER (skip if prebuilt context provided) ────────
+        string discoveryContext;
+        if (prebuiltDiscoveryContext != null)
+        {
+            discoveryContext = prebuiltDiscoveryContext;
+            if (prebuiltDiscoverySteps != null)
+                allSteps.AddRange(prebuiltDiscoverySteps);
+            await EmitLog(emitSse, "info", "CodeEdit: reuse prior discovery context", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", "CodeEdit: Phase 1 — DISCOVER", ct: ct);
+            var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles);
+            discoveryContext = dc;
+            allSteps.AddRange(ds);
+        }
 
         // ── Phase 2: PLAN ─────────────────────────────────────────────────
         await EmitLog(emitSse, "info", "CodeEdit: Phase 2 — PLAN", ct: ct);
@@ -1408,7 +1504,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
     private async Task<(List<object> steps, string summary, string thinking)> CompoundPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
-        AgentPlan? prebuiltPlan = null, string? discoveryContext = null)
+        AgentPlan? prebuiltPlan = null, string? discoveryContext = null,
+        List<string>? attachedFiles = null)
     {
         var allSteps = new List<object>();
 
@@ -1423,7 +1520,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             if (discoveryContext == null)
             {
                 await EmitLog(emitSse, "info", "Compound: Phase 1 — DISCOVER", ct: ct);
-                var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse);
+                var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles);
                 discoveryContext = dc;
                 allSteps.AddRange(ds);
             }
@@ -1947,11 +2044,11 @@ Be concise — 2-4 sentences max.";
 
         var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
-        // --- up to 2 attempts ---
+        // --- up to 4 parse attempts (generous for small models) ---
         List<AgentStep> editSteps = new();
         var timedOut = false;
         var editHistory = new List<(string path, string preContent)>();
-        for (var attempt = 0; attempt < 2 && editSteps.Count == 0; attempt++)
+        for (var attempt = 0; attempt < 4 && editSteps.Count == 0; attempt++)
         {
             await EmitLog(emitSse, "info",
                 $"LLM edit call: {relPath} (attempt {attempt + 1})",
@@ -2007,7 +2104,7 @@ Be concise — 2-4 sentences max.";
                     StringComparison.Ordinal))
                 .ToList();
 
-            if (editSteps.Count == 0)
+            if (editSteps.Count == 0 && (rejectReason ?? err) != null)
             {
                 await EmitLog(emitSse, "warn",
                     $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
@@ -2035,47 +2132,45 @@ Be concise — 2-4 sentences max.";
             d.TryGetValue("status", out var st) && st?.ToString() == "done");
 
         var appliedEdit = fileEdited;
-        if (!fileEdited)
+        for (var retryAttempt = 0; !appliedEdit && retryAttempt < 2 && System.IO.File.Exists(fullPath); retryAttempt++)
         {
             await EmitLog(emitSse, "warn",
-                $"All edits failed for {relPath} — running one retry with re-read content", ct: ct);
+                $"All edits failed for {relPath} — apply retry {retryAttempt + 1}", ct: ct);
 
-            if (System.IO.File.Exists(fullPath))
+            var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+
+            // Collect near-match snippets reported by TryReplace failures.
+            var nearMatches = batchResults
+                .OfType<Dictionary<string, object?>>()
+                .Where(r => r.TryGetValue("status", out var st) && st?.ToString() == "error")
+                .Select(r => r.TryGetValue("snippet", out var sn) ? sn?.ToString() : null)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+
+            var (retryRaw, _, _) = await CallLlmSingleFileEdit(
+                fileTask, relPath, freshContent, projectRoot,
+                attempt: 2 + retryAttempt,      // signals RETRY to the prompt
+                discoveryContext,
+                ct,
+                nearMatchSnippets: nearMatches!);
+
+            var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
+                .Where(e => !string.Equals(
+                    NormalizeLineEndings(e.OldString ?? ""),
+                    NormalizeLineEndings(e.NewString ?? ""),
+                    StringComparison.Ordinal))
+                .ToList();
+
+            if (retrySteps.Count > 0)
             {
-                var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-
-                // Collect near-match snippets reported by TryReplace failures.
-                var nearMatches = batchResults
-                    .OfType<Dictionary<string, object?>>()
-                    .Where(r => r.TryGetValue("status", out var st) && st?.ToString() == "error")
-                    .Select(r => r.TryGetValue("snippet", out var sn) ? sn?.ToString() : null)
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .ToList();
-
-                var (retryRaw, _, _) = await CallLlmSingleFileEdit(
-                    fileTask, relPath, freshContent, projectRoot,
-                    attempt: 2,                   // signals RETRY to the prompt
-                    discoveryContext,
-                    ct,
-                    nearMatchSnippets: nearMatches!);  // ← pass hints
-
-                var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
-                    .Where(e => !string.Equals(
-                        NormalizeLineEndings(e.OldString ?? ""),
-                        NormalizeLineEndings(e.NewString ?? ""),
-                        StringComparison.Ordinal))
-                    .ToList();
-
-                if (retrySteps.Count > 0)
-                {
-                    for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
-                    var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
-                    idx += retryResults.Count;
-                    allResults.AddRange(retryResults);
-                    appliedEdit = retryResults.Any(r =>
-                        r is Dictionary<string, object?> rd &&
-                        rd.TryGetValue("status", out var rs) && rs?.ToString() == "done");
-                }
+                for (var i = 0; i < retrySteps.Count; i++) retrySteps[i].Index = i;
+                var retryResults = await ExecuteSteps(retrySteps, projectRoot, idx, emitSse, ct);
+                idx += retryResults.Count;
+                allResults.AddRange(retryResults);
+                appliedEdit = retryResults.Any(r =>
+                    r is Dictionary<string, object?> rd &&
+                    rd.TryGetValue("status", out var rs) && rs?.ToString() == "done");
+                batchResults = retryResults; // feed back for near-match collection
             }
         }
 
@@ -2230,7 +2325,8 @@ Be concise — 2-4 sentences max.";
             bool complete;
             // ── Full phased pipeline ────────────────────────────────────
             (allSteps, summary, complete, thinking) =
-                await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted);
+                await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted,
+                    attachedFiles: req.Files?.Count > 0 ? req.Files : null);
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = HasSuccessfulEdits(allSteps);
@@ -2448,7 +2544,7 @@ Each edit must have:
 
 RULES:
   - oldString MUST be SHORT (1-5 lines max) and literally present in the code shown.
-  - oldString and newString must not be the same. You must make an edit.
+  - oldString and newString must NOT be the same.
   - Prefer MANY small targeted edits over one large edit.
   - Preserve indentation exactly in both oldString and newString.
   - Return ONLY valid JSON, no markdown fences, no explanation.
@@ -2700,6 +2796,98 @@ Example:
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Runs discovery steps in parallel. Emits all "running" events first,
+    /// executes I/O concurrently, then emits "done" events in original order.
+    /// Only handles list/grep/read types used by bootstrap discovery.
+    /// </summary>
+    private async Task<List<object>> ExecuteDiscoveryStepsConcurrent(
+        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse)
+    {
+        var count = steps.Count;
+        var results = new Dictionary<string, object?>[count];
+        var sync = new object();
+
+        // Phase 1: emit all "running" events synchronously
+        for (var i = 0; i < count; i++)
+        {
+            var step = steps[i];
+            var displayIndex = indexOffset + step.Index;
+            var result = new Dictionary<string, object?>
+            {
+                ["index"] = displayIndex,
+                ["type"] = step.Type,
+                ["description"] = step.Description,
+                ["status"] = "running"
+            };
+            results[i] = result;
+
+            if (emitSse)
+            {
+                await EmitLog(emitSse, "step",
+                    $"▶ {step.Type}: {step.Description ?? step.Path ?? step.Command ?? step.Query ?? ""}");
+                await SendSse(Response, "step", result);
+            }
+        }
+
+        // Phase 2: execute all I/O in parallel
+        var tasks = steps.Select((step, i) => Task.Run(async () =>
+        {
+            var result = results[i];
+            try
+            {
+                switch (step.Type?.ToLowerInvariant())
+                {
+                    case "list":
+                        await ExecuteListStep(step, projectRoot, result);
+                        break;
+                    case "grep":
+                        await ExecuteGrepStep(step, projectRoot, result);
+                        break;
+                    case "read":
+                        await ExecuteReadStep(step, projectRoot, result);
+                        break;
+                    default:
+                        result["status"] = "error";
+                        result["error"] = $"Unknown step type: {step.Type}";
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                result["status"] = "error";
+                result["error"] = ex.Message;
+            }
+
+            result["status"] = NormalizeUiStatus(result["status"]?.ToString());
+        }));
+
+        await Task.WhenAll(tasks);
+
+        // Phase 3: emit all "done" events in original order
+        for (var i = 0; i < count; i++)
+        {
+            var result = results[i];
+            if (emitSse)
+            {
+                var st = result["status"]?.ToString() ?? "?";
+                await EmitLog(emitSse, st == "error" ? "error" : "info",
+                    $"✓ {steps[i].Type} finished ({st})",
+                    new
+                    {
+                        path = result.GetValueOrDefault("path"),
+                        error = result.GetValueOrDefault("error"),
+                        oldStringPreview = result.GetValueOrDefault("oldStringPreview"),
+                        snippet = result.GetValueOrDefault("snippet"),
+                        suggestions = result.GetValueOrDefault("suggestions")
+                    });
+                await SendSse(Response, "step", result);
+            }
+        }
+
+        return results.Cast<object>().ToList();
     }
 
     private async Task ExecuteEditStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
