@@ -619,6 +619,62 @@ header h1 {
 	text-decoration: underline;
 }
 
+/* FAQ Section */
+.faq-section {
+	margin-top: 24px;
+}
+
+.faq-item {
+	margin-bottom: 12px;
+	border: var(--border);
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.faq-toggle {
+	background: var(--panel);
+	border: none;
+	color: var(--text);
+	width: 100%;
+	padding: 12px 16px;
+	text-align: left;
+	font-size: 14px;
+	font-weight: 600;
+	cursor: pointer;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	transition: all 0.2s ease;
+}
+
+.faq-toggle:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+.faq-content {
+	background: var(--surface);
+	padding: 16px;
+	display: none;
+	max-height: 0;
+	overflow: hidden;
+	transition: all 0.3s ease;
+}
+
+.faq-content.active {
+	display: block;
+	max-height: 500px;
+}
+
+.faq-toggle::after {
+	content: '▼';
+	font-size: 12px;
+	transition: transform 0.3s ease;
+}
+
+.faq-toggle.active::after {
+	transform: rotate(180deg);
+}
+
 .popup-header {
 	font-size: 16px;
 	font-weight: 600;

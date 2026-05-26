@@ -60,9 +60,11 @@
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
-                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
-                    <div class="step-body">
+                    <summary>
+                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
                       <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                    </summary>
+                    <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
                     </div>
@@ -125,9 +127,11 @@
               <div class="analysis-steps" ng-if="vm.streamingSteps.length">
                 <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
                   <details>
-                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
-                    <div class="step-body">
+                    <summary>
+                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
                       <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                    </summary>
+                    <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
                     </div>
@@ -186,9 +190,11 @@
               <div class="analysis-steps" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
-                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
-                    <div class="step-body">
+                    <summary>
+                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
                       <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                    </summary>
+                    <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
                         <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
                         <div class="diff-sbs">
@@ -308,10 +314,11 @@
               <div class="analysis-steps log-entries" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
-                    <summary><span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span></summary>
+                    <summary>
+                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                    </summary>
                     <div class="step-body">
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
                         <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
                           −{{s.linesRemoved || 0}} lines</div>
