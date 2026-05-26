@@ -840,7 +840,7 @@ FILE EDIT RULES (only when NOT using a special marker):
         {
             // Strategy 1: "new file .editorconfig" or "file called filename.ext"
             var namedMatch = Regex.Match(changeDesc,
-                @"(?:new\s+)?file\s+(?:called|named|`` `)?\s*([\w./\\-]+\.[\w.-]+)", RegexOptions.IgnoreCase);
+                @"(?:new\s+)?file\s+(?:called|named|`` `)?\s*['""`]?([\w./\\-]+\.[\w.-]+)['""`]?", RegexOptions.IgnoreCase);
             if (namedMatch.Success)
                 targetRelPath = namedMatch.Groups[1].Value.Replace('\\', '/');
         }

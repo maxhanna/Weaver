@@ -35,8 +35,6 @@ body {
 	height: 100%;
 	margin: 0;
 	font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-	background: var(--bg) url('/images/wireframe.png') repeat;
-	background: var(--bg) url('/images/wireframe.png') repeat;
 	color: var(--text);
 	-webkit-font-smoothing: antialiased;
 }
