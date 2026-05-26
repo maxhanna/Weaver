@@ -47,8 +47,12 @@ public class AgentController : ControllerBase
             Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
             return PipelineType.QuickCheck;
 
-        // Command execution: known simple intents (git, package_install, etc.)
+        // Command execution: known simple intents (git, package_install, rename, etc.)
         if (TryDetectSimpleIntent(prompt) != null)
+            return PipelineType.CommandExecution;
+
+        // Rename/move is always command-execution regardless of phrasing
+        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
             return PipelineType.CommandExecution;
 
         // Default: needs the full planning pipeline
@@ -57,6 +61,8 @@ public class AgentController : ControllerBase
 
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_delete_file", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_show", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_display", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
@@ -447,7 +453,8 @@ public class AgentController : ControllerBase
         if (idx < 0) idx = changeDesc.LastIndexOf(" → ", StringComparison.OrdinalIgnoreCase);
         if (idx < 0) return null;
 
-        var after = changeDesc.Substring(idx + 4).Trim().Trim('.', ' ', '"', '\'');
+        // NOTE: do NOT strip leading '.' — dotfiles like .editorconfig start with it
+        var after = changeDesc.Substring(idx + 4).Trim().Trim(' ', '"', '\'');
         if (string.IsNullOrWhiteSpace(after)) return null;
 
         // If it's just a filename (no directory separators), inherit source directory
@@ -556,7 +563,7 @@ public class AgentController : ControllerBase
     }
 
 
-    private async Task<AgentPlan?> AnalyzePromptAndPlan( 
+    private async Task<AgentPlan?> AnalyzePromptAndPlan(
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
         const string systemPrompt = @"You are a task planning agent.
@@ -565,6 +572,8 @@ Given a task and the contents of project files, output a structured plan.
 
 IMPORTANT — SPECIAL MARKERS (use these in the file field instead of file paths for certain tasks):
 - For GIT OPERATIONS (pull, commit, push, branch, revert, sync): use ""_git"" as the file.
+- For RENAMING / MOVING a file: use ""_rename"" as the file.
+- For DELETING a file: use ""_delete_file"" as the file.
 - For PACKAGE INSTALLATION: use ""_package_install"" as the file.
 - For PING / NETWORK DIAGNOSTIC: use ""_ping"" as the file.
 - For SHOWING OUTPUT to the user: use ""_show"" as the file.
@@ -580,14 +589,9 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
   ""summary"":  ""description of the overall changes"",
   ""plan"": [
     {
-      ""file"":   ""_git"" or ""_package_install"" or ""_ping"" or ""_show"" or ""_create_file"" or ""relative/path/to/file"",
+      ""file"":   ""_git"" or ""_rename"" or ""_delete_file"" or ""_package_install"" or ""_ping"" or ""_show"" or ""_create_file"" or ""relative/path/to/file"",
       ""change"": ""description of what to do. Be very detailed."",
       ""priority"": 1
-    },
-    {
-      ""file"": ""example/relative/path/to/file"",
-      ""change"": ""example specific description of what to add/modify/remove in this file. Be very detailed."",
-      ""priority"": 2
     }
   ]
 }
@@ -596,6 +600,19 @@ The ""change"" field is CRITICAL — it will be passed directly to the handler s
 Make it specific and accurate.
 
 SPECIAL MARKER DETAILS:
+
+RENAMING OR MOVING A FILE:
+  Set ""file"" to ""_rename"". In ""change"", write EXACTLY: ""source/path → destination/path"".
+  Use the arrow character → between source and destination.
+  Examples:
+    - Rename newfile.txt to .editorconfig → change: ""newfile.txt → .editorconfig""
+    - Move Controllers/Foo.cs to Services/Foo.cs → change: ""Controllers/Foo.cs → Services/Foo.cs""
+  CRITICAL: Do NOT plan any code edits for a rename task. ONLY use _rename.
+  CRITICAL: Do NOT use _git, do NOT use real file paths for rename tasks.
+
+DELETING A FILE:
+  Set ""file"" to ""_delete_file"". In ""change"", write the exact relative path of the file to delete.
+  Example: change: ""wwwroot/old-script.js""
 
 GIT OPERATIONS (pull, commit, push, branch, revert, sync):
   Set ""file"" to ""_git"". In ""change"", describe the git operation naturally.
@@ -637,10 +654,10 @@ FILE EDIT RULES (only when NOT using a special marker):
 - Only list files that actually exist in the Project Discovery section below.
 - Priority 1 = most important file. Sort by priority ascending.
 - When describing changes, quote exact existing code to modify.
-- For RENAME/MOVE tasks: list source file, set change to 'Rename this file to <new/path>'.
 - DO NOT write any code yet. DO NOT include oldString or newString.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
-- If you're unsure about exact code, describe the location and intent clearly.";
+- If you're unsure about exact code, describe the location and intent clearly.
+- NEVER plan a code edit to implement a rename/move/delete — always use the marker.";
 
         var analysisPrompt = new StringBuilder();
         analysisPrompt.AppendLine("## Task");
@@ -689,7 +706,7 @@ FILE EDIT RULES (only when NOT using a special marker):
             return null;
         }
 
-        return parsedPlan; 
+        return parsedPlan;
     }
     /// <summary>
     /// Parses the LLM planning response into an AgentPlan.
@@ -797,7 +814,7 @@ FILE EDIT RULES (only when NOT using a special marker):
         }
         return changed ? sb.ToString() : null;
     }
-     
+
     /// <summary>
     /// Create a new file with LLM-generated content.
     /// The changeDesc describes what to create; the LLM generates full file content.
@@ -948,6 +965,51 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var p = prompt.Trim();
         var lower = p.ToLowerInvariant();
 
+        // ── Rename / Move file ────────────────────────────────────────────────
+        // Matches: "rename X to Y", "rename X → Y", "move X to Y", etc.
+        // Deliberately lenient: captures any token that looks like a filename/path
+        var renameMatch = Regex.Match(p,
+            @"\b(?:rename|move)\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?\s+(?:to|→|-?>)\s+['""]?(\.?[\w./\\-]+(?:\.[\w.-]+)?)['""]?",
+            RegexOptions.IgnoreCase);
+        if (renameMatch.Success)
+        {
+            var src = renameMatch.Groups[1].Value.Replace('\\', '/').Trim('/', ' ');
+            var dst = renameMatch.Groups[2].Value.Replace('\\', '/').Trim('/', ' ');
+            // If dst is a bare name (no dir), inherit the source's directory
+            if (!dst.Contains('/') && src.Contains('/'))
+            {
+                var srcDir = src.Substring(0, src.LastIndexOf('/') + 1);
+                dst = srcDir + dst;
+            }
+            return new AgentPlan
+            {
+                Thinking = $"Direct file rename detected: {src} → {dst}",
+                Summary = $"Rename {src} to {dst}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_rename", Change = $"{src} → {dst}", Priority = 1 }
+                }
+            };
+        }
+
+        // ── Delete file ───────────────────────────────────────────────────────
+        var deleteMatch = Regex.Match(p,
+            @"\b(?:delete|remove)\s+(?:the\s+)?file\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?",
+            RegexOptions.IgnoreCase);
+        if (deleteMatch.Success)
+        {
+            var target = deleteMatch.Groups[1].Value.Replace('\\', '/');
+            return new AgentPlan
+            {
+                Thinking = $"Direct file delete detected: {target}",
+                Summary = $"Delete file {target}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_delete_file", Change = target, Priority = 1 }
+                }
+            };
+        }
+
         // ── Git pull ──────────────────────────────────────────────────────────
         if (Regex.IsMatch(lower, @"\b(git\s+pull|pull\s+(all\s+)?change|pull\s+from\s+git|pull\s+latest)\b")
             || (lower.Contains("pull") && lower.Contains("git") && !lower.Contains("request")))
@@ -957,10 +1019,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct git pull intent detected from prompt.",
                 Summary = "Pull latest changes from the remote repository and show the result.",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_git",  Change = "pull all changes",             Priority = 1 },
-                new() { File = "_show", Change = "show what was pulled from git", Priority = 2 }
-            }
+                {
+                    new() { File = "_git",  Change = "pull all changes",             Priority = 1 },
+                    new() { File = "_show", Change = "show what was pulled from git", Priority = 2 }
+                }
             };
         }
 
@@ -974,9 +1036,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct git commit intent detected.",
                 Summary = $"Commit all staged changes: {msg}",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_git", Change = $"commit all changes with message \"{msg}\"", Priority = 1 }
-            }
+                {
+                    new() { File = "_git", Change = $"commit all changes with message \"{msg}\"", Priority = 1 }
+                }
             };
         }
 
@@ -988,9 +1050,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct git sync intent detected.",
                 Summary = "Sync with remote (pull then push).",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_git", Change = "sync with remote (pull then push)", Priority = 1 }
-            }
+                {
+                    new() { File = "_git", Change = "sync with remote (pull then push)", Priority = 1 }
+                }
             };
         }
 
@@ -1002,9 +1064,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct git revert intent detected.",
                 Summary = "Discard all local working-tree changes.",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_git", Change = "revert all changes", Priority = 1 }
-            }
+                {
+                    new() { File = "_git", Change = "revert all changes", Priority = 1 }
+                }
             };
         }
 
@@ -1016,9 +1078,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct ping/connectivity check detected.",
                 Summary = "Test network connectivity.",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_ping", Change = p, Priority = 1 }
-            }
+                {
+                    new() { File = "_ping", Change = p, Priority = 1 }
+                }
             };
         }
 
@@ -1030,9 +1092,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 Thinking = "Direct package install intent detected.",
                 Summary = "Install the requested package.",
                 Plan = new List<PlanStep>
-            {
-                new() { File = "_package_install", Change = p, Priority = 1 }
-            }
+                {
+                    new() { File = "_package_install", Change = p, Priority = 1 }
+                }
             };
         }
 
@@ -1056,11 +1118,11 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         // ── Route to the right pipeline ───────────────────────────────────
         var (allSteps, summary) = pipelineType switch
         {
-            PipelineType.QuickCheck       => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.QuickCheck => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
             PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
-            PipelineType.CodeEdit         => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
-            PipelineType.Compound         => await CompoundPipeline(prompt, projectRoot, emitSse, ct),
-            _                             => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.CodeEdit => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
+            PipelineType.Compound => await CompoundPipeline(prompt, projectRoot, emitSse, ct),
+            _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct),
         };
 
         // ── Verification Pipeline ─────────────────────────────────────────
@@ -1082,7 +1144,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (plan != null)
         {
             await EmitLog(emitSse, "info", $"QuickCheck: {plan.Plan.Count} step(s)", ct: ct);
-            if (emitSse) {
+            if (emitSse)
+            {
                 await SendSse(Response, "plan",
                     new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
             }
@@ -1243,8 +1306,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 conversation.AppendLine();
                 steps.Add(new Dictionary<string, object?>
                 {
-                    ["index"] = stepIndex++, ["type"] = "command",
-                    ["command"] = fallbackCmd, ["status"] = "done",
+                    ["index"] = stepIndex++,
+                    ["type"] = "command",
+                    ["command"] = fallbackCmd,
+                    ["status"] = "done",
                     ["output"] = Truncate(fresh2, MaxReadOutputChars)
                 });
                 continue;
@@ -1377,19 +1442,58 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         string prompt, List<object> allSteps, string projectRoot,
         bool emitSse, CancellationToken ct)
     {
-        var editsApplied = HasSuccessfulEdits(allSteps);
-        if (!editsApplied)
+        var steps = allSteps.OfType<Dictionary<string, object?>>().ToList();
+
+        // Rename / delete operations are self-verifying — if the step succeeded the task is done
+        var hasSuccessfulRenames = steps.Any(s =>
+            s.TryGetValue("type", out var t) && t?.ToString() == "rename" &&
+            s.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+        var hasFailedRenames = steps.Any(s =>
+            s.TryGetValue("type", out var t) && t?.ToString() == "rename" &&
+            s.TryGetValue("status", out var st) && st?.ToString() == "error");
+
+        var hasFileEdits = steps.Any(s =>
+            s.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+            s.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+        // Successful rename with no code edits → immediately complete, no LLM review
+        if (hasSuccessfulRenames && !hasFileEdits)
         {
-            if (!TaskExpectsFileChanges(prompt))
+            var renamedPaths = steps
+                .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "rename"
+                         && s.TryGetValue("status", out var st) && st?.ToString() == "done")
+                .Select(s =>
+                {
+                    s.TryGetValue("path", out var src);
+                    s.TryGetValue("toPath", out var dst);
+                    return $"{src} → {dst}";
+                });
+            await EmitLog(emitSse, "success", $"Verification ✓ rename completed: {string.Join(", ", renamedPaths)}", ct: ct);
+            return (true, $"File renamed successfully");
+        }
+
+        if (hasFailedRenames && !hasSuccessfulRenames)
+            return (false, "Rename operation failed — check the error in the step output");
+
+        // Command-only operations (git, ping, show, package_install) — no file changes expected
+        var hasSuccessfulCommands = steps.Any(s =>
+            s.TryGetValue("type", out var t) && t?.ToString() == "command" &&
+            s.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+        var editsApplied = HasSuccessfulEdits(allSteps);
+        if (!editsApplied && !hasSuccessfulRenames)
+        {
+            if (!TaskExpectsFileChanges(prompt) || hasSuccessfulCommands)
                 return (true, "Task completed (no file changes needed)");
             return (false, "No edits were applied");
         }
 
-        // Content review
+        // Content review for code edits
         await EmitLog(emitSse, "info", "Verification: reviewing edited files…", ct: ct);
         var (complete, feedback) = await RunContentReview(prompt, allSteps, projectRoot, emitSse, ct);
 
-        // Build check if edits applied
+        // Build check
         if (complete)
         {
             var config = await _configFile.LoadConfigAsync();
@@ -1418,6 +1522,83 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         {
             var planFile = item.File;
             var changeDesc = item.Change;
+            // ── _rename marker ────────────────────────────────────────────────────
+            if (planFile.Equals("_rename", StringComparison.OrdinalIgnoreCase))
+            {
+                // changeDesc is "src → dst"  or  "src to dst"
+                string? renameSrc = null, renameDst = null;
+                var arrowIdx = changeDesc.IndexOf('→');
+                if (arrowIdx > 0)
+                {
+                    renameSrc = changeDesc[..arrowIdx].Trim();
+                    renameDst = changeDesc[(arrowIdx + 1)..].Trim();
+                }
+                else
+                {
+                    var toIdx = changeDesc.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
+                    if (toIdx > 0)
+                    {
+                        renameSrc = changeDesc[..toIdx].Trim();
+                        renameDst = changeDesc[(toIdx + 4)..].Trim(' ', '"', '\'');
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(renameSrc) && !string.IsNullOrWhiteSpace(renameDst))
+                {
+                    renameSrc = renameSrc.Replace('\\', '/').Trim('/');
+                    // dst may be dotfile — preserve leading dot
+                    renameDst = renameDst.Replace('\\', '/').TrimEnd('/');
+
+                    // Inherit source directory when dst has no directory component
+                    if (!renameDst.Contains('/') && renameSrc.Contains('/'))
+                    {
+                        var srcDir = renameSrc[..(renameSrc.LastIndexOf('/') + 1)];
+                        renameDst = srcDir + renameDst;
+                    }
+
+                    await EmitLog(emitSse, "info", $"Rename: {renameSrc} → {renameDst}", ct: ct);
+                    var renameStep2 = new AgentStep
+                    {
+                        Index = 0,
+                        Type = "rename",
+                        Path = renameSrc,
+                        ToPath = renameDst,
+                        Description = $"Rename {renameSrc} → {renameDst}"
+                    };
+                    var renameResults = await ExecuteSteps(new List<AgentStep> { renameStep2 }, projectRoot, stepIndex, emitSse, ct);
+                    stepIndex += renameResults.Count;
+                    allResults.AddRange(renameResults);
+                    var renameFirst = renameResults.FirstOrDefault() as Dictionary<string, object?>;
+                    var renameStatus = renameFirst?.TryGetValue("status", out var rs) == true ? rs?.ToString() : "";
+                    await EmitLog(emitSse, renameStatus == "done" ? "success" : "error",
+                        renameStatus == "done" ? $"Renamed {renameSrc} → {renameDst}" : $"Rename failed",
+                        renameFirst?.TryGetValue("error", out var re) == true ? new { error = re } : null, ct: ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "error", $"_rename: could not parse src/dst from: {changeDesc}", ct: ct);
+                }
+                continue;
+            }
+
+            // ── _delete_file marker ───────────────────────────────────────────────
+            if (planFile.Equals("_delete_file", StringComparison.OrdinalIgnoreCase))
+            {
+                var deleteTarget = changeDesc.Trim().Trim('"', '\'').Replace('\\', '/');
+                var deleteFullPath = Path.GetFullPath(Path.Combine(projectRoot, deleteTarget.Replace('/', Path.DirectorySeparatorChar)));
+                if (IsPathUnderRoot(deleteFullPath, projectRoot) && System.IO.File.Exists(deleteFullPath))
+                {
+                    System.IO.File.Delete(deleteFullPath);
+                    await EmitLog(emitSse, "success", $"Deleted {deleteTarget}", ct: ct);
+                    allResults.Add(new Dictionary<string, object?> { ["type"] = "rename", ["status"] = "done", ["path"] = deleteTarget, ["editAction"] = "deleted" });
+                }
+                else
+                {
+                    await EmitLog(emitSse, "warn", $"Delete target not found or outside root: {deleteTarget}", ct: ct);
+                }
+                continue;
+            }
+
             if (planFile.Equals("_git", StringComparison.OrdinalIgnoreCase))
             {
                 var gitDesc = (changeDesc.Trim().Trim('`', '"', '\'') + " ").ToLowerInvariant();
@@ -1661,13 +1842,13 @@ Be concise — 2-4 sentences max.";
     }
 
     private async Task RunEditingPipeline(
-        PlanStep item, 
-        string discoveryContext, 
-        string projectRoot, 
+        PlanStep item,
+        string discoveryContext,
+        string projectRoot,
         string originalPrompt,
         int idx,
         List<object> allResults,
-        bool emitSse, 
+        bool emitSse,
         CancellationToken ct)
     {
         // Combine the original prompt with the file-specific change description
@@ -1682,9 +1863,10 @@ Be concise — 2-4 sentences max.";
         {
             await EmitLog(emitSse, "warn", $"Skipping {relPath} — outside project root", ct: ct);
             return;
-        } 
-        if (emitSse) {
-            await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct); 
+        }
+        if (emitSse)
+        {
+            await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
         }
 
         var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
@@ -1749,20 +1931,22 @@ Be concise — 2-4 sentences max.";
                     StringComparison.Ordinal))
                 .ToList();
 
-            if (editSteps.Count == 0) { 
+            if (editSteps.Count == 0)
+            {
                 await EmitLog(emitSse, "warn",
                     $"No valid edits parsed from attempt {attempt + 1} for {relPath}. Error: {rejectReason ?? err ?? "No edits in response"}", ct: ct);
             }
         }
 
-        if (timedOut) {return;}  
+        if (timedOut) { return; }
         if (editSteps.Count == 0)
         {
             await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
             return;
         }
 
-        for (var i = 0; i < editSteps.Count; i++) { 
+        for (var i = 0; i < editSteps.Count; i++)
+        {
             editSteps[i].Index = i;
         }
 
@@ -1891,7 +2075,7 @@ Be concise — 2-4 sentences max.";
                 }
             }
         }
-    } 
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     //  PUBLIC ENDPOINTS
@@ -1970,16 +2154,16 @@ Be concise — 2-4 sentences max.";
 
             List<object> allSteps;
             string summary;
-            bool complete; 
+            bool complete;
             // ── Full phased pipeline ────────────────────────────────────
             (allSteps, summary, complete) =
                 await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted);
-            
+
             var filesEdited = ExtractFilesEdited(allSteps);
             var requirementsMet = complete || TaskRequirementsMet(
                 req.Prompt,
                 ResolveEditTargetPaths(req.Prompt, req.Files ?? new List<string>(), projectRoot),
-                projectRoot, allSteps); 
+                projectRoot, allSteps);
 
             await SendSse(Response, "done", new
             {
@@ -1999,7 +2183,7 @@ Be concise — 2-4 sentences max.";
             await SendSse(Response, "error", new { message = ex.Message });
             await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
         }
-    } 
+    }
 
     private async Task<string> WaitForBuildOutput(string beforeOutput)
     {
@@ -2065,7 +2249,7 @@ Be concise — 2-4 sentences max.";
                 return _lastConnectionCheckResult;
             }
         }
-        
+
         var baseUrl = await GetLlamaBaseUrl();
         _lastConnectionCheckResult = await CheckForConnectivity(projectRoot, emitSse, baseUrl, ct);
         _nextConnectivityCheck = DateTime.UtcNow.AddMinutes(5);
@@ -2154,17 +2338,17 @@ Be concise — 2-4 sentences max.";
         string systemPrompt, string userMessage, CancellationToken ct = default,
         TimeSpan? requestTimeout = null)
     {
-            var baseUrl = await GetLlamaBaseUrl();
-            var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-            var client = _clientFactory.CreateClient("llama");
-            client.Timeout = _infiniteTimeout;
+        var baseUrl = await GetLlamaBaseUrl();
+        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = _infiniteTimeout;
 
         var messages = new object[]
         {
             new { role = "system",  content = systemPrompt },
             new { role = "user",    content = userMessage  }
         };
- 
+
         var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
@@ -2286,7 +2470,7 @@ Example:
         {
             return ("", null, ex.Message);
         }
-    } 
+    }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
         HttpClient client, string target, string model, object messages, CancellationToken ct = default)
@@ -2560,20 +2744,20 @@ Example:
             result["error"] = matchError ?? "oldString not found";
             if (snippet != null) result["snippet"] = snippet;
             result["oldStringPreview"] = oldString;
-            
+
             // Add helpful context about file content for debugging
             var lines = content.Split('\n');
             result["fileLineCount"] = lines.Length;
             result["fileCharCount"] = content.Length;
-            
 
-            
+
+
             // If the file is small, show more context
             if (content.Length < 1000)
             {
                 result["fileContentPreview"] = Truncate(content, 300);
             }
-            
+
             return;
         }
 
@@ -2804,7 +2988,7 @@ Example:
 
         return (false, content, "oldString not found in file",
             !string.IsNullOrEmpty(hint) ? Truncate(hint, 400) : null);
-    } 
+    }
 
     private static int FindTrimmedBlock(string[] fileLines, string[] pattern, StringComparison cmp)
     {
@@ -3235,7 +3419,7 @@ Rules:
             return content.Contains("showTerminal", StringComparison.OrdinalIgnoreCase);
         return false;
     }
- 
+
 
     // ═════════════════════════════════════════════════════════════════════════
     //  JSON PARSING  (unchanged from original)
