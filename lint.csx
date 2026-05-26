@@ -5,7 +5,7 @@ using System.IO;
 using Jint;
 
 // 1. Gather all files matching the glob pattern
-string searchFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "js");
+string searchFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
 if (!Directory.Exists(searchFolder))
 {
     Console.WriteLine($"Directory not found: {searchFolder}");

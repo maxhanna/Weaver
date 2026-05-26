@@ -15,8 +15,8 @@
   <header>
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
       <svg class="logo-icon-enhanced" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="12" cy="12" r="10" fill="currentColor" />
-        <path d="M12 6L12 18M6 12L18 12" stroke="white" stroke-width="2" stroke-linecap="round" />
+        <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" fill="currentColor" stroke="currentColor" stroke-width="0.5"/>
+        <path d="M12 6L12 18M6 12L18 12" stroke="white" stroke-width="1.5" stroke-linecap="round" />
       </svg>
       <span class="logo-text-enhanced">Maestro</span>
     </div>
@@ -108,34 +108,37 @@
           <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
             <details>
               <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
-              <div class="log-entries">
-                <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
-                  <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
-                    <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
-                        style="font-weight:600;color:var(--error);">!</span></summary>
-                    <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                    <div ng-if="e.detail.diagnosis" class="log-diagnosis">
-                      <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
-                        opening quote on "newString" key</div>
-                      <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing
-                        opening quote on "oldString" key</div>
-                      <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON
-                        blocks found in response</div>
-                      <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified
-                        the text</div>
-                      <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be
-                        truncated (no closing brace)</div>
-                      <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains
-                        markdown comments (## or ?)</div>
-                      <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
-                        <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
+              <details>
+                <summary style="cursor:pointer;opacity:0.6;font-size:11px;padding:4px 0;">Commands ({{vm.agentActivityLogLength}})</summary>
+                <div class="log-entries">
+                  <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
+                    <span class="log-ts">{{e.ts}}</span>
+                    <span class="log-msg">{{e.message}}</span>
+                    <details ng-if="e.detail" class="log-detail">
+                      <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
+                          style="font-weight:600;color:var(--error);">!</span></summary>
+                      <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                      <div ng-if="e.detail.diagnosis" class="log-diagnosis">
+                        <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
+                          opening quote on "newString" key</div>
+                        <div ng-if="e.detail.diagnosis.hasUnquotedKeyOldString" class="log-diag-hint error">Missing
+                          opening quote on "oldString" key</div>
+                        <div ng-if="e.detail.diagnosis.extractJsonBlocks === 0" class="log-diag-hint warn">No valid JSON
+                          blocks found in response</div>
+                        <div ng-if="e.detail.diagnosis.repairChanged" class="log-diag-hint info">RepairJsonString modified
+                          the text</div>
+                        <div ng-if="!e.detail.diagnosis.endsWithClosingBrace" class="log-diag-hint warn">Response might be
+                          truncated (no closing brace)</div>
+                        <div ng-if="e.detail.diagnosis.hasMarkdownComment" class="log-diag-hint warn">Response contains
+                          markdown comments (## or ?)</div>
+                        <div ng-if="e.detail.diagnosis.unquotedNewStringContext" class="log-diag-hint">
+                          <code class="log-diag-context">{{e.detail.diagnosis.unquotedNewStringContext}}</code>
+                        </div>
                       </div>
-                    </div>
-                  </details>
+                    </details>
+                  </div>
                 </div>
-              </div>
+              </details>
             </details>
           </div>
 

@@ -191,7 +191,7 @@ public class AgentController : ControllerBase
             return PipelineType.CommandExecution;
 
         // Network scanning / discovery
-        if (Regex.IsMatch(lower, @"\b(computers?\s+on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts)|connected\s+devices|what'?s?\s+on\s+(my\s+)?network)\b"))
+        if (Regex.IsMatch(lower, @"\b(computers?\s+(\S+\s+)?on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts|(\S+\s+){0,2}on\s+(the\s+)?network)|connected\s+devices|what'?s?\s+(\S+\s+){0,3}on\s+((my|the)\s+)?network)\b"))
             return PipelineType.CommandExecution;
 
         // File operations — copy, duplicate, backup files

@@ -62,7 +62,7 @@
                   <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
                   <div class="step-body">
                     <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
-                    <pre class="step-output" ng-if="s.output">{{s.output | limitTo:300}}</pre>
+                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                     <span class="step-err" ng-if="s.error">{{s.error}}</span>
                   </div>
                 </div>
@@ -73,14 +73,15 @@
             <details>
               <summary>📋 Log ({{card.agentLog.length}})</summary>
               <div class="log-entries">
-                <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
-                  <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
-                    <summary>detail</summary>
+                <details class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                  <summary>
+                    <span class="log-ts">{{e.ts}}</span>
+                    <span class="log-msg">{{e.message}}</span>
+                  </summary>
+                  <div ng-if="e.detail" class="log-entry-body">
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                  </details>
-                </div>
+                  </div>
+                </details>
               </div>
             </details>
           </div>
@@ -124,25 +125,26 @@
                   <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
                   <div class="step-body">
                     <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
-                    <pre class="step-output" ng-if="s.output">{{s.output | limitTo:300}}</pre>
+                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                     <span class="step-err" ng-if="s.error">{{s.error}}</span>
                   </div>
                 </div>
               </div>
             </details>
           </div>
-          <div class="analysis-log" ng-if="vm.agentActivityLog.length">
+          <div class="card-analysis analysis-log" ng-if="vm.agentActivityLog.length">
             <details>
               <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
               <div class="log-entries">
-                <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
-                  <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
-                    <summary>detail</summary>
+                <details class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
+                  <summary>
+                    <span class="log-ts">{{e.ts}}</span>
+                    <span class="log-msg">{{e.message}}</span>
+                  </summary>
+                  <div ng-if="e.detail" class="log-entry-body">
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                  </details>
-                </div>
+                  </div>
+                </details>
               </div>
             </details>
           </div>
@@ -150,14 +152,15 @@
             <details>
               <summary>📋 Log ({{card.agentLog.length}})</summary>
               <div class="log-entries">
-                <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
-                  <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
-                    <summary>detail</summary>
+                <details class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                  <summary>
+                    <span class="log-ts">{{e.ts}}</span>
+                    <span class="log-msg">{{e.message}}</span>
+                  </summary>
+                  <div ng-if="e.detail" class="log-entry-body">
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                  </details>
-                </div>
+                  </div>
+                </details>
               </div>
             </details>
           </div>
@@ -213,7 +216,7 @@
                     <div class="rename-display" ng-if="s.type==='rename'">
                       <span class="rename-arrow">{{s.path || ''}} → {{s.toPath || ''}}</span>
                     </div>
-                    <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
+                    <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                     <span class="step-err" ng-if="s.error">{{s.error}}</span>
                   </div>
                 </div>
@@ -270,14 +273,15 @@
             <details>
               <summary>📋 Log ({{card.agentLog.length}})</summary>
               <div class="log-entries">
-                <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
-                  <span class="log-ts">{{e.ts}}</span>
-                  <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
-                    <summary>detail</summary>
+                <details class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                  <summary>
+                    <span class="log-ts">{{e.ts}}</span>
+                    <span class="log-msg">{{e.message}}</span>
+                  </summary>
+                  <div ng-if="e.detail" class="log-entry-body">
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                  </details>
-                </div>
+                  </div>
+                </details>
               </div>
             </details>
           </div>
