@@ -12,9 +12,9 @@
 
 <body ng-controller="MainCtrl as vm">
   <header>
-      <div class="brand-logo-container brand-logo-enhanced brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
-        <span class="logo-text-enhanced">Maestro</span>
-      </div>
+    <div class="brand-logo-container brand-logo-enhanced brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
+      <span class="logo-text-enhanced">Maestro</span>
+    </div>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
       <select id="project-select" ng-model="vm.selectedProject" ng-options="p.Path as p.Name for p in vm.projects"
