@@ -7,7 +7,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
 
   function loadCards() {
     var raw = $window.localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : { todo: [], doing: [], done: [] };
+    var state = raw ? JSON.parse(raw) : { todo: [], doing: [], done: [] };
+    if (!state.archived) state.archived = [];
+    return state;
   }
 
   return {
@@ -58,6 +60,33 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         vm.state.done = [];
         vm.saveCards();
       };
+
+      vm.archiveCard = function (id, col) {
+        col = col || 'done';
+        var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
+        if (idx === -1) return;
+        var card = vm.state[col].splice(idx, 1)[0];
+        vm.state.archived.push(card);
+        vm.saveCards();
+      };
+
+      vm.archiveAllDone = function () {
+        if (!vm.state.done.length) return;
+        if (!$window.confirm('Archive all done tasks?')) return;
+        Array.prototype.push.apply(vm.state.archived, vm.state.done);
+        vm.state.done = [];
+        vm.saveCards();
+      };
+
+      vm.unarchiveCard = function (id) {
+        var idx = vm.state.archived.findIndex(function (c) { return c.id === id; });
+        if (idx === -1) return;
+        var card = vm.state.archived.splice(idx, 1)[0];
+        vm.state.todo.push(card);
+        vm.saveCards();
+      };
+
+      vm.showArchived = false;
 
       vm.copyCardText = function (card) {
         if (!card || !card.text) return;
@@ -243,9 +272,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
         vm.saveCards();
       };
 
-      vm.buildDiffLines = function (oldLines, newLines) {
+      vm.buildDiffLines = function (oldLines, newLines, startLine) {
         if (!oldLines) oldLines = [];
         if (!newLines) newLines = [];
+        startLine = startLine || 0;
         var maxLen = Math.max(oldLines.length, newLines.length);
         var result = [];
         for (var i = 0; i < maxLen; i++) {
@@ -253,7 +283,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
           var newLine = i < newLines.length ? newLines[i] : null;
           var bothExist = oldLine !== null && newLine !== null;
           var changed = bothExist ? oldLine !== newLine : true;
-          result.push({ oldLine: oldLine, newLine: newLine, changed: changed, bothExist: bothExist });
+          result.push({
+            oldLine: oldLine,
+            newLine: newLine,
+            changed: changed,
+            bothExist: bothExist,
+            oldLineNum: startLine + i,
+            newLineNum: startLine + i
+          });
         }
         return result;
       };
@@ -431,7 +468,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
               var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
               if (!cardId || !targetCol) return;
               var fromCol = null;
-              ['todo', 'doing', 'done'].forEach(function (cn) {
+              ['todo', 'doing', 'done', 'archived'].forEach(function (cn) {
                 var idx = vm.state[cn].findIndex(function (c) { return c.id === cardId; });
                 if (idx !== -1) fromCol = cn;
               });

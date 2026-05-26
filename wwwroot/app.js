@@ -135,8 +135,7 @@
 
     // Settings
     vm.settingsDefaultProject = '';
-    vm.fileHints = '';
-    vm.fileHintsJson = '';
+    vm.fileHintsData = [];
 
     // === Load settings from localStorage ===
     function loadSettings() {
@@ -156,10 +155,35 @@
       } catch (e) { }
     }
 
-    function saveFileHints() {
-      var fileHintsJson = vm.fileHints || '';
-      return $http.post('/api/filehints', { fileHints: fileHintsJson });
-    }
+    vm.saveFileHints = function () {
+      var projectKey = vm.selectedProject || vm.defaultProject || '__default__';
+      var hints = vm.fileHintsData.map(function (h) {
+        return {
+          Keywords: h.keywords.split(',').map(function (k) { return k.trim(); }).filter(Boolean),
+          Files: h.files.filter(Boolean)
+        };
+      });
+      var payload = { Projects: {} };
+      payload.Projects[projectKey] = { Hints: hints, AutoLearned: [] };
+      return $http.put('/api/filehints', payload).then(function () {
+        vm.closeSettingsPanel();
+      }, function (err) {
+        $window.alert('Failed to save file hints: ' + (err.data || err.statusText || err));
+      });
+    };
+
+    vm.addHint = function () {
+      vm.fileHintsData.push({ keywords: '', files: [''] });
+    };
+    vm.removeHint = function (index) {
+      vm.fileHintsData.splice(index, 1);
+    };
+    vm.addFileToHint = function (hintIndex) {
+      vm.fileHintsData[hintIndex].files.push('');
+    };
+    vm.removeFileFromHint = function (hintIndex, fileIndex) {
+      vm.fileHintsData[hintIndex].files.splice(fileIndex, 1);
+    };
 
     vm.saveSettings = function () {
       saveSettings();
@@ -172,7 +196,7 @@
         cfg.showKanban = vm.showKanban !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";  
         cfg.buildCommands = vm.buildCommands;
-        cfg.fileHints = vm.fileHints;
+        cfg.fileHints = '';
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -203,7 +227,7 @@
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
-        vm.fileHints = cfg.fileHints || "";
+        vm.fileHintsData = [];
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -288,11 +312,41 @@
     vm.openSettingsPanel = function () {
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
-      // Load file hints when opening settings panel
+      vm.fileHintsData = [];
       $http.get('/api/filehints').then(function (resp) {
-        vm.fileHints = resp.data || '';
+        try {
+          var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
+          if (store && store.Projects) {
+            var keys = Object.keys(store.Projects);
+            var projKey = vm.selectedProject || keys[0];
+            if (projKey && store.Projects[projKey]) {
+              var proj = store.Projects[projKey];
+              if (proj.Hints) {
+                vm.fileHintsData = proj.Hints.map(function (h) {
+                  return {
+                    keywords: (h.Keywords || []).join(', '),
+                    files: (h.Files || []).length > 0 ? h.Files.slice() : ['']
+                  };
+                });
+              }
+            } else if (keys.length) {
+              var proj = store.Projects[keys[0]];
+              if (proj.Hints) {
+                vm.fileHintsData = proj.Hints.map(function (h) {
+                  return {
+                    keywords: (h.Keywords || []).join(', '),
+                    files: (h.Files || []).length > 0 ? h.Files.slice() : ['']
+                  };
+                });
+              }
+            }
+          }
+        } catch (e) {
+          vm.fileHintsData = [];
+        }
+      }, function () {
+        vm.fileHintsData = [];
       });
-      // Show backdrop when settings panel is opened
       var backdrop = document.getElementById('backdrop');
       if (backdrop) {
         backdrop.style.display = 'block';
@@ -430,18 +484,53 @@
     function formatLogDetail(detail) {
       if (!detail) return '';
       if (typeof detail === 'string') return detail;
-      if (typeof detail === 'object' && detail !== null) {
+      if (typeof detail !== 'object') return String(detail);
+
+      function fmt(val, indent) {
+        if (val === null || val === undefined) return indent + '—';
+        if (typeof val === 'boolean') return indent + (val ? 'yes' : 'no');
+        if (typeof val === 'string') return indent + val;
+        if (typeof val === 'number') return indent + String(val);
+
+        if (Array.isArray(val)) {
+          if (val.length === 0) return indent + '(empty)';
+          var items = [];
+          for (var i = 0; i < val.length; i++) {
+            var item = val[i];
+            var bullet = indent + '  ';
+            if (item !== null && typeof item === 'object') {
+              var inner = fmt(item, indent + '    ');
+              var lines = inner.split('\n');
+              lines[0] = bullet + '- ' + lines[0].trim();
+              for (var j = 1; j < lines.length; j++) {
+                lines[j] = bullet + '  ' + lines[j].trim();
+              }
+              items.push(lines.join('\n'));
+            } else {
+              items.push(bullet + '- ' + fmt(item, '').trim());
+            }
+          }
+          return items.join('\n');
+        }
+
+        var keys = Object.keys(val);
+        if (keys.length === 0) return indent + '(empty)';
         var lines = [];
-        var diagnosticKeys = ['hasUnquotedKeyNewString', 'hasUnquotedKeyOldString', 'extractJsonBlocks', 'repairChanged', 'endsWithClosingBrace', 'totalChars', 'hasMarkdownComment'];
-  for (var k = 0; k < diagnosticKeys.length; k++) {
-      var dk = diagnosticKeys[k];
-      if (detail.hasOwnProperty(dk) && detail[dk] !== null && detail[dk] !== undefined) {
-        lines.push(dk + ': ' + JSON.stringify(detail[dk]));
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          var v = val[k];
+          var label = k.replace(/([A-Z])/g, ' $1').replace(/^./, function (s) { return s.toUpperCase(); });
+          if (v !== null && typeof v === 'object') {
+            lines.push(indent + label + ':');
+            lines.push(fmt(v, indent + '  '));
+          } else {
+            lines.push(indent + label + ': ' + fmt(v, '').trim());
+          }
+        }
+        return lines.join('\n');
       }
-    }
-    if (lines.length > 0) return lines.join('\n') + '\n' + JSON.stringify(detail, null, 2);
-  }
-  try { return JSON.stringify(detail, null, 2); } catch (e) { return String(detail); }
+
+      return fmt(detail, '');
     }
 
     function refreshFilesEditedFromSteps() {

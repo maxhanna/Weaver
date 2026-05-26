@@ -3,6 +3,8 @@
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
     <button ng-click="vm.exportKanbanData()" class="search-button">Export</button>
+    <button ng-click="vm.showArchived = !vm.showArchived" class="search-button"
+      style="margin-left:4px;">🗄 Archived ({{vm.state.archived.length}})</button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
@@ -64,21 +66,21 @@
                     <span class="step-err" ng-if="s.error">{{s.error}}</span>
                   </div>
                 </div>
-              </div>
-              <div class="analysis-log" ng-if="card.agentLog && card.agentLog.length">
-                <details>
-                  <summary>📋 Log ({{card.agentLog.length}})</summary>
-                  <div class="log-entries">
-                    <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
-                      <span class="log-ts">{{e.ts}}</span>
-                      <span class="log-msg">{{e.message}}</span>
-                      <details ng-if="e.detail" class="log-detail">
-                        <summary>detail</summary>
-                        <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                      </details>
-                    </div>
-                  </div>
-                </details>
+              </div> 
+            </details>
+          </div>
+          <div class="card-analysis analysis-log" ng-if="card.agentLog && card.agentLog.length">
+            <details>
+              <summary>📋 Log ({{card.agentLog.length}})</summary>
+              <div class="log-entries">
+                <div class="log-entry" ng-repeat="e in card.agentLog track by $index" ng-class="e.level">
+                  <span class="log-ts">{{e.ts}}</span>
+                  <span class="log-msg">{{e.message}}</span>
+                  <details ng-if="e.detail" class="log-detail">
+                    <summary>detail</summary>
+                    <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                  </details>
+                </div>
               </div>
             </details>
           </div>
@@ -127,24 +129,24 @@
                   </div>
                 </div>
               </div>
-              <div class="analysis-log" ng-if="vm.agentActivityLog.length">
-                <details>
-                  <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
-                  <div class="log-entries">
-                    <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
-                      <span class="log-ts">{{e.ts}}</span>
-                      <span class="log-msg">{{e.message}}</span>
-                      <details ng-if="e.detail" class="log-detail">
-                        <summary>detail</summary>
-                        <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
-                      </details>
-                    </div>
-                  </div>
-                </details>
+            </details>
+          </div>
+          <div class="analysis-log" ng-if="vm.agentActivityLog.length">
+            <details>
+              <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
+              <div class="log-entries">
+                <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
+                  <span class="log-ts">{{e.ts}}</span>
+                  <span class="log-msg">{{e.message}}</span>
+                  <details ng-if="e.detail" class="log-detail">
+                    <summary>detail</summary>
+                    <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                  </details>
+                </div>
               </div>
             </details>
           </div>
-          <div class="analysis-log agent-log-container" ng-if="card.agentLog && card.agentLog.length">
+          <div class="card-analysis analysis-log agent-log-container" ng-if="card.agentLog && card.agentLog.length">
             <details>
               <summary>📋 Log ({{card.agentLog.length}})</summary>
               <div class="log-entries">
@@ -188,19 +190,19 @@
                         </div>
                         <div class="diff-wrapper">
                           <div class="diff-col diff-col-old">
-                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                               <div class="diff-cell diff-cell-old"
                                 ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                <span class="diff-lineno">{{$index+1}} ({{line.oldLineNum || $index+1}})</span>
+                                <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
                                 <span>{{line.oldLine || ''}}</span>
                               </div>
                             </div>
                           </div>
                           <div class="diff-col diff-col-new">
-                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                            <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                               <div class="diff-cell diff-cell-new"
                                 ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                                <span class="diff-lineno">{{$index+1}}</span>
+                                <span class="diff-lineno">{{line.newLineNum + 1}}</span>
                                 <span>{{line.newLine || ''}}</span>
                               </div>
                             </div>
@@ -242,7 +244,8 @@
     <div class="column" data-col="done">
       <h3>
         <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
-        <button class="small ghost" ng-click="vm.clearDoneCards()" title="Clear all done tasks">Clear</button>
+        <button class="small ghost" ng-click="vm.archiveAllDone()" title="Archive all done tasks">Archive All</button>
+        <button class="small ghost" ng-click="vm.clearDoneCards()" title="Delete all done tasks">Clear</button>
       </h3>
       <div class="cards" id="col-done" dropzone="move" ng-class="{empty: vm.cardsForProject('done').length===0}"
         ondragover="event.preventDefault()">
@@ -309,20 +312,20 @@
                         <div class="diff-wrapper">
                           <div class="diff-col diff-col-old">
                             <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                               <div class="diff-cell diff-cell-old"
                                 ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                                <span class="diff-lineno">{{$index+1}} ({{line.oldLineNum || $index+1}})</span>
+                                <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
                                 <span>{{line.oldLine || ''}}</span>
                               </div>
                             </div>
                           </div>
                           <div class="diff-col diff-col-new">
                             <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                               <div class="diff-cell diff-cell-new"
                                 ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                                <span class="diff-lineno">{{$index+1}}</span>
+                                <span class="diff-lineno">{{line.newLineNum + 1}}</span>
                                 <span>{{line.newLine || ''}}</span>
                               </div>
                             </div>
@@ -348,9 +351,44 @@
           </div>
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
             <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
               Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ARCHIVED column -->
+    <div class="column" data-col="archived" ng-if="vm.showArchived">
+      <h3>
+        <span class="col-header">🗄 Archived <span class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
+        <button class="small ghost" ng-click="vm.showArchived = false" title="Close archived view">✕</button>
+      </h3>
+      <div class="cards" id="col-archived" ng-class="{empty: vm.cardsForProject('archived').length===0}">
+        <div class="card" ng-repeat="card in vm.cardsForProject('archived') track by card.id"
+          ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
+          ng-click="vm.selectCard(card)" data-card-id="{{card.id}}">
+          <div class="card-meta">
+            <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+          </div>
+          <div class="card-text">{{card.text}}</div>
+          <div class="card-tags" ng-if="card.priority">
+            <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+          </div>
+          <div class="card-analysis" ng-if="card.agentAnalysis">
+            <details>
+              <summary>🤖 AI Analysis</summary>
+              <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
+                <strong>Summary:</strong> {{card.agentAnalysis.summary}}
+              </div>
+            </details>
+          </div>
+          <div class="card-actions">
+            <button ng-click="vm.unarchiveCard(card.id)" class="small">↩ Unarchive</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
           </div>
         </div>
       </div>

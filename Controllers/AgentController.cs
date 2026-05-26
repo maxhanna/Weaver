@@ -183,7 +183,39 @@ public class AgentController : ControllerBase
             return PipelineType.CommandExecution;
 
         // Directory listing / exploration — needs agentic terminal control, not hallucination
-        if (Regex.IsMatch(lower, @"\b(list|show|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing))\b"))
+        if (Regex.IsMatch(lower, @"\b(list|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing)|structure\s+of|tree)\b"))
+            return PipelineType.CommandExecution;
+
+        // System info / version / environment queries — needs terminal, not code edit
+        if (Regex.IsMatch(lower, @"\b(what\s+version|is\s+(\S+\s+)?(installed|running|available)|which\s+(port|process|version|branch)|disk\s+(usage|space|free)|how\s+much\s+(memory|disk|space)|free\s+(memory|disk|space)|running\s+process(es)?|environment\s+variables?|current\s+(directory|path|branch|time|date)|whoami|uptime|list\s+(process|service|container|running))\b"))
+            return PipelineType.CommandExecution;
+
+        // Network scanning / discovery
+        if (Regex.IsMatch(lower, @"\b(computers?\s+on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts)|connected\s+devices|what'?s?\s+on\s+(my\s+)?network)\b"))
+            return PipelineType.CommandExecution;
+
+        // File operations — copy, duplicate, backup files
+        if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
+            return PipelineType.CommandExecution;
+
+        // Package/tool/software installation and management
+        if (Regex.IsMatch(lower, @"\b(install|uninstall|remove|update|upgrade|downgrade)\s+(\S+\s+){0,3}(package|tool|module|library|dependency|sdk|runtime|plugin|extension|app|application|software)s?\b"))
+            return PipelineType.CommandExecution;
+
+        // Docker / container operations
+        if (Regex.IsMatch(lower, @"\b(docker|container|compose|podman|kubernetes|kubectl|helm)\b"))
+            return PipelineType.CommandExecution;
+
+        // Process / service / server management
+        if (Regex.IsMatch(lower, @"\b(start|stop|restart|reload)\s+(service|process|daemon|server|application)\b"))
+            return PipelineType.CommandExecution;
+
+        // Read/show file content (cat/type) — just display, no edit
+        if (Regex.IsMatch(lower, @"\b(cat|type)\s+\S+"))
+            return PipelineType.CommandExecution;
+
+        // Check/verify/validate something without intending to change it
+        if (Regex.IsMatch(lower, @"\b(check\s+if|check\s+whether|verify|validate)\b") && !TaskExpectsFileChanges(prompt))
             return PipelineType.CommandExecution;
 
         // Default: needs the full planning pipeline
@@ -544,24 +576,13 @@ public class AgentController : ControllerBase
     }
 
 
-    private async Task<AgentPlan?> AnalyzePromptAndPlan(
+    private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
-        const string systemPrompt = @"You are a task planning agent.
+        const string systemPrompt = @"You are a coding specialist agent.
 
-Given a task and the contents of project files, output a structured plan.
-
-IMPORTANT — SPECIAL MARKERS (use these in the file field instead of file paths for certain tasks):
-- For GIT OPERATIONS (pull, commit, push, branch, revert, sync): use ""_git"" as the file.
-- For RENAMING / MOVING a file: use ""_rename"" as the file.
-- For DELETING a file: use ""_delete_file"" as the file.
-- For PACKAGE INSTALLATION: use ""_package_install"" as the file.
-- For PING / NETWORK DIAGNOSTIC: use ""_ping"" as the file.
-- For SHOWING OUTPUT to the user: use ""_show"" as the file.
-- For CREATING NEW FILES: use ""_create_file"" as the file.
-
+Given a task and the contents of project files, output a structured plan. 
 For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field.
-
 When describing changes, be very specific and detailed. The more precise you are, the better the agent can execute the plan.
 
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
@@ -570,7 +591,7 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
   ""summary"":  ""description of the overall changes"",
   ""plan"": [
     {
-      ""file"":   ""_git"" or ""_rename"" or ""_delete_file"" or ""_package_install"" or ""_ping"" or ""_show"" or ""_create_file"" or ""relative/path/to/file"",
+      ""file"": ""relative/path/to/file"",
       ""change"": ""description of what to do. Be very detailed."",
       ""priority"": 1
     }
@@ -580,68 +601,12 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
 The ""change"" field is CRITICAL — it will be passed directly to the handler so it knows exactly what to do.
 Make it specific and accurate.
 
-SPECIAL MARKER DETAILS:
-
-RENAMING OR MOVING A FILE:
-  Set ""file"" to ""_rename"". In ""change"", write EXACTLY: ""source/path → destination/path"".
-  Use the arrow character → between source and destination.
-  Examples:
-    - Rename newfile.txt to .editorconfig → change: ""newfile.txt → .editorconfig""
-    - Move Controllers/Foo.cs to Services/Foo.cs → change: ""Controllers/Foo.cs → Services/Foo.cs""
-  CRITICAL: Do NOT plan any code edits for a rename task. ONLY use _rename.
-  CRITICAL: Do NOT use _git, do NOT use real file paths for rename tasks.
-
-DELETING A FILE:
-  Set ""file"" to ""_delete_file"". In ""change"", write the exact relative path of the file to delete.
-  Example: change: ""wwwroot/old-script.js""
-
-GIT OPERATIONS (pull, commit, push, branch, revert, sync):
-  Set ""file"" to ""_git"". In ""change"", describe the git operation naturally.
-  The agent will detect the operation type and run the appropriate git commands.
-  Valid: commit, revert (discard working tree changes), branch (create new), pull, sync (pull + push).
-  Examples:
-    - ""pull all changes and show what was pulled"" → use _git then _show
-    - ""commit all changes with message 'WIP'"" → runs git add -A && git commit
-    - ""revert all changes"" → runs git checkout -- .
-    - ""create a branch called feature/new"" → runs git checkout -b feature/new
-    - ""sync with remote"" → runs git pull && git push
-  DO NOT list real file paths for git tasks. Do NOT plan edits to TerminalController.cs or any other file.
-
-PACKAGE INSTALLATION:
-  Set ""file"" to ""_package_install"". In ""change"", specify the exact install command.
-  Example: 'dotnet add package SonarAnalyzer.CSharp --version 9.0.0'
-
-PING / NETWORK DIAGNOSTIC:
-  Set ""file"" to ""_ping"". In ""change"", specify the target and parameters.
-  Extract port from user's request (e.g. ""check 192.168.1.1:8080"" means port 8080).
-
-SHOWING INFORMATION to the user:
-  Set ""file"" to ""_show"". In ""change"", put the exact text to display in the frontend.
-  Use this ONLY to display information you ALREADY know from discovery output.
-  CRITICAL: NEVER invent or hallucinate file contents, directory listings, or code.
-  If you need to discover what files exist or what a directory contains, use a command
-  (e.g. run `dir` or `ls` in the terminal) — do NOT use _show to fake the answer.
-
-CREATING NEW FILES:
-  Set ""file"" to ""_create_file"". In ""change"", describe what file to create and its contents.
-  IMPORTANT: Use correct filename with leading dot (e.g. "".editorconfig"", not ""_editorconfig"").
-  FOLDER CONVENTIONS — when describing a new file, mention its type so the system places it correctly:
-    • Controllers → file names ending with Controller.cs → e.g. ""Controllers/FooController.cs""
-    • Services → file names ending with Service.cs or Manager.cs → e.g. ""Services/FooService.cs""
-    • Frontend (.html, .js, .css) → wwwroot/ folder → e.g. ""wwwroot/foo.js""
-    • Docs (.md) → Docs/ folder → e.g. ""Docs/FEATURE.md""
-    • Pipelines → Pipelines/ folder
-    • Routing → Routing/ folder
-  If you don't specify a folder, the system infers it from the file name pattern above.
-
-FILE EDIT RULES (only when NOT using a special marker):
-- Only list files that actually exist in the Project Discovery section below.
+FILE EDIT RULES (only when NOT using a special marker): 
 - Priority 1 = most important file. Sort by priority ascending.
 - When describing changes, quote exact existing code to modify.
 - DO NOT write any code yet. DO NOT include oldString or newString.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
-- If you're unsure about exact code, describe the location and intent clearly.
-- NEVER plan a code edit to implement a rename/move/delete — always use the marker.";
+- If you're unsure about exact code, describe the location and intent clearly.";
 
         var analysisPrompt = new StringBuilder();
         analysisPrompt.AppendLine("## Task");
@@ -1328,7 +1293,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (emitSse)
             await SendSse(Response, "phase", new { phase = "plan", message = "Planning..." }, ct);
 
-        var plan = await AnalyzePromptAndPlan(prompt, discoveryContext, projectRoot, emitSse, ct);
+        var plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct);
         if (plan == null || plan.Plan.Count == 0)
         {
             await EmitLog(emitSse, "warn", "Plan phase produced no items.", new { plan }, ct: ct);
@@ -1391,7 +1356,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             }
 
             await EmitLog(emitSse, "info", "Compound: Phase 2 — PLAN", ct: ct);
-            plan = await AnalyzePromptAndPlan(prompt, discoveryContext!, projectRoot, emitSse, ct)
+            plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext!, projectRoot, emitSse, ct)
                 ?? throw new InvalidOperationException("Compound: LLM returned empty plan");
         }
 
@@ -2642,6 +2607,7 @@ Example:
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
                 await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
+                result["oldStartLine"] = 0;
                 PopulateEditResult(result, "created", step.Path!, null, newString, newString);
                 return;
             }
@@ -2656,6 +2622,10 @@ Example:
 
         if (string.IsNullOrEmpty(oldString))
         {
+            var startLine = content.Length > 0
+                ? content.Count(c => c == '\n') + (content.EndsWith("\n") ? 0 : 1)
+                : 0;
+            result["oldStartLine"] = startLine;
             content += newString;
             await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
             PopulateEditResult(result, "modified", step.Path!, null, newString, newString);
@@ -2689,6 +2659,14 @@ Example:
 
         if (NormalizeLineEndings(newContent) == NormalizeLineEndings(content))
         { result["status"] = "skipped"; result["path"] = step.Path; return; }
+
+        var normOldContent = NormalizeLineEndings(content);
+        var normNewContent = NormalizeLineEndings(newContent);
+        var minLen = Math.Min(normOldContent.Length, normNewContent.Length);
+        var diffIdx = 0;
+        while (diffIdx < minLen && normOldContent[diffIdx] == normNewContent[diffIdx])
+            diffIdx++;
+        result["oldStartLine"] = normOldContent[..diffIdx].Count(c => c == '\n');
 
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);

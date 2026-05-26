@@ -1,0 +1,73 @@
+﻿/* Wireframe Background Styles */
+:root {
+  --wireframe-color: rgba(100, 100, 100, 0.1);
+  --wireframe-accent: rgba(99, 102, 241, 0.15);
+}
+
+.wireframe-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  background-image: 
+    linear-gradient(rgba(99, 102, 241, 0.15) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99, 102, 241, 0.15) 1px, transparent 1px);
+  background-size: 30px 30px;
+  pointer-events: none;
+  z-index: -1;
+  opacity: 0.6;
+} 
+
+
+/* Apply to body or specific containers */
+body .wireframe-bg,
+.container .wireframe-bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, var(--bg), rgba(255, 255, 255, 0.01));
+  background-image: 
+    linear-gradient(rgba(100, 100, 100, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 100, 100, 0.1) 1px, transparent 1px);
+  background-size: 30px 30px;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.6;
+}
+
+/* For elements that need wireframe overlay */
+.wireframe-overlay {
+  position: relative;
+  background-image: 
+    linear-gradient(rgba(100, 100, 100, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(100, 100, 100, 0.1) 1px, transparent 1px);
+  background-size: 30px 30px;
+  opacity: 0.6;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .wireframe-bg,
+  .wireframe-accent-bg {
+    background-size: 20px 20px;
+  }
+  
+  .wireframe-overlay {
+    background-size: 20px 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .wireframe-bg,
+  .wireframe-accent-bg {
+    background-size: 15px 15px;
+  }
+  
+  .wireframe-overlay {
+    background-size: 15px 15px;
+  }
+}

@@ -7,6 +7,7 @@
   <title>Maestro — Agentic Kanban</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/kanban.css" />
+  <link rel="stylesheet" href="/wireframe.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -38,6 +39,7 @@
   </header>
 
   <main>
+    <div class="wireframe-bg"></div>
     <div ng-include="'kanban.html'" ng-if="vm.showKanban"></div>
 
 
@@ -176,20 +178,20 @@
                     <div class="diff-wrapper">
                       <div class="diff-col diff-col-old">
                         <div class="diff-row"
-                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                           <div class="diff-cell diff-cell-old"
                             ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
-                            <span class="diff-lineno">{{$index+1}}</span>
+                            <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
                             <span>{{line.oldLine || ''}}</span>
                           </div>
                         </div>
                       </div>
                       <div class="diff-col diff-col-new">
                         <div class="diff-row"
-                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines) track by $index">
+                          ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                           <div class="diff-cell diff-cell-new"
                             ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
-                            <span class="diff-lineno">{{$index+1}}</span>
+                            <span class="diff-lineno">{{line.newLineNum + 1}}</span>
                             <span>{{line.newLine || ''}}</span>
                           </div>
                         </div>
@@ -253,7 +255,7 @@
           </div>
         </div>
       </div>
-    </div>
+    </                div>
   </main>
 
   <!-- FILE PICKER MODAL -->
@@ -401,14 +403,48 @@
             placeholder="Enter build commands, one per line" rows="4"></textarea>
         </div>
         <div class="form-row" style="display: flex; flex-direction: column;">
-          <label for="settings-filehints" class="settings-header">File Hints</label>
-          <textarea id="settings-filehints" ng-model="vm.fileHintsJson"
-            placeholder="Enter file hints JSON" rows="6"></textarea>
-          <button class="small" ng-click="vm.saveFileHints()" style="margin-top: 8px;">Save File Hints</button>
+          <details>
+            <summary style="cursor:pointer;font-weight:700;font-size:1.1em;text-transform:uppercase;letter-spacing:0.5px;color:var(--accent);padding:8px 0;">
+              File Hints
+            </summary>
+            <div style="margin-top:8px;">
+              <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
+                Map keywords to files so the agent knows where to look.
+              </span>
+              <div ng-repeat="hint in vm.fileHintsData track by $index"
+                style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                  <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
+                  <input ng-model="hint.keywords" placeholder="comma-separated keywords"
+                    style="flex:1;padding:4px 8px;font-size:12px;" />
+                </div>
+                <div style="margin-left:4px;">
+                  <span style="font-size:12px;color:var(--muted);">Files:</span>
+                  <div ng-repeat="file in hint.files track by $index"
+                    style="display:flex;align-items:center;gap:4px;margin:4px 0;">
+                    <input ng-model="hint.files[$index]" placeholder="file path"
+                      style="flex:1;padding:3px 6px;font-size:12px;" />
+                    <button ng-click="vm.removeFileFromHint($parent.$index, $index)"
+                      title="Remove file" style="padding:2px 6px;font-size:11px;">✕</button>
+                  </div>
+                  <button ng-click="vm.addFileToHint($index)"
+                    style="padding:2px 8px;font-size:11px;margin-top:2px;">+ File</button>
+                </div>
+                <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+                  <button ng-click="vm.removeHint($index)"
+                    style="padding:2px 8px;font-size:11px;color:var(--error);">✕ Remove</button>
+                </div>
+              </div>
+              <button ng-click="vm.addHint()"
+                style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add Keyword Mapping</button>
+              <button class="small primary" ng-click="vm.saveFileHints()"
+                style="margin-top:8px;">Save File Hints</button>
+            </div>
+          </details>
         </div>
       </div>
       <div class="popup-footer">
-        <button ng-click="vm.saveFileHints()" class="primary">Save</button>
+          <button ng-click="vm.saveSettings()" class="primary">Save</button>
         <button ng-click="vm.closeSettingsPanel()">Cancel</button>
       </div>
     </div>

@@ -13,7 +13,7 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.01));
+    background: linear-gradient(180deg, var(--bg), rgba(255, 255, 255, 0.01));
     min-width: 280px;
     width: 320px;
     height: 100%;
@@ -51,6 +51,7 @@
     flex: 1;
     padding-right: 4px;
     min-height: 100px;
+    z-index: 1;
 }
 
 /* Drop indicator line — dynamically inserted by JS at the exact drop position */
@@ -319,6 +320,7 @@ body.dragging-active .card:hover {
     height: 100px;
     overflow-y: auto;
     font-size: 10px;
+    resize: vertical;
 }
 
 .log-entry {

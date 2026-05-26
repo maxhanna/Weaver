@@ -23,14 +23,13 @@ namespace MaestroBackend.Controllers
         }
 
         [HttpPut]
-        public IActionResult UpdateFileHints([FromBody] string fileHintsContent)
+        public IActionResult UpdateFileHints([FromBody] object content)
         {
             try
             {
-                // Validate JSON
-                JsonDocument.Parse(fileHintsContent);
-
-                System.IO.File.WriteAllText(_filePath, fileHintsContent);
+                var json = JsonSerializer.Serialize(content);
+                JsonDocument.Parse(json);
+                System.IO.File.WriteAllText(_filePath, json);
                 return Ok("File hints updated successfully.");
             }
             catch (JsonException)

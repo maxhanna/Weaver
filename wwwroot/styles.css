@@ -547,7 +547,7 @@ header h1 {
 }
 
 .brand-link:hover {
-	color: var(--brand-secondary);
+	color: var(--accent);
 	text-decoration: underline;
 }
 
@@ -2435,6 +2435,7 @@ h3 .small.ghost:hover {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 12px;
 	white-space: pre-wrap;
+	z-index: 1;
 }
 
 .terminal-panel .term-input-row {
