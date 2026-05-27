@@ -3,8 +3,8 @@
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
     <button ng-click="vm.exportKanbanData()" class="search-button">Export</button>
-    <button ng-click="vm.showArchived = !vm.showArchived" class="search-button"
-      style="margin-left:4px;">🗄 Archived ({{vm.state.archived.length}})</button>
+    <button ng-click="vm.showArchived = !vm.showArchived" class="search-button" style="margin-left:4px;">🗄 Archived
+      ({{vm.state.archived.length}})</button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
@@ -12,7 +12,7 @@
     <div class="column" data-col="todo">
       <h3>
         <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
-<button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋</button>
+        <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
       </h3>
       <div class="cards" id="col-todo" dropzone="move" ng-class="{empty: vm.cardsForProject('todo').length===0}"
         ondragover="event.preventDefault()">
@@ -25,15 +25,14 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card) rows="2"
-              ng-click="$event.stopPropagation()"
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card) rows=" 2" ng-click="$event.stopPropagation()"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
+            </textarea>
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-            <span class="card-tag" ng-if="card.priority"
-              ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
@@ -47,7 +46,8 @@
             <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
               title="Split into smaller tasks">✂ Split</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run'}}</button>
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶
+              Run'}}</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>
@@ -62,8 +62,10 @@
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}</span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
@@ -71,7 +73,7 @@
                     </div>
                   </details>
                 </div>
-              </div> 
+              </div>
             </details>
           </div>
           <div class="card-analysis analysis-log" ng-if="card.agentLog && card.agentLog.length">
@@ -129,8 +131,10 @@
                 <div class="analysis-step" ng-repeat="s in vm.streamingSteps track by s.index" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}</span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
@@ -192,12 +196,15 @@
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}</span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
-                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} / −{{s.linesRemoved || 0}} lines</div>
+                        <div class="diff-meta" ng-if="s.editAction">{{s.editAction}} — +{{s.linesAdded || 0}} /
+                          −{{s.linesRemoved || 0}} lines</div>
                         <div class="diff-sbs">
                           <div class="diff-header">
                             <div class="diff-header-cell diff-header-old">Old</div>
@@ -205,7 +212,8 @@
                           </div>
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
-                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -214,7 +222,8 @@
                               </div>
                             </div>
                             <div class="diff-col diff-col-new">
-                              <div class="diff-row" ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              <div class="diff-row"
+                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -233,7 +242,7 @@
                     </div>
                   </details>
                 </div>
-              </div> 
+              </div>
               <div class="analysis-thinking" ng-if="card.agentAnalysis.thinking">
                 <details>
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
@@ -241,14 +250,15 @@
                 </details>
               </div>
             </details>
-          </div> 
+          </div>
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small"
-              ng-disabled="vm.streamingActive && card.ready || (vm.activeCardId === card.id && card.tags && !card.tags.includes('In Progress'))">✔ Done</button>
+              ng-disabled="vm.streamingActive && card.ready || (vm.activeCardId === card.id && card.tags && !card.tags.includes('In Progress'))">✔
+              Done</button>
             <button ng-click="vm.stopAgent(card)" class="small"
               ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>
@@ -312,12 +322,15 @@
                   <span class="chip-meta" ng-if="f.editAction">{{f.editAction}}</span>
                 </div>
               </div>
-              <div class="analysis-steps log-entries" ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
+              <div class="analysis-steps log-entries"
+                ng-if="card.agentAnalysis.steps && card.agentAnalysis.steps.length">
                 <div class="analysis-step" ng-repeat="s in card.agentAnalysis.steps" ng-class="s.status">
                   <details>
                     <summary>
-                      <span class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command || s.url || ''}}</span>
+                      <span
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
+                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}</span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
@@ -372,7 +385,7 @@
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>
@@ -383,7 +396,8 @@
     <!-- ARCHIVED column -->
     <div class="column" data-col="archived" ng-if="vm.showArchived">
       <h3>
-        <span class="col-header">🗄 Archived <span class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
+        <span class="col-header">🗄 Archived <span
+            class="col-badge">{{vm.cardsForProject('archived').length}}</span></span>
         <button class="small ghost" ng-click="vm.showArchived = false" title="Close archived view">✕</button>
       </h3>
       <div class="cards" id="col-archived" ng-class="{empty: vm.cardsForProject('archived').length===0}">
@@ -408,7 +422,7 @@
           </div>
           <div class="card-actions">
             <button ng-click="vm.unarchiveCard(card.id)" class="small">↩ Unarchive</button>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
           </div>
         </div>
       </div>
