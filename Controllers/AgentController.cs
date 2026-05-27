@@ -681,26 +681,12 @@ If unsure, use CodeEdit.";
     }
 
     /// <summary>
-    /// When the planner specified a line range, extract only that window + context lines.
-    /// Otherwise return the full content unchanged.
+    /// Always returns the full file content. lineFrom/lineTo are still available
+    /// in the planner for reference, but the edit LLM always sees the complete file.
     /// </summary>
     private static string FocusFileContent(string fullContent, string[] allLines, int? lineFrom, int? lineTo)
     {
-        if (!lineFrom.HasValue || !lineTo.HasValue)
-            return fullContent;
-
-        const int contextLines = 3;
-        var fromIdx = Math.Max(0, lineFrom.Value - 1 - contextLines);
-        var toIdx = Math.Min(allLines.Length, lineTo.Value + contextLines);
-        var focused = new StringBuilder();
-        focused.AppendLine($"// Focus: lines {lineFrom}-{lineTo} (showing {fromIdx + 1}-{toIdx} with context)");
-        focused.AppendLine();
-        for (var i = fromIdx; i < toIdx; i++)
-        {
-            var prefix = (i >= lineFrom.Value - 1 && i < lineTo.Value) ? "→ " : "  ";
-            focused.AppendLine($"{prefix}{i + 1}: {allLines[i].TrimEnd('\r')}");
-        }
-        return focused.ToString();
+        return fullContent;
     }
 
 
@@ -720,16 +706,26 @@ OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text
   ""plan"": [
     {
       ""file"": ""relative/path/to/file"",
-      ""change"": ""description of what to do"",
+      ""change"": ""CRITICAL: Self-contained instruction that tells the LLM EXACTLY what text to change. Include the exact code to find and what to replace it with. The LLM only sees this snippet — do NOT make it look elsewhere."",
       ""priority"": 1,
       ""lineFrom"": <1-based start line of the section to edit>,
       ""lineTo"": <1-based end line of the section to edit>
     }
   ]
 }
-
-PRO TIP: lineFrom/lineTo narrows the LLM's focus so it only sees the relevant portion of the file.
-When editing specific regions, set lineFrom/lineTo to the exact line range. If unsure, omit them (will show full file).
+PRO TIP: lineFrom/lineTo controls which code the LLM sees. The GOAL is to make each plan item
+so precise that the LLM only needs a tiny snippet (5-15 lines) to make the edit.
+- ""change"" must be a COMPLETE, self-contained instruction. Tell the LLM EXACTLY what old text
+  to find and what new text to put in its place. If the new text includes code, quote it inline.
+  The LLM receives ONLY the snippet — it should NOT need to look elsewhere in the file.
+- For MOVING code: ALWAYS split into TWO plan items:
+    Item 1: ""Remove the <exact-HTML> from here""     — range around the SOURCE
+    Item 2: ""Insert <exact-HTML> right after/before <target> here""  — range around the DESTINATION
+  The change field must include the EXACT string being moved, so the LLM can produce oldString/newString
+  without seeing the other location.
+- Example (moving a button from line 15 to after line 30):
+    { ""file"": ""index.html"", ""change"": ""Remove <button>Save</button> from between the textarea and the div"", ""lineFrom"": 13, ""lineTo"": 17 },
+    { ""file"": ""index.html"", ""change"": ""Insert <button>Save</button> right after the textarea"", ""lineFrom"": 28, ""lineTo"": 32 }
 
 Rules for the ""file"" field:
 - Must be an actual relative file path (e.g. ""src/app.js""). 
@@ -1728,6 +1724,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         //  string File, string ChangeDescription, int Priority
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
+
         foreach (var item in planItems)
         {
             var planFile = item.File;
@@ -2078,12 +2075,7 @@ Be concise — 2-4 sentences max.";
             await SendSse(Response, "phase", new { phase = "edit-file", message = $"Editing {relPath}…" }, ct);
         }
 
-        var fileFullContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-        var allLines = fileFullContent.Split('\n');
-        var fileContent = FocusFileContent(fileFullContent, allLines, item.LineFrom, item.LineTo);
-        if (item.LineFrom.HasValue)
-            await EmitLog(emitSse, "info",
-                $"Focused on lines {item.LineFrom}-{item.LineTo} ({fileContent.Split('\n').Length} lines vs {allLines.Length} total)", ct: ct);
+        var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
         // --- up to 4 parse attempts (generous for small models) ---
         List<AgentStep> editSteps = new();
@@ -2185,9 +2177,7 @@ Be concise — 2-4 sentences max.";
             await EmitLog(emitSse, "warn",
                 $"All edits failed for {relPath} — apply retry {retryAttempt + 1}", ct: ct);
 
-            var freshFull = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-            var freshLines = freshFull.Split('\n');
-            var freshContent = FocusFileContent(freshFull, freshLines, item.LineFrom, item.LineTo);
+            var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
             // Collect near-match snippets reported by TryReplace failures.
             var nearMatches = batchResults
@@ -2259,11 +2249,9 @@ Be concise — 2-4 sentences max.";
                         // Build passes with undo — retry the original file edit
                         await EmitLog(emitSse, "info", $"Build passes after undo — retrying edit for {relPath}", ct: ct);
 
-                        var currentFull = System.IO.File.Exists(fullPath)
+                        var currentContent = System.IO.File.Exists(fullPath)
                             ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8)
-                            : fileFullContent;
-                        var currentLines = currentFull.Split('\n');
-                        var currentContent = FocusFileContent(currentFull, currentLines, item.LineFrom, item.LineTo);
+                            : fileContent;
 
                         var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
                             fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
@@ -2540,18 +2528,9 @@ Be concise — 2-4 sentences max.";
         user.AppendLine($"Task: {taskPrompt}");
         user.AppendLine($"File: {relativePath}");
         user.AppendLine();
-        var isFocused = fileForLlm.StartsWith("// Focus: lines");
-        if (isFocused)
-        {
-            user.AppendLine("Below is the relevant SECTION of the file (with line numbers).");
-            user.AppendLine("Lines prefixed with → are the target range; other lines are context.");
-        }
-        else
-        {
-            user.AppendLine("Below is the ENTIRE file. Find the exact code that needs to change and plan small targeted edits.");
-        }
+        user.AppendLine("Below is the ENTIRE file. Find the exact code that needs to change and plan small targeted edits.");
         user.AppendLine();
-        user.AppendLine(isFocused ? "## FOCUSED FILE SECTION:" : "## FULL FILE CONTENT:");
+        user.AppendLine("## FULL FILE CONTENT:");
         user.AppendLine("```");
         user.AppendLine(fileForLlm);
         user.AppendLine("```");

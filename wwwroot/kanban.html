@@ -28,8 +28,8 @@
             <textarea ng-model="card.text" ng-blur="vm.saveCardText(card) rows=" 2" ng-click="$event.stopPropagation()"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             </textarea>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
+          <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
@@ -110,7 +110,11 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-          <div class="card-text">{{card.text}}</div>
+          <div class="card-text">
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()" placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
+            </textarea>
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+          </div>
           <div class="card-tags" ng-if="card.priority">
             <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
@@ -247,6 +251,14 @@
                 <details>
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
+                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                    <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                      <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change">{{item.change}}</span>
+                    </div>
+                  </div>
                 </details>
               </div>
             </details>
@@ -282,7 +294,10 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-          <div class="card-text">{{card.text}}</div>
+          <div class="card-text">
+            {{card.text}}
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+          </div>
           <div class="card-tags" ng-if="card.priority">
             <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
@@ -378,6 +393,14 @@
                 <details>
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
+                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                    <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                      <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change">{{item.change}}</span>
+                    </div>
+                  </div>
                 </details>
               </div>
             </details>

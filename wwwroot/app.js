@@ -56,6 +56,7 @@
     vm.lastStreamingThinking = '';
     vm.streamingStepsCopy = [];
     vm.lastStreamingStepsUpdate = 0;
+    vm.planItems = [];
 
     // Debug logging for file size and token count
     vm.logFileSizeAndTokens = function (filePath, content) {
@@ -548,6 +549,18 @@
       });
     }
 
+    function reconcilePlanItems() {
+      if (!vm.planItems || !vm.planItems.length) return;
+      vm.planItems.forEach(function (item) {
+        if (item.done) return;
+        var doneSteps = vm.streamingSteps.filter(function (s) {
+          return s.status === 'done' && s.path && item.file &&
+            s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
+        });
+        if (doneSteps.length > 0) item.done = true;
+      });
+    }
+
     function upsertStreamingStep(parsed) {
       normalizeStep(parsed);
       var existing = vm.streamingSteps.find(function (s) { return s.index === parsed.index; });
@@ -583,6 +596,7 @@
       vm.streamingPhase = '';
       vm.streamingSteps = [];
       vm.streamingFilesEdited = [];
+      vm.planItems = [];
       vm.agentActivityLog = [];
       vm.activeStepIndex = null;
       vm.lastPhaseLogged = '';
@@ -686,6 +700,13 @@
                       pushAgentLog('summary', parsed.text);
                     }
                     break;
+                  case 'plan':
+                    if (parsed && parsed.items && parsed.items.length) {
+                      vm.planItems = parsed.items.map(function (item, i) {
+                        return { index: i, file: item.file, change: item.change, priority: item.priority, done: false };
+                      });
+                    }
+                    break;
                   case 'show':
                     if (parsed && parsed.text) {
                       vm.aiResponse = parsed.text;
@@ -695,6 +716,7 @@
                   case 'step':
                     if (parsed) {
                       upsertStreamingStep(parsed);
+                      reconcilePlanItems();
                       if (parsed.status === 'running') {
                         pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
                       } else if (parsed.status === 'error') {
@@ -723,6 +745,7 @@
                       thinking: finalThinking,
                       filesEdited: vm.streamingFilesEdited,
                       steps: finalSteps,
+                      planItems: angular.copy(vm.planItems),
                       warning: parsed && parsed.warning,
                       incomplete: incomplete
                     };
@@ -732,6 +755,7 @@
                       thinking: finalThinking,
                       steps: finalSteps,
                       filesEdited: vm.streamingFilesEdited,
+                      planItems: angular.copy(vm.planItems),
                       warning: parsed && parsed.warning,
                       incomplete: incomplete
                     };

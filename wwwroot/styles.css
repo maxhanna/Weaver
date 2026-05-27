@@ -1840,6 +1840,37 @@ h3 .small.ghost:hover {
 	margin-left: 4px;
 }
 
+.plan-items-list {
+	margin-top: 8px;
+	border-top: 1px solid var(--border, #eee);
+	padding-top: 6px;
+}
+.plan-item-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	padding: 2px 4px;
+	font-size: 12px;
+}
+.plan-item-row.plan-done {
+	opacity: 0.7;
+}
+.plan-item-icon {
+	flex-shrink: 0;
+	width: 18px;
+}
+.plan-item-file {
+	font-family: ui-monospace, monospace;
+	color: var(--accent);
+	flex-shrink: 0;
+}
+.plan-item-change {
+	color: var(--text, #333);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .agent-steps .step .step-path {
 	color: var(--accent);
 	margin-right: 4px;

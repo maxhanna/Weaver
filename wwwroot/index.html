@@ -163,6 +163,14 @@
             <details>
               <summary>🧠 Plan</summary>
               <pre class="streaming-text">{{vm.streamingThinking}}</pre>
+              <div ng-if="vm.planItems.length" class="plan-items-list">
+                <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
+                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                  <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-file">{{item.file}}</span>
+                  <span class="plan-item-change">{{item.change}}</span>
+                </div>
+              </div>
             </details>
           </div>
 
