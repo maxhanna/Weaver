@@ -1987,8 +1987,7 @@ Be concise — 2-4 sentences max.";
                 continue;
             }
 
-            else if (changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase)
-                || changeDesc.StartsWith("move", StringComparison.OrdinalIgnoreCase))
+            else if (changeDesc.StartsWith("rename", StringComparison.OrdinalIgnoreCase))
             {
                 var dstPath = ExtractTargetPath(changeDesc, planFile, projectRoot);
                 if (dstPath != null)
@@ -2054,6 +2053,7 @@ Be concise — 2-4 sentences max.";
         // --- up to 4 parse attempts (generous for small models) ---
         List<AgentStep> editSteps = new();
         var timedOut = false;
+        var noEditsNeeded = false;
         var editHistory = new List<(string path, string preContent)>();
         for (var attempt = 0; attempt < 4 && editSteps.Count == 0; attempt++)
         {
@@ -2076,7 +2076,13 @@ Be concise — 2-4 sentences max.";
                 $"LLM raw ({raw?.Length ?? 0} chars)",
                 new { raw }, ct: ct);
 
-            editSteps = ParseEditsFromLlmRaw(raw, relPath);
+            editSteps = ParseEditsFromLlmRaw(raw, relPath, out var noEditsOuter);
+            if (noEditsOuter)
+            {
+                noEditsNeeded = true;
+                await EmitLog(emitSse, "info", $"No edits needed for {relPath} — skipping", ct: ct);
+                break;
+            }
 
             // Determine rejection reason for better logging
             string? rejectReason = null;
@@ -2118,7 +2124,7 @@ Be concise — 2-4 sentences max.";
             }
         }
 
-        if (timedOut) { return; }
+        if (timedOut || noEditsNeeded) { return; }
         if (editSteps.Count == 0)
         {
             await EmitLog(emitSse, "error", $"Could not produce edits for {relPath} — skipping", ct: ct);
@@ -2161,7 +2167,7 @@ Be concise — 2-4 sentences max.";
                 ct,
                 nearMatchSnippets: nearMatches!);
 
-            var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath)
+            var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath, out var _)
                 .Where(e => !string.Equals(
                     NormalizeLineEndings(e.OldString ?? ""),
                     NormalizeLineEndings(e.NewString ?? ""),
@@ -2223,7 +2229,7 @@ Be concise — 2-4 sentences max.";
                         var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
                             fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
 
-                        var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath)
+                        var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath, out var _)
                             .Where(e => !string.Equals(
                                 NormalizeLineEndings(e.OldString ?? ""),
                                 NormalizeLineEndings(e.NewString ?? ""),
@@ -3651,8 +3657,9 @@ Rules:
         return null;
     }
 
-    private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath)
+    private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath, out bool noEditsSignal)
     {
+        noEditsSignal = false;
         var steps = new List<AgentStep>();
         if (string.IsNullOrWhiteSpace(raw)) return steps;
 
@@ -3693,6 +3700,13 @@ Rules:
 
                     if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
                     {
+                        // Explicit {"edits": []} means no changes needed — stop retrying
+                        if (editsEl.GetArrayLength() == 0)
+                        {
+                            noEditsSignal = true;
+                            return steps;
+                        }
+
                         var envelope = JsonSerializer.Deserialize<MinimalEditsEnvelope>(candidate,
                             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                         if (envelope?.Edits != null)
