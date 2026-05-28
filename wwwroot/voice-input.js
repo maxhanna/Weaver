@@ -68,7 +68,12 @@ angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
           if (i <= lastProcessedIndex) continue;
           if (e.results[i].isFinal) {
             var text = e.results[i][0].transcript;
-            currentCard.text = baseText + (baseText && text ? ' ' : '') + text;
+            // Append the new text to existing card text with proper spacing
+            if (currentCard.text) {
+              currentCard.text += ' ' + text;
+            } else {
+              currentCard.text = text;
+            }
             lastProcessedIndex = i;
           }
         }
