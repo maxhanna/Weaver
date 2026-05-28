@@ -28,6 +28,10 @@
             <textarea ng-model="card.text" ng-blur="vm.saveCardText(card) rows=" 2" ng-click="$event.stopPropagation()"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             </textarea>
+            <button ng-click="vm.recordVoice(card)" class="small-icon"
+              ng-class="{'recording': vm.isRecording}"
+              title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"
+              ng-show="vm.voiceSupported">🎤</button>
           </div>
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           <div class="card-tags">
@@ -43,11 +47,11 @@
           <div class="card-actions">
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
-            <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
-              title="Split into smaller tasks">✂ Split</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
               ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶
               Run'}}</button>
+            <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
+              title="Split into smaller tasks">✂ Split</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
               Delete</button>
           </div>
@@ -149,7 +153,7 @@
               </div>
             </details>
           </div>
-          <div class="card-analysis analysis-log" ng-if="vm.agentActivityLog.length">
+          <div class="card-analysis analysis-log" ng-if="vm.activeCardId === card.id && vm.agentActivityLog.length">
             <details>
               <summary>📋 Log ({{vm.agentActivityLog.length}})</summary>
               <div class="log-entries">
@@ -265,7 +269,7 @@
           </div>
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small"
-              ng-disabled="vm.streamingActive && card.ready || (vm.activeCardId === card.id && card.tags && !card.tags.includes('In Progress'))">✔
+              ng-disabled="vm.streamingActive && card.ready || card.status === 'done' || card.status === 'error'">✔
               Done</button>
             <button ng-click="vm.stopAgent(card)" class="small"
               ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>

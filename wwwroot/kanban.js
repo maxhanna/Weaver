@@ -1,6 +1,6 @@
 'use strict';
 
-angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
+angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, VoiceInput) {
   var STORAGE_KEY = 'maestroconfig.cards';
 
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -87,6 +87,19 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout) {
       };
 
       vm.showArchived = false;
+      vm.voiceSupported = VoiceInput.isSupported();
+      vm.isRecording = false;
+
+      vm.recordVoice = function (card) {
+        if (!card) return;
+        if (VoiceInput.isActive()) {
+          VoiceInput.stop();
+          vm.isRecording = false;
+        } else {
+          VoiceInput.start(card, $scope);
+          vm.isRecording = true;
+        }
+      };
 
       vm.copyCardText = function (card) {
         if (!card || !card.text) return;

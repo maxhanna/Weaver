@@ -703,7 +703,7 @@
                   case 'plan':
                     if (parsed && parsed.items && parsed.items.length) {
                       vm.planItems = parsed.items.map(function (item, i) {
-                        return { index: i, file: item.file, change: item.change, priority: item.priority, done: false };
+                        return { index: i, file: item.File || item.file, change: item.Change || item.change, priority: item.Priority || item.priority, done: false };
                       });
                     }
                     break;
