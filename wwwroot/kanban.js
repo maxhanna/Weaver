@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, VoiceInput) {
   var STORAGE_KEY = 'maestroconfig.cards';
@@ -198,18 +198,27 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           vm.activeCardId = null;
         }
         if (from === 'doing' && to === 'done') {
-          vm.activeCardId = null;
+          // Only clear activeCardId if it's not part of the current project
+          if (card.filePath !== vm.selectedProject) {
+            vm.activeCardId = null;
+          }
         }
         if (from === 'done' && to === 'todo') {
           card.ready = false;
           // Preserve agentAnalysis/agentLog for previous-analysis display
-          vm.activeCardId = null;
+          // Only clear activeCardId if it's not part of the current project
+          if (card.filePath !== vm.selectedProject) {
+            vm.activeCardId = null;
+          }
         }
         if (from === 'todo' && to === 'done') {
           card.ready = false;
           delete card.agentAnalysis;
           delete card.agentSteps;
-          vm.activeCardId = null;
+          // Only clear activeCardId if it's not part of the current project
+          if (card.filePath !== vm.selectedProject) {
+            vm.activeCardId = null;
+          }
         }
         vm.state[to].push(card);
         if (from === 'todo' && to === 'doing' && card.ready) {

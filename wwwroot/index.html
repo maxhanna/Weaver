@@ -14,19 +14,16 @@
 <body ng-controller="MainCtrl as vm">
   <header>
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
-      <svg class="logo-icon-enhanced" width="24" height="24" viewBox="0 0 24 24" fill="none"
-        xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#3b82f6" />
-            <stop offset="100%" stop-color="#64748b" />
-          </linearGradient>
-        </defs>
-        <path d="M12 2L14.5 8.5L22 10L16 14L18 20L12 16L6 20L8 14L2 10L9.5 8.5L12 2Z" fill="url(#logoGradient)"
-          stroke="#3b82f6" stroke-width="0.5" />
-        <circle cx="12" cy="12" r="3" fill="#3b82f6" />
+      <svg class="brand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2L14.5 8.5L22 10L16 14L18 20L12 16L6 20L8 14L2 10L9.5 8.5L12 2Z" fill="var(--brand-primary)"
+          stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <path d="M10 6L14 6L14 10L10 10L10 6Z" fill="var(--brand-secondary)" />
+        <path d="M8 12L16 12L16 16L8 16L8 12Z" fill="var(--brand-secondary)" />
+        <path d="M12 4L13.5 9L18 10L14 13L15 18L12 15L9 18L10 13L6 10L10.5 9L12 4Z" fill="var(--brand-secondary)" />
+        <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22Z" fill="var(--brand-primary)" stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <path d="M12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18Z" fill="var(--brand-secondary)" />
       </svg>
-      <span class="logo-text-enhanced">Maestro</span>
+      <span class="brand-text">Maestro</span>
     </div>
     <div class="project-picker">
       <label class="text-sm muted" for="project-select">Project:</label>
@@ -317,7 +314,7 @@
 
   <!-- FILE PICKER MODAL -->
   <div class="popup-overlay" ng-if="vm.showFilePicker" ng-click="vm.closeFilePicker()">
-    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
+    <div class="popup-panel file-picker-panel" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>Attach Files</strong>
         <button ng-click="vm.closeFilePicker()">✕</button>
@@ -330,12 +327,13 @@
           <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
           <span>{{vm.pickerPath || '/'}}</span>
         </div>
+        <input type="text" ng-model="vm.searchFilter" placeholder="Search files..." class="search-input" />
         <div class="file-picker-list">
-          <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
+          <div class="entry dir" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="e.isDirectory"
             ng-click="vm.pickerEnterDir(e.path)">
             <span>📁</span><span>{{e.name}}/</span>
           </div>
-          <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory"
+          <div class="entry" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="!e.isDirectory"
             ng-click="vm.pickerToggleFile(e.path)">
             <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}"></div>
             <span>📄</span><span>{{e.name}}</span>
