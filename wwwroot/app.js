@@ -19,11 +19,32 @@
     vm.showAI = true;
     vm.llamaUrl = "";
     vm.buildCommands = "";
+    vm.terminalApprovalMode = 'approveAll';
+    vm.approvedTerminalRoots = [];
+    vm.approvedTerminalRootsText = '';
+    vm.pendingTerminalApprovals = [];
     vm.aiChatMessages = [];
     vm.aiChatInput = '';
     vm.aiChatLoading = false;
     vm.searchFilter = '';
     vm.chatMode = 'ask';
+    vm.faqs = [
+      {
+        question: 'How do I get started?',
+        answer: 'To get started, simply create a new project and begin adding tasks to your Kanban board.',
+        expanded: false
+      },
+      {
+        question: 'Can I collaborate with others?',
+        answer: 'Yes, you can invite team members to collaborate on projects and share Kanban boards.',
+        expanded: false
+      },
+      {
+        question: 'How do I export my data?',
+        answer: 'You can export your Kanban data as JSON by clicking the export button in the settings panel.',
+        expanded: false
+      }
+    ];
 
     // Build mode tool definitions
     vm.buildTools = [
@@ -49,6 +70,7 @@
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
+    vm.clarificationReply = '';
     vm.abortController = null;
     vm.lastStreamingSteps = [];
     vm.lastStreamingPhase = '';
@@ -197,6 +219,10 @@
         cfg.showKanban = vm.showKanban !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";  
         cfg.buildCommands = vm.buildCommands;
+        cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
+        cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+          return r.trim().toLowerCase();
+        }).filter(Boolean);
         cfg.fileHints = '';
         return $http.post('/api/config/save', cfg);
       }).then(function () {
@@ -228,6 +254,9 @@
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
+        vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
+        vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
+        vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
         vm.fileHintsData = [];
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
@@ -575,6 +604,37 @@
       refreshFilesEditedFromSteps();
     }
 
+    function findCardById(cardId) {
+      if (!cardId || !vm.state) return null;
+      var cols = ['todo', 'doing', 'done'];
+      for (var c = 0; c < cols.length; c++) {
+        var cards = vm.state[cols[c]] || [];
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === cardId) return cards[i];
+        }
+      }
+      return null;
+    }
+
+    vm.submitClarification = function () {
+      var reply = (vm.clarificationReply || '').trim();
+      if (!reply) return;
+      var card = findCardById(vm.activeCardId);
+      if (!card) {
+        vm.aiChatMessages.push({ role: 'user', content: reply });
+        vm.clarificationReply = '';
+        return;
+      }
+      var question = (vm.agentResult && (vm.agentResult.question || vm.agentResult.summary)) || 'Clarification';
+      card.text = (card.text || '') + '\n\nClarification requested: ' + question + '\nUser answer: ' + reply;
+      delete card.agentAnalysis;
+      delete card.agentLog;
+      vm.saveCards();
+      vm.clarificationReply = '';
+      vm.agentResult = null;
+      vm.executeAgent(card);
+    };
+
     // === Agent Execution (streaming) ===
 
     vm.executeAgent = function (card) {
@@ -691,7 +751,7 @@
                   case 'thinking':
                     if (parsed && parsed.text) {
                       vm.streamingThinking = parsed.text;
-                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)');
+                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
                     }
                     break;
                   case 'summary':
@@ -711,6 +771,12 @@
                     if (parsed && parsed.text) {
                       vm.aiResponse = parsed.text;
                       pushAgentLog('info', '📄 ' + parsed.text);
+                    }
+                    break;
+                  case 'clarification':
+                    if (parsed && parsed.question) {
+                      vm.aiResponse = parsed.question;
+                      pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
                     }
                     break;
                   case 'step':
@@ -747,7 +813,9 @@
                       steps: finalSteps,
                       planItems: angular.copy(vm.planItems),
                       warning: parsed && parsed.warning,
-                      incomplete: incomplete
+                      incomplete: incomplete,
+                      needsClarification: parsed && parsed.needsClarification,
+                      question: parsed && (parsed.question || parsed.warning || finalSummary)
                     };
                     vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                     var analysis = {
@@ -757,7 +825,9 @@
                       filesEdited: vm.streamingFilesEdited,
                       planItems: angular.copy(vm.planItems),
                       warning: parsed && parsed.warning,
-                      incomplete: incomplete
+                      incomplete: incomplete,
+                      needsClarification: parsed && parsed.needsClarification,
+                      question: parsed && (parsed.question || parsed.warning || finalSummary)
                     };
                     var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                     if (doIdx !== -1) {
@@ -931,6 +1001,29 @@
       $http.get('/api/terminal/output').then(function (resp) { vm.terminalOutput = resp.data.output || ''; });
     };
 
+    vm.refreshTerminalApprovals = function () {
+      $http.get('/api/terminal/approvals/pending').then(function (resp) {
+        vm.pendingTerminalApprovals = (resp.data && resp.data.approvals) || [];
+      }, function () {
+        vm.pendingTerminalApprovals = [];
+      });
+    };
+
+    vm.approveTerminalCommand = function (approval, scope) {
+      if (!approval) return;
+      $http.post('/api/terminal/approvals/approve', { id: approval.id || approval.Id, scope: scope || 'once' })
+        .then(function () {
+          vm.refreshTerminalApprovals();
+          vm.loadConfig();
+        });
+    };
+
+    vm.rejectTerminalCommand = function (approval) {
+      if (!approval) return;
+      $http.post('/api/terminal/approvals/reject', { id: approval.id || approval.Id })
+        .then(function () { vm.refreshTerminalApprovals(); });
+    };
+
     vm.stopAgent = function (card) {
       if (vm.abortController) {
         vm.abortController.abort();
@@ -954,6 +1047,7 @@
 
     vm.formatLogDetail = formatLogDetail;
     vm.refreshTerminal();
+    vm.refreshTerminalApprovals();
 
     // Refresh terminal periodically — but NOT while the agent is streaming.
     // $interval always calls $apply after each tick.  When the agent is active,
@@ -963,6 +1057,7 @@
     // still dirty after 10 passes and throws).  Pausing the interval during streaming
     // and resuming on done/error keeps exactly one digest source active at a time.
     var _terminalInterval = $interval(vm.refreshTerminal, 3000);
+    var _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500);
 
     function pauseTerminalPolling() {
       if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }

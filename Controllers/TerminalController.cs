@@ -20,38 +20,79 @@ public class TerminalController : ControllerBase
     }
 
     public class ExecRequest { public string command { get; set; } = ""; }
+    public class ApprovalDecisionRequest
+    {
+        public string Id { get; set; } = "";
+        public string Scope { get; set; } = "once";
+    }
 
     [HttpPost("exec")]
     public async Task<IActionResult> Exec([FromBody] ExecRequest req)
     {
         if (string.IsNullOrWhiteSpace(req?.command)) return BadRequest("command required");
-        await _terminal.SendCommandAsync(req.command);
-        await Task.Delay(100);
-        return Ok(new { output = _terminal.ReadLastLines(200) });
+        try
+        {
+            await _terminal.SendCommandAsync(req.command);
+            await Task.Delay(100);
+            return Ok(new { output = _terminal.ReadLastLines(200) });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = ex.Message });
+        }
     }
 
     [HttpPost("exec-isolated")]
     public async Task<IActionResult> ExecIsolated([FromBody] ExecRequest req)
     {
         if (string.IsNullOrWhiteSpace(req?.command)) return BadRequest("command required");
-        _terminal.Start();
-        var beforeLen = _terminal.ReadAll().Length;
-        await _terminal.SendCommandAsync(req.command);
-        var prevLen = beforeLen;
-        var stableMs = 0;
-        for (var i = 0; i < 30; i++)
+        try
         {
-            await Task.Delay(500);
-            var curLen = _terminal.ReadAll().Length;
-            if (curLen == prevLen) { stableMs += 500; if (stableMs >= 2000) break; }
-            else { stableMs = 0; prevLen = curLen; }
+            _terminal.Start();
+            var beforeLen = _terminal.ReadAll().Length;
+            await _terminal.SendCommandAsync(req.command);
+            var prevLen = beforeLen;
+            var stableMs = 0;
+            for (var i = 0; i < 30; i++)
+            {
+                await Task.Delay(500);
+                var curLen = _terminal.ReadAll().Length;
+                if (curLen == prevLen) { stableMs += 500; if (stableMs >= 2000) break; }
+                else { stableMs = 0; prevLen = curLen; }
+            }
+            var fullOutput = _terminal.ReadAll();
+            var output = beforeLen >= 0 && beforeLen < fullOutput.Length
+                ? fullOutput.Substring(beforeLen)
+                : "";
+            if (output.Length > MaxOutputChars) output = output[..MaxOutputChars];
+            return Ok(new { output });
         }
-        var fullOutput = _terminal.ReadAll();
-        var output = beforeLen >= 0 && beforeLen < fullOutput.Length
-            ? fullOutput.Substring(beforeLen)
-            : "";
-        if (output.Length > MaxOutputChars) output = output[..MaxOutputChars];
-        return Ok(new { output });
+        catch (UnauthorizedAccessException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("approvals/pending")]
+    public IActionResult PendingApprovals()
+    {
+        return Ok(new { approvals = _terminal.GetPendingApprovals() });
+    }
+
+    [HttpPost("approvals/approve")]
+    public async Task<IActionResult> Approve([FromBody] ApprovalDecisionRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Id)) return BadRequest(new { error = "Approval id is required" });
+        var ok = await _terminal.ApproveCommandAsync(req.Id, req.Scope);
+        return ok ? Ok(new { approved = true }) : NotFound(new { error = "Approval request not found" });
+    }
+
+    [HttpPost("approvals/reject")]
+    public IActionResult Reject([FromBody] ApprovalDecisionRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Id)) return BadRequest(new { error = "Approval id is required" });
+        var ok = _terminal.RejectCommand(req.Id);
+        return ok ? Ok(new { rejected = true }) : NotFound(new { error = "Approval request not found" });
     }
 
     public class InstallPackageRequest
@@ -86,7 +127,14 @@ public class TerminalController : ControllerBase
             return BadRequest(new { error = $"Unknown package manager: {manager}. Use dotnet, npm, or pip." });
 
         var beforeLen = _terminal.ReadAll().Length;
-        await _terminal.SendCommandAsync(command, req.ProjectPath);
+        try
+        {
+            await _terminal.SendCommandAsync(command, req.ProjectPath);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = ex.Message, command, manager });
+        }
 
         var prevLen = beforeLen;
         var stableMs = 0;
@@ -259,7 +307,14 @@ public class TerminalController : ControllerBase
     private async Task<(bool success, string output)> RunTerminalCommand(string command, string? projectPath)
     {
         var beforeLen = _terminal.ReadAll().Length;
-        await _terminal.SendCommandAsync(command, projectPath);
+        try
+        {
+            await _terminal.SendCommandAsync(command, projectPath);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return (false, ex.Message);
+        }
         var prevLen = beforeLen;
         var stableMs = 0;
         for (var i = 0; i < 30; i++)

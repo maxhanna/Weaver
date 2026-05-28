@@ -19,6 +19,8 @@ public class FrontendConfig
     public bool showKanban { get; set; } = true;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
+    public string terminalApprovalMode { get; set; } = "approveAll";
+    public List<string> approvedTerminalRoots { get; set; } = new();
 }
 
 public class ConfigFileService

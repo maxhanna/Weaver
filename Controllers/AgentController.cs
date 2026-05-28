@@ -3,10 +3,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MaestroBackend.Services;
+using MaestroBackend;
 
 [ApiController]
 [Route("api/agent")]
-public class AgentController : ControllerBase
+public partial class AgentController : ControllerBase
 {
     // ── tuning constants ──────────────────────────────────────────────────────
     private const int MaxFileContextChars = 24_000;
@@ -18,8 +19,6 @@ public class AgentController : ControllerBase
 
     // ── pipeline type classification ──────────────────────────────────────
 
-    private enum PipelineType { QuickCheck, CommandExecution, CodeEdit, Compound }
-
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||
@@ -28,7 +27,10 @@ public class AgentController : ControllerBase
         file.Equals("_display", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase);
+        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_terminal", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_web", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_clarify", StringComparison.OrdinalIgnoreCase);
 
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
@@ -50,119 +52,6 @@ public class AgentController : ControllerBase
         _configFile = configFile;
     }
 
-    public class AgentRequest
-    {
-        public string Prompt { get; set; } = "";
-        public string Project { get; set; } = "";
-        public List<string> Files { get; set; } = new();
-        public int? MaxIterations { get; set; }
-        public int? MaxStepsPerBatch { get; set; }
-    }
-
-    public class ApplyEditsRequest
-    {
-        public string Project { get; set; } = "";
-        public List<EditAction> Edits { get; set; } = new();
-        public List<CommandAction> Commands { get; set; } = new();
-    }
-
-    public class EditAction
-    {
-        public string Path { get; set; } = "";
-        public string OldString { get; set; } = "";
-        public string NewString { get; set; } = "";
-    }
-
-    public class CommandAction { public string Command { get; set; } = ""; }
-
-    public class EditResult
-    {
-        public string Path { get; set; } = "";
-        public string Status { get; set; } = "";
-        public string? Error { get; set; }
-    }
-
-    public class AgentStep
-    {
-        public int Index { get; set; }
-        public string Type { get; set; } = "";
-        public string Description { get; set; } = "";
-        public string? Path { get; set; }
-        public string? OldString { get; set; }
-        public string? NewString { get; set; }
-        public string? Command { get; set; }
-        public string? Pattern { get; set; }
-        public string? Url { get; set; }
-        public string? Query { get; set; }
-        public string? ToPath { get; set; }
-        public bool? Complete { get; set; }
-    }
-
-    public class AgentResponse
-    {
-        public string Thinking { get; set; } = "";
-        public string Summary { get; set; } = "";
-        public bool Complete { get; set; }
-        public List<AgentStep> Steps { get; set; } = new();
-    }
-
-    /// <summary>
-    /// One item in the structured plan the LLM produces during Phase 2.
-    /// </summary>
-    private class PlanItem
-    {
-        public string File { get; set; } = "";
-        public string Change { get; set; } = "";
-        public int Priority { get; set; } = 1;
-    }
-
-    private class PlanItemDeserialized
-    {
-        public string file { get; set; } = "";
-        public string change { get; set; } = "";
-        public int priority { get; set; } = 1;
-    }
-
-    private class AgentPlanDeserialized
-    {
-        public string thinking { get; set; } = "";
-        public string summary { get; set; } = "";
-        public List<PlanItemDeserialized> plan { get; set; } = new();
-    }
-
-    /// <summary>
-    /// The full plan envelope returned by the Phase-2 LLM call.
-    /// </summary> 
-    public class AgentPlan
-    {
-        public string Thinking { get; set; } = string.Empty;
-        public string Summary { get; set; } = string.Empty;
-        public List<PlanStep> Plan { get; set; } = new();
-    }
-
-    public class PlanStep
-    {
-        public string File { get; set; } = string.Empty;
-        public string Change { get; set; } = string.Empty;
-        public int Priority { get; set; }
-        public int? LineFrom { get; set; }
-        public int? LineTo { get; set; }
-    }
-
-    // ── internal edit DTO ─────────────────────────────────────────────────────
-
-    private class MinimalEditDto
-    {
-        public string Path { get; set; } = "";
-        public string OldString { get; set; } = "";
-        public string NewString { get; set; } = "";
-    }
-
-    private class MinimalEditsEnvelope
-    {
-        public List<MinimalEditDto> Edits { get; set; } = new();
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     //  PATH HELPERS
     // ═════════════════════════════════════════════════════════════════════════ 
@@ -179,6 +68,11 @@ public class AgentController : ControllerBase
         // Command execution: known simple intents (git, package_install, rename, etc.)
         if (TryDetectSimpleIntent(prompt) != null)
             return PipelineType.CommandExecution;
+
+        // Bug reports and broken UI behavior need code discovery/planning, even when
+        // phrased as "I can't..." instead of "fix...".
+        if (LooksLikeBugFixRequest(prompt))
+            return PipelineType.CodeEdit;
 
         // Rename/move is always command-execution regardless of phrasing
         if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
@@ -220,6 +114,16 @@ public class AgentController : ControllerBase
         if (Regex.IsMatch(lower, @"\b(check\s+if|check\s+whether|verify|validate)\b") && !TaskExpectsFileChanges(prompt))
             return PipelineType.CommandExecution;
 
+        // File creation outside the project — create files on desktop, downloads, documents, etc.
+        if (Regex.IsMatch(lower, @"\b(create|make|write|save)\b.{0,80}\b(file|folder|directory)\b") &&
+            (Regex.IsMatch(lower, @"\b(desktop|downloads?|documents?|pictures?|music|videos?)\b") ||
+             Regex.IsMatch(lower, @"\\users\\|~\\")))
+            return PipelineType.CommandExecution;
+
+        // Text translation to a foreign language — not a code edit
+        if (Regex.IsMatch(lower, @"\btranslate\b.{0,80}\bto\b.{0,40}(french|spanish|german|italian|portuguese|russian|japanese|chinese|korean|arabic|dutch|polish|swedish|norwegian|danish|finnish|turkish|thai|vietnamese|hindi|bengali|english)\b"))
+            return PipelineType.CommandExecution;
+
         // Default: needs the full planning pipeline
         return PipelineType.CodeEdit;
     }
@@ -231,9 +135,14 @@ public class AgentController : ControllerBase
 
 Types:
 - QuickCheck: ping, health, status, connectivity (no file changes)
-- CommandExecution: anything that should be done in terminal, including git operations, directory listing, renames, system info queries, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
-- CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
+- CommandExecution: anything that should be done in terminal, including: file/folder creation on desktop/downloads/documents (NOT inside project), text translation between languages, git operations, directory listing, renames, system info queries, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
+- CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change INSIDE the project). Bug reports like ""I can't expand the FAQ"", ""the button does not work"", ""the page is broken"", or ""clicking X fails"" are CodeEdit unless the user explicitly asks only to inspect.
 - Compound: mix of command execution and code edits, prefer this if there are multiple distinct steps that should be executed separately for best results. The agent will decompose and orchestrate the steps.
+
+Examples:
+- ""Create a file on my desktop"" → CommandExecution (file system operation outside project)
+- ""Translate hello to french"" → CommandExecution (text translation, not code)
+- ""Create a file on my desktop and translate text to french"" → CommandExecution (both file system and translation)
 
 If unsure, use CodeEdit.";
 
@@ -368,16 +277,64 @@ If unsure, use CodeEdit.";
              string.Equals(t?.ToString(), "rename", StringComparison.OrdinalIgnoreCase)) &&
             s.TryGetValue("status", out var st) && st?.ToString() == "done");
 
+    private static bool LooksLikeBugFixRequest(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+
+        return Regex.IsMatch(lower,
+            @"\b(can'?t|cannot|couldn'?t|won'?t|doesn'?t|isn'?t|aren'?t|not\s+(working|clickable|opening|closing|expanding|collapsing|loading|saving|showing|hiding)|broken|bug|issue|error|exception|fail(?:s|ed|ing)?|crash(?:es|ed|ing)?|stuck|unresponsive|missing|wrong|incorrect)\b",
+            RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsTerminalOnlyTask(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var lower = prompt.ToLowerInvariant();
+
+        if (TryDetectSimpleIntent(prompt) != null)
+            return true;
+
+        return
+            Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b") ||
+            Regex.IsMatch(lower, @"\b(list|what.*in|contents? of|files?\s+in|directory\s+(contents?|listing)|structure\s+of|tree)\b") ||
+            Regex.IsMatch(lower, @"\b(what\s+version|is\s+(\S+\s+)?(installed|running|available)|which\s+(port|process|version|branch)|disk\s+(usage|space|free)|how\s+much\s+(memory|disk|space)|free\s+(memory|disk|space)|running\s+process(es)?|environment\s+variables?|current\s+(directory|path|branch|time|date)|whoami|uptime|list\s+(process|service|container|running))\b") ||
+            Regex.IsMatch(lower, @"\b(computers?\s+(\S+\s+)?on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts|(\S+\s+){0,2}on\s+(the\s+)?network)|connected\s+devices|what'?s?\s+(\S+\s+){0,3}on\s+((my|the)\s+)?network)\b") ||
+            Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+") ||
+            Regex.IsMatch(lower, @"\b(install|uninstall|remove|update|upgrade|downgrade)\s+(\S+\s+){0,3}(package|tool|module|library|dependency|sdk|runtime|plugin|extension|app|application|software)s?\b") ||
+            Regex.IsMatch(lower, @"\b(docker|container|compose|podman|kubernetes|kubectl|helm)\b") ||
+            Regex.IsMatch(lower, @"\b(start|stop|restart|reload)\s+(service|process|daemon|server|application)\b") ||
+            Regex.IsMatch(lower, @"\b(cat|type)\s+\S+") ||
+            (Regex.IsMatch(lower, @"\b(check\s+if|check\s+whether|verify|validate)\b") && !LooksLikeBugFixRequest(prompt));
+    }
+
     private static bool TaskExpectsFileChanges(string prompt)
     {
         var lower = prompt.ToLowerInvariant();
+
+        if (IsTerminalOnlyTask(prompt) && !LooksLikeBugFixRequest(prompt))
+            return false;
+
+        if (LooksLikeBugFixRequest(prompt))
+            return true;
+
         string[] verbs = {
             "add","implement","fix","update","change","create","modify","remove","delete",
             "refactor","edit","write","toggle","enable","disable","insert","set","make",
-            "build","install","configure","hook","wire","connect","show","hide","display",
+            "configure","hook","wire","connect","hide","display",
             "save","persist","store","expose","include"
         };
         return verbs.Any(v => lower.Contains(v, StringComparison.Ordinal));
+    }
+
+    private static bool ShouldPreferManualCodePipeline(PipelineType manual, PipelineType? llm, string prompt)
+    {
+        if (llm is null) return false;
+        var manualIsEdit = manual is PipelineType.CodeEdit or PipelineType.Compound;
+        var llmIsEdit = llm is PipelineType.CodeEdit or PipelineType.Compound;
+        if (!manualIsEdit || llmIsEdit) return false;
+        if (IsTerminalOnlyTask(prompt) && !LooksLikeBugFixRequest(prompt)) return false;
+        return TaskExpectsFileChanges(prompt);
     }
 
     private static bool BatchWasExplorationOnly(IReadOnlyList<AgentStep> batch) =>
@@ -698,6 +655,10 @@ If unsure, use CodeEdit.";
 Given a task and the contents of project files, output a structured plan. 
 
 For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field. 
+For NEW FILES: use ""_create_file"" in the file field and put the target path plus a complete content brief in change.
+For TERMINAL WORK: use ""_terminal"" in the file field and put the exact command in change.
+For CURRENT OR EXTERNAL FACTS: use ""_web"" in the file field and put either an absolute URL or a precise search query in change.
+For AMBIGUOUS TASKS: use ""_clarify"" in the file field only when acting would be unsafe or impossible because a required target/source/credential is missing. Do not ask preference or debugging questions when you can inspect the repo and proceed.
 
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
 {
@@ -729,11 +690,16 @@ so precise that the LLM only needs a tiny snippet (5-15 lines) to make the edit.
 
 Rules for the ""file"" field:
 - Must be an actual relative file path (e.g. ""src/app.js""). 
+- Or one of these tool markers when a file edit is not the next best action: ""_create_file"", ""_terminal"", ""_web"", ""_clarify"", ""_git"", ""_rename"", ""_delete_file"", ""_show"", ""_ping"", ""_package_install"".
 
 Rules for the ""change"" field:
 - When describing changes, quote exact existing code to modify. Mention specific lines.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
 - If you're unsure about exact code, describe the location and intent clearly.
+- Break coding work into small, deterministic edits. Each plan item should be doable with only the target file and the exact instruction.
+- If the user asks for email access and no mailbox/account/source is present in project context, ask for clarification instead of pretending to have email access.
+- If the user asks a factual/current question and the answer may be stale, plan a ""_web"" lookup before answering or editing.
+- If the user reports a bug but does not specify the exact failing line/component, inspect likely files and fix the bug. Do not ask the user what error they saw unless you cannot locate any relevant code.
 
 Rules for the ""priority"" field:
 - Must be a positive integer.
@@ -1193,11 +1159,27 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
+        var manualPipelineType = ClassifyTask(prompt);
         PipelineType? pipelineType = await TryClassifyWithLlm(prompt, emitSse, ct);
         if (pipelineType == null)
         {
             await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
-            pipelineType = ClassifyTask(prompt);
+            pipelineType = manualPipelineType;
+        }
+        else if (ShouldPreferManualCodePipeline(manualPipelineType, pipelineType, prompt))
+        {
+            await EmitLog(emitSse, "warn",
+                $"Router guard: overriding LLM {pipelineType} classification with {manualPipelineType} for likely code-edit task",
+                new { prompt }, ct: ct);
+            pipelineType = manualPipelineType;
+        }
+        else if (manualPipelineType is PipelineType.CommandExecution or PipelineType.QuickCheck
+                 && pipelineType is PipelineType.CodeEdit or PipelineType.Compound)
+        {
+            await EmitLog(emitSse, "warn",
+                $"Router trust: manual {manualPipelineType} is more specific than LLM {pipelineType} — using manual",
+                new { prompt }, ct: ct);
+            pipelineType = manualPipelineType;
         }
         await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
 
@@ -1210,6 +1192,12 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             PipelineType.Compound => await CompoundPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
             _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
         };
+
+        // ── Styling Pipeline (pre-verification) ─────────────────────────
+        var (styleSteps, styleFeedback) = await StylingPipeline(allSteps, projectRoot, emitSse, ct);
+        allSteps.AddRange(styleSteps);
+        if (!string.IsNullOrWhiteSpace(styleFeedback))
+            await EmitLog(emitSse, "warn", $"Styling feedback: {styleFeedback}", ct: ct);
 
         // ── Verification Pipeline ─────────────────────────────────────────
         var (complete, feedback) = await VerificationPipeline(
@@ -1235,19 +1223,33 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
                 await EmitLog(emitSse, "info", "Starting reprisal attempt(s) based on feedback.", ct: ct);
                 int attempt = 0;
+                string? lastResultHash = null;
                 while (attempt < 5 && !complete)
                 {
                     attempt++;
-                    await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt}", ct: ct);
+                    await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt} using {pipelineType} pipeline", ct: ct);
                     var reprisalContext = ReconstructDiscoveryContext(allSteps);
-                    var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(
-                        reprisalPrompt, projectRoot, emitSse, ct,
-                        prebuiltDiscoveryContext: reprisalContext,
-                        prebuiltDiscoverySteps: allSteps.Where(s => {
-                            if (s is not Dictionary<string, object?> r) return false;
-                            var t = r.TryGetValue("type", out var tv) ? tv?.ToString() : "";
-                            return t is "list" or "grep" or "glob" or "read";
-                        }).ToList());
+                    var (reprisalSteps, reprisalSummary, reprisalThinking) = pipelineType switch
+                    {
+                        PipelineType.CommandExecution => await CommandExecutionPipeline(reprisalPrompt, projectRoot, emitSse, ct),
+                        _ => await CodeEditPipeline(
+                            reprisalPrompt, projectRoot, emitSse, ct,
+                            prebuiltDiscoveryContext: reprisalContext,
+                            prebuiltDiscoverySteps: allSteps.Where(s => {
+                                if (s is not Dictionary<string, object?> r) return false;
+                                var t = r.TryGetValue("type", out var tv) ? tv?.ToString() : "";
+                                return t is "list" or "grep" or "glob" or "read";
+                            }).ToList())
+                    };
+                    // Deduplication — skip if same steps as last attempt
+                    var resultHash = string.Join("|", reprisalSteps.OfType<Dictionary<string, object?>>()
+                        .Select(s => $"{s.GetValueOrDefault("type")}:{s.GetValueOrDefault("command") ?? s.GetValueOrDefault("path")}"));
+                    if (lastResultHash == resultHash)
+                    {
+                        await EmitLog(emitSse, "warn", $"Reprisal attempt #{attempt} produced identical results — breaking loop", ct: ct);
+                        break;
+                    }
+                    lastResultHash = resultHash;
                     allSteps.AddRange(reprisalSteps);
                     var (reprisalComplete, reprisalFeedback) = await VerificationPipeline(prompt, allSteps, projectRoot, emitSse, ct);
                     if (!reprisalComplete)
@@ -1319,15 +1321,38 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         _terminal.Start();
 
         var conversation = new StringBuilder();
-        conversation.AppendLine("You are a terminal automation agent. You have full terminal access.");
+        var isWin = OperatingSystem.IsWindows();
+        conversation.AppendLine($"You are a terminal automation agent on **{(isWin ? "Windows" : "Unix/Linux")}**. You have full terminal access.");
         conversation.AppendLine("Run commands to accomplish the user's task.");
         conversation.AppendLine();
         conversation.AppendLine("Rules:");
         conversation.AppendLine("  - Output ONLY valid JSON, no other text, no markdown fences");
         conversation.AppendLine("  - To run a command: {\"cmd\": \"the full command\"}");
         conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
+        if (isWin)
+        {
+            conversation.AppendLine("  - This is WINDOWS. Use PowerShell commands, not bash/Linux.");
+            conversation.AppendLine("  - Use $env:USERPROFILE instead of ~ for home directory paths.");
+            conversation.AppendLine("  - BEFORE creating a file/folder, CHECK if it exists: Test-Path <path>");
+            conversation.AppendLine("  - Use `New-Item -ItemType File -Force <path>` for file creation.");
+            conversation.AppendLine("  - Use `New-Item -ItemType Directory -Force <path>` for directory creation.");
+            conversation.AppendLine("  - When writing file content with Set-Content, use ACTUAL line breaks, not \\n.");
+            conversation.AppendLine("    PowerShell treats \\n as literal characters. Use here-strings (@\"...\"@) or backtick-n (`n) for newlines.");
+        }
+        else
+        {
+            conversation.AppendLine("  - This is Unix/Linux. Use bash commands.");
+            conversation.AppendLine("  - BEFORE creating a file/folder, CHECK if it exists: test -d <path> or [ -f <path> ]");
+            conversation.AppendLine("  - Use `mkdir -p <path>` for directory creation, `touch <path>` or `echo > <path>` for files.");
+        }
+        conversation.AppendLine("  - If a command fails (error output), try a DIFFERENT approach — do not repeat the same command.");
+        conversation.AppendLine("  - If a fact may be current or external, use terminal web tools such as curl or Invoke-WebRequest to verify it.");
+        conversation.AppendLine("  - If required information is missing, stop with {\"done\": true, \"summary\": \"Clarification needed: <question>\"}.");
         conversation.AppendLine("  - Respond to errors by fixing and retrying");
         conversation.AppendLine("  - Max 15 iterations");
+        conversation.AppendLine("  - IMPORTANT: If the task involves generating content (translation, formatting, rewriting),");
+        conversation.AppendLine("    use your own knowledge to produce the content and write it with commands like Set-Content.");
+        conversation.AppendLine("    Do NOT just copy the input — actually perform the requested transformation.");
         conversation.AppendLine();
         conversation.AppendLine($"Task: {prompt}");
         conversation.AppendLine();
@@ -1335,6 +1360,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         const int maxIterations = 15;
         var stepIndex = 0;
         string? summary = null;
+        string? lastCommand = null;
+        var lastCommandRepeatCount = 0;
 
         for (var i = 0; i < maxIterations; i++)
         {
@@ -1342,7 +1369,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
             var systemMsg = "You are a terminal agent. Output only JSON.";
             var (raw, _, err) = await CallLlmRaw(systemMsg, conversation.ToString(), ct,
-                requestTimeout: TimeSpan.FromSeconds(30));
+                requestTimeout: TimeSpan.FromSeconds(180));
 
             if (string.IsNullOrWhiteSpace(raw))
             {
@@ -1380,6 +1407,21 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     if (string.IsNullOrWhiteSpace(cmd))
                     {
                         conversation.AppendLine("Empty command — try again.");
+                        continue;
+                    }
+
+                    // Repetition detection — same command 3+ times
+                    if (cmd == lastCommand)
+                        lastCommandRepeatCount++;
+                    else
+                        lastCommandRepeatCount = 0;
+                    lastCommand = cmd;
+
+                    if (lastCommandRepeatCount >= 2)
+                    {
+                        conversation.AppendLine($"Command [{i + 1}]: {cmd}");
+                        conversation.AppendLine("WARNING: This command has been run 3 times consecutively. It keeps failing — try a COMPLETELY DIFFERENT approach or signal done with an error summary.");
+                        conversation.AppendLine();
                         continue;
                     }
 
@@ -1465,70 +1507,389 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     //  CODE EDIT PIPELINE  —  discover → plan → edit → review loop
     // ═════════════════════════════════════════════════════════════════════════
 
+    private async Task<(List<object> steps, string summary, string thinking)> IterativeResearchAndEditLoop(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        List<string>? attachedFiles = null,
+        string? initialContext = null,
+        List<object>? initialSteps = null,
+        int maxIterations = 15)
+    {
+        var allSteps = initialSteps ?? new List<object>();
+        var contextSb = new StringBuilder();
+        contextSb.AppendLine("Below is the current state of research and file modifications.");
+        contextSb.AppendLine();
+
+        // Seed from previous context (reprisal) or attached files (fresh run)
+        if (!string.IsNullOrWhiteSpace(initialContext))
+        {
+            contextSb.AppendLine("## Previous research");
+            contextSb.AppendLine(initialContext);
+            contextSb.AppendLine();
+        }
+        else if (attachedFiles != null && attachedFiles.Count > 0)
+        {
+            await EmitLog(emitSse, "info", "Reading attached files", ct: ct);
+            var (dc, ds) = await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
+            contextSb.AppendLine(dc);
+            allSteps.AddRange(ds);
+        }
+
+        string? finalSummary = null;
+        string? finalThinking = null;
+        int iteration;
+
+        // Track the LLM's own understanding between iterations
+        var currentPhase = "explore";
+        var currentSynthesis = "";
+        var previousSynthesis = "";
+
+        // Repetition detection — track research step signatures
+        var lastResearchSignatures = new List<string>();
+        var consecutiveSamePhaseCount = 0;
+        var consecutiveSameSynthesisCount = 0;
+        string? lastPhase = null;
+
+        // Track files already read to prevent re-reads
+        var filesReadSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        const string systemPromptBase = @"You are a precise coding agent. Work through the problem step by step.
+
+## Available Operations
+  {""type"":""read"", ""path"":""relative/file.cs""}                          — Read full file
+  {""type"":""read"", ""path"":""relative/file.cs"", ""lineFrom"":10, ""lineTo"":50}   — Read specific lines
+  {""type"":""grep"", ""query"":""search term""}                             — Search code
+  {""type"":""glob"", ""pattern"":""**/*.cs""}                               — Find files
+  {""type"":""list"", ""path"":""src/""}                                     — List dir
+  {""type"":""edit"", ""path"":""src/file.cs"", ""oldString"":""..."", ""newString"":""...""}  — Edit file
+  {""type"":""command"", ""command"":""npm test""}                            — Run command
+
+## Progressive phases — MUST move through in order:
+
+**explore** — Read key files related to the task. At most 2 different files. After reading, form a hypothesis.
+**investigate** — You have a SPECIFIC hypothesis. Read ONE specific section (use lineFrom/lineTo) of ONE file to confirm or reject it. Do NOT re-read a file you already read in explore.
+**hypothesize** — State CLEARLY what you believe the problem is, what you LEARNED, and what needs to change. Synthesis MUST use past tense (""I found that..."").
+**edit** — Output precise oldString/newString edits. Do NOT include research steps.
+**done** — Task complete.
+
+CRITICAL RULES:
+- Move FORWARD through phases. NEVER repeat the same phase twice.
+- In explore: read at most 2 different files, then move to investigate.
+- In investigate: you MUST have a hypothesis. Read ONE specific section of ONE file, then form a conclusion and move to hypothesize. Do NOT read the same file twice.
+- CSS ISSUES: If investigating styling, you MUST cross-reference the HTML file to check if CSS selectors match actual HTML elements.
+- Each read/grep MUST give you NEW information. If a file is already listed in ## Files Already Read, do NOT read it again.
+- Synthesis MUST be different from your previous synthesis. If your understanding has not changed, you are stuck — force advancement.
+- For large files, use lineFrom/lineTo to read only the specific section you need (e.g., around line 600 for FAQ section).
+- NEVER set complete:true unless every step of the task is done.
+
+## Output — JSON ONLY:
+{
+  ""phase"": ""explore"" | ""investigate"" | ""hypothesize"" | ""edit"" | ""done"",
+  ""thinking"": ""Your reasoning"",
+  ""synthesis"": ""What you LEARNED so far. What the problem is and what must change."",
+  ""steps"": [operations],
+  ""complete"": false
+}";
+
+        for (iteration = 0; iteration < maxIterations; iteration++)
+        {
+            await EmitLog(emitSse, "info", $"Iterative [{currentPhase}]: step {iteration + 1}/{maxIterations}", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "phase", new { phase = currentPhase, message = $"[{currentPhase}] Step {iteration + 1}/{maxIterations}..." }, ct);
+
+            var context = contextSb.ToString();
+            if (context.Length > 12000)
+            {
+                // Keep head (files-read index + early research) + tail (latest results)
+                var headLen = 3000;
+                var tailLen = 10000;
+                var keepPrefix = "(mid-section of research log truncated — synthesis preserved below)\n";
+                context = context[..Math.Min(headLen, context.Length)] + keepPrefix + context[^Math.Min(tailLen, context.Length)..];
+            }
+
+            var synthesisBlock = string.IsNullOrWhiteSpace(currentSynthesis)
+                ? "(none yet — form a hypothesis as you explore)"
+                : currentSynthesis;
+
+            // Build files-read summary for the prompt header
+            var filesReadSummary = filesReadSet.Count == 0
+                ? "(none yet)"
+                : string.Join(", ", filesReadSet.OrderBy(f => f));
+
+            var userMsg = $"## Task\n{prompt}\n\n" +
+                $"## Current Phase: {currentPhase}\n" +
+                $"Move through: explore → investigate → hypothesize → edit → done.\n" +
+                $"Based on your current phase, what ONE thing should you do next?\n\n" +
+                $"## Files Already Read\n{filesReadSummary}\n\n" +
+                $"DO NOT re-read any file listed above. Read NEW files or use lineFrom/lineTo to read a section you haven't seen yet.\n\n" +
+                $"## Your Synthesis (current understanding)\n{synthesisBlock}\n\n" +
+                $"## Research Log\n{(string.IsNullOrWhiteSpace(context) ? "(none yet)\n" : context)}\n\n" +
+                $"## What to do now\nWhat phase are you in, and what steps do you need to execute?";
+
+            var (raw, agentResponse, err) = await CallLlmRaw(systemPromptBase, userMsg, ct, requestTimeout: TimeSpan.FromMinutes(10));
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"LLM returned empty response: {err}", ct: ct);
+                continue;
+            }
+
+            agentResponse ??= ParseAgentResponse(raw);
+
+            // Fallback: LLM may output plan format {thinking, summary, plan: [...]} instead of steps
+            if (agentResponse == null)
+            {
+                agentResponse = TryParseAsPlanFormat(raw);
+                if (agentResponse != null)
+                    await EmitLog(emitSse, "debug", "Parsed LLM response as plan format", ct: ct);
+            }
+
+            if (agentResponse == null)
+            {
+                var snippet = raw.Length > 120 ? raw[..120] : raw;
+                await EmitLog(emitSse, "warn", $"Could not parse LLM response", new { snippet }, ct: ct);
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(agentResponse.Thinking))
+            {
+                finalThinking = agentResponse.Thinking;
+                if (emitSse)
+                    await SendSse(Response, "thinking", new { text = agentResponse.Thinking }, ct);
+            }
+            if (!string.IsNullOrWhiteSpace(agentResponse.Summary))
+                finalSummary = agentResponse.Summary;
+
+            // Track the LLM's phase and synthesis for continuity
+            if (!string.IsNullOrWhiteSpace(agentResponse.Phase))
+                currentPhase = agentResponse.Phase;
+            if (!string.IsNullOrWhiteSpace(agentResponse.Synthesis))
+            {
+                previousSynthesis = currentSynthesis;
+                currentSynthesis = agentResponse.Synthesis;
+            }
+
+            // Repetition detection — count consecutive same-phase iterations
+            if (lastPhase == currentPhase)
+                consecutiveSamePhaseCount++;
+            else
+                consecutiveSamePhaseCount = 0;
+            lastPhase = currentPhase;
+
+            // Synthesis stuck detection — force advance if synthesis hasn't changed
+            var synthesisUnchanged = !string.IsNullOrWhiteSpace(previousSynthesis) &&
+                !string.IsNullOrWhiteSpace(currentSynthesis) &&
+                string.Equals(previousSynthesis.Trim(), currentSynthesis.Trim(), StringComparison.Ordinal);
+            if (synthesisUnchanged)
+                consecutiveSameSynthesisCount++;
+            else
+                consecutiveSameSynthesisCount = 0;
+
+            // Force phase advancement if stuck in same phase for 3+ iterations
+            if (consecutiveSamePhaseCount >= 3 && currentPhase is "explore" or "investigate")
+            {
+                var nextPhase = currentPhase == "explore" ? "investigate" : "hypothesize";
+                await EmitLog(emitSse, "warn",
+                    $"Stuck in '{currentPhase}' for {consecutiveSamePhaseCount} iterations — forcing phase to '{nextPhase}'", ct: ct);
+                currentPhase = nextPhase;
+                consecutiveSamePhaseCount = 0;
+            }
+
+            // Force advancement if synthesis is unchanged for 2+ iterations in explore/investigate
+            if (consecutiveSameSynthesisCount >= 2 && currentPhase is "explore" or "investigate")
+            {
+                var nextPhase = currentPhase == "explore" ? "investigate" : "hypothesize";
+                await EmitLog(emitSse, "warn",
+                    $"Synthesis unchanged for {consecutiveSameSynthesisCount} iterations — forcing phase to '{nextPhase}'", ct: ct);
+                currentPhase = nextPhase;
+                consecutiveSamePhaseCount = 0;
+                consecutiveSameSynthesisCount = 0;
+            }
+
+            await EmitLog(emitSse, "debug", $"[phase={currentPhase}] synthesis={currentSynthesis}", ct: ct);
+
+            // Emit plan event so frontend shows the proposed steps
+            if (emitSse && agentResponse.Steps.Count > 0)
+            {
+                await SendSse(Response, "plan", new
+                {
+                    thinking = agentResponse.Thinking ?? "",
+                    summary = agentResponse.Summary ?? "",
+                    items = agentResponse.Steps.Select(s => new
+                    {
+                        file = s.Type == "edit" ? s.Path : "_" + s.Type,
+                        change = s.OldString ?? s.Query ?? s.Pattern ?? s.Command ?? s.Path ?? "",
+                        priority = 1
+                    }).ToList()
+                }, ct);
+            }
+
+            // Done signal or phase=done with no steps
+            if (agentResponse.Complete || currentPhase == "done")
+            {
+                if (currentPhase == "done" || agentResponse.Complete)
+                    await EmitLog(emitSse, "success", finalSummary ?? "Task complete", ct: ct);
+                break;
+            }
+
+            // If LLM is hypothesizing with no steps and synthesis, just continue to let it move to edit
+            if (currentPhase == "hypothesize" && agentResponse.Steps.Count == 0 && !string.IsNullOrWhiteSpace(currentSynthesis))
+            {
+                await EmitLog(emitSse, "info", $"Hypothesis formed — moving to edit phase", ct: ct);
+                continue;
+            }
+
+            if (agentResponse.Steps.Count == 0)
+            {
+                await EmitLog(emitSse, "warn", "No steps returned — continuing", ct: ct);
+                continue;
+            }
+
+            // Separate research from action steps
+            var researchSteps = new List<AgentStep>();
+            var actionSteps = new List<AgentStep>();
+            foreach (var step in agentResponse.Steps)
+            {
+                var t = step.Type?.ToLowerInvariant() ?? "";
+                if (t is "read" or "grep" or "glob" or "list")
+                    researchSteps.Add(step);
+                else
+                    actionSteps.Add(step);
+            }
+
+            // Execute research steps and append to context
+            if (researchSteps.Count > 0)
+            {
+                // Check for repeated research (same file as a previously read file)
+                var repeatsExistingFile = researchSteps
+                    .Any(s => s.Type == "read" && s.Path != null && filesReadSet.Contains(s.Path));
+                if (repeatsExistingFile)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Research step requests a file already in Files Already Read set — coaching LLM to read different files", ct: ct);
+                }
+
+                // Check for repeated research signature (same type+path+query as last 2 iterations)
+                var signature = string.Join("|", researchSteps.Select(s => $"{s.Type}:{s.Path}:{s.Query}:{s.LineFrom}:{s.LineTo}"));
+                if (lastResearchSignatures.Count >= 2 && lastResearchSignatures.TakeLast(2).All(s => s == signature))
+                {
+                    await EmitLog(emitSse, "warn", $"Repeated research pattern ({researchSteps[0].Type}: {researchSteps[0].Path ?? researchSteps[0].Query}) — forcing phase to hypothesize", ct: ct);
+                    currentPhase = currentPhase switch
+                    {
+                        "explore" => "investigate",
+                        "investigate" => "hypothesize",
+                        _ => "hypothesize"
+                    };
+                    consecutiveSamePhaseCount = 0;
+                }
+                lastResearchSignatures.Add(signature);
+
+                var results = await ExecuteSteps(researchSteps, projectRoot, allSteps.Count, emitSse, ct);
+
+                // Track files read and add them to the read set
+                foreach (var step in researchSteps)
+                {
+                    if (step.Type == "read" && !string.IsNullOrWhiteSpace(step.Path))
+                        filesReadSet.Add(step.Path);
+                }
+
+                foreach (var r in results)
+                {
+                    allSteps.Add(r);
+                    AppendResearchToContext(contextSb, r);
+                }
+            }
+
+            // Execute action steps (edits, commands)
+            if (actionSteps.Count > 0)
+            {
+                var results = await ExecuteSteps(actionSteps, projectRoot, allSteps.Count, emitSse, ct);
+                foreach (var r in results)
+                {
+                    allSteps.Add(r);
+                    if (r is Dictionary<string, object?> actionResult)
+                    {
+                        var path = actionResult.TryGetValue("path", out var ap) ? ap?.ToString() : "";
+                        var status = actionResult.TryGetValue("status", out var as_) ? as_?.ToString() : "?";
+                        var stepType = actionResult.TryGetValue("type", out var at) ? at?.ToString() : "action";
+                        contextSb.AppendLine($"## {stepType}: {path} — {status}");
+                        if (actionResult.TryGetValue("error", out var errVal) && errVal != null)
+                            contextSb.AppendLine($"  Error: {errVal}");
+                        contextSb.AppendLine();
+                    }
+                }
+            }
+        }
+
+        if (iteration >= maxIterations)
+            await EmitLog(emitSse, "warn", $"Reached max iterations ({maxIterations})", ct: ct);
+
+        return (allSteps, finalSummary ?? "", finalThinking ?? "");
+    }
+
+    private static void AppendResearchToContext(StringBuilder sb, object stepObj)
+    {
+        if (stepObj is not Dictionary<string, object?> r) return;
+        var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+        if (type is not ("read" or "grep" or "glob" or "list")) return;
+
+        var path = r.TryGetValue("path", out var p) ? p?.ToString() : "";
+        var query = r.TryGetValue("query", out var q) ? q?.ToString() : "";
+        var output = r.TryGetValue("output", out var o) ? o?.ToString() : "";
+        var error = r.TryGetValue("error", out var e) ? e?.ToString() : "";
+        var status = r.TryGetValue("status", out var s) ? s?.ToString() : "";
+
+        var label = path ?? query ?? type;
+        if (string.IsNullOrWhiteSpace(label)) label = type;
+
+        var lineFrom = r.TryGetValue("lineFrom", out var lf) ? lf?.ToString() : null;
+        var lineTo = r.TryGetValue("lineTo", out var lt) ? lt?.ToString() : null;
+        var totalLines = r.TryGetValue("totalLines", out var tl) ? tl?.ToString() : null;
+
+        var rangeInfo = "";
+        if (lineFrom != null && lineTo != null && totalLines != null)
+            rangeInfo = $" (lines {lineFrom}–{lineTo} of {totalLines})";
+
+        sb.AppendLine($"[{type}] {label}{rangeInfo} — {status}");
+
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            sb.AppendLine($"  Error: {error}");
+            sb.AppendLine();
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(output)) return;
+
+        if (type == "grep" || type == "glob" || type == "list")
+        {
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            sb.AppendLine($"  ({lines.Length} result(s))");
+            sb.AppendLine(output.Length > 2000
+                ? output[..2000] + "\n  …(truncated)"
+                : output);
+        }
+        else
+        {
+            sb.AppendLine(output.Length > 8000
+                ? output[..8000] + "\n…(content truncated)"
+                : output);
+        }
+        sb.AppendLine();
+    }
+
     private async Task<(List<object> steps, string summary, string thinking)> CodeEditPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         string? prebuiltDiscoveryContext = null,
         List<object>? prebuiltDiscoverySteps = null)
     {
-        var allSteps = new List<object>();
+        await EmitLog(emitSse, "info", "CodeEdit: iterative research-and-edit pipeline", ct: ct);
 
-        // ── Phase 1: DISCOVER (skip if prebuilt context provided) ────────
-        string discoveryContext;
-        if (prebuiltDiscoveryContext != null)
-        {
-            discoveryContext = prebuiltDiscoveryContext;
-            if (prebuiltDiscoverySteps != null)
-                allSteps.AddRange(prebuiltDiscoverySteps);
-            await EmitLog(emitSse, "info", "CodeEdit: reuse prior discovery context", ct: ct);
-        }
-        else
-        {
-            await EmitLog(emitSse, "info", "CodeEdit: Phase 1 — DISCOVER", ct: ct);
-            var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles);
-            discoveryContext = dc;
-            allSteps.AddRange(ds);
-        }
-
-        // ── Phase 2: PLAN ─────────────────────────────────────────────────
-        await EmitLog(emitSse, "info", "CodeEdit: Phase 2 — PLAN", ct: ct);
-        if (emitSse)
-            await SendSse(Response, "phase", new { phase = "plan", message = "Planning..." }, ct);
-
-        var plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct);
-        if (plan == null || plan.Plan.Count == 0)
-        {
-            await EmitLog(emitSse, "warn", "Plan phase produced no items.", new { plan }, ct: ct);
-            throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
-        }
-
-        // Emit thinking immediately
-        if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
-            await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
-
-        await EmitLog(emitSse, "info",
-            $"Plan: {plan.Plan.Count} step(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
-            new { plan },
-            ct: ct);
-
-        if (emitSse)
-            await SendSse(Response, "plan",
-                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
-
-        // Check if plan has mixed types → escalate to Compound Pipeline
-        var hasMarkers = plan.Plan.Any(p => IsSpecialMarker(p.File));
-        var hasFileEdits = plan.Plan.Any(p => !IsSpecialMarker(p.File) && !string.IsNullOrWhiteSpace(p.File));
-        if (hasMarkers && hasFileEdits)
-        {
-            await EmitLog(emitSse, "info",
-                "Plan contains mixed types — escalating to Compound Pipeline", ct: ct);
-            return await CompoundPipeline(prompt, projectRoot, emitSse, ct, prebuiltPlan: plan, discoveryContext: discoveryContext);
-        }
-
-        // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
-
-        return (allSteps, plan.Summary, plan.Thinking ?? "");
+        return await IterativeResearchAndEditLoop(
+            prompt, projectRoot, emitSse, ct,
+            attachedFiles: attachedFiles,
+            initialContext: prebuiltDiscoveryContext,
+            initialSteps: prebuiltDiscoverySteps);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1597,6 +1958,145 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     }
 
     // ═════════════════════════════════════════════════════════════════════════
+    //  STYLING PIPELINE  —  reviews edited files for style/structural consistency
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<(List<object> styleSteps, string? feedback)> StylingPipeline(
+        List<object> existingSteps, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var styleSteps = new List<object>();
+        var feedbackSb = new StringBuilder();
+
+        var editedFiles = existingSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(s =>
+                s.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                s.TryGetValue("status", out var st) && st?.ToString() == "done" &&
+                s.TryGetValue("path", out var p) && p != null)
+            .Select(s => s.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Also collect file paths from Set-Content / Out-File / Add-Content commands
+        var commandCreatedFiles = existingSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "command")
+            .SelectMany(s =>
+            {
+                var cmd = s.GetValueOrDefault("command")?.ToString() ?? "";
+                var matches = Regex.Matches(cmd,
+                    @"(?:Set-Content|Out-File|Add-Content)\s+(?:-Path\s+)?['""]?([^'""\s]+)['""]?",
+                    RegexOptions.IgnoreCase);
+                return matches.Select(m => m.Groups[1].Value.Trim());
+            })
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p!.Replace("\"", "").Replace("'", "").Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Merge edits and command-created files
+        var allFiles = editedFiles.Concat(commandCreatedFiles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (allFiles.Count == 0)
+            return (styleSteps, null);
+
+        await EmitLog(emitSse, "info", $"Styling: reviewing {allFiles.Count} file(s) ({editedFiles.Count} edited, {commandCreatedFiles.Count} from commands)", ct: ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "styling", message = "Checking style and content consistency…" }, ct);
+
+        const string systemPrompt = @"You are a file audit assistant. Review the file below for issues.
+
+CHECK THESE:
+1. ESCAPE CHARACTERS — if the file contains literal \n, \r\n, \t, or \r as text (not actual formatting), replace them with real newlines/tabs.
+2. TRAILING WHITESPACE — no trailing spaces on lines.
+3. FILE-END — single trailing newline, no garbage at end.
+4. INDENTATION — infer the file's own indentation convention from its content (common indent unit, e.g. 2-space, 4-space, tabs). Find lines whose indentation deviates from the surrounding pattern — especially lines indented less than their apparent parent context or siblings at the same logical depth. Fix only clear inconsistencies with the file's prevailing style.
+
+If the file is already clean, return {""edits"": []}
+
+Respond with valid JSON:
+{
+  ""thinking"": ""Brief analysis of issues found"",
+  ""edits"": [ { ""oldString"": ""..."", ""newString"": ""..."" } ]
+}";
+
+        foreach (var fileRef in allFiles)
+        {
+            // Resolve path: try project-relative first, then absolute
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, fileRef!.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath))
+                fullPath = fileRef;  // may already be absolute
+            if (!System.IO.File.Exists(fullPath)) continue;
+
+            await EmitLog(emitSse, "info", $"Styling: auditing {fileRef}", ct: ct);
+
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+            if (string.IsNullOrWhiteSpace(content)) continue;
+
+            var displayPath = fileRef.Length > 60 ? "..." + fileRef[^57..] : fileRef;
+            var userMsg = $"File: {displayPath}\n\n```\n{content}\n```\n\nReview this file for issues. Fix any literal escape sequences (\\n, \\r\\n, \\t) and formatting problems.";
+
+            var (raw, _, err) = await CallLlmRaw(systemPrompt, userMsg, ct, requestTimeout: TimeSpan.FromMinutes(5));
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"Styling: LLM returned empty for {fileRef}: {err}", ct: ct);
+                continue;
+            }
+
+            // Use fileRef as path hint for edit steps — resolve to relative if under projectRoot
+            var editPath = fileRef;
+            if (fileRef.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                editPath = Path.GetRelativePath(projectRoot, fileRef).Replace('\\', '/');
+
+            var editSteps = ParseEditsFromLlmRaw(raw, editPath, out var noEdits, out var needMoreInfo);
+
+            if (noEdits || editSteps.Count == 0)
+            {
+                await EmitLog(emitSse, "info", $"Styling: {fileRef} — clean", ct: ct);
+                continue;
+            }
+
+            // Filter no-op edits
+            editSteps = editSteps
+                .Where(e => !string.Equals(
+                    NormalizeLineEndings(e.OldString ?? ""),
+                    NormalizeLineEndings(e.NewString ?? ""),
+                    StringComparison.Ordinal))
+                .ToList();
+
+            if (editSteps.Count == 0) continue;
+
+            await EmitLog(emitSse, "info", $"Styling: applying {editSteps.Count} fix(es) to {fileRef}", ct: ct);
+
+            // Check if any edits look structural (oldString/newString differ significantly)
+            var hasStructuralEdits = editSteps.Any(e =>
+            {
+                var oldLines = (e.OldString ?? "").Split('\n').Length;
+                var newLines = (e.NewString ?? "").Split('\n').Length;
+                return Math.Abs(oldLines - newLines) > 3;
+            });
+
+            var results = await ExecuteSteps(editSteps, projectRoot, styleSteps.Count, emitSse, ct);
+            styleSteps.AddRange(results);
+
+            foreach (var r in results)
+            {
+                if (r is Dictionary<string, object?> ar &&
+                    ar.TryGetValue("status", out var s) && s?.ToString() == "error")
+                {
+                    var error = ar.TryGetValue("error", out var e) ? e?.ToString() : "";
+                    var path = ar.TryGetValue("path", out var ap) ? ap?.ToString() : fileRef;
+                    feedbackSb.AppendLine($"Styling fix failed for {path}: {error}");
+                }
+            }
+        }
+
+        return (styleSteps, feedbackSb.Length > 0 ? feedbackSb.ToString().TrimEnd() : null);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
     //  VERIFICATION PIPELINE  —  shared by all pipelines
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -1646,9 +2146,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var editsApplied = HasSuccessfulEdits(allSteps);
         if (!editsApplied && !hasSuccessfulRenames)
         {
-            if (!TaskExpectsFileChanges(prompt) || hasSuccessfulCommands)
-                return (true, "Task completed (no file changes needed)");
-            return (false, "No edits were applied");
+            // Successful terminal commands count as completion even if no file edits
+            if (hasSuccessfulCommands)
+                return (true, "Task completed via command execution");
+
+            if (TaskExpectsFileChanges(prompt))
+                return (false, "No edits were applied for a task that appears to require code changes");
+
+            return (true, "Task completed (no file changes needed)");
         }
 
         // Content review for code edits
@@ -1917,6 +2422,57 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 continue;
             }
 
+            else if (planFile.Equals("_terminal", StringComparison.OrdinalIgnoreCase))
+            {
+                var rawCommand = changeDesc.Trim().Trim('`', '"', '\'');
+                await EmitLog(emitSse, "info", $"Terminal: {rawCommand}", ct: ct);
+                var terminalStep = new AgentStep
+                {
+                    Index = 0,
+                    Type = "command",
+                    Command = rawCommand,
+                    Description = $"run: {rawCommand}"
+                };
+                var terminalResults = await ExecuteSteps(new List<AgentStep> { terminalStep }, projectRoot, stepIndex, emitSse, ct);
+                stepIndex += terminalResults.Count;
+                allResults.AddRange(terminalResults);
+                continue;
+            }
+
+            else if (planFile.Equals("_web", StringComparison.OrdinalIgnoreCase))
+            {
+                var webTarget = changeDesc.Trim().Trim('`', '"', '\'');
+                await EmitLog(emitSse, "info", $"Web: {webTarget}", ct: ct);
+                var webStep = new AgentStep
+                {
+                    Index = 0,
+                    Type = "web",
+                    Url = Uri.TryCreate(webTarget, UriKind.Absolute, out _) ? webTarget : null,
+                    Query = Uri.TryCreate(webTarget, UriKind.Absolute, out _) ? null : webTarget,
+                    Description = $"web lookup: {webTarget}"
+                };
+                var webResults = await ExecuteSteps(new List<AgentStep> { webStep }, projectRoot, stepIndex, emitSse, ct);
+                stepIndex += webResults.Count;
+                allResults.AddRange(webResults);
+                continue;
+            }
+
+            else if (planFile.Equals("_clarify", StringComparison.OrdinalIgnoreCase))
+            {
+                var question = changeDesc.Trim().Trim('`', '"', '\'');
+                await EmitLog(emitSse, "warn", $"Clarification needed: {question}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "clarification", new { question }, ct);
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex++,
+                    ["type"] = "clarification",
+                    ["status"] = "done",
+                    ["output"] = question
+                });
+                continue;
+            }
+
             else if (planFile.Equals("_ping", StringComparison.OrdinalIgnoreCase))
             {
                 var pingCmd = changeDesc.Trim().Trim('`', '"', '\'');
@@ -2078,11 +2634,15 @@ Be concise — 2-4 sentences max.";
         var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
         // --- up to 4 parse attempts (generous for small models) ---
+        // Info requests (LLM says "I need to look at X") expand discovery and retry without
+        // consuming an attempt, capped at 3 per file to prevent infinite loops.
         List<AgentStep> editSteps = new();
         var timedOut = false;
         var noEditsNeeded = false;
+        var infoRequestCount = 0;
         var editHistory = new List<(string path, string preContent)>();
-        for (var attempt = 0; attempt < 4 && editSteps.Count == 0; attempt++)
+        var attempt = 0;
+        while (attempt < 4 && editSteps.Count == 0)
         {
             await EmitLog(emitSse, "info",
                 $"LLM edit call: {relPath} (attempt {attempt + 1})",
@@ -2103,13 +2663,38 @@ Be concise — 2-4 sentences max.";
                 $"LLM raw ({raw?.Length ?? 0} chars)",
                 new { raw }, ct: ct);
 
-            editSteps = ParseEditsFromLlmRaw(raw, relPath, out var noEditsOuter);
+            var needMoreInfoRequest = "";
+            editSteps = ParseEditsFromLlmRaw(raw, relPath, out var noEditsOuter, out needMoreInfoRequest);
             if (noEditsOuter)
             {
                 noEditsNeeded = true;
                 await EmitLog(emitSse, "info", $"No edits needed for {relPath} — skipping", ct: ct);
                 break;
             }
+
+            if (!string.IsNullOrWhiteSpace(needMoreInfoRequest))
+            {
+                infoRequestCount++;
+                if (infoRequestCount > 3)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Too many info requests for {relPath} — giving up", ct: ct);
+                    break;
+                }
+                await EmitLog(emitSse, "info",
+                    $"Info request #{infoRequestCount}: {needMoreInfoRequest}", ct: ct);
+                var extraContext = await ExecuteInfoRequest(needMoreInfoRequest, projectRoot, relPath, emitSse, ct);
+                if (!string.IsNullOrWhiteSpace(extraContext))
+                {
+                    discoveryContext += "\n" + extraContext;
+                    await EmitLog(emitSse, "info",
+                        $"Discovery expanded — retrying {relPath} with new context", ct: ct);
+                }
+                // Don't consume an attempt — the LLM asked for more info, it didn't fail
+                continue;
+            }
+
+            attempt++;
 
             // Determine rejection reason for better logging
             string? rejectReason = null;
@@ -2194,7 +2779,7 @@ Be concise — 2-4 sentences max.";
                 ct,
                 nearMatchSnippets: nearMatches!);
 
-            var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath, out var _)
+            var retrySteps = ParseEditsFromLlmRaw(retryRaw, relPath, out var _, out var _)
                 .Where(e => !string.Equals(
                     NormalizeLineEndings(e.OldString ?? ""),
                     NormalizeLineEndings(e.NewString ?? ""),
@@ -2256,7 +2841,7 @@ Be concise — 2-4 sentences max.";
                         var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
                             fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
 
-                        var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath, out var _)
+                        var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath, out var _, out var _)
                             .Where(e => !string.Equals(
                                 NormalizeLineEndings(e.OldString ?? ""),
                                 NormalizeLineEndings(e.NewString ?? ""),
@@ -2295,6 +2880,21 @@ Be concise — 2-4 sentences max.";
             return BadRequest("Prompt is required");
 
         var projectRoot = GetProjectRoot(req.Project);
+
+        var clarification = await CheckIfClarificationNeeded(req.Prompt, projectRoot, HttpContext.RequestAborted);
+        if (clarification.NeedsClarification)
+        {
+            return Ok(new
+            {
+                summary = clarification.Question,
+                thinking = "The request needs one clarification before changes are safe.",
+                complete = false,
+                needsClarification = true,
+                question = clarification.Question,
+                steps = Array.Empty<object>(),
+                filesEdited = Array.Empty<object>()
+            });
+        }
 
         var (allSteps, summary, complete, thinking) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
 
@@ -2360,6 +2960,23 @@ Be concise — 2-4 sentences max.";
             await EmitLog(true, "info", "Agent run started",
                 new { projectRoot, task = req.Prompt });
 
+            var clarification = await CheckIfClarificationNeeded(req.Prompt, projectRoot, Response.HttpContext.RequestAborted);
+            if (clarification.NeedsClarification)
+            {
+                await SendSse(Response, "clarification", new { question = clarification.Question }, Response.HttpContext.RequestAborted);
+                await SendSse(Response, "done", new
+                {
+                    summary = clarification.Question,
+                    complete = false,
+                    incomplete = true,
+                    needsClarification = true,
+                    warning = clarification.Question,
+                    steps = Array.Empty<object>(),
+                    filesEdited = Array.Empty<object>()
+                }, Response.HttpContext.RequestAborted);
+                return;
+            }
+
             List<object> allSteps;
             string summary, thinking;
             bool complete;
@@ -2396,6 +3013,35 @@ Be concise — 2-4 sentences max.";
     // ═════════════════════════════════════════════════════════════════════════
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
+
+    private async Task<ClarificationCheck> CheckIfClarificationNeeded(
+        string prompt, string projectRoot, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+            return new ClarificationCheck { NeedsClarification = true, Question = "What would you like Maestro to do?" };
+
+        var lower = prompt.ToLowerInvariant();
+        if (Regex.IsMatch(lower, @"\b(read|check|search|summari[sz]e|open|reply|send|find)\b.{0,40}\b(email|emails|inbox|gmail|outlook|mailbox)\b") ||
+            Regex.IsMatch(lower, @"\b(email|emails|inbox|gmail|outlook|mailbox)\b.{0,40}\b(read|check|search|summari[sz]e|open|reply|send|find)\b"))
+        {
+            return new ClarificationCheck
+            {
+                NeedsClarification = true,
+                Question = "Which mailbox or exported email source should I use, and do you want me to read it from a local file, browser session, or a configured CLI account?"
+            };
+        }
+
+        if (Regex.IsMatch(lower, @"\b(delete|remove|wipe|erase)\s+(everything|all files|the project|this project|workspace|repo|repository)\b"))
+        {
+            return new ClarificationCheck
+            {
+                NeedsClarification = true,
+                Question = "This sounds destructive. Which exact files or directories should I delete?"
+            };
+        }
+
+        return new ClarificationCheck();
+    }
 
     private async Task<bool> CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
     {
@@ -2488,6 +3134,66 @@ Be concise — 2-4 sentences max.";
     {
         var cfg = await _configFile.LoadConfigAsync();
         return (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
+    }
+
+    /// <summary>
+    /// Executes a "need more info" request from the LLM during file editing.
+    /// Supports free-text requests, "grep: ..." and "read: ..." prefixes for precision.
+    /// Returns formatted output to append to the discovery context.
+    /// </summary>
+    private async Task<string> ExecuteInfoRequest(string request, string projectRoot,
+        string currentFile, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request)) return "";
+
+        request = request.Trim();
+        var result = new Dictionary<string, object?>();
+        var step = new AgentStep { Index = 0 };
+
+        // Parse structured prefixes
+        if (request.StartsWith("grep:", StringComparison.OrdinalIgnoreCase))
+        {
+            var query = request.Substring(5).Trim();
+            step.Type = "grep";
+            step.Query = query;
+            step.Description = $"Info request: grep for '{query}'";
+            await EmitLog(emitSse, "step", $"🔍 {step.Description}", ct: ct);
+            await ExecuteGrepStep(step, projectRoot, result);
+        }
+        else if (request.StartsWith("read:", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = request.Substring(5).Trim();
+            step.Type = "read";
+            step.Path = path;
+            step.Description = $"Info request: read '{path}'";
+            await EmitLog(emitSse, "step", $"📖 {step.Description}", ct: ct);
+            await ExecuteReadStep(step, projectRoot, result);
+        }
+        else
+        {
+            // Free-text: treat as grep query
+            step.Type = "grep";
+            step.Query = request;
+            step.Description = $"Info request: search for '{request}'";
+            await EmitLog(emitSse, "step", $"🔍 {step.Description}", ct: ct);
+            await ExecuteGrepStep(step, projectRoot, result);
+        }
+
+        // Format output for discovery context
+        var output = result.TryGetValue("output", out var o) ? o?.ToString() ?? "" : "";
+        if (string.IsNullOrWhiteSpace(output))
+            output = result.TryGetValue("error", out var e) ? e?.ToString() ?? "" : "";
+
+        if (!string.IsNullOrWhiteSpace(output))
+        {
+            // Emit the result so the user can see what was found
+            await EmitLog(emitSse, "debug",
+                $"Info request result ({output.Length} chars)", new { output }, ct: ct);
+            var label = $"## Additional context (info request: {request})";
+            return $"\n{label}\n{output}";
+        }
+
+        return "";
     }
 
     /// <summary>
@@ -2590,8 +3296,21 @@ RULES:
   - Return ONLY valid JSON, no markdown fences, no explanation.
   - If no changes are needed, return: {""edits"": []}
 
+If the file shown looks correct and you need to investigate another file or search the codebase before you can determine the fix, return a ""needMoreInfo"" object instead of an edits array. The system will run your request and retry with the new context.
+Use one of these formats:
+  {""needMoreInfo"": ""grep: <search query>""}
+  {""needMoreInfo"": ""read: <file path>""}
+  {""needMoreInfo"": ""<free text search query>""}
+Use this when the bug is clearly NOT in this file. Be precise about what to search for.
+
 Example:
-{""edits"":[{""oldString"":""<button class=\""foo\"">"",""newString"":""<button class=\""foo bar\"">""},{""oldString"":""<button class=\""foo2\"">"",""newString"":""<button class=\""foo2 bar2\"">""}]}";
+{""needMoreInfo"": ""grep: initSession in app.js""}
+
+Example:
+{""needMoreInfo"": {""reason"": ""UI bindings look correct"", ""target"": ""read: wwwroot/app.js""}}
+
+Example:
+{""edits"":[{""oldString"":""<button class=\""foo\"">"",""newString"":""<button class=\""foo bar\"">""}]}";
 
             var messages = new object[]
             {
@@ -2932,9 +3651,13 @@ Example:
 
     private async Task ExecuteEditStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
     {
-        var relPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
-        var targetPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
-        if (!IsPathUnderRoot(targetPath, projectRoot))
+        var rawPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
+        // Absolute path (contains drive letter or starts with /) or relative to project
+        var isAbsolute = rawPath.Contains(":\\") || rawPath.StartsWith('/') || rawPath.StartsWith('\\');
+        var targetPath = isAbsolute
+            ? Path.GetFullPath(rawPath)
+            : Path.GetFullPath(Path.Combine(projectRoot, rawPath));
+        if (!isAbsolute && !IsPathUnderRoot(targetPath, projectRoot))
         { result["status"] = "error"; result["error"] = "Path outside project root"; return; }
 
         result["path"] = step.Path;
@@ -3268,9 +3991,9 @@ Example:
         var command = step.Command ?? "";
         if (string.IsNullOrWhiteSpace(command))
         { result["status"] = "error"; result["error"] = "No command provided"; return; }
+        var beforeLen = _terminal.ReadAll().Length;
         await _terminal.SendCommandAsync(command, projectRoot);
         // Adaptive wait: poll output length every 500ms, stop when no growth for 2s, cap at 15s
-        var beforeLen = _terminal.ReadAll().Length;
         var prevLen = beforeLen;
         var stableMs = 0;
         for (var i = 0; i < 30; i++)
@@ -3335,10 +4058,34 @@ Example:
         { result["status"] = "error"; result["error"] = "Path outside project root"; return; }
         if (!System.IO.File.Exists(targetPath))
         { result["status"] = "error"; result["error"] = "File not found"; return; }
-        var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
-        result["status"] = "done";
+
         result["path"] = step.Path;
-        result["output"] = Truncate(content, MaxReadOutputChars);
+
+        // Support ranged reads via LineFrom/LineTo (1-indexed, inclusive)
+        if (step.LineFrom.HasValue || step.LineTo.HasValue)
+        {
+            var allLines = await System.IO.File.ReadAllLinesAsync(targetPath, Encoding.UTF8);
+            var lineFrom = (step.LineFrom ?? 1) - 1; // convert to 0-indexed
+            var lineTo = (step.LineTo ?? allLines.Length) - 1;
+            if (lineFrom < 0) lineFrom = 0;
+            if (lineTo >= allLines.Length) lineTo = allLines.Length - 1;
+            if (lineFrom > lineTo) lineFrom = lineTo;
+
+            var count = lineTo - lineFrom + 1;
+            var selected = allLines[lineFrom..(lineTo + 1)];
+            var content = string.Join("\n", selected);
+            result["output"] = Truncate(content, MaxReadOutputChars);
+            result["lineFrom"] = step.LineFrom ?? 1;
+            result["lineTo"] = step.LineTo ?? allLines.Length;
+            result["totalLines"] = allLines.Length;
+        }
+        else
+        {
+            var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
+            result["output"] = Truncate(content, MaxReadOutputChars);
+        }
+
+        result["status"] = "done";
     }
 
     private Task ExecuteListStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
@@ -3366,17 +4113,27 @@ Example:
         try
         {
             IEnumerable<string> files;
-            if (pattern.Contains('*'))
+            if (pattern.Contains('*') || pattern.Contains('?'))
             {
+                // Split into directory part + file pattern
                 var parts = pattern.Split('/');
                 var filePattern = parts[^1];
-                var dirPart = parts.Length > 1 ? string.Join(Path.DirectorySeparatorChar, parts[..^1]) : "";
-                var searchRoot = string.IsNullOrEmpty(dirPart)
-                    ? projectRoot
-                    : Path.GetFullPath(Path.Combine(projectRoot, dirPart));
-                if (!IsPathUnderRoot(searchRoot, projectRoot))
-                    throw new InvalidOperationException("Pattern outside project root");
-                files = Directory.EnumerateFiles(searchRoot, filePattern, SearchOption.AllDirectories);
+                var dirParts = parts.Length > 1 ? parts[..^1] : Array.Empty<string>();
+
+                // If dirParts are just "**" markers, search from projectRoot
+                if (dirParts.Length == 0 || dirParts.All(p => p == "**"))
+                {
+                    var actualPattern = filePattern == "**" ? "*" : filePattern;
+                    files = Directory.EnumerateFiles(projectRoot, actualPattern, SearchOption.AllDirectories);
+                }
+                else
+                {
+                    var dirPart = string.Join(Path.DirectorySeparatorChar, dirParts);
+                    var searchRoot = Path.GetFullPath(Path.Combine(projectRoot, dirPart));
+                    if (!IsPathUnderRoot(searchRoot, projectRoot))
+                        throw new InvalidOperationException("Pattern outside project root");
+                    files = Directory.EnumerateFiles(searchRoot, filePattern, SearchOption.AllDirectories);
+                }
             }
             else
             {
@@ -3408,9 +4165,9 @@ Example:
             { result["status"] = "error"; result["error"] = "Path outside project root"; return Task.CompletedTask; }
         }
 
-        var matches = new List<string>();
         var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "node_modules", ".git", "bin", "obj", "dist", ".angular" };
+        var grepResult = new GrepResult { Query = query, Path = step.Path };
 
         try
         {
@@ -3426,25 +4183,51 @@ Example:
                     for (var i = 0; i < lines.Length; i++)
                     {
                         if (!lines[i].Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
-                        matches.Add($"{Path.GetRelativePath(projectRoot, file).Replace('\\', '/')}:{i + 1}: {lines[i].Trim()}");
-                        if (matches.Count >= 50) break;
+                        grepResult.Matches.Add(new GrepMatch
+                        {
+                            FilePath = Path.GetRelativePath(projectRoot, file).Replace('\\', '/'),
+                            LineNumber = i + 1,
+                            Content = lines[i].Trim()
+                        });
+                        if (grepResult.Matches.Count >= 50) break;
                     }
                 }
                 catch { }
-                if (matches.Count >= 50) break;
+                if (grepResult.Matches.Count >= 50) break;
             }
+            grepResult.Status = "done";
             result["status"] = "done";
-            result["output"] = matches.Count == 0 ? "(no matches)" : string.Join("\n", matches);
+            result["output"] = grepResult.Matches.Count == 0 ? "(no matches)" : string.Join("\n", grepResult.Matches.Select(m => $"{m.FilePath}:{m.LineNumber}: {m.Content}"));
+            result["grepResult"] = grepResult;
         }
-        catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
+        catch (Exception ex)
+        {
+            grepResult.Status = "error";
+            grepResult.Error = ex.Message;
+            result["status"] = "error";
+            result["error"] = ex.Message;
+            result["grepResult"] = grepResult;
+        }
         return Task.CompletedTask;
     }
 
     private async Task ExecuteWebStep(AgentStep step, Dictionary<string, object?> result)
     {
-        var url = step.Url ?? step.Path ?? "";
-        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        { result["status"] = "error"; result["error"] = "Valid absolute url required"; return; }
+        var target = step.Url ?? step.Path ?? "";
+        var query = step.Query ?? "";
+        Uri uri;
+        if (!string.IsNullOrWhiteSpace(target) && Uri.TryCreate(target, UriKind.Absolute, out var parsedUri))
+        {
+            uri = parsedUri;
+        }
+        else
+        {
+            var search = !string.IsNullOrWhiteSpace(query) ? query : target;
+            if (string.IsNullOrWhiteSpace(search))
+            { result["status"] = "error"; result["error"] = "web requires a URL or search query"; return; }
+            uri = new Uri("https://duckduckgo.com/html/?q=" + Uri.EscapeDataString(search));
+            result["query"] = search;
+        }
 
         try
         {
@@ -3455,7 +4238,7 @@ Example:
             var body = await resp.Content.ReadAsStringAsync();
             var contentType = resp.Content.Headers.ContentType?.MediaType ?? "text/plain";
             result["status"] = "done";
-            result["url"] = url;
+            result["url"] = uri.ToString();
             result["output"] = Truncate($"HTTP {(int)resp.StatusCode} ({contentType})\n{body}", MaxWebResponseChars);
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
@@ -3674,19 +4457,99 @@ Rules:
                 {
                     var thinking = root.TryGetProperty("thinking", out var th) ? th.GetString() ?? "" : "";
                     var summary = root.TryGetProperty("summary", out var sm) ? sm.GetString() ?? "" : "";
+                    var phase = root.TryGetProperty("phase", out var ph) ? ph.GetString() ?? "" : "";
+                    var synthesis = root.TryGetProperty("synthesis", out var sy) ? sy.GetString() ?? "" : "";
                     var complete = root.TryGetProperty("complete", out var cp) && cp.ValueKind == JsonValueKind.True;
-                    return new AgentResponse { Thinking = thinking, Summary = summary, Complete = complete, Steps = steps };
+                    return new AgentResponse { Thinking = thinking, Summary = summary, Phase = phase, Synthesis = synthesis, Complete = complete, Steps = steps };
                 }
             }
+
+            // Also try parsing without steps — we may need phase/synthesis even without steps
+            if (root.TryGetProperty("phase", out var phEl) || root.TryGetProperty("synthesis", out var syEl) || root.TryGetProperty("thinking", out var thEl))
+            {
+                var phase = root.TryGetProperty("phase", out var p2) ? p2.GetString() ?? "" : "";
+                var synthesis = root.TryGetProperty("synthesis", out var s2) ? s2.GetString() ?? "" : "";
+                var thinking = root.TryGetProperty("thinking", out var t2) ? t2.GetString() ?? "" : "";
+                var summary = root.TryGetProperty("summary", out var sm2) ? sm2.GetString() ?? "" : "";
+                var complete = root.TryGetProperty("complete", out var cp2) && cp2.ValueKind == JsonValueKind.True;
+                return new AgentResponse { Phase = phase, Synthesis = synthesis, Thinking = thinking, Summary = summary, Complete = complete };
+            }
+        }
+        catch { }
+
+        // Truncated JSON fallback — extract fields via regex when JSON is incomplete/cut off
+        try
+        {
+            var phase = Regex.Match(jsonStr, @"""(?:phase)""\s*:\s*""([^""]*)""").Groups[1].Value;
+            var thinking = Regex.Match(jsonStr, @"""(?:thinking)""\s*:\s*""([^""]*)", RegexOptions.Singleline).Groups[1].Value;
+            var synthesis = Regex.Match(jsonStr, @"""(?:synthesis)""\s*:\s*""([^""]*)", RegexOptions.Singleline).Groups[1].Value;
+            var summary = Regex.Match(jsonStr, @"""(?:summary)""\s*:\s*""([^""]*)", RegexOptions.Singleline).Groups[1].Value;
+            var hasComplete = jsonStr.Contains("\"complete\": true") || jsonStr.Contains("\"complete\":true");
+            if (!string.IsNullOrWhiteSpace(phase) || !string.IsNullOrWhiteSpace(thinking) ||
+                !string.IsNullOrWhiteSpace(synthesis) || !string.IsNullOrWhiteSpace(summary))
+                return new AgentResponse { Phase = phase, Synthesis = synthesis, Thinking = thinking, Summary = summary, Complete = hasComplete };
         }
         catch { }
 
         return null;
     }
 
-    private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath, out bool noEditsSignal)
+    /// <summary>
+    /// Fallback: LLM may output the old plan format {thinking, summary, plan: [{file, change, priority}, ...]}
+    /// instead of the new steps format. Convert plan items to AgentSteps.
+    /// </summary>
+    private static AgentResponse? TryParseAsPlanFormat(string raw)
+    {
+        var jsonStr = raw.Trim();
+        if (jsonStr.StartsWith("```"))
+        {
+            var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) jsonStr = m.Groups[1].Value.Trim();
+        }
+        var start = jsonStr.IndexOf('{');
+        var end = jsonStr.LastIndexOf('}');
+        if (start >= 0 && end > start) jsonStr = jsonStr.Substring(start, end - start + 1);
+
+        AgentPlanDeserialized? plan = null;
+        try { plan = JsonSerializer.Deserialize<AgentPlanDeserialized>(jsonStr); } catch { }
+        if (plan == null || plan.plan.Count == 0) return null;
+
+        var steps = new List<AgentStep>();
+        foreach (var item in plan.plan)
+        {
+            var file = (item.file ?? "").Trim();
+            var change = (item.change ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(file) && string.IsNullOrWhiteSpace(change)) continue;
+
+            if (file.Equals("_terminal", StringComparison.OrdinalIgnoreCase))
+                steps.Add(new AgentStep { Type = "command", Command = change, Description = change });
+            else if (file.Equals("_read", StringComparison.OrdinalIgnoreCase))
+                steps.Add(new AgentStep { Type = "read", Path = change, Description = $"Read {change}" });
+            else if (file.Equals("_grep", StringComparison.OrdinalIgnoreCase))
+                steps.Add(new AgentStep { Type = "grep", Query = change, Description = $"Search {change}" });
+            else if (file.Equals("_glob", StringComparison.OrdinalIgnoreCase))
+                steps.Add(new AgentStep { Type = "glob", Pattern = change, Description = $"Glob {change}" });
+            else if (file.Equals("_list", StringComparison.OrdinalIgnoreCase))
+                steps.Add(new AgentStep { Type = "list", Path = change, Description = $"List {change}" });
+            else if (!string.IsNullOrWhiteSpace(file) && !file.StartsWith("_"))
+                steps.Add(new AgentStep { Type = "edit", Path = file, OldString = change, Description = $"Edit {file}" });
+            else
+                steps.Add(new AgentStep { Type = "command", Command = change, Description = change });
+        }
+
+        if (steps.Count == 0) return null;
+        return new AgentResponse
+        {
+            Thinking = plan.thinking,
+            Summary = plan.summary,
+            Steps = steps
+        };
+    }
+
+    private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath, out bool noEditsSignal, out string needMoreInfo)
     {
         noEditsSignal = false;
+        needMoreInfo = "";
         var steps = new List<AgentStep>();
         if (string.IsNullOrWhiteSpace(raw)) return steps;
 
@@ -3724,6 +4587,24 @@ Rules:
                 {
                     using var doc = JsonDocument.Parse(candidate, jsonOptions);
                     var root = doc.RootElement;
+
+                    // LLM can request more info instead of making edits
+                    if (root.TryGetProperty("needMoreInfo", out var nmiEl))
+                    {
+                        if (nmiEl.ValueKind == JsonValueKind.String)
+                        {
+                            needMoreInfo = nmiEl.GetString() ?? "";
+                        }
+                        else if (nmiEl.ValueKind == JsonValueKind.Object)
+                        {
+                            if (nmiEl.TryGetProperty("target", out var tEl))
+                                needMoreInfo = tEl.GetString() ?? "";
+                            if (string.IsNullOrWhiteSpace(needMoreInfo) && nmiEl.TryGetProperty("reason", out var rEl))
+                                needMoreInfo = rEl.GetString() ?? "";
+                        }
+                        if (!string.IsNullOrWhiteSpace(needMoreInfo))
+                            return steps;
+                    }
 
                     if (root.TryGetProperty("edits", out var editsEl) && editsEl.ValueKind == JsonValueKind.Array)
                     {

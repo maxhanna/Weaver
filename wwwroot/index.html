@@ -14,16 +14,18 @@
 <body ng-controller="MainCtrl as vm">
   <header>
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
-      <svg class="logo-icon-enhanced" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#4F46E5" />
-      <stop offset="100%" stop-color="#7C3AED" />
-    </linearGradient>
-  </defs>
-  <path d="M12 2L14.5 8.5L22 10L16 14L18 20L12 16L6 20L8 14L2 10L9.5 8.5L12 2Z" fill="url(#logoGradient)" stroke="#4F46E5" stroke-width="0.5"/>
-  <circle cx="12" cy="12" r="3" fill="#FFFFFF" />
-</svg>
+      <svg class="logo-icon-enhanced" width="24" height="24" viewBox="0 0 24 24" fill="none"
+        xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#06b6d4" />
+            <stop offset="100%" stop-color="#7c3aed" />
+          </linearGradient>
+        </defs>
+        <path d="M12 2L14.5 8.5L22 10L16 14L18 20L12 16L6 20L8 14L2 10L9.5 8.5L12 2Z" fill="url(#logoGradient)"
+          stroke="#06b6d4" stroke-width="0.5" />
+        <circle cx="12" cy="12" r="3" fill="#06b6d4" />
+      </svg>
       <span class="logo-text-enhanced">Maestro</span>
     </div>
     <div class="project-picker">
@@ -254,6 +256,16 @@
             <div class="agent-analysis-section">
               <div class="agent-error" ng-if="vm.agentResult.error">{{vm.agentResult.error}}</div>
               <div class="agent-warning" ng-if="vm.agentResult.warning">{{vm.agentResult.warning}}</div>
+              <div class="clarification-panel" ng-if="vm.agentResult.needsClarification">
+                <strong>Reply to continue</strong>
+                <div class="clarification-question">{{vm.agentResult.question || vm.agentResult.summary}}</div>
+                <div class="clarification-input-row">
+                  <input ng-model="vm.clarificationReply" placeholder="Type your answer..."
+                    ng-keydown="$event.key==='Enter' && vm.submitClarification()" />
+                  <button class="primary" ng-click="vm.submitClarification()"
+                    ng-disabled="!vm.clarificationReply">Continue</button>
+                </div>
+              </div>
               <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
                 {{vm.agentResult.summary}}</div>
               <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
@@ -275,6 +287,23 @@
         data-panel-id="terminal-panel">
         <h3>💻 Terminal</h3>
         <div class="panel-body">
+          <div class="terminal-approval-queue" ng-if="vm.pendingTerminalApprovals.length">
+            <div class="approval-card"
+              ng-repeat="approval in vm.pendingTerminalApprovals track by (approval.id || approval.Id)">
+              <div class="approval-meta">
+                <strong>Approval required</strong>
+                <span>root: {{approval.rootCommand || approval.RootCommand}}</span>
+              </div>
+              <pre>{{approval.command || approval.Command}}</pre>
+              <div class="approval-actions">
+                <button class="small primary" ng-click="vm.approveTerminalCommand(approval, 'once')">Approve
+                  once</button>
+                <button class="small" ng-click="vm.approveTerminalCommand(approval, 'root')">Approve root</button>
+                <button class="small" ng-click="vm.approveTerminalCommand(approval, 'all')">Approve all</button>
+                <button class="small danger" ng-click="vm.rejectTerminalCommand(approval)">Reject</button>
+              </div>
+            </div>
+          </div>
           <div class="terminalOutput">{{vm.terminalOutput}}</div>
           <div class="term-input-row">
             <input ng-model="vm.termInput" placeholder="Command..." ng-keydown="$event.key==='Enter' && vm.sendCmd()" />
@@ -283,7 +312,7 @@
           </div>
         </div>
       </div>
-      </ div>
+    </div>
   </main>
 
   <!-- FILE PICKER MODAL -->
@@ -375,31 +404,40 @@
       </div>
       <div class="popup-header">
         <strong>GitHub</strong>
-      </div>
-      <div class="popup-body">
-        <div class="link-item github-link">
-          <a href="https://github.com/maxhanna/Maestro" target="_blank"
-            class="brand-link">https://github.com/maxhanna/Maestro</a>
-        </div> 
-      </div>
-      <div class="popup-body">
-        <div class="faq-container">
-        <h3>❓ FAQ</h3>
-        <div class="faq-item" ng-repeat="faq in vm.faqItems">
-          <div class="faq-question" ng-click="faq.expanded = !faq.expanded">
-            {{faq.question}}
-            <span class="faq-toggle">{{faq.expanded ? '−' : '+'}}</span>
-          </div>
-          <div class="faq-answer" ng-if="faq.expanded">
-            <p ng-repeat="paragraph in faq.answer">{{paragraph}}</p>
+        <div class="popup-body">
+          <div class="link-item github-link">
+            <a href="https://github.com/maxhanna/Maestro" target="_blank"
+              class="brand-link">https://github.com/maxhanna/Maestro</a>
           </div>
         </div>
       </div>
-      </div>
-      <div class="popup-footer">
-        <button ng-click="vm.closeDiscordPanel()">Close</button>
+      <div class="popup-body">
+        <details class="faq-container">
+          <summary>
+            <h3>❓ FAQ</h3>
+          </summary>
+          <details>
+            <summary>How do I get started with Maestro?</summary>
+            <p>Maestro is an agentic kanban system that helps you manage projects with AI assistance. To get started,
+              create a new project or select an existing one from the project picker.</p>
+          </details>
+          <details>
+            <summary>What is the purpose of the agent activity log?</summary>
+            <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
+              you track what the agent is doing and why.</p>
+          </details>
+          <details>
+            <summary>How do I add tasks to my project?</summary>
+            <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
+              create tasks for you.</p>
+          </details>
+        </details>
       </div>
     </div>
+    <div class="popup-footer">
+      <button ng-click="vm.closeDiscordPanel()">Close</button>
+    </div>
+  </div>
   </div>
 
   <!-- SETTINGS MODAL -->
@@ -443,6 +481,23 @@
           <label for="settings-build-commands" class="settings-header">Build Commands</label>
           <textarea id="settings-build-commands" ng-model="vm.buildCommands"
             placeholder="Enter build commands, one per line" rows="4"></textarea>
+        </div>
+        <div class="form-row" style="display:flex;flex-direction:column;">
+          <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>
+          <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
+            <option value="approveEach">Approve every command</option>
+            <option value="approveRoot">Approve command roots</option>
+            <option value="approveAll">Approve all commands</option>
+          </select>
+          <span class="settings-help">Enterprise mode blocks terminal execution until a user approves the queued
+            command.</span>
+        </div>
+        <div class="form-row" style="display:flex;flex-direction:column;"
+          ng-if="vm.terminalApprovalMode === 'approveRoot'">
+          <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
+          <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
+            placeholder="git, dotnet, rg, npm" />
+          <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
         </div>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <details>
