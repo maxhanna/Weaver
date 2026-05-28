@@ -669,6 +669,74 @@ header h1 {
 	transform: rotate(180deg);
 }
 
+/* FAQ section inner details styling — matches .faq-item / .faq-toggle pattern for <details> */
+.faq-container > summary {
+	list-style: none;
+	cursor: pointer;
+	padding: 4px 0;
+}
+
+.faq-container > summary::-webkit-details-marker {
+	display: none;
+}
+
+.faq-container > summary h3 {
+	display: inline;
+	margin: 0;
+	color: var(--text);
+}
+
+.faq-container details {
+	margin-bottom: 12px;
+	border: var(--border);
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--surface);
+}
+
+.faq-container details summary {
+	background: var(--panel);
+	padding: 12px 16px;
+	font-size: 14px;
+	font-weight: 600;
+	cursor: pointer;
+	list-style: none;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	transition: all 0.2s ease;
+	color: var(--text);
+}
+
+.faq-container details summary::-webkit-details-marker {
+	display: none;
+}
+
+.faq-container details summary:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+.faq-container details summary::after {
+	content: '▼';
+	font-size: 12px;
+	transition: transform 0.3s ease;
+}
+
+.faq-container details[open] > summary::after {
+	transform: rotate(180deg);
+}
+
+.faq-container details > :not(summary) {
+	padding: 16px;
+	background: var(--surface);
+}
+
+.faq-container details > :not(summary) p {
+	margin: 0;
+	color: var(--muted);
+	line-height: 1.6;
+}
+
 .popup-header {
 	font-size: 16px;
 	font-weight: 600;

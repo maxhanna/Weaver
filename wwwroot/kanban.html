@@ -115,10 +115,10 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()" placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
-            </textarea>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+            {{card.text}}
           </div>
+          <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+           
           <div class="card-tags" ng-if="card.priority">
             <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
