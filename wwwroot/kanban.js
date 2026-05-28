@@ -98,6 +98,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         } else {
           VoiceInput.start(card, $scope);
           vm.isRecording = true;
+          // Focus the textarea for the card when starting recording
+          $timeout(function() {
+            var textarea = document.querySelector('[data-card-id="' + card.id + '"] textarea');
+            if (textarea) {
+              textarea.focus();
+              textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 0);
         }
       };
 
