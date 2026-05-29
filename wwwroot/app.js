@@ -708,7 +708,7 @@
             if (result.done) {
               vm.streamingActive = false;
               resumeTerminalPolling();
-              $scope.$digest();
+              try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
               return;
             }
             buffer += decoder.decode(result.value, { stream: true });
@@ -1061,8 +1061,10 @@
 
     function pauseTerminalPolling() {
       if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+      if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
     }
     function resumeTerminalPolling() {
       if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000);
+      if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500);
     }
   }]);
