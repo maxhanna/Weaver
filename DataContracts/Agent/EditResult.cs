@@ -1,5 +1,3 @@
-namespace MaestroBackend;
-
 public class EditResult
 {
     public string Path { get; set; } = "";

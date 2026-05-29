@@ -11,9 +11,7 @@ using MaestroBackend;
 public class AgentController : ControllerBase
 {
     // ── tuning constants ──────────────────────────────────────────────────────
-    private const int MaxFileContextChars = 24_000;
-    private const int MaxReadOutputChars = 24_000;
-    private const int MaxWebResponseChars = 24_000;
+    private const int MaxFileContextChars = 24_000; 
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
@@ -53,168 +51,6 @@ public class AgentController : ControllerBase
         _fileHints = fileHints;
         _configFile = configFile;
         _emailService = emailService;
-    }
-
-    public class AgentRequest
-    {
-        public string Prompt { get; set; } = "";
-        public string Project { get; set; } = "";
-        public List<string> Files { get; set; } = new();
-        public int? MaxIterations { get; set; }
-        public int? MaxStepsPerBatch { get; set; }
-    }
-
-    public class ApplyEditsRequest
-    {
-        public string Project { get; set; } = "";
-        public List<EditAction> Edits { get; set; } = new();
-        public List<CommandAction> Commands { get; set; } = new();
-    }
-
-    public class EditAction
-    {
-        public string Path { get; set; } = "";
-        public string OldString { get; set; } = "";
-        public string NewString { get; set; } = "";
-    }
-
-    public class CommandAction { public string Command { get; set; } = ""; }
-
-    public class EditResult
-    {
-        public string Path { get; set; } = "";
-        public string Status { get; set; } = "";
-        public string? Error { get; set; }
-    }
-
-    public class AgentStep
-    {
-        public int Index { get; set; }
-        public string Type { get; set; } = "";
-        public string Description { get; set; } = "";
-        public string? Path { get; set; }
-        public string? OldString { get; set; }
-        public string? NewString { get; set; }
-        public string? Command { get; set; }
-        public string? Pattern { get; set; }
-        public string? Url { get; set; }
-        public string? Query { get; set; }
-        public string? ToPath { get; set; }
-        public bool? Complete { get; set; }
-        public string? Prompt { get; set; }
-    }
-
-    public class AgentResponse
-    {
-        public string Thinking { get; set; } = "";
-        public string Summary { get; set; } = "";
-        public bool Complete { get; set; }
-        public List<AgentStep> Steps { get; set; } = new();
-    }
-
-    public class PendingQuestion
-    {
-        public string Id { get; set; } = "";
-        public string Question { get; set; } = "";
-        public List<QuestionField> Fields { get; set; } = new();
-        public DateTime CreatedUtc { get; set; }
-        public TaskCompletionSource<Dictionary<string, string>> Answer { get; set; } = new();
-    }
-
-    public class QuestionField
-    {
-        public string Key { get; set; } = "";
-        public string Label { get; set; } = "";
-        public string Type { get; set; } = "text";
-        public string? DefaultValue { get; set; }
-    }
-
-    public class QuestionAnswerRequest
-    {
-        public string Id { get; set; } = "";
-        public Dictionary<string, string> Answers { get; set; } = new();
-    }
-
-    /// <summary>
-    /// One item in the structured plan the LLM produces during Phase 2.
-    /// </summary>
-    private class PlanItem
-    {
-        public string File { get; set; } = "";
-        public string Change { get; set; } = "";
-        public int Priority { get; set; } = 1;
-    }
-
-    private class PlanItemDeserialized
-    {
-        public string file { get; set; } = "";
-        public string change { get; set; } = "";
-        public int priority { get; set; } = 1;
-    }
-
-    private class AgentPlanDeserialized
-    {
-        public string thinking { get; set; } = "";
-        public string summary { get; set; } = "";
-        public List<PlanItemDeserialized> plan { get; set; } = new();
-    }
-
-    /// <summary>
-    /// The full plan envelope returned by the Phase-2 LLM call.
-    /// </summary> 
-    public class AgentPlan
-    {
-        public string Thinking { get; set; } = string.Empty;
-        public string Summary { get; set; } = string.Empty;
-        public List<PlanStep> Plan { get; set; } = new();
-    }
-
-    public class PlanStep
-    {
-        public string File { get; set; } = string.Empty;
-        public string Change { get; set; } = string.Empty;
-        public int Priority { get; set; }
-    }
-
-    // ── internal edit DTO ─────────────────────────────────────────────────────
-
-    private class MinimalEditDto
-    {
-        public string Path { get; set; } = "";
-        public string OldString { get; set; } = "";
-        public string NewString { get; set; } = "";
-    }
-
-    private class MinimalEditsEnvelope
-    {
-        public List<MinimalEditDto> Edits { get; set; } = new();
-    }
-
-    // ── multi-phase pipeline DTOs ─────────────────────────────────────────────
-
-    private class DetailedPlanStep
-    {
-        public int Index { get; set; }
-        public string Description { get; set; } = "";
-        public string TargetArea { get; set; } = "";
-        public string ChangeType { get; set; } = "edit";
-        public string? OldString { get; set; }
-        public string? NewString { get; set; }
-        public string? GeneratedCode { get; set; }
-        public string? ReviewFeedback { get; set; }
-    }
-
-    private class DetailedPlanDeserialized
-    {
-        public string? thinking { get; set; }
-        public List<DetailedPlanStepDeserialized>? steps { get; set; }
-    }
-
-    private class DetailedPlanStepDeserialized
-    {
-        public string description { get; set; } = "";
-        public string targetArea { get; set; } = "";
-        public string changeType { get; set; } = "edit";
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -456,20 +292,7 @@ public class AgentController : ControllerBase
     private List<string> FindLikelyFiles(string prompt, string projectRoot)
     {
         var matches = new List<string>();
-        if (!Directory.Exists(projectRoot)) return matches;
-
-        var presets = new[]
-        {
-            "wwwroot/app.js", "wwwroot/index.html", "wwwroot/styles.css",
-            "wwwroot/app.js",          "wwwroot/index.html",          "wwwroot/styles.css",
-            "app.js",                   "index.html",                  "styles.css"
-        };
-        foreach (var p in presets)
-        {
-            var full = Path.Combine(projectRoot, p.Replace('/', Path.DirectorySeparatorChar));
-            if (System.IO.File.Exists(full))
-                matches.Add(p.Replace('\\', '/'));
-        }
+        if (!Directory.Exists(projectRoot)) return matches; 
 
         var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot);
         foreach (var hf in hintedFiles)

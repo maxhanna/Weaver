@@ -1,5 +1,3 @@
-namespace MaestroBackend;
-
 public class AgentStep
 {
     public int Index { get; set; }
@@ -14,6 +12,5 @@ public class AgentStep
     public string? Query { get; set; }
     public string? ToPath { get; set; }
     public bool? Complete { get; set; }
-    public int? LineFrom { get; set; }
-    public int? LineTo { get; set; }
+    public string? Prompt { get; set; }
 }
