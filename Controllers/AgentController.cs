@@ -101,6 +101,7 @@ public class AgentController : ControllerBase
         public string? Query { get; set; }
         public string? ToPath { get; set; }
         public bool? Complete { get; set; }
+        public string? Prompt { get; set; }
     }
 
     public class AgentResponse
@@ -555,9 +556,8 @@ public class AgentController : ControllerBase
     //  Purely deterministic; no LLM calls.  Builds a rich context string
     //  that later phases feed into their prompts.
     // ═════════════════════════════════════════════════════════════════════════
-
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
-        string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null)
+        string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null, CancellationToken ct = default)
     {
         // Fast path: if files are already attached, skip full discovery
         if (attachedFiles != null && attachedFiles.Count > 0)
@@ -597,7 +597,7 @@ public class AgentController : ControllerBase
                 foreach (var kf in knownPaths)
                 {
                     if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, kf, StringComparison.OrdinalIgnoreCase)))
-                        plan.Add(new AgentStep { Index = idx++, Type = "read", Path = kf, Description = $"Auto: read hinted file for '{kw}'" });
+                        plan.Add(new AgentStep { Index = idx++, Type = "read", Path = kf, Description = $"Auto: read hinted file for '{kw}'", Prompt = prompt });
                 }
             }
             else
@@ -610,7 +610,7 @@ public class AgentController : ControllerBase
         foreach (var file in FindLikelyFiles(prompt, projectRoot))
         {
             if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, file, StringComparison.OrdinalIgnoreCase)))
-                plan.Add(new AgentStep { Index = idx++, Type = "read", Path = file, Description = $"Auto: read candidate file {file}" });
+                plan.Add(new AgentStep { Index = idx++, Type = "read", Path = file, Description = $"Auto: read candidate file {file}", Prompt = prompt });
         }
 
         // ── Execute all discovery steps in parallel ──────────────────────
@@ -635,9 +635,32 @@ public class AgentController : ControllerBase
         foreach (var item in steps)
         {
             if (item is not Dictionary<string, object?> r) continue;
-            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : ""; 
             if (r.TryGetValue("output", out var output) && output != null)
             {
+                string? fileOutput = output.ToString();
+                string? path = r.GetValueOrDefault("path")?.ToString();
+                string? description = r.GetValueOrDefault("description")?.ToString();
+                if (string.IsNullOrEmpty(fileOutput))
+                {
+                        await EmitLog(emitSse, "info", "No output from step: " + description, ct: ct); 
+                        continue;
+                }
+                if (string.IsNullOrEmpty(path))
+                {
+                    await EmitLog(emitSse, "info", "No path from step: " + description, ct: ct);
+                    continue;
+                }
+                var isRelevant = await VerifySourceMaterial(prompt, fileOutput, emitSse, ct);
+                if (!isRelevant || string.IsNullOrEmpty(path))
+                {
+                    await EmitLog(emitSse, "info", "File : " + r.GetValueOrDefault("path") + " deemed irrelevant to the task, skipping.", new { Path = path, Material = fileOutput }, ct: ct); 
+                    continue;
+                } 
+                else
+                {
+                    await EmitLog(emitSse, "info", "File : " + r.GetValueOrDefault("path") + " deemed relevant to the task.", new { Path = path, Material = fileOutput }, ct: ct); 
+                }
                 sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
                 sb.AppendLine(output.ToString());
                 sb.AppendLine();
@@ -2105,7 +2128,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         string discoveryContext;
     
         await EmitLog(emitSse, "info", "CodeEdit: Phase 1 — DISCOVER", ct: ct);
-        var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles);
+        var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         discoveryContext = dc;
         allSteps.AddRange(ds);
         
@@ -2833,65 +2856,65 @@ Be concise — 2-4 sentences max.";
             {
                 var (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
 
-                for (var retryLoop = 0; retryLoop < 2 && !buildOk && editHistory.Count > 0; retryLoop++)
-                {
-                    // Undo edits (up to 2) until build passes
-                    var undoneCount = 0;
-                    while (undoneCount < 2 && editHistory.Count > 0 && !buildOk)
-                    {
-                        var (undoPath, undoContent) = editHistory[^1];
-                        editHistory.RemoveAt(editHistory.Count - 1);
-                        var undoFullPath = Path.GetFullPath(
-                            Path.Combine(projectRoot, undoPath.Replace('/', Path.DirectorySeparatorChar)));
-                        if (System.IO.File.Exists(undoFullPath))
-                        {
-                            await System.IO.File.WriteAllTextAsync(undoFullPath, undoContent, Encoding.UTF8);
-                            await EmitLog(emitSse, "warn", $"Undid edit: {undoPath}", ct: ct);
-                        }
-                        undoneCount++;
-                        (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
-                    }
+                // for (var retryLoop = 0; retryLoop < 2 && !buildOk && editHistory.Count > 0; retryLoop++)
+                // {
+                //     // Undo edits (up to 2) until build passes
+                //     var undoneCount = 0;
+                //     while (undoneCount < 2 && editHistory.Count > 0 && !buildOk)
+                //     {
+                //         var (undoPath, undoContent) = editHistory[^1];
+                //         editHistory.RemoveAt(editHistory.Count - 1);
+                //         var undoFullPath = Path.GetFullPath(
+                //             Path.Combine(projectRoot, undoPath.Replace('/', Path.DirectorySeparatorChar)));
+                //         if (System.IO.File.Exists(undoFullPath))
+                //         {
+                //             await System.IO.File.WriteAllTextAsync(undoFullPath, undoContent, Encoding.UTF8);
+                //             await EmitLog(emitSse, "warn", $"Undid edit: {undoPath}", ct: ct);
+                //         }
+                //         undoneCount++;
+                //         (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                //     }
 
-                    if (buildOk && undoneCount > 0)
-                    {
-                        // Build passes with undo — retry the original file edit
-                        await EmitLog(emitSse, "info", $"Build passes after undo — retrying edit for {relPath}", ct: ct);
+                //     if (buildOk && undoneCount > 0)
+                //     {
+                //         // Build passes with undo — retry the original file edit
+                //         await EmitLog(emitSse, "info", $"Build passes after undo — retrying edit for {relPath}", ct: ct);
 
-                        var currentContent = System.IO.File.Exists(fullPath)
-                            ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8)
-                            : fileContent;
+                //         var currentContent = System.IO.File.Exists(fullPath)
+                //             ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8)
+                //             : fileContent;
 
-                        var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
-                            fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
+                //         var (retryRaw2, _, _) = await CallLlmSingleFileEdit(
+                //             fileTask, relPath, currentContent, projectRoot, 2, discoveryContext, ct);
 
-                        var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath, out var _, out var _)
-                            .Where(e => !string.Equals(
-                                NormalizeLineEndings(e.OldString ?? ""),
-                                NormalizeLineEndings(e.NewString ?? ""),
-                                StringComparison.Ordinal))
-                            .ToList();
+                //         var retrySteps2 = ParseEditsFromLlmRaw(retryRaw2, relPath, out var _, out var _)
+                //             .Where(e => !string.Equals(
+                //                 NormalizeLineEndings(e.OldString ?? ""),
+                //                 NormalizeLineEndings(e.NewString ?? ""),
+                //                 StringComparison.Ordinal))
+                //             .ToList();
 
-                        if (retrySteps2.Count > 0)
-                        {
-                            for (var i = 0; i < retrySteps2.Count; i++) retrySteps2[i].Index = i;
-                            var retryResults2 = await ExecuteSteps(retrySteps2, projectRoot, idx, emitSse, ct);
-                            idx += retryResults2.Count;
-                            allResults.AddRange(retryResults2);
+                //         if (retrySteps2.Count > 0)
+                //         {
+                //             for (var i = 0; i < retrySteps2.Count; i++) retrySteps2[i].Index = i;
+                //             var retryResults2 = await ExecuteSteps(retrySteps2, projectRoot, idx, emitSse, ct);
+                //             idx += retryResults2.Count;
+                //             allResults.AddRange(retryResults2);
 
-                            (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
-                        }
-                    }
-                }
+                //             (buildOk, _) = await RunQuickBuild(projectRoot, buildCmd, emitSse, ct);
+                //         }
+                //     }
+                // }
 
-                if (!buildOk)
-                {
-                    await EmitLog(emitSse, "warn",
-                        $"Build failing after edit/retry for {relPath} — restoring and skipping", ct: ct);
-                    // Restore current file to pre-edit state
-                    await System.IO.File.WriteAllTextAsync(fullPath, fileContent, Encoding.UTF8);
-                    editHistory.RemoveAll(e => e.path == relPath);
-                    return;
-                }
+                // if (!buildOk)
+                // {
+                //     await EmitLog(emitSse, "warn",
+                //         $"Build failing after edit/retry for {relPath} — restoring and skipping", ct: ct);
+                //     // Restore current file to pre-edit state
+                //     await System.IO.File.WriteAllTextAsync(fullPath, fileContent, Encoding.UTF8);
+                //     editHistory.RemoveAll(e => e.path == relPath);
+                //     return;
+                // }
             }
         }
     }
@@ -4863,7 +4886,7 @@ Types:
 
 If unsure, use CodeEdit.";
 
-        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
+        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: _infiniteTimeout);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, raw, err }, ct: ct);
@@ -4876,13 +4899,48 @@ If unsure, use CodeEdit.";
             using var doc = JsonDocument.Parse(raw);
             var pipelineStr = doc.RootElement.TryGetProperty("pipeline", out var p) ? p.GetString() : null;
             return pipelineStr switch
-            { 
+            {
                 "CommandExecution" => PipelineType.CommandExecution,
-                "CodeEdit" => PipelineType.CodeEdit, 
+                "CodeEdit" => PipelineType.CodeEdit,
                 _ => null
             };
         }
         catch { return null; }
+    }
+
+
+    private async Task<bool> VerifySourceMaterial(string prompt, string material, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var systemPrompt = @"Verify the source material is relevant to the user request. 
+        We are editing code, verify if the material could possibly contain any relevant information to edit the code required. 
+        We need to assess if any of the information in this file could be relevant to the user's request. 
+        Respond with JSON only: {""relevance"": ""true""} or {""relevance"": ""false""}
+        If unsure, use {""relevance"": ""false""}.
+        ## User Request:" + prompt + @"
+        ## Source Material:
+        ```" + material + @"```
+        ";
+
+        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: _infiniteTimeout);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, material, raw, err }, ct: ct);
+            return true;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var relevanceStr = doc.RootElement.TryGetProperty("relevance", out var r) ? r.GetString() : null;
+            return relevanceStr switch
+            {
+                "true" => true,
+                "false" => false,
+                _ => true
+            };
+        }
+        catch { return true; }
     }
     private static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
