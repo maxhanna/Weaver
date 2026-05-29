@@ -1379,16 +1379,20 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             }
             else
             {
-                string reprisalPrompt = $"The previous attempt to {prompt} was not successful. Feedback: {feedback}. Please try again, taking this feedback into account.";
-                await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", ct: ct);
+                await EmitLog(emitSse, "info", "Starting reprisal attempt based on feedback.", feedback, ct: ct);
                 int attempt = 0;
                 while (attempt < 5 && !complete)
                 {
+                    string reprisalPrompt = $@"The previous coding attempt was not successful. 
+                    Please try again, taking this feedback into account.  
+                    ## Original Task: ```{prompt}```.
+                    ## Feedback: ```{feedback}```. ";
+
                     attempt++;
-                    await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt}", ct: ct);
+                    await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt}", feedback, ct: ct);
                     var reprisalContext = ReconstructDiscoveryContext(allSteps);
                     var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(
-                        feedback, projectRoot, emitSse, ct,
+                        reprisalPrompt, projectRoot, emitSse, ct,
                         prebuiltDiscoveryContext: reprisalContext,
                         prebuiltDiscoverySteps: allSteps.Where(s =>
                         {
@@ -1397,7 +1401,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             return t is "list" or "grep" or "glob" or "read";
                         }).ToList());
                     allSteps.AddRange(reprisalSteps);
-                    var (reprisalComplete, _) = await VerificationPipeline(feedback, allSteps, projectRoot, emitSse, ct);
+                    var (reprisalComplete, _) = await VerificationPipeline(reprisalPrompt, allSteps, projectRoot, emitSse, ct);
                     if (!reprisalComplete)
                     {
                         await EmitLog(emitSse, "info", "Reprisal attempt failed.", new { reprisalSteps, reprisalSummary, reprisalComplete, reprisalThinking }, ct: ct);
@@ -1954,10 +1958,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (emitSse)
             await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length }, ct);
 
-        var plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct);
+        AgentPlan? plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct);
         if (plan == null || plan.Plan.Count == 0)
         {
-            await EmitLog(emitSse, "warn", "Plan phase produced no items.", new { plan }, ct: ct);
+            await EmitLog(emitSse, "warn", $"Plan phase produced no items. Context length: {discoveryContext.Length} characters.", new { plan }, ct: ct);
             throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
         }
 
@@ -1966,7 +1970,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
 
         await EmitLog(emitSse, "info",
-            $"Plan: {plan.Plan.Count} step(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}",
+            $"Plan: {plan.Plan.Count} step(s) — {string.Join(", ", plan.Plan.Select(p => p.File))}. Context length: {discoveryContext.Length} characters.",
             new { plan },
             ct: ct);
 
