@@ -53,8 +53,10 @@
       { name: 'Build', icon: '🔨', desc: 'Run build verification', hint: 'build the project' },
       { name: 'Full Agent', icon: '🤖', desc: 'Run the full agent pipeline', hint: 'refactor the login page' }
     ];
-    vm.useToolHint = function (hint) { vm.aiChatInput = hint;
-      var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
+    vm.useToolHint = function (hint) {
+      vm.aiChatInput = hint;
+      var el = document.querySelector('.ai-chat-body input'); if (el) el.focus();
+    };
 
     vm.toggleChatMode = function () { vm.chatMode = vm.chatMode === 'ask' ? 'build' : 'ask'; };
 
@@ -222,7 +224,7 @@
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
         cfg.showKanban = vm.showKanban !== false;
-        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";  
+        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
         cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
@@ -650,35 +652,188 @@
       vm.executeAgent(card);
     };
 
-    vm.submitQuestion = function () {
-      if (!vm.pendingQuestion) return;
-      var answers = {};
-      var allFilled = true;
-      vm.pendingQuestion.fields.forEach(function (f) {
-        var val = (vm.questionAnswers[f.key] || '').trim();
-        if (!val) allFilled = false;
-        answers[f.key] = val;
-      });
-      if (!allFilled) {
-        vm.questionError = 'Please fill in all fields (password is required).';
-        return;
-      }
-      vm.questionError = '';
-      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: answers }).then(function () {
-        vm.showQuestionModal = false;
-        vm.pendingQuestion = null;
-      }, function (err) {
-        vm.questionError = 'Failed to submit: ' + (err.data || err.statusText || err);
-      });
-    };
+    // === Agent Execution (streaming) ===
 
-    vm.cancelQuestion = function () {
-      if (!vm.pendingQuestion) return;
-      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () {
-        vm.showQuestionModal = false;
-        vm.pendingQuestion = null;
-      });
-    };
+    vm.executeAgent = function (card) {
+      if (!card) return;
+      if (vm.streamingActive) return;
+      if (!card.text) return $window.alert('Card has no task text');
+      var proj = card.filePath || vm.selectedProject;
+      if (!proj) return $window.alert('No project assigned');
+
+      // Clear previous analysis for this fresh run
+      delete card.agentAnalysis;
+      delete card.agentLog;
+
+      // Reset
+      vm.agentResult = null;
+      vm.aiResponse = '';
+      vm.streamingThinking = '';
+      vm.streamingSummary = '';
+      vm.streamingPhase = '';
+      vm.streamingSteps = [];
+      vm.streamingFilesEdited = [];
+      vm.planItems = [];
+      vm.agentActivityLog = [];
+      vm.activeStepIndex = null;
+      vm.lastPhaseLogged = '';
+      _lastLogKey = '';
+      vm.streamingActive = true;
+      pauseTerminalPolling();
+      pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
+      vm.activeCardText = card.text;
+
+      var files = card.attached || [];
+      var payload = {
+        prompt: card.text,
+        project: proj,
+        files: files,
+        maxIterations: 5,
+        maxStepsPerBatch: 8
+      };
+
+      // Move to Doing
+      vm.moveCardToDoing(card.id);
+
+      vm.activeCardId = card.id;
+      if (!vm.activeCardIds) {
+        vm.activeCardIds = new Set();
+      }
+      vm.activeCardIds.add(card.id);
+
+      vm.abortController = new AbortController();
+
+      fetch('/api/agent/execute-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: vm.abortController.signal
+      }).then(function (response) {
+        if (!response.ok) {
+          vm.streamingActive = false;
+          resumeTerminalPolling();
+          vm.agentResult = { error: 'Server error: ' + response.status };
+          $scope.$digest();
+          return;
+        }
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+
+        function readNext() {
+          reader.read().then(function (result) {
+            if (result.done) {
+              vm.streamingActive = false;
+              resumeTerminalPolling();
+              try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
+              return;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+            var parts = buffer.split('\n\n');
+            buffer = parts.pop();
+
+            for (var p = 0; p < parts.length; p++) {
+              var block = parts[p];
+              var lines = block.split('\n');
+              var eventName = '';
+              var data = '';
+
+              for (var l = 0; l < lines.length; l++) {
+                if (lines[l].startsWith('event: ')) eventName = lines[l].substring(7);
+                else if (lines[l].startsWith('data: ')) data += lines[l].substring(6);
+              }
+
+              if (eventName) {
+                var parsed = null;
+                try { parsed = JSON.parse(data); } catch (e) { }
+
+                switch (eventName) {
+                  case 'log':
+                    if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
+                    break;
+                  case 'phase':
+                    if (parsed && parsed.message) {
+                      vm.streamingPhase = parsed.message;
+                      if (parsed.message !== vm.lastPhaseLogged) {
+                        vm.lastPhaseLogged = parsed.message;
+                        pushAgentLog('phase', parsed.message);
+                      }
+                    } else if (parsed && parsed.phase) {
+                      vm.streamingPhase = parsed.phase;
+                    }
+                    break;
+                  case 'status':
+                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                    break;
+                  case 'thinking':
+                    if (parsed && parsed.text) {
+                      vm.streamingThinking = parsed.text;
+                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
+                    }
+                    break;
+                  case 'summary':
+                    if (parsed && parsed.text) {
+                      vm.streamingSummary = parsed.text;
+                      pushAgentLog('summary', parsed.text);
+                    }
+                    break;
+                  case 'plan':
+                    if (parsed && parsed.items && parsed.items.length) {
+                      vm.planItems = parsed.items.map(function (item, i) {
+                        return { index: i, file: item.File || item.file, change: item.Change || item.change, priority: item.Priority || item.priority, done: false };
+                      });
+                    }
+                    break;
+                  case 'show':
+                    if (parsed && parsed.text) {
+                      vm.aiResponse = parsed.text;
+                      pushAgentLog('info', '📄 ' + parsed.text);
+                    }
+                    break;
+                  case 'clarification':
+                    if (parsed && parsed.question) {
+                      vm.aiResponse = parsed.question;
+                      pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
+                    }
+                    break;
+                  case 'step':
+                    if (parsed) {
+                      upsertStreamingStep(parsed);
+                      reconcilePlanItems();
+                      if (parsed.status === 'running') {
+                        pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
+                      } else if (parsed.status === 'error') {
+                        pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
+                      }
+                    }
+                    break;
+                  case 'done':
+                    vm.streamingActive = false;
+                    resumeTerminalPolling();
+                    var editsApplied = parsed && parsed.editsApplied;
+                    var incomplete = parsed && parsed.incomplete;
+                    if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
+                    pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
+                      { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
+                    var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
+                    var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
+                    var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                    if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
+                      vm.streamingFilesEdited = parsed.filesEdited;
+                    } else {
+                      refreshFilesEditedFromSteps();
+                    }
+                    vm.agentResult = {
+                      summary: finalSummary,
+                      thinking: finalThinking,
+                      filesEdited: vm.streamingFilesEdited,
+                      steps: finalSteps,
+                      planItems: angular.copy(vm.planItems),
+                      warning: parsed && parsed.warning,
+                      incomplete: incomplete,
+                      needsClarification: parsed && parsed.needsClarification,
+                      question: parsed && (parsed.question || parsed.warning || finalSummary)
+                    };
                     vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                     var analysis = {
                       summary: finalSummary,
@@ -851,7 +1006,7 @@
 
     // === Terminal ===
     vm.startTerminal = function () { $http.post('/api/terminal/start').catch(function () { }); };
-    
+
     vm.sendCmd = function () {
       if (!vm.termInput) return;
       $http.post('/api/terminal/exec', { command: vm.termInput }).then(function () {
@@ -886,6 +1041,47 @@
         .then(function () { vm.refreshTerminalApprovals(); });
     };
 
+    vm.submitClarification = function () {
+      var reply = (vm.clarificationReply || '').trim();
+      if (!reply) return;
+      var card = findCardById(vm.activeCardId);
+      if (!card) {
+        vm.aiChatMessages.push({ role: 'user', content: reply });
+        vm.clarificationReply = '';
+        return;
+      }
+      var question = (vm.agentResult && (vm.agentResult.question || vm.agentResult.summary)) || 'Clarification';
+      card.text = (card.text || '') + '\n\nClarification requested: ' + question + '\nUser answer: ' + reply;
+      delete card.agentAnalysis;
+      delete card.agentLog;
+      vm.saveCards();
+      vm.clarificationReply = '';
+      vm.agentResult = null;
+      vm.executeAgent(card);
+    };
+
+    vm.submitQuestion = function () {
+      if (!vm.pendingQuestion) return;
+      var answers = {};
+      var allFilled = true;
+      vm.pendingQuestion.fields.forEach(function (f) {
+        var val = (vm.questionAnswers[f.key] || '').trim();
+        if (!val) allFilled = false;
+        answers[f.key] = val;
+      });
+      if (!allFilled) {
+        vm.questionError = 'Please fill in all fields (password is required).';
+        return;
+      }
+      vm.questionError = '';
+      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: answers }).then(function () {
+        vm.showQuestionModal = false;
+        vm.pendingQuestion = null;
+      }, function (err) {
+        vm.questionError = 'Failed to submit: ' + (err.data || err.statusText || err);
+      });
+    };
+
     vm.stopAgent = function (card) {
       if (vm.abortController) {
         vm.abortController.abort();
@@ -895,15 +1091,15 @@
       vm.agentResult = { warning: 'Agent stopped by user.' };
       pushAgentLog('warn', 'Agent stopped by user');
       if (card) {
-          vm.activeCardIds.delete(card.id);
-          vm.updateCardStatus(card.id, 'todo');
+        vm.activeCardIds.delete(card.id);
+        vm.updateCardStatus(card.id, 'todo');
       }
       if (vm.activeCardIds.size === 0) {
-          vm.streamingActive = false;
-          vm.abortController = null;
-          if (vm.state.todo.length > 0 && !vm.activeCardIds.size) {
-              vm.moveCardToDoing(vm.state.todo[0].id);
-          }
+        vm.streamingActive = false;
+        vm.abortController = null;
+        if (vm.state.todo.length > 0 && !vm.activeCardIds.size) {
+          vm.moveCardToDoing(vm.state.todo[0].id);
+        }
       }
     };
 
