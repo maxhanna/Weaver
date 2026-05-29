@@ -65,6 +65,7 @@
     vm.streamingThinking = '';
     vm.streamingSummary = '';
     vm.streamingPhase = '';
+    vm.streamingContextSize = 0;
     vm.streamingSteps = [];
     vm.streamingFilesEdited = [];
     vm.agentActivityLog = [];
@@ -671,6 +672,7 @@
       vm.streamingThinking = '';
       vm.streamingSummary = '';
       vm.streamingPhase = '';
+      vm.streamingContextSize = 0;
       vm.streamingSteps = [];
       vm.streamingFilesEdited = [];
       vm.planItems = [];
@@ -761,6 +763,7 @@
                     } else if (parsed && parsed.phase) {
                       vm.streamingPhase = parsed.phase;
                     }
+                    if (parsed && parsed.contextSize) {vm.streamingContextSize = parsed.contextSize;}
                     break;
                   case 'status':
                     if (parsed && parsed.message) vm.streamingPhase = parsed.message;
@@ -1101,6 +1104,8 @@
           vm.moveCardToDoing(vm.state.todo[0].id);
         }
       }
+      vm.activeCardId = null;
+      vm.activeCardIds = new Set();
     };
 
     vm.formatLogDetail = formatLogDetail;

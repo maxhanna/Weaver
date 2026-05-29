@@ -113,6 +113,7 @@
             <span class="status-text" title="{{vm.activeCardText | limitTo:4000}}">
               Agent: "{{vm.activeCardText | limitTo:40}}"
               <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span>
+              <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize}} tokens</span>
             </span>
           </div>
 
@@ -387,6 +388,11 @@
             <button ng-click="vm.addProjectFromPanel()" class="primary">Add</button>
           </div>
         </div>
+        <div class="form-row">
+          <label for="edit-projects-default">Default Project</label>
+          <select id="edit-projects-default" ng-model="vm.settingsDefaultProject"
+            ng-options="p.Path as p.Name for p in vm.projects"></select>
+        </div>
       </div>
       <div class="popup-footer">
         <button ng-click="vm.closeEditProjectsPanel()">Done</button>
@@ -455,11 +461,7 @@
         <button ng-click="vm.closeSettingsPanel()">✕</button>
       </div>
       <div class="popup-body">
-        <div class="form-row">
-          <label for="settings-default">Default Project</label>
-          <select id="settings-default" ng-model="vm.settingsDefaultProject"
-            ng-options="p.Path as p.Name for p in vm.projects"></select>
-        </div>
+
         <div class="form-row">
           <label>
             <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes

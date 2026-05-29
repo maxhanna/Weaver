@@ -268,7 +268,7 @@ public class AgentController : ControllerBase
     {
         var result = new List<string>();
         string[] priority = { "settings","terminal","popup","panel","toggle","config","visibility",
-                               "maestro","showSettingsPanel","autoQueue","delete","confirm","modal","overlay" };
+                             "showSettingsPanel","autoQueue","delete","confirm","modal","overlay" };
         foreach (var p in priority)
             if (prompt.Contains(p, StringComparison.OrdinalIgnoreCase))
                 result.Add(p);
@@ -297,7 +297,7 @@ public class AgentController : ControllerBase
 
         var lower = prompt.ToLowerInvariant();
         var keywords = lower.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Contains('.') && w.Length >= 4 && !new HashSet<string> {
+            .Where(w => w.Length >= 4 && !new HashSet<string> {
                 "with","that","this","from","will","have","been","when","what","which" }.Contains(w))
             .Distinct().Take(5).ToList();
 
@@ -1952,7 +1952,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         // ── Phase 2: PLAN ─────────────────────────────────────────────────
         await EmitLog(emitSse, "info", "CodeEdit: Phase 2 — PLAN", ct: ct);
         if (emitSse)
-            await SendSse(Response, "phase", new { phase = "plan", message = "Planning..." }, ct);
+            await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length }, ct);
 
         var plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct);
         if (plan == null || plan.Plan.Count == 0)
