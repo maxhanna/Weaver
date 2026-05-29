@@ -10,16 +10,19 @@ using MaestroBackend;
 [Route("api/agent")]
 public class AgentController : ControllerBase
 {
-    // ── tuning constants ──────────────────────────────────────────────────────
+
+    private readonly IHttpClientFactory _clientFactory;
+    private readonly IConfiguration _config;
+    private readonly IWebHostEnvironment _env;
+    private readonly TerminalService _terminal;
+    private readonly FileHintsManager _fileHints;
+    private readonly ConfigFileService _configFile;
+    private readonly EmailService _emailService;
     private const int MaxFileContextChars = 24_000; 
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
-
-    // ── pipeline type classification ──────────────────────────────────────
-
-    private enum PipelineType { CommandExecution, CodeEdit }
 
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
@@ -31,13 +34,6 @@ public class AgentController : ControllerBase
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_create_file", StringComparison.OrdinalIgnoreCase);
 
-    private readonly IHttpClientFactory _clientFactory;
-    private readonly IConfiguration _config;
-    private readonly IWebHostEnvironment _env;
-    private readonly TerminalService _terminal;
-    private readonly FileHintsManager _fileHints;
-    private readonly ConfigFileService _configFile;
-    private readonly EmailService _emailService;
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
