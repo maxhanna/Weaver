@@ -219,6 +219,12 @@ body.dragging-active .card:hover {
     padding: 2px 0;
 }
 
+.card .attachments .attachment .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 50px);
+}
+
 .card .attachments .attachment .remove {
     opacity: 0.4;
     cursor: pointer;

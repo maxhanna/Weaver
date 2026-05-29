@@ -218,34 +218,41 @@
 
     vm.saveSettings = function () {
       saveSettings();
-      $http.get('/api/config').then(function (resp) {
-        var cfg = resp.data || { projects: vm.projects };
-        cfg.projects = cfg.projects || vm.projects;
-        cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
-        cfg.showTerminal = vm.showTerminal !== false;
-        cfg.showAI = vm.showAI !== false;
-        cfg.showKanban = vm.showKanban !== false;
-        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
-        cfg.buildCommands = vm.buildCommands;
-        cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
-        cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
-          return r.trim().toLowerCase();
-        }).filter(Boolean);
-        cfg.fileHints = '';
-        cfg.emailImapServer = vm.emailImapServer || '';
-        cfg.emailImapPort = vm.emailImapPort || 993;
-        cfg.emailUseSsl = vm.emailUseSsl !== false;
-        cfg.emailUsername = vm.emailUsername || '';
-        cfg.emailPassword = vm.emailPassword || '';
-        return $http.post('/api/config/save', cfg);
-      }).then(function () {
+      // Check if default project has changed and save using the same logic as closeEditProjectsPanel
+      if (vm.settingsDefaultProject !== vm.defaultProject) {
+        $http.get('/api/config').then(function (resp) {
+          var cfg = resp.data || { projects: vm.projects };
+          cfg.projects = cfg.projects || vm.projects;
+          cfg.showTerminal = vm.showTerminal !== false;
+          cfg.showAI = vm.showAI !== false;
+          cfg.showKanban = vm.showKanban !== false;
+          cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+          cfg.buildCommands = vm.buildCommands;
+          cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
+          cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+            return r.trim().toLowerCase();
+          }).filter(Boolean);
+          cfg.fileHints = '';
+          cfg.emailImapServer = vm.emailImapServer || '';
+          cfg.emailImapPort = vm.emailImapPort || 993;
+          cfg.emailUseSsl = vm.emailUseSsl !== false;
+          cfg.emailUsername = vm.emailUsername || '';
+          cfg.emailPassword = vm.emailPassword || '';
+          return $http.post('/api/config/save', cfg);
+        }).then(function () {
+          vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+          if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
+          vm.loadConfig();
+          vm.closeSettingsPanel();
+        }, function (err) {
+          $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
+        });
+      } else {
+        // No change in default project, proceed as before
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
-        if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
         vm.loadConfig();
         vm.closeSettingsPanel();
-      }, function (err) {
-        $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
-      });
+      }
     };
 
     // === Project config ===
@@ -302,7 +309,43 @@
     };
 
     vm.closeEditProjectsPanel = function () {
-      vm.showEditProjectsPanel = false;
+      // Check if default project has changed
+      if (vm.settingsDefaultProject !== vm.defaultProject) {
+        $http.get('/api/config').then(function (resp) {
+          var cfg = resp.data || { projects: vm.projects };
+          cfg.projects = cfg.projects || vm.projects;
+          cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
+          cfg.showTerminal = vm.showTerminal !== false;
+          cfg.showAI = vm.showAI !== false;
+          cfg.showKanban = vm.showKanban !== false;
+          cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080"; 
+          cfg.buildCommands = vm.buildCommands;
+          cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
+          cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+            return r.trim().toLowerCase();
+          }).filter(Boolean);
+          cfg.fileHints = '';
+          cfg.emailImapServer = vm.emailImapServer || '';
+          cfg.emailImapPort = vm.emailImapPort || 993;
+          cfg.emailUseSsl = vm.emailUseSsl !== false;
+          cfg.emailUsername = vm.emailUsername || '';
+          cfg.emailPassword = vm.emailPassword || '';
+          return $http.post('/api/config/save', cfg);
+        }).then(function () {
+          vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+          if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
+          vm.loadConfig();
+          vm.showEditProjectsPanel = false;
+        }, function (err) {
+          $window.alert('Failed to save default project: ' + (err.data || err.statusText || err));
+          vm.showEditProjectsPanel = false;
+        });
+      } else {
+        // No change, proceed as before
+        vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+        vm.loadConfig();
+        vm.showEditProjectsPanel = false;
+      }
     };
 
     vm.addProjectFromPanel = function () {
