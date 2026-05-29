@@ -48,10 +48,7 @@ public class AgentController : ControllerBase
         _configFile = configFile;
         _emailService = emailService;
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PATH HELPERS
-    // ═════════════════════════════════════════════════════════════════════════ 
+ 
     private PipelineType ClassifyTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.CommandExecution;
@@ -164,7 +161,7 @@ public class AgentController : ControllerBase
 
         // Config files — placed at root
         var configFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "appsettings.json", "maestroconfig.json", "filehints.json", ".gitignore",
+            { "appsettings.json", ".gitignore",
               "appsettings.development.json", "appsettings.production.json" };
         if (configFiles.Contains(name))
             return "";
@@ -300,7 +297,7 @@ public class AgentController : ControllerBase
 
         var lower = prompt.ToLowerInvariant();
         var keywords = lower.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length >= 4 && !new HashSet<string> {
+            .Where(w => w.Contains('.') && w.Length >= 4 && !new HashSet<string> {
                 "with","that","this","from","will","have","been","when","what","which" }.Contains(w))
             .Distinct().Take(5).ToList();
 
