@@ -1371,7 +1371,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - NEVER use mkdir, curl, wget, jq, python, Set-Location, cd, or bash syntax — they do NOT work here");
         conversation.AppendLine("  - If a command shows ⚠ Error:, read it and try a DIFFERENT command");
         conversation.AppendLine("  - web_search uses DuckDuckGo — if it returns empty, try web_fetch with a direct API URL");
-        conversation.AppendLine("  - Write all files directly to the target path. Never create folders unless the user explicitly asks for them.");
+        conversation.AppendLine("  - Write all files directly to the target path. Never create folders or extra files unless the user explicitly asks for them.");
         conversation.AppendLine("  - Max 15 iterations");
         conversation.AppendLine();
         conversation.AppendLine($"Task: {prompt}");
