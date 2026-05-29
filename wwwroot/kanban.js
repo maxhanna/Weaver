@@ -7,15 +7,16 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
   function loadCards() {
     var raw = $window.localStorage.getItem(STORAGE_KEY);
-    var state = raw ? JSON.parse(raw) : { todo: [], doing: [], done: [] };
-    if (!state.archived) state.archived = [];
+    var state = raw ? JSON.parse(raw) : { todo: [], doing: [], done: [], archived: [] };
+    if (!state.archived) state.archived = [];  
+
     return state;
   }
 
   return {
     init: function(vm, $scope) {
       vm.state = loadCards();
-
+ 
       vm.saveCards = function() {
         $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state));
       };

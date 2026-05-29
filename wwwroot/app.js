@@ -5,6 +5,7 @@
 
     // === State ===
     vm.selectedProject = '';
+    vm.archiveCardCount = 0;
     vm.projects = [];
     vm.defaultProject = '';
     vm.aiPrompt = '';
@@ -242,7 +243,7 @@
         }).then(function () {
           vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
           if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
-          vm.loadConfig();
+          vm.loadConfig(vm.defaultProject);
           vm.closeSettingsPanel();
         }, function (err) {
           $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
@@ -260,15 +261,15 @@
       return raw.map(function (p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
     }
 
-    vm.loadConfig = function () {
+    vm.loadConfig = function (project) {
       $http.get('/api/config').then(function (resp) {
         var cfg = resp.data || {};
         var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
           { Name: 'Project Alpha', Path: '../project-alpha' }
         ];
         vm.projects = normalizeProjects(raw);
-        vm.selectedProject = cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
-        vm.defaultProject = cfg.defaultProject;
+        vm.selectedProject = project || cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
+        vm.defaultProject = project || cfg.defaultProject;
         if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
         if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
@@ -288,6 +289,8 @@
         vm.selectedProject = '..';
         vm.defaultProject = '..';
       });
+
+      console.log('Config loaded. Selected project:', vm.selectedProject, project);
     };
     vm.loadConfig();
 
@@ -298,7 +301,13 @@
     };
 
     vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
-    vm.changeProject = function () { };
+    
+    vm.changeProject = function () { 
+      console.log(vm.selectedProject); 
+      vm.loadConfig(vm.selectedProject);  
+      vm.archiveCardCount = vm.state.archived.filter(x => x.filePath === vm.selectedProject).length; 
+      KanbanMixin.init(vm, $scope);  
+    };
 
     vm.openEditProjectsPanel = function () {
       vm.newProjectName = '';
@@ -758,7 +767,7 @@
           vm.streamingActive = false;
           resumeTerminalPolling();
           vm.agentResult = { error: 'Server error: ' + response.status };
-          $scope.$digest();
+          try { $scope.$digest(); } catch {}
           return;
         }
         var reader = response.body.getReader();
@@ -938,7 +947,7 @@
         } else {
           vm.agentResult = { error: 'Connection failed: ' + err.message };
         }
-        $scope.$digest();
+        try { $scope.$digest(); } catch (e) { }
       });
     };
 

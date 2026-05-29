@@ -4,7 +4,7 @@
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
     <button ng-click="vm.exportKanbanData()" class="search-button">Export</button>
     <button ng-click="vm.showArchived = !vm.showArchived" class="search-button" style="margin-left:4px;">🗄 Archived
-      ({{vm.state.archived.length}})</button>
+      ({{vm.archiveCardCount}})</button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
