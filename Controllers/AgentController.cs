@@ -19,7 +19,7 @@ public class AgentController : ControllerBase
 
     // ── pipeline type classification ──────────────────────────────────────
 
-    private enum PipelineType { QuickCheck, CommandExecution, CodeEdit, Compound }
+    private enum PipelineType { CommandExecution, CodeEdit }
 
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
@@ -167,13 +167,13 @@ public class AgentController : ControllerBase
     // ═════════════════════════════════════════════════════════════════════════ 
     private PipelineType ClassifyTask(string prompt)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.QuickCheck;
+        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.CommandExecution;
         var lower = prompt.ToLowerInvariant();
 
         // Quick check: pure ping/health/status with no file changes
         if (!TaskExpectsFileChanges(prompt) &&
             Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
-            return PipelineType.QuickCheck;
+            return PipelineType.CommandExecution;
 
         // Command execution: known simple intents (git, package_install, rename, etc.)
         if (TryDetectSimpleIntent(prompt) != null)
@@ -221,43 +221,6 @@ public class AgentController : ControllerBase
 
         // Default: needs the full planning pipeline
         return PipelineType.CodeEdit;
-    }
-
-    private async Task<PipelineType?> TryClassifyWithLlm(string prompt, bool emitSse, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(prompt)) return null;
-        var systemPrompt = @"Classify the user request into exactly one pipeline type. Respond with JSON only: {""pipeline"": ""<type>""}
-
-Types:
-- QuickCheck: ping, health, status, connectivity (no file changes)
-- CommandExecution: anything that should be done in terminal, including git operations, directory listing, renames, system info queries, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
-- CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
-- Compound: mix of command execution and code edits, prefer this if there are multiple distinct steps that should be executed separately for best results. The agent will decompose and orchestrate the steps.
-
-If unsure, use CodeEdit.";
-
-        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, raw, err }, ct: ct);
-            return null;
-        }
-        await EmitLog(emitSse, "info", "LLM classified the prompt.", new { prompt, raw, err }, ct: ct);
-
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            var pipelineStr = doc.RootElement.TryGetProperty("pipeline", out var p) ? p.GetString() : null;
-            return pipelineStr switch
-            {
-                "QuickCheck" => PipelineType.QuickCheck,
-                "CommandExecution" => PipelineType.CommandExecution,
-                "CodeEdit" => PipelineType.CodeEdit,
-                "Compound" => PipelineType.Compound,
-                _ => null
-            };
-        }
-        catch { return null; }
     }
 
     /// <summary>
@@ -1161,21 +1124,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
-        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, emitSse, ct);
-        if (pipelineType == null)
-        {
-            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
-            pipelineType = ClassifyTask(prompt);
-        }
+        var pipelineType = ClassifyTask(prompt);
         await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
 
         // ── Route to the right pipeline ───────────────────────────────────
         var (allSteps, summary, thinking) = pipelineType switch
         {
-            PipelineType.QuickCheck => await QuickCheckPipeline(prompt, projectRoot, emitSse, ct),
             PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
             PipelineType.CodeEdit => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
-            PipelineType.Compound => await CompoundPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
             _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
         };
 
@@ -1232,29 +1188,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         return (allSteps, summary, complete, thinking);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  QUICK CHECK PIPELINE  —  ping, health, status (no LLM)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private async Task<(List<object> steps, string summary, string thinking)> QuickCheckPipeline(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct)
-    {
-        var steps = new List<object>();
-        var plan = TryDetectSimpleIntent(prompt);
-        if (plan != null)
-        {
-            await EmitLog(emitSse, "info", $"QuickCheck: {plan.Plan.Count} step(s)", ct: ct);
-            if (emitSse)
-            {
-                await SendSse(Response, "plan",
-                    new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
-            }
-            await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, steps);
-            return (steps, plan.Summary, plan.Thinking ?? "");
-        }
-        return (steps, $"Quick check completed for: {prompt}", "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -1472,85 +1405,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             await SendSse(Response, "plan",
                 new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
 
-        // Check if plan has mixed types → escalate to Compound Pipeline
-        var hasMarkers = plan.Plan.Any(p => IsSpecialMarker(p.File));
-        var hasFileEdits = plan.Plan.Any(p => !IsSpecialMarker(p.File) && !string.IsNullOrWhiteSpace(p.File));
-        if (hasMarkers && hasFileEdits)
-        {
-            await EmitLog(emitSse, "info",
-                "Plan contains mixed types — escalating to Compound Pipeline", ct: ct);
-            return await CompoundPipeline(prompt, projectRoot, emitSse, ct, prebuiltPlan: plan, discoveryContext: discoveryContext);
-        }
-
         // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
 
         return (allSteps, plan.Summary, plan.Thinking ?? "");
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  COMPOUND PIPELINE  —  sequences mixed operations through sub-pipelines
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private async Task<(List<object> steps, string summary, string thinking)> CompoundPipeline(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
-        AgentPlan? prebuiltPlan = null, string? discoveryContext = null,
-        List<string>? attachedFiles = null)
-    {
-        var allSteps = new List<object>();
-
-        // Build plan if not provided
-        AgentPlan plan;
-        if (prebuiltPlan != null)
-        {
-            plan = prebuiltPlan;
-        }
-        else
-        {
-            if (discoveryContext == null)
-            {
-                await EmitLog(emitSse, "info", "Compound: Phase 1 — DISCOVER", ct: ct);
-                var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles);
-                discoveryContext = dc;
-                allSteps.AddRange(ds);
-            }
-
-            await EmitLog(emitSse, "info", "Compound: Phase 2 — PLAN", ct: ct);
-            plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext!, projectRoot, emitSse, ct)
-                ?? throw new InvalidOperationException("Compound: LLM returned empty plan");
-        }
-
-        // Emit thinking immediately
-        if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
-            await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
-
-        // Group plan items by type
-        var commandItems = plan.Plan.Where(p => IsSpecialMarker(p.File)).ToList();
-        var editItems = plan.Plan.Where(p => !IsSpecialMarker(p.File) && !string.IsNullOrWhiteSpace(p.File)).ToList();
-
-        await EmitLog(emitSse, "info",
-            $"Compound: {commandItems.Count} command item(s), {editItems.Count} edit item(s)", ct: ct);
-
-        // Execute command items first (git, package installs, etc.)
-        if (commandItems.Count > 0)
-        {
-            await EmitLog(emitSse, "info", "Compound → CommandExecution sub-pipeline", ct: ct);
-            var cmdPlan = new AgentPlan { Thinking = plan.Thinking, Summary = plan.Summary, Plan = commandItems };
-            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext ?? "", cmdPlan, ct, allSteps);
-        }
-
-        // Execute file edit items
-        if (editItems.Count > 0)
-        {
-            await EmitLog(emitSse, "info", "Compound → CodeEdit sub-pipeline", ct: ct);
-            var editPlan = new AgentPlan { Thinking = plan.Thinking, Summary = plan.Summary, Plan = editItems };
-            if (emitSse)
-                await SendSse(Response, "phase", new { phase = "editing", message = $"Editing {editItems.Count} file(s)…" }, ct);
-            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext ?? "", editPlan, ct, allSteps);
-        }
-
-        var summary = plan.Summary;
-        return (allSteps, summary, plan.Thinking ?? "");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -3953,14 +3811,62 @@ Rules:
             Steps = steps
         };
     }
+    private static string? EscapeUnescapedQuotesInStrings(string json)
+    {
+        var sb = new StringBuilder(json.Length);
+        bool inString = false;
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
 
+            if (c == '"')
+            {
+                // Check if this quote is escaped
+                bool escaped = i > 0 && json[i - 1] == '\\';
+                if (!escaped)
+                    inString = !inString;
+                sb.Append(c);
+            }
+            else if (c == '"' && inString)
+            {
+                // Inside a string, check for unescaped quotes that need escaping
+                if (i + 1 < json.Length && json[i + 1] == '"')
+                {
+                    // Double quotes inside string, escape them
+                    sb.Append('\\').Append('"');
+                    i++; // skip next quote
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
     private static List<AgentStep> ParseEditsFromLlmRaw(string? raw, string defaultPath, out bool noEditsSignal, out string needMoreInfo)
     {
         noEditsSignal = false;
         needMoreInfo = "";
         var steps = new List<AgentStep>();
         if (string.IsNullOrWhiteSpace(raw)) return steps;
+        var processedRaw = raw;
+        try
+        {
+            var escapedRaw = EscapeUnescapedQuotesInStrings(raw);
+            if (!string.IsNullOrEmpty(escapedRaw))
+                processedRaw = escapedRaw;
+        }
+        catch
+        {
+            // fallback: ignore errors
+        }
 
+        var jsonStr = processedRaw.Trim();
         var agent = ParseAgentResponse(raw);
         if (agent?.Steps != null)
         {
@@ -3975,7 +3881,6 @@ Rules:
             if (steps.Count > 0) return steps;
         }
 
-        var jsonStr = raw.Trim();
         if (jsonStr.StartsWith("```"))
         {
             var m = Regex.Match(jsonStr, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
@@ -4063,7 +3968,7 @@ Rules:
         }
 
         if (steps.Count == 0)
-            steps = ExtractEditPairs(jsonStr, defaultPath);
+            steps = ExtractEditPairs(repaired, defaultPath);
 
         return steps;
     }
@@ -4136,12 +4041,57 @@ Rules:
         pos++;
 
         var start = pos;
-        while (pos < text.Length)
+
+        // Find the next JSON key or structure end as an anchor boundary
+        var afterKeyStart = keyEndPos + 5;
+        var nextKeyPos = int.MaxValue;
+        foreach (var key in new[] { "\"oldString\"", "\"newString\"", "\"path\"", "\"toPath\"", "\"description\"", "\"edits\"" })
+        {
+            var kpos = text.IndexOf(key, afterKeyStart, StringComparison.OrdinalIgnoreCase);
+            if (kpos >= 0 && kpos < nextKeyPos) nextKeyPos = kpos;
+        }
+        var structureEnd = Math.Min(
+            nextKeyPos < int.MaxValue ? nextKeyPos : int.MaxValue,
+            text.Length);
+
+        while (pos < text.Length && pos <= structureEnd)
         {
             if (text[pos] == '\\') { pos += 2; continue; }
-            if (text[pos] == '"') return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
+
+            if (text[pos] == '"')
+            {
+                var afterPos = pos + 1;
+                while (afterPos < text.Length && char.IsWhiteSpace(text[afterPos])) afterPos++;
+
+                // Valid JSON structural transitions: , } ] end-of-text
+                if (afterPos >= text.Length || text[afterPos] == ',' || text[afterPos] == '}' || text[afterPos] == ']')
+                    return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
+
+                // If followed by "key": pattern, this is the closing delimiter
+                if (text[afterPos] == '"' && afterPos + 3 < text.Length)
+                {
+                    var keyEnd = text.IndexOf('"', afterPos + 1);
+                    if (keyEnd > afterPos + 1)
+                    {
+                        var afterKey = keyEnd + 1;
+                        while (afterKey < text.Length && char.IsWhiteSpace(text[afterKey])) afterKey++;
+                        if (afterKey < text.Length && text[afterKey] == ':')
+                            return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
+                    }
+                }
+            }
             pos++;
         }
+
+        // Fallback: walk backward from nextKeyPos to find the last quote
+        if (nextKeyPos > start + 1 && nextKeyPos < int.MaxValue)
+        {
+            var end = nextKeyPos - 1;
+            while (end > start && text[end] != '"') end--;
+            if (end > start && text[end] == '"')
+                return (UnescapeJsonString(text.Substring(start, end - start)), end + 1);
+        }
+
         return null;
     }
 
