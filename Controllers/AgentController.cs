@@ -646,6 +646,220 @@ public class AgentController : ControllerBase
     }
 
     /// <summary>
+    /// After the LLM produces a plan, scans each planned file for imports,
+    /// service calls, and type references to discover cross-file dependencies.
+    /// Reads discovered files and asks the LLM whether the plan is complete
+    /// or needs additional files. Time-boxed to prevent runaway exploration.
+    /// </summary>
+    private async Task<(AgentPlan plan, string expandedContext)> ExpandDiscoveryFromPlan(
+        AgentPlan plan, string prompt, string projectRoot,
+        string discoveryContext, bool emitSse, CancellationToken ct)
+    {
+        var planFiles = plan.Plan
+            .Select(p => p.File)
+            .Where(f => !string.IsNullOrWhiteSpace(f) && !IsSpecialMarker(f))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (planFiles.Count == 0)
+            return (plan, discoveryContext);
+
+        await EmitLog(emitSse, "info",
+            $"Phase 2.5 — CROSS-FILE DISCOVERY: scanning {planFiles.Count} planned file(s) for references", ct: ct);
+
+        // ── Step 1: read all planned files, extract imports / service refs ──
+        var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "node_modules", ".git", "bin", "obj", "dist", ".angular" };
+
+        foreach (var relFile in planFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relFile.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
+
+            try
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, ct);
+                if (content.Length > 100_000) content = content[..100_000];
+
+                // C# using statements
+                foreach (Match m in Regex.Matches(content, @"^using\s+([\w.]+)", RegexOptions.Multiline))
+                    references.Add(m.Groups[1].Value.Split('.').Last());
+
+                // JS/TS imports
+                foreach (Match m in Regex.Matches(content, @"(?:from|require)\s*['""]([^'""]+)['""]"))
+                {
+                    var last = m.Groups[1].Value.Split('/').Last().Split('.').First();
+                    if (!string.IsNullOrWhiteSpace(last)) references.Add(last);
+                }
+
+                // Service/Provider/Repository/Helper/Manager/Factory method calls
+                foreach (Match m in Regex.Matches(content,
+                    @"(?:this\.|private\s+\w+\s+)?(\w+(?:Service|Repository|Manager|Provider|Factory|Helper|Controller|Handler|Store|Api|Client))\s*\.\s*\w+\s*\("))
+                    references.Add(m.Groups[1].Value);
+            }
+            catch { }
+        }
+
+        if (references.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "Phase 2.5 — no cross-file references found", ct: ct);
+            return (plan, discoveryContext);
+        }
+
+        // ── Step 2: grep for each reference (limited to 8) ─────────────────
+        var candidateFiles = new List<string>();
+        foreach (var refName in references.Take(8))
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(projectRoot, "*", SearchOption.AllDirectories))
+                {
+                    if (!IsPathUnderRoot(file, projectRoot)) continue;
+                    if (skipDirs.Any(d => file.Contains(Path.DirectorySeparatorChar + d + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    try
+                    {
+                        var fi = new System.IO.FileInfo(file);
+                        if (fi.Length > 200_000) continue;
+                        var lines = System.IO.File.ReadAllLines(file);
+                        var found = lines.Any(l => l.Contains(refName, StringComparison.OrdinalIgnoreCase) &&
+                            (l.TrimStart().StartsWith("class ") || l.TrimStart().StartsWith("interface ") ||
+                             l.TrimStart().StartsWith("function ") || l.TrimStart().StartsWith("export ") ||
+                             l.Contains(" enum ") || l.Contains(" record ") || l.Contains(" struct ")));
+                        if (found)
+                        {
+                            var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                            if (!planFiles.Contains(rel, StringComparer.OrdinalIgnoreCase) &&
+                                !candidateFiles.Contains(rel, StringComparer.OrdinalIgnoreCase))
+                                candidateFiles.Add(rel);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        // Remove duplicates and cap
+        candidateFiles = candidateFiles.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
+        if (candidateFiles.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "Phase 2.5 — no new files discovered", ct: ct);
+            return (plan, discoveryContext);
+        }
+
+        await EmitLog(emitSse, "info",
+            $"Phase 2.5 — discovered {candidateFiles.Count} cross-file reference(s): {string.Join(", ", candidateFiles)}", ct: ct);
+
+        // ── Step 3: read discovered files and build expanded context ──────
+        var expandSb = new StringBuilder();
+        expandSb.AppendLine("## Cross-file references discovered from plan");
+        expandSb.AppendLine();
+        foreach (var cf in candidateFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, cf.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
+            try
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, ct);
+                expandSb.AppendLine($"### {cf}");
+                expandSb.AppendLine(Truncate(content, MaxFileContextChars));
+                expandSb.AppendLine();
+            }
+            catch { }
+        }
+
+        var expandedContext = discoveryContext + "\n\n" + expandSb.ToString();
+
+        // ── Step 4: ask LLM if plan needs updating ─────────────────────────
+        var completenessPrompt = new StringBuilder();
+        completenessPrompt.AppendLine("You are validating a code-change plan for completeness.");
+        completenessPrompt.AppendLine("Below is the original task, the existing plan, and newly discovered cross-file references that may be related.");
+        completenessPrompt.AppendLine();
+        completenessPrompt.AppendLine("## Original Task");
+        completenessPrompt.AppendLine(prompt);
+        completenessPrompt.AppendLine();
+        completenessPrompt.AppendLine("## Current Plan");
+        foreach (var p in plan.Plan)
+            completenessPrompt.AppendLine($"  - {p.File}: {p.Change}");
+        completenessPrompt.AppendLine();
+        completenessPrompt.AppendLine("## Newly Discovered Files (may or may not be relevant)");
+        completenessPrompt.AppendLine(string.Join("\n", candidateFiles));
+        completenessPrompt.AppendLine();
+        completenessPrompt.AppendLine(expandSb.ToString());
+        completenessPrompt.AppendLine();
+        completenessPrompt.AppendLine("Decide: Is the current plan complete, or do any of the newly discovered files need editing too?");
+        completenessPrompt.AppendLine("Output ONLY valid JSON — no markdown, no extra text:");
+        completenessPrompt.AppendLine(@"{""complete"": true, ""confidence"": ""high"", ""reasoning"": ""...""}");
+        completenessPrompt.AppendLine("OR if incomplete:");
+        completenessPrompt.AppendLine(@"{""complete"": false, ""confidence"": ""low"", ""reasoning"": ""..."", ""additions"": [{""file"": ""path"", ""change"": ""what to do""}]}");
+
+        const string completenessSystem = "You are a plan validation specialist. Output only JSON.";
+
+        var (raw, _, err) = await CallLlmRaw(completenessSystem, completenessPrompt.ToString(), ct,
+            requestTimeout: TimeSpan.FromSeconds(30));
+
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                }
+                var objStart = cleaned.IndexOf('{');
+                var objEnd = cleaned.LastIndexOf('}');
+                if (objStart >= 0 && objEnd > objStart)
+                    cleaned = cleaned.Substring(objStart, objEnd - objStart + 1);
+
+                using var doc = JsonDocument.Parse(cleaned);
+                var root = doc.RootElement;
+
+                var isComplete = root.TryGetProperty("complete", out var c) && c.ValueKind == JsonValueKind.True && c.GetBoolean();
+                var reasoning = root.TryGetProperty("reasoning", out var r) ? r.GetString() : "";
+
+                if (!isComplete && root.TryGetProperty("additions", out var adds) && adds.ValueKind == JsonValueKind.Array)
+                {
+                    var newSteps = new List<PlanStep>();
+                    foreach (var add in adds.EnumerateArray())
+                    {
+                        var file = add.TryGetProperty("file", out var f) ? f.GetString() : "";
+                        var change = add.TryGetProperty("change", out var ch) ? ch.GetString() : "";
+                        if (!string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(change))
+                        {
+                            newSteps.Add(new PlanStep
+                            {
+                                File = file.Replace('\\', '/'),
+                                Change = change,
+                                Priority = plan.Plan.Count + newSteps.Count + 1
+                            });
+                        }
+                    }
+                    if (newSteps.Count > 0)
+                    {
+                        plan.Plan.AddRange(newSteps);
+                        await EmitLog(emitSse, "info",
+                            $"Phase 2.5 — added {newSteps.Count} file(s) to plan: {string.Join(", ", newSteps.Select(s => s.File))}",
+                            ct: ct);
+                    }
+                }
+
+                await EmitLog(emitSse, "info",
+                    $"Phase 2.5 — completeness check: complete={isComplete}, confidence={reasoning}", ct: ct);
+            }
+            catch (JsonException) { }
+        }
+
+        return (plan, expandedContext);
+    }
+
+    /// <summary>
     /// Scans generated edits for references to methods/types that might belong
     /// to other files not included in the current edit set. Returns a list of
     /// candidate file paths that may also need editing.
@@ -1606,10 +1820,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         summary ??= $"Command execution completed after {steps.Count} step(s)";
         return (steps, summary, "");
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  CODE EDIT PIPELINE  —  discover → plan → execute
+    } 
+    
     // ═════════════════════════════════════════════════════════════════════════
     //  CODE EDIT PIPELINE  —  discover → plan → edit → review loop
     // ═════════════════════════════════════════════════════════════════════════
@@ -1655,6 +1867,25 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (emitSse)
             await SendSse(Response, "plan",
                 new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+
+        // ── Phase 2.5: CROSS-FILE DISCOVERY ───────────────────────────────
+        // After planning, scan each planned file for imports, service calls,
+        // and type references to find cross-file dependencies.  If new files
+        // are discovered, the LLM decides whether the plan needs updating.
+        await EmitLog(emitSse, "info", "CodeEdit: Phase 2.5 — CROSS-FILE DISCOVERY", ct: ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "cross-file-discovery", message = "Scanning for cross-file references..." }, ct);
+
+        var (expandedPlan, expandedContext) = await ExpandDiscoveryFromPlan(
+            plan, prompt, projectRoot, discoveryContext, emitSse, ct);
+
+        // Re-emit plan if it was amended
+        if (expandedPlan.Plan.Count != plan.Plan.Count && emitSse)
+            await SendSse(Response, "plan",
+                new { thinking = expandedPlan.Thinking, summary = expandedPlan.Summary, items = expandedPlan.Plan }, ct);
+
+        plan = expandedPlan;
+        discoveryContext = expandedContext;
 
         // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
