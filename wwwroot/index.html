@@ -489,6 +489,21 @@
           <textarea id="settings-build-commands" ng-model="vm.buildCommands"
             placeholder="Enter build commands, one per line" rows="4"></textarea>
         </div>
+        <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+          <label class="settings-header">Email (IMAP)</label>
+          <div style="display:flex;gap:8px;margin-bottom:6px;">
+            <input ng-model="vm.emailImapServer" placeholder="imap.example.com" style="flex:1;" />
+            <input ng-model="vm.emailImapPort" type="number" placeholder="993" style="width:80px;" />
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <input ng-model="vm.emailUsername" placeholder="Email username" style="flex:1;" />
+            <input ng-model="vm.emailPassword" type="password" placeholder="Password" style="flex:1;" />
+          </div>
+          <label style="font-size:12px;">
+            <input type="checkbox" ng-model="vm.emailUseSsl" /> Use SSL
+          </label>
+          <span class="settings-help">Configure IMAP credentials so the agent can read your email.</span>
+        </div>
         <div class="form-row" style="display:flex;flex-direction:column;">
           <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>
           <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
@@ -551,6 +566,33 @@
       <div class="popup-footer">
         <button ng-click="vm.saveSettings()" class="primary">Save</button>
         <button ng-click="vm.closeSettingsPanel()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- QUESTION MODAL (user input requested by agent) -->
+  <div class="popup-overlay" ng-if="vm.showQuestionModal" ng-click="vm.questionError = ''">
+    <div class="popup-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-body">
+        <h3 style="margin:0 0 12px 0;">❓ {{vm.pendingQuestion.question}}</h3>
+        <div ng-repeat="field in vm.pendingQuestion.fields track by field.key"
+          style="margin-bottom:10px;">
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:3px;">{{field.label}}</label>
+          <input ng-if="field.type!=='password'"
+            ng-model="vm.questionAnswers[field.key]"
+            placeholder="{{field.defaultValue || field.label}}"
+            style="width:100%;padding:6px 8px;font-size:14px;box-sizing:border-box;" />
+          <input ng-if="field.type==='password'"
+            type="password"
+            ng-model="vm.questionAnswers[field.key]"
+            placeholder="{{field.label}}"
+            style="width:100%;padding:6px 8px;font-size:14px;box-sizing:border-box;" />
+        </div>
+        <div ng-if="vm.questionError" style="color:var(--error);font-size:12px;margin-top:4px;">{{vm.questionError}}</div>
+      </div>
+      <div class="popup-footer">
+        <button ng-click="vm.cancelQuestion()">Cancel</button>
+        <button ng-click="vm.submitQuestion()" class="primary">Submit</button>
       </div>
     </div>
   </div>

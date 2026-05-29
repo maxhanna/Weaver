@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -16,6 +17,7 @@ public class AgentController : ControllerBase
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
+    private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
 
     // ── pipeline type classification ──────────────────────────────────────
 
@@ -37,11 +39,12 @@ public class AgentController : ControllerBase
     private readonly TerminalService _terminal;
     private readonly FileHintsManager _fileHints;
     private readonly ConfigFileService _configFile;
+    private readonly EmailService _emailService;
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
-        ConfigFileService configFile)
+        ConfigFileService configFile, EmailService emailService)
     {
         _clientFactory = cf;
         _config = config;
@@ -49,6 +52,7 @@ public class AgentController : ControllerBase
         _terminal = terminal;
         _fileHints = fileHints;
         _configFile = configFile;
+        _emailService = emailService;
     }
 
     public class AgentRequest
@@ -105,6 +109,29 @@ public class AgentController : ControllerBase
         public string Summary { get; set; } = "";
         public bool Complete { get; set; }
         public List<AgentStep> Steps { get; set; } = new();
+    }
+
+    public class PendingQuestion
+    {
+        public string Id { get; set; } = "";
+        public string Question { get; set; } = "";
+        public List<QuestionField> Fields { get; set; } = new();
+        public DateTime CreatedUtc { get; set; }
+        public TaskCompletionSource<Dictionary<string, string>> Answer { get; set; } = new();
+    }
+
+    public class QuestionField
+    {
+        public string Key { get; set; } = "";
+        public string Label { get; set; } = "";
+        public string Type { get; set; } = "text";
+        public string? DefaultValue { get; set; }
+    }
+
+    public class QuestionAnswerRequest
+    {
+        public string Id { get; set; } = "";
+        public Dictionary<string, string> Answers { get; set; } = new();
     }
 
     /// <summary>
@@ -252,6 +279,10 @@ public class AgentController : ControllerBase
 
         // Web search or fetch — user wants info retrieved, not code edited
         if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the))\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
+            return PipelineType.CommandExecution;
+
+        // Email — read emails, inbox, unread, etc., not code editing
+        if (Regex.IsMatch(lower, @"\b(email|inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email)\b"))
             return PipelineType.CommandExecution;
 
         // Default: needs the full planning pipeline
@@ -767,7 +798,7 @@ public class AgentController : ControllerBase
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, ct);
                 expandSb.AppendLine($"### {cf}");
-                expandSb.AppendLine(Truncate(content, MaxFileContextChars));
+                expandSb.AppendLine(content);
                 expandSb.AppendLine();
             }
             catch { }
@@ -959,7 +990,7 @@ public class AgentController : ControllerBase
                 if (r.TryGetValue("output", out var output) && output != null)
                 {
                     sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
-                    sb.AppendLine(Truncate(output.ToString() ?? "", type == "read" ? 4000 : 1500));
+                    sb.AppendLine(output.ToString() ?? "");
                     sb.AppendLine();
                 }
             }
@@ -973,7 +1004,7 @@ public class AgentController : ControllerBase
                     if (!string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(newContent))
                     {
                         sb.AppendLine($"### edited {path} (current content)");
-                        sb.AppendLine(Truncate(newContent, 4000));
+                        sb.AppendLine(newContent);
                         sb.AppendLine();
                     }
                 }
@@ -1250,7 +1281,7 @@ Task: {originalPrompt}
 Description: {changeDesc}
 
 Project context:
-{Truncate(discoveryContext, 4000)}
+{discoveryContext}
 
 Respond with ONLY the raw file content — no markdown, no code fences, no explanation. The content will be written directly to the file.";
 
@@ -1301,7 +1332,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         {
             ["status"] = "done",
             ["path"] = targetRelPath,
-            ["output"] = Truncate(cleaned, 2000),
+            ["output"] = cleaned,
             ["type"] = "create"
         };
         results.Add(result);
@@ -1470,7 +1501,13 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
-        var pipelineType = ClassifyTask(prompt);
+        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, emitSse, ct);
+        if (pipelineType == null)
+        {
+            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
+            pipelineType = ClassifyTask(prompt);
+        }
+
         await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
 
         // ── Route to the right pipeline ───────────────────────────────────
@@ -1578,6 +1615,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - To run a command: {\"cmd\": \"the full command\"}");
         conversation.AppendLine("  - To search the web: {\"web_search\": \"query\"}");
         conversation.AppendLine("  - To fetch a URL: {\"web_fetch\": \"url\"}");
+        conversation.AppendLine("  - To read emails: {\"email\": \"inbox\"} or {\"email\": \"validate\"}");
         conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
         conversation.AppendLine($"  - Desktop path: {desktopPath}");
         conversation.AppendLine($"  - WRITE FILE: {fileCmd} -Path \"<path>\" -Value \"<content>\"");
@@ -1585,6 +1623,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - NEVER use mkdir, curl, wget, jq, python, Set-Location, cd, or bash syntax — they do NOT work here");
         conversation.AppendLine("  - If a command shows ⚠ Error:, read it and try a DIFFERENT command");
         conversation.AppendLine("  - web_search uses DuckDuckGo — if it returns empty, try web_fetch with a direct API URL");
+        conversation.AppendLine("  - To read emails, email must be configured in maestroconfig.json (imap server, username, password)");
         conversation.AppendLine("  - Write all files directly to the target path. Never create folders or extra files unless the user explicitly asks for them.");
         conversation.AppendLine("  - Max 15 iterations");
         conversation.AppendLine();
@@ -1692,7 +1731,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         ["type"] = "command",
                         ["command"] = cmd,
                         ["status"] = isError ? "error" : "done",
-                        ["output"] = Truncate(freshOutput, MaxReadOutputChars)
+                        ["output"] = freshOutput
                     };
                     steps.Add(result);
 
@@ -1716,7 +1755,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
                     conversation.AppendLine($"Command [{i + 1}]: {cmd}");
                     conversation.AppendLine(outputLabel);
-                    conversation.AppendLine(Truncate(freshOutput, 4000));
+                    conversation.AppendLine(freshOutput);
                     conversation.AppendLine();
                     continue;
                 }
@@ -1736,14 +1775,242 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         ["type"] = "web_search",
                         ["query"] = query,
                         ["status"] = string.IsNullOrWhiteSpace(searchErr) ? "done" : "error",
-                        ["output"] = Truncate(searchOutput, MaxReadOutputChars)
+                        ["output"] = searchOutput
                     };
                     steps.Add(webResult);
                     if (emitSse) await SendSse(Response, "step", webResult, ct);
 
                     conversation.AppendLine($"Web search [{i + 1}]: {query}");
                     conversation.AppendLine("Results:");
-                    conversation.AppendLine(Truncate(searchOutput, 6000));
+                    conversation.AppendLine(searchOutput);
+                    conversation.AppendLine();
+                    continue;
+                }
+
+                // Email inbox
+                if (root.TryGetProperty("email", out var emailEl))
+                {
+                    var action = emailEl.GetString() ?? "inbox";
+
+                    await EmitLog(emitSse, "step", $"▶ email[{i + 1}]: {action}", ct: ct);
+
+                    // Try to auto-configure before proceeding
+                    var cfgCheck = await _emailService.CheckAndAutoConfigureAsync();
+                    if (!cfgCheck.IsConfigured && action != "validate" && action != "test")
+                    {
+                        // Ask the user for missing credentials
+                        var questionFields = new List<QuestionField>();
+                        if (string.IsNullOrWhiteSpace(cfgCheck.ExistingUsername))
+                        {
+                            questionFields.Add(new QuestionField
+                            {
+                                Key = "emailUsername",
+                                Label = "Email username",
+                                Type = "text",
+                                DefaultValue = ""
+                            });
+                        }
+                        if (cfgCheck.MissingField == "emailImapServer" || string.IsNullOrWhiteSpace(cfgCheck.ExistingServer))
+                        {
+                            questionFields.Add(new QuestionField
+                            {
+                                Key = "emailImapServer",
+                                Label = "IMAP server",
+                                Type = "text",
+                                DefaultValue = cfgCheck.AutoServer ?? "imap.gmail.com"
+                            });
+                            questionFields.Add(new QuestionField
+                            {
+                                Key = "emailImapPort",
+                                Label = "IMAP port",
+                                Type = "text",
+                                DefaultValue = (cfgCheck.AutoPort ?? 993).ToString()
+                            });
+                        }
+                        // always ask password if missing
+                        questionFields.Add(new QuestionField
+                        {
+                            Key = "emailPassword",
+                            Label = "Email password",
+                            Type = "password",
+                            DefaultValue = ""
+                        });
+
+                        var pendingId = Guid.NewGuid().ToString("N");
+                        var pending = new PendingQuestion
+                        {
+                            Id = pendingId,
+                            Question = "Email is not configured. Please enter your IMAP credentials:",
+                            Fields = questionFields,
+                            CreatedUtc = DateTime.UtcNow
+                        };
+                        _pendingQuestions[pendingId] = pending;
+
+                        // Send SSE question event
+                        await SendSse(Response, "question", new
+                        {
+                            id = pending.Id,
+                            question = pending.Question,
+                            fields = pending.Fields
+                        }, ct);
+
+                        // Emit log
+                        await EmitLog(emitSse, "info", $"⏳ Waiting for email credentials from user...", ct: ct);
+
+                        // Block until user answers (with timeout)
+                        string? qError = null;
+                        try
+                        {
+                            var timeout = TimeSpan.FromMinutes(5);
+                            var answer = await pending.Answer.Task.WaitAsync(timeout, ct);
+
+                            // Save the answers to config
+                            var hasCreds = answer.Any(a => !string.IsNullOrWhiteSpace(a.Value));
+                            if (hasCreds)
+                            {
+                                var cfg = await _configFile.LoadConfigAsync();
+                                if (answer.TryGetValue("emailImapServer", out var server) && !string.IsNullOrWhiteSpace(server))
+                                    cfg.emailImapServer = server;
+                                if (answer.TryGetValue("emailImapPort", out var portStr) && int.TryParse(portStr, out var port))
+                                    cfg.emailImapPort = port;
+                                if (answer.TryGetValue("emailUsername", out var username) && !string.IsNullOrWhiteSpace(username))
+                                    cfg.emailUsername = username;
+                                if (answer.TryGetValue("emailPassword", out var password) && !string.IsNullOrWhiteSpace(password))
+                                    cfg.emailPassword = password;
+
+                                await _configFile.WriteConfigAsync(cfg);
+
+                                await EmitLog(emitSse, "info", "✓ Email credentials saved — retrying...", ct: ct);
+                                conversation.AppendLine("Email credentials have been saved. The user entered their credentials. Retry the email command now — it should work.");
+                            }
+                            else
+                            {
+                                // User cancelled (empty answers)
+                                conversation.AppendLine("Email credential input was cancelled. Inform the user that email requires valid credentials, then call {\"done\": true}.");
+                            }
+                            conversation.AppendLine();
+                            continue;
+                        }
+                        catch (TimeoutException)
+                        {
+                            qError = "User did not respond in time";
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            qError = "User cancelled the question";
+                        }
+                        finally
+                        {
+                            _pendingQuestions.TryRemove(pendingId, out _);
+                        }
+
+                        if (qError != null)
+                        {
+                            var errResult = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex++, ["type"] = "email",
+                                ["action"] = action, ["status"] = "error",
+                                ["command"] = qError,
+                                ["output"] = qError
+                            };
+                            steps.Add(errResult);
+                            if (emitSse) await SendSse(Response, "step", errResult, ct);
+                            conversation.AppendLine($"⚠ Error: {qError}");
+                            conversation.AppendLine();
+                            continue;
+                        }
+                    }
+
+                    try
+                    {
+                        if (action == "validate")
+                        {
+                            var status = await _emailService.ValidateConfigAsync();
+                            var validateResult = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex++,
+                                ["type"] = "email",
+                                ["action"] = action,
+                                ["status"] = status == "ok" ? "done" : "error",
+                                ["command"] = status,
+                                ["output"] = status
+                            };
+                            steps.Add(validateResult);
+                            if (emitSse) await SendSse(Response, "step", validateResult, ct);
+                            if (status == "ok")
+                            {
+                                conversation.AppendLine($"Email validate [{i + 1}]: ok — IMAP connection works");
+                            }
+                            else if (status == "not_configured")
+                            {
+                                conversation.AppendLine("⚠ Error: Email is NOT configured. The user must set emailImapServer, emailUsername, and emailPassword in Settings or maestroconfig.json. Do NOT retry — tell the user to configure email first, then call {\"done\": true}.");
+                            }
+                            else
+                            {
+                                conversation.AppendLine($"⚠ Error: Email validation failed — {status} This is NOT a transient error; retrying will not fix it. Do NOT retry — tell the user the email issue, then call {{\"done\": true}}.");
+                            }
+                            conversation.AppendLine();
+                            continue;
+                        }
+
+                        var unreadOnly = action == "inbox" || action == "unread";
+                        var emails = await _emailService.FetchLatestEmailsAsync(10, unreadOnly);
+                        var emailOutput = new StringBuilder();
+                        if (emails.Count == 0)
+                        {
+                            emailOutput.AppendLine("No emails found.");
+                        }
+                        else
+                        {
+                            emailOutput.AppendLine($"Found {emails.Count} email(s):");
+                            emailOutput.AppendLine();
+                            for (var ei = 0; ei < emails.Count; ei++)
+                            {
+                                var e = emails[ei];
+                                emailOutput.AppendLine($"--- Email {ei + 1} ---");
+                                emailOutput.AppendLine($"From: {e.From}");
+                                emailOutput.AppendLine($"Subject: {e.Subject}");
+                                emailOutput.AppendLine($"Date: {e.Date:yyyy-MM-dd HH:mm}");
+                                var bodyPreview = e.Body.Length > 500 ? e.Body[..500] + "…" : e.Body;
+                                if (!string.IsNullOrWhiteSpace(bodyPreview))
+                                {
+                                    emailOutput.AppendLine("Body:");
+                                    emailOutput.AppendLine(bodyPreview);
+                                }
+                                emailOutput.AppendLine();
+                            }
+                        }
+                        var emailStr = emailOutput.ToString();
+                        var emailResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex++,
+                            ["type"] = "email",
+                            ["action"] = action,
+                            ["status"] = "done",
+                            ["command"] = $"fetched {emails.Count} email(s)",
+                            ["output"] = emailStr
+                        };
+                        steps.Add(emailResult);
+                        if (emitSse) await SendSse(Response, "step", emailResult, ct);
+                        conversation.AppendLine($"Email [{i + 1}]: fetched {emails.Count} email(s)");
+                        conversation.AppendLine(emailStr);
+                    }
+                    catch (Exception ex)
+                    {
+                        var errMsg = $"⚠ Error: Email failed — {ex.Message} This is NOT a transient error; retrying will not fix it. Do NOT retry — tell the user the email issue, then call {{\"done\": true}}.";
+                        if (ex.Message.Contains("not configured", StringComparison.OrdinalIgnoreCase))
+                            errMsg = "⚠ Error: Email is NOT configured. The user must set emailImapServer, emailUsername, and emailPassword in Settings or maestroconfig.json. Do NOT retry — tell the user to configure email first, then call {\"done\": true}.";
+                        var errResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex++, ["type"] = "email",
+                            ["action"] = action, ["status"] = "error",
+                            ["command"] = errMsg,
+                            ["output"] = errMsg
+                        };
+                        steps.Add(errResult);
+                        if (emitSse) await SendSse(Response, "step", errResult, ct);
+                        conversation.AppendLine(errMsg);
+                    }
                     conversation.AppendLine();
                     continue;
                 }
@@ -1763,14 +2030,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         ["type"] = "web_fetch",
                         ["url"] = url,
                         ["status"] = string.IsNullOrWhiteSpace(fetchErr) ? "done" : "error",
-                        ["output"] = Truncate(fetchOutput, MaxReadOutputChars)
+                        ["output"] = fetchOutput
                     };
                     steps.Add(fetchResult);
                     if (emitSse) await SendSse(Response, "step", fetchResult, ct);
 
                     conversation.AppendLine($"Web fetch [{i + 1}]: {url}");
                     conversation.AppendLine("Content:");
-                    conversation.AppendLine(Truncate(fetchOutput, 6000));
+                    conversation.AppendLine(fetchOutput);
                     conversation.AppendLine();
                     continue;
                 }
@@ -1802,7 +2069,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 var output2 = _terminal.ReadAll();
                 var fresh2 = beforeLen2 < output2.Length ? output2[beforeLen2..] : "";
                 conversation.AppendLine("Output:");
-                conversation.AppendLine(Truncate(fresh2, 4000));
+                conversation.AppendLine(fresh2);
                 conversation.AppendLine();
                 steps.Add(new Dictionary<string, object?>
                 {
@@ -1810,7 +2077,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     ["type"] = "command",
                     ["command"] = fallbackCmd,
                     ["status"] = "done",
-                    ["output"] = Truncate(fresh2, MaxReadOutputChars)
+                    ["output"] = fresh2
                 });
                 continue;
             }
@@ -2176,7 +2443,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     gitSuccess
                         ? $"Git {gitOp} completed{(commitHash != null ? $" ({commitHash})" : "")}"
                         : $"Git {gitOp} may have failed",
-                    new { output = Truncate(gitOutput, 2000) }, ct: ct);
+                    new { output = gitOutput }, ct: ct);
                 continue;
             }
 
@@ -2254,7 +2521,7 @@ Ping command: {pingCmd}
 
 Raw output:
 ```
-{Truncate(output, 4000)}
+{output}
 ```
 
 Provide a brief analysis covering:
@@ -2735,6 +3002,32 @@ Be concise — 2-4 sentences max.";
         }
     }
 
+    [HttpGet("questions/pending")]
+    public IActionResult GetPendingQuestions()
+    {
+        var list = _pendingQuestions.Values
+            .OrderBy(q => q.CreatedUtc)
+            .Select(q => new
+            {
+                q.Id,
+                q.Question,
+                q.Fields,
+                q.CreatedUtc
+            })
+            .ToList();
+        return Ok(new { questions = list });
+    }
+
+    [HttpPost("questions/answer")]
+    public async Task<IActionResult> AnswerQuestion([FromBody] QuestionAnswerRequest req)
+    {
+        if (!_pendingQuestions.TryRemove(req.Id, out var pending))
+            return NotFound("Question not found or already answered");
+
+        pending.Answer.TrySetResult(req.Answers);
+        return Ok(new { status = "answered" });
+    }
+
     // ═════════════════════════════════════════════════════════════════════════
     //  LLM CALL HELPERS
     // ═════════════════════════════════════════════════════════════════════════
@@ -2907,7 +3200,7 @@ Be concise — 2-4 sentences max.";
         {
             user.AppendLine();
             user.AppendLine("## Project context");
-            user.AppendLine(Truncate(discoveryContext, 3_000));
+            user.AppendLine(discoveryContext);
         }
 
         // ── LLM call ───────────────────────────────────────────────────────────
@@ -3352,7 +3645,7 @@ Example:
             // If the file is small, show more context
             if (content.Length < 1000)
             {
-                result["fileContentPreview"] = Truncate(content, 300);
+                result["fileContentPreview"] = content;
             }
 
             return;
@@ -3592,7 +3885,7 @@ Example:
             : null;
 
         return (false, content, "oldString not found in file",
-            !string.IsNullOrEmpty(hint) ? Truncate(hint, 400) : null);
+            !string.IsNullOrEmpty(hint) ? hint : null);
     }
 
     private static int FindTrimmedBlock(string[] fileLines, string[] pattern, StringComparison cmp)
@@ -3648,9 +3941,9 @@ Example:
         result["command"] = command;
         var fullOutput = _terminal.ReadAll();
         result["output"] = beforeLen >= 0 && beforeLen < fullOutput.Length
-            ? Truncate(fullOutput.Substring(beforeLen), MaxReadOutputChars)
+            ? fullOutput.Substring(beforeLen)
             : "";
-        result["snippet"] = Truncate((result["output"] as string) ?? "", 200);
+        result["snippet"] = (result["output"] as string) ?? "";
     }
 
     /// <summary>
@@ -3789,7 +4082,7 @@ Example:
         result["path"] = step.Path;
  
         var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
-        result["output"] = Truncate(content, MaxReadOutputChars);
+        result["output"] = content;
        
         result["status"] = "done";
     }
@@ -4010,7 +4303,7 @@ Example:
                     body = Regex.Replace(body, "<[^>]+>", " ");
                 result["status"] = "done";
                 result["url"] = url.ToString();
-                result["output"] = Truncate($"HTTP {(int)resp.StatusCode} ({contentType})\n{body.Trim()}", MaxWebResponseChars);
+                result["output"] = $"HTTP {(int)resp.StatusCode} ({contentType})\n{body.Trim()}";
             }
             else
             {
@@ -4108,14 +4401,14 @@ Example:
 
                     result["status"] = "done";
                     result["query"] = search;
-                    result["output"] = Truncate(output.ToString(), MaxWebResponseChars);
+                    result["output"] = output.ToString();
                 }
                 catch (JsonException)
                 {
                     // Fallback: return raw API response
                     result["status"] = "done";
                     result["query"] = search;
-                    result["output"] = Truncate($"(raw API response)\n{json}", MaxWebResponseChars);
+                    result["output"] = $"(raw API response)\n{json}";
                 }
             }
         }
@@ -4229,7 +4522,7 @@ Example:
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
                 sb.AppendLine($"### {relPath}");
                 sb.AppendLine("```");
-                sb.AppendLine(Truncate(content, MaxFileContextChars));
+                sb.AppendLine(content);
                 sb.AppendLine("```");
                 sb.AppendLine();
             }
@@ -4558,7 +4851,39 @@ Rules:
 
         return steps;
     }
-    
+
+    private async Task<PipelineType?> TryClassifyWithLlm(string prompt, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return null;
+        var systemPrompt = @"Classify the user request into exactly one pipeline type. Respond with JSON only: {""pipeline"": ""<type>""}
+
+Types: 
+- CommandExecution: anything that should be done in terminal, including git operations, directory listing, renames, system info queries, ping, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
+- CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
+
+If unsure, use CodeEdit.";
+
+        var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: TimeSpan.FromSeconds(15));
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, raw, err }, ct: ct);
+            return null;
+        }
+        await EmitLog(emitSse, "info", "LLM classified the prompt.", new { prompt, raw, err }, ct: ct);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var pipelineStr = doc.RootElement.TryGetProperty("pipeline", out var p) ? p.GetString() : null;
+            return pipelineStr switch
+            { 
+                "CommandExecution" => PipelineType.CommandExecution,
+                "CodeEdit" => PipelineType.CodeEdit, 
+                _ => null
+            };
+        }
+        catch { return null; }
+    }
     private static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
@@ -5002,7 +5327,7 @@ Analyze deeply what needs to change and how to implement it correctly.";
         }
 
         // Trim analysis to a reasonable context size
-        var analysis = Truncate(analysisRaw, 8_000);
+        var analysis = analysisRaw;
         await EmitLog(emitSse, "info", $"Phase 1 (Analysis) complete — {analysis.Length} chars", ct: ct);
 
         // ── Phase 2: Detailed Plan ─────────────────────────────────────────
@@ -5149,10 +5474,7 @@ Change Type: {step.ChangeType}
 ```
 
 Generate the exact oldString and newString for THIS step only. Do NOT make changes belonging to other steps.";
-
-            var maxCodeGenContext = 16_000;
-            if (codeUser.Length > maxCodeGenContext)
-                codeUser = Truncate(codeUser, maxCodeGenContext);
+ 
 
             var (codeRaw, codeErr) = await CallLlmRawText(codeGenSystemPrompt, codeUser, ct,
                 requestTimeout: TimeSpan.FromMinutes(10));

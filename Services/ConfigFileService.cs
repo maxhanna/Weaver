@@ -21,11 +21,18 @@ public class FrontendConfig
     public string llamaUrl { get; set; } = "http://localhost:8080";
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
+    public string? emailImapServer { get; set; }
+    public int emailImapPort { get; set; } = 993;
+    public bool emailUseSsl { get; set; } = true;
+    public string? emailUsername { get; set; }
+    public string? emailPassword { get; set; }
 }
 
 public class ConfigFileService
 {
     private readonly string _configPath;
+
+    public string ConfigPath => _configPath;
 
     public ConfigFileService(IWebHostEnvironment env)
     {

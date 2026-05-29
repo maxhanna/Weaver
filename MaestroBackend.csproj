@@ -4,6 +4,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings> 
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.17.0" />
+  </ItemGroup>
 
   <!-- Automatically Runs the standalone C# Script script before compiling your backend -->
   <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">

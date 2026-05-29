@@ -159,6 +159,11 @@
     // Settings
     vm.settingsDefaultProject = '';
     vm.fileHintsData = [];
+    vm.emailImapServer = '';
+    vm.emailImapPort = 993;
+    vm.emailUseSsl = true;
+    vm.emailUsername = '';
+    vm.emailPassword = '';
 
     // === Load settings from localStorage ===
     function loadSettings() {
@@ -224,6 +229,11 @@
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';
+        cfg.emailImapServer = vm.emailImapServer || '';
+        cfg.emailImapPort = vm.emailImapPort || 993;
+        cfg.emailUseSsl = vm.emailUseSsl !== false;
+        cfg.emailUsername = vm.emailUsername || '';
+        cfg.emailPassword = vm.emailPassword || '';
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -258,6 +268,11 @@
         vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
         vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
         vm.fileHintsData = [];
+        vm.emailImapServer = cfg.emailImapServer || '';
+        vm.emailImapPort = cfg.emailImapPort || 993;
+        vm.emailUseSsl = cfg.emailUseSsl !== false;
+        vm.emailUsername = cfg.emailUsername || '';
+        vm.emailPassword = cfg.emailPassword || '';
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -635,188 +650,35 @@
       vm.executeAgent(card);
     };
 
-    // === Agent Execution (streaming) ===
-
-    vm.executeAgent = function (card) {
-      if (!card) return;
-      if (vm.streamingActive) return;
-      if (!card.text) return $window.alert('Card has no task text');
-      var proj = card.filePath || vm.selectedProject;
-      if (!proj) return $window.alert('No project assigned');
-
-      // Clear previous analysis for this fresh run
-      delete card.agentAnalysis;
-      delete card.agentLog;
-
-      // Reset
-      vm.agentResult = null;
-      vm.aiResponse = '';
-      vm.streamingThinking = '';
-      vm.streamingSummary = '';
-      vm.streamingPhase = '';
-      vm.streamingSteps = [];
-      vm.streamingFilesEdited = [];
-      vm.planItems = [];
-      vm.agentActivityLog = [];
-      vm.activeStepIndex = null;
-      vm.lastPhaseLogged = '';
-      _lastLogKey = '';
-      vm.streamingActive = true;
-      pauseTerminalPolling();
-      pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
-      vm.activeCardText = card.text;
-
-      var files = card.attached || [];
-      var payload = {
-        prompt: card.text,
-        project: proj,
-        files: files,
-        maxIterations: 5,
-        maxStepsPerBatch: 8
-      };
-
-      // Move to Doing
-      vm.moveCardToDoing(card.id);
-
-      vm.activeCardId = card.id;
-      if (!vm.activeCardIds) {
-        vm.activeCardIds = new Set();
+    vm.submitQuestion = function () {
+      if (!vm.pendingQuestion) return;
+      var answers = {};
+      var allFilled = true;
+      vm.pendingQuestion.fields.forEach(function (f) {
+        var val = (vm.questionAnswers[f.key] || '').trim();
+        if (!val) allFilled = false;
+        answers[f.key] = val;
+      });
+      if (!allFilled) {
+        vm.questionError = 'Please fill in all fields (password is required).';
+        return;
       }
-      vm.activeCardIds.add(card.id);
+      vm.questionError = '';
+      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: answers }).then(function () {
+        vm.showQuestionModal = false;
+        vm.pendingQuestion = null;
+      }, function (err) {
+        vm.questionError = 'Failed to submit: ' + (err.data || err.statusText || err);
+      });
+    };
 
-      vm.abortController = new AbortController();
-
-      fetch('/api/agent/execute-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: vm.abortController.signal
-      }).then(function (response) {
-        if (!response.ok) {
-          vm.streamingActive = false;
-          resumeTerminalPolling();
-          vm.agentResult = { error: 'Server error: ' + response.status };
-          $scope.$digest();
-          return;
-        }
-        var reader = response.body.getReader();
-        var decoder = new TextDecoder();
-        var buffer = '';
-
-        function readNext() {
-          reader.read().then(function (result) {
-            if (result.done) {
-              vm.streamingActive = false;
-              resumeTerminalPolling();
-              try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
-              return;
-            }
-            buffer += decoder.decode(result.value, { stream: true });
-            var parts = buffer.split('\n\n');
-            buffer = parts.pop();
-
-            for (var p = 0; p < parts.length; p++) {
-              var block = parts[p];
-              var lines = block.split('\n');
-              var eventName = '';
-              var data = '';
-
-              for (var l = 0; l < lines.length; l++) {
-                if (lines[l].startsWith('event: ')) eventName = lines[l].substring(7);
-                else if (lines[l].startsWith('data: ')) data += lines[l].substring(6);
-              }
-
-              if (eventName) {
-                var parsed = null;
-                try { parsed = JSON.parse(data); } catch (e) { }
-
-                switch (eventName) {
-                  case 'log':
-                    if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
-                    break;
-                  case 'phase':
-                    if (parsed && parsed.message) {
-                      vm.streamingPhase = parsed.message;
-                      if (parsed.message !== vm.lastPhaseLogged) {
-                        vm.lastPhaseLogged = parsed.message;
-                        pushAgentLog('phase', parsed.message);
-                      }
-                    } else if (parsed && parsed.phase) {
-                      vm.streamingPhase = parsed.phase;
-                    }
-                    break;
-                  case 'status':
-                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
-                    break;
-                  case 'thinking':
-                    if (parsed && parsed.text) {
-                      vm.streamingThinking = parsed.text;
-                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
-                    }
-                    break;
-                  case 'summary':
-                    if (parsed && parsed.text) {
-                      vm.streamingSummary = parsed.text;
-                      pushAgentLog('summary', parsed.text);
-                    }
-                    break;
-                  case 'plan':
-                    if (parsed && parsed.items && parsed.items.length) {
-                      vm.planItems = parsed.items.map(function (item, i) {
-                        return { index: i, file: item.File || item.file, change: item.Change || item.change, priority: item.Priority || item.priority, done: false };
-                      });
-                    }
-                    break;
-                  case 'show':
-                    if (parsed && parsed.text) {
-                      vm.aiResponse = parsed.text;
-                      pushAgentLog('info', '📄 ' + parsed.text);
-                    }
-                    break;
-                  case 'clarification':
-                    if (parsed && parsed.question) {
-                      vm.aiResponse = parsed.question;
-                      pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
-                    }
-                    break;
-                  case 'step':
-                    if (parsed) {
-                      upsertStreamingStep(parsed);
-                      reconcilePlanItems();
-                      if (parsed.status === 'running') {
-                        pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
-                      } else if (parsed.status === 'error') {
-                        pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
-                      }
-                    }
-                    break;
-                  case 'done':
-                    vm.streamingActive = false;
-                    resumeTerminalPolling();
-                    var editsApplied = parsed && parsed.editsApplied;
-                    var incomplete = parsed && parsed.incomplete;
-                    if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
-                    pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
-                      { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
-                    var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
-                    var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
-                    var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                    if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
-                      vm.streamingFilesEdited = parsed.filesEdited;
-                    } else {
-                      refreshFilesEditedFromSteps();
-                    }
-                    vm.agentResult = {
-                      summary: finalSummary,
-                      thinking: finalThinking,
-                      filesEdited: vm.streamingFilesEdited,
-                      steps: finalSteps,
-                      planItems: angular.copy(vm.planItems),
-                      warning: parsed && parsed.warning,
-                      incomplete: incomplete,
-                      needsClarification: parsed && parsed.needsClarification,
-                      question: parsed && (parsed.question || parsed.warning || finalSummary)
-                    };
+    vm.cancelQuestion = function () {
+      if (!vm.pendingQuestion) return;
+      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () {
+        vm.showQuestionModal = false;
+        vm.pendingQuestion = null;
+      });
+    };
                     vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                     var analysis = {
                       summary: finalSummary,

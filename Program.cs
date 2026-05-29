@@ -4,6 +4,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddSingleton<ConfigFileService>();
+builder.Services.AddSingleton<EmailService>();
 
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
