@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MaestroBackend.Services;
@@ -565,6 +566,302 @@ public static class AgentUtilities
             (string.Equals(t?.ToString(), "edit", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(t?.ToString(), "rename", StringComparison.OrdinalIgnoreCase)) &&
             s.TryGetValue("status", out var st) && st?.ToString() == "done");
+
+    /// <summary>
+    /// Extracts oldString/newString from a code generation LLM response.
+    /// Tries JSON parse first, then falls back to manual extraction.
+    /// </summary>
+    public static (string? oldString, string? newString, string? error) ExtractEditFromCodeGen(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return (null, null, "Empty response");
+
+        var json = raw.Trim();
+
+        // Strip markdown fences
+        if (json.StartsWith("```"))
+        {
+            var m = Regex.Match(json, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) json = m.Groups[1].Value.Trim();
+        }
+
+        // Extract first JSON object
+        var startIdx = json.IndexOf('{');
+        var endIdx = json.LastIndexOf('}');
+        if (startIdx >= 0 && endIdx > startIdx)
+            json = json.Substring(startIdx, endIdx - startIdx + 1);
+
+        // Try proper JSON parse
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var os = root.TryGetProperty("oldString", out var osEl) ? osEl.GetString() : null;
+            var ns = root.TryGetProperty("newString", out var nsEl) ? nsEl.GetString() : null;
+            if (os != null || ns != null)
+                return (os, ns, null);
+        }
+        catch { }
+
+        // Fallback: try with RepairJsonString
+        try
+        {
+            var repaired = RepairJsonString(json);
+            if (repaired != null)
+            {
+                using var doc = JsonDocument.Parse(repaired);
+                var root = doc.RootElement;
+                var os = root.TryGetProperty("oldString", out var osEl) ? osEl.GetString() : null;
+                var ns = root.TryGetProperty("newString", out var nsEl) ? nsEl.GetString() : null;
+                if (os != null || ns != null)
+                    return (os, ns, null);
+            }
+        }
+        catch { }
+
+        // Last resort: manual extraction via ExtractEditPairs logic
+        var pairs = ExtractEditPairs(raw, "");
+        if (pairs.Count > 0)
+            return (pairs[0].OldString, pairs[0].NewString, null);
+
+        return (null, null, "Could not parse oldString/newString from code gen response");
+    }
+
+    public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
+    {
+        var steps = new List<AgentStep>();
+
+        // Fix common unquoted-key LLM blunder
+        var unquotedNew = text.IndexOf(",newString\"", StringComparison.OrdinalIgnoreCase);
+        var unquotedOld = text.IndexOf(",oldString\"", StringComparison.OrdinalIgnoreCase);
+        if (unquotedNew >= 0 || unquotedOld >= 0)
+        {
+            var fixedText = text;
+            if (unquotedNew >= 0) fixedText = fixedText.Substring(0, unquotedNew + 1) + "\"" + fixedText.Substring(unquotedNew + 1);
+            if (unquotedOld >= 0) fixedText = fixedText.Substring(0, unquotedOld + 1) + "\"" + fixedText.Substring(unquotedOld + 1);
+            return ExtractEditPairs(fixedText, defaultPath);
+        }
+
+        var i = 0;
+        while (i < text.Length)
+        {
+            var oldKeyIdx = text.IndexOf("\"oldString\"", i, StringComparison.OrdinalIgnoreCase);
+            var newKeyIdx = text.IndexOf("\"newString\"", i, StringComparison.OrdinalIgnoreCase);
+            if (oldKeyIdx < 0 || newKeyIdx < 0) break;
+
+            string firstKey, secondKey;
+            int firstIdx, secondIdx;
+            if (oldKeyIdx < newKeyIdx)
+            { firstKey = "oldString"; secondKey = "newString"; firstIdx = oldKeyIdx; secondIdx = newKeyIdx; }
+            else
+            { firstKey = "newString"; secondKey = "oldString"; firstIdx = newKeyIdx; secondIdx = oldKeyIdx; }
+
+            var firstVal = ExtractJsonStringValue(text, firstIdx + firstKey.Length);
+            if (firstVal == null) { i = firstIdx + 1; continue; }
+
+            var secKeyPos = text.IndexOf("\"" + secondKey + "\"", firstVal.Value.EndPos, StringComparison.OrdinalIgnoreCase);
+            if (secKeyPos < 0) { i = firstIdx + 1; continue; }
+
+            var secVal = ExtractJsonStringValue(text, secKeyPos + secondKey.Length);
+            if (secVal == null) { i = firstIdx + 1; continue; }
+
+            var oldStr = firstKey == "oldString" ? firstVal.Value.Text : secVal.Value.Text;
+            var newStr = firstKey == "newString" ? firstVal.Value.Text : secVal.Value.Text;
+
+            if (!string.IsNullOrEmpty(oldStr) || !string.IsNullOrEmpty(newStr))
+                steps.Add(new AgentStep
+                {
+                    Index = steps.Count,
+                    Type = "edit",
+                    Path = defaultPath,
+                    OldString = oldStr ?? "",
+                    NewString = newStr ?? "",
+                    Description = "LLM edit (extracted)"
+                });
+
+            i = secVal.Value.EndPos;
+        }
+        return steps;
+    }
+
+
+
+    private static (string Text, int EndPos)? ExtractJsonStringValue(string text, int keyEndPos)
+    {
+        var pos = keyEndPos;
+        while (pos < text.Length && text[pos] != ':') pos++;
+        if (pos >= text.Length) return null;
+        pos++;
+        while (pos < text.Length && char.IsWhiteSpace(text[pos])) pos++;
+        if (pos >= text.Length || text[pos] != '"') return null;
+        pos++;
+
+        var start = pos;
+
+        // Find the next JSON key or structure end as an anchor boundary
+        var afterKeyStart = keyEndPos + 5;
+        var nextKeyPos = int.MaxValue;
+        foreach (var key in new[] { "\"oldString\"", "\"newString\"", "\"path\"", "\"toPath\"", "\"description\"", "\"edits\"" })
+        {
+            var kpos = text.IndexOf(key, afterKeyStart, StringComparison.OrdinalIgnoreCase);
+            if (kpos >= 0 && kpos < nextKeyPos) nextKeyPos = kpos;
+        }
+        var structureEnd = Math.Min(
+            nextKeyPos < int.MaxValue ? nextKeyPos : int.MaxValue,
+            text.Length);
+
+        while (pos < text.Length && pos <= structureEnd)
+        {
+            if (text[pos] == '\\') { pos += 2; continue; }
+
+            if (text[pos] == '"')
+            {
+                var afterPos = pos + 1;
+                while (afterPos < text.Length && char.IsWhiteSpace(text[afterPos])) afterPos++;
+
+                // Valid JSON structural transitions: , } ] end-of-text
+                if (afterPos >= text.Length || text[afterPos] == ',' || text[afterPos] == '}' || text[afterPos] == ']')
+                    return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
+
+                // If followed by "key": pattern, this is the closing delimiter
+                if (text[afterPos] == '"' && afterPos + 3 < text.Length)
+                {
+                    var keyEnd = text.IndexOf('"', afterPos + 1);
+                    if (keyEnd > afterPos + 1)
+                    {
+                        var afterKey = keyEnd + 1;
+                        while (afterKey < text.Length && char.IsWhiteSpace(text[afterKey])) afterKey++;
+                        if (afterKey < text.Length && text[afterKey] == ':')
+                            return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
+                    }
+                }
+            }
+            pos++;
+        }
+
+        // Fallback: walk backward from nextKeyPos to find the last quote
+        if (nextKeyPos > start + 1 && nextKeyPos < int.MaxValue)
+        {
+            var end = nextKeyPos - 1;
+            while (end > start && text[end] != '"') end--;
+            if (end > start && text[end] == '"')
+                return (UnescapeJsonString(text.Substring(start, end - start)), end + 1);
+        }
+
+        return null;
+    }
+
+
+    /// <summary>
+    /// Tries to parse a review response JSON from the LLM, with
+    /// multiple fallback strategies for common malformed outputs.
+    /// Returns (null, errorMessage) on failure.
+    /// </summary>
+    public static (bool? complete, string? feedback) TryParseReviewResponse(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return (null, "Empty response");
+
+        // Strategy 1: Try direct parse with repair
+        foreach (var candidate in GetReviewJsonCandidates(raw))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(candidate);
+                var c = doc.RootElement.TryGetProperty("complete", out var cp) &&
+                        (cp.ValueKind == JsonValueKind.True ||
+                         (cp.ValueKind == JsonValueKind.String &&
+                          string.Equals(cp.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
+                var f = doc.RootElement.TryGetProperty("feedback", out var fb) ? fb.GetString() : null;
+                return (c, f);
+            }
+            catch { }
+        }
+
+        return (null, "Failed to parse review JSON");
+    }
+
+
+    /// <summary>
+    /// Generates candidate JSON strings from raw LLM output,
+    /// trying increasingly aggressive repair strategies.
+    /// </summary>
+    public static IEnumerable<string> GetReviewJsonCandidates(string raw)
+    {
+        var trimmed = raw.Trim();
+
+        // Strip markdown fences
+        if (trimmed.StartsWith("```"))
+        {
+            var m = Regex.Match(trimmed, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) trimmed = m.Groups[1].Value.Trim();
+        }
+
+        // Extract JSON object
+        var start = trimmed.IndexOf('{');
+        var end = trimmed.LastIndexOf('}');
+        if (start < 0 || end <= start) yield break;
+        var json = trimmed.Substring(start, end - start + 1);
+
+        // Candidate 1: raw extracted JSON
+        yield return json;
+
+        // Candidate 2: run existing repair
+        var repaired = RepairJsonString(json);
+        if (repaired != null) yield return repaired;
+
+        // Candidate 3: quote unquoted property names
+        var quoted = QuoteJsonKeys(json);
+        if (quoted != json) yield return quoted;
+
+        // Candidate 4: repair + quote
+        if (repaired != null)
+        {
+            var quotedRepaired = QuoteJsonKeys(repaired);
+            if (quotedRepaired != repaired) yield return quotedRepaired;
+        }
+
+        // Candidate 5: try extracting JSON blocks
+        foreach (var block in ExtractJsonBlocks(trimmed))
+        {
+            yield return block;
+            var br = RepairJsonString(block);
+            if (br != null) yield return br;
+            var bq = QuoteJsonKeys(block);
+            if (bq != block) yield return bq;
+        }
+    }
+
+
+    /// <summary>
+    /// Extracts unique phone numbers from text using multiple common formats.
+    /// Matches North American (XXX-XXX-XXXX, (XXX) XXX-XXXX, XXX.XXX.XXXX, XXXXXXXXXX)
+    /// and international formats including leading +.
+    /// </summary>
+    public static List<string> ExtractPhoneNumbers(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
+
+        var phones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var patterns = new[]
+        {
+            @"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+            @"\+\d{1,3}[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        };
+        foreach (var pattern in patterns)
+        {
+            var matches = Regex.Matches(text, pattern);
+            foreach (Match m in matches)
+            {
+                var normalized = Regex.Replace(m.Value, @"[^\d+]", "");
+                if (normalized.Length >= 10) phones.Add(normalized);
+            }
+        }
+        var result = phones.ToList();
+        result.Sort();
+        return result;
+    }
+
     /// <summary>
     /// Strips stopwords and generic action verbs from a prompt, returning
     /// the domain-meaningful terms that are actually useful for file matching.
@@ -756,7 +1053,7 @@ public static class AgentUtilities
         if (quoted != json) yield return quoted;
 
         // Candidate 3 — escape bare newlines inside string values
-        var repaired = AgentUtilities.RepairJsonStringValues(json);
+        var repaired = RepairJsonStringValues(json);
         if (repaired != null && repaired != json) yield return repaired;
 
         // Candidate 4 — both repairs combined
