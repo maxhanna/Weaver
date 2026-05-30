@@ -1700,7 +1700,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         // ── Compact discovery context: keep full content only for plan files ──
         var beforeTokens = AgentUtilities.EstimateTokens(discoveryContext);
-        var planFiles = new HashSet<string>(plan.Plan
+        var planFiles = new HashSet<string?>(plan.Plan
             .Select(p => p.File?.Replace('\\', '/'))
             .Where(f => !string.IsNullOrWhiteSpace(f)), StringComparer.OrdinalIgnoreCase);
         discoveryContext = AgentUtilities.CompactDiscoveryContext(discoveryContext, planFiles);

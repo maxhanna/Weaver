@@ -772,7 +772,7 @@ public static class AgentUtilities
     public static int EstimateTokens(string text) =>
         string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
 
-    public static string CompactDiscoveryContext(string discoveryContext, HashSet<string> keepFull)
+    public static string CompactDiscoveryContext(string discoveryContext, HashSet<string?> keepFull)
     {
         if (string.IsNullOrEmpty(discoveryContext) || EstimateTokens(discoveryContext) < CompactThreshold75)
             return discoveryContext;
