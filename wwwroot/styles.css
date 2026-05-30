@@ -1260,6 +1260,48 @@ header h1 span.brand-badge {
 	z-index: 1100;
 }
 
+.context-review-panel {
+	width: 500px;
+	max-height: 80vh;
+	display: flex;
+	flex-direction: column;
+}
+
+.context-review-files {
+	max-height: 300px;
+	overflow-y: auto;
+	margin-bottom: 8px;
+}
+
+.context-review-file {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 6px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.context-review-file:hover {
+	background: rgba(255,255,255,0.06);
+}
+
+.context-review-file input[type="checkbox"] {
+	margin: 0;
+	flex-shrink: 0;
+}
+
+.context-review-path {
+	color: var(--accent);
+	word-break: break-all;
+}
+
+.context-review-countdown {
+	color: var(--accent);
+	font-weight: 600;
+}
+
 .delete-confirm-overlay {
 	position: fixed;
 	top: 0;

@@ -23,6 +23,7 @@ public class AgentController : ControllerBase
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
+    private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
 
     private static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
@@ -1097,11 +1098,16 @@ FILE EDIT RULES (only when NOT using a special marker):
                 _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
         }
 
-        // Build discovery text
+        await EmitLog(emitSse, "info", $"Phase 1 complete — {allSteps.Count} steps, {toRead.Count} file(s) read", ct: ct);
+        return (BuildDiscoveryTextFromSteps(allSteps), allSteps);
+    }
+
+    private static string BuildDiscoveryTextFromSteps(List<object> steps)
+    {
         var sb = new StringBuilder();
         sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
         sb.AppendLine();
-        foreach (var item in allSteps)
+        foreach (var item in steps)
         {
             if (item is not Dictionary<string, object?> r) continue;
             var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
@@ -1110,10 +1116,9 @@ FILE EDIT RULES (only when NOT using a special marker):
             sb.AppendLine(output.ToString());
             sb.AppendLine();
         }
-
-        await EmitLog(emitSse, "info", $"Phase 1 complete — {allSteps.Count} steps, {toRead.Count} file(s) read", ct: ct);
-        return (sb.ToString(), allSteps);
+        return sb.ToString();
     }
+
     /// <summary>
     /// Parses the LLM planning response into an AgentPlan.
     /// Handles: markdown fences, leading/trailing prose, missing quotes on keys,
@@ -2264,7 +2269,85 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         var (dc, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         discoveryContext = dc;
         allSteps.AddRange(ds);
-        
+
+        // ── Context Review: let user confirm / remove files ──────────────
+        if (emitSse && prebuiltDiscoveryContext == null && prebuiltDiscoverySteps == null)
+        {
+            var readFiles = ds
+                .OfType<Dictionary<string, object?>>()
+                .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "read")
+                .Select(s => s.GetValueOrDefault("path")?.ToString())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (readFiles.Count > 0)
+            {
+                var reviewId = Guid.NewGuid().ToString();
+                var review = new PendingContextReview
+                {
+                    Id = reviewId,
+                    Files = readFiles.Where(f => f != null).ToList()!,
+                    CreatedUtc = DateTime.UtcNow,
+                    Answer = new TaskCompletionSource<List<string>>()
+                };
+                _pendingContextReviews[reviewId] = review;
+
+                await SendSse(Response, "context-review", new
+                {
+                    id = reviewId,
+                    files = readFiles.Select(f => new { path = f }).ToList()
+                }, ct);
+
+                await EmitLog(emitSse, "info", "⏳ Awaiting context review (will auto-confirm in 30s)...", ct: ct);
+
+                try
+                {
+                    var timeout = TimeSpan.FromSeconds(30);
+                    var confirmedFiles = await review.Answer.Task.WaitAsync(timeout, ct);
+
+                    var confirmedSet = new HashSet<string>(confirmedFiles, StringComparer.OrdinalIgnoreCase);
+                    var removedCount = readFiles.Count - confirmedFiles.Count;
+
+                    if (removedCount > 0)
+                    {
+                        var filteredSteps = new List<object>();
+                        foreach (var item in ds)
+                        {
+                            if (item is not Dictionary<string, object?> r) { filteredSteps.Add(item); continue; }
+                            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+                            if (type == "read")
+                            {
+                                var p = r.GetValueOrDefault("path")?.ToString();
+                                if (!string.IsNullOrWhiteSpace(p) && confirmedSet.Contains(p))
+                                    filteredSteps.Add(item);
+                            }
+                            else
+                            {
+                                filteredSteps.Add(item);
+                            }
+                        }
+                        allSteps.Clear();
+                        allSteps.AddRange(filteredSteps);
+                        discoveryContext = BuildDiscoveryTextFromSteps(filteredSteps);
+                        await EmitLog(emitSse, "info", $"Context review: {removedCount} file(s) removed, {confirmedFiles.Count} kept", ct: ct);
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "info", "Context review: all files confirmed", ct: ct);
+                    }
+                }
+                catch (TimeoutException)
+                {
+                    await EmitLog(emitSse, "info", "Context review timed out — proceeding with all files", ct: ct);
+                }
+                catch (OperationCanceledException) { }
+                finally
+                {
+                    _pendingContextReviews.TryRemove(reviewId, out _);
+                }
+            }
+        }
 
         // ── Phase 2: PLAN ─────────────────────────────────────────────────
         await EmitLog(emitSse, "info", "CodeEdit: Phase 2 — PLAN", ct: ct);
@@ -3182,6 +3265,15 @@ Be concise — 2-4 sentences max.";
 
         pending.Answer.TrySetResult(req.Answers);
         return Ok(new { status = "answered" });
+    }
+
+    [HttpPost("context-review/confirm")]
+    public IActionResult ConfirmContextReview([FromBody] ContextReviewAnswer req)
+    {
+        if (!_pendingContextReviews.TryRemove(req.Id, out var pending))
+            return NotFound("Context review not found or already answered");
+        pending.Answer.TrySetResult(req.Files ?? pending.Files);
+        return Ok(new { status = "confirmed" });
     }
 
     // ═════════════════════════════════════════════════════════════════════════

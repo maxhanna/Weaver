@@ -72,6 +72,9 @@
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
     vm.logFontSize = 10;
+    vm.pendingContextReview = null;
+    vm.contextReviewCountdown = 0;
+    vm.contextReviewTimer = null;
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
@@ -710,6 +713,10 @@
       // Clear previous analysis for this fresh run
       delete card.agentAnalysis;
       delete card.agentLog;
+      // Clear confirmed context files if the task text changed since last run
+      if (card.confirmedContextFiles && card._lastRunText && card.text !== card._lastRunText) {
+        delete card.confirmedContextFiles;
+      }
 
       // Reset
       vm.agentResult = null;
@@ -729,8 +736,9 @@
       pauseTerminalPolling();
       pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
       vm.activeCardText = card.text;
+      card._lastRunText = card.text;
 
-      var files = card.attached || [];
+      var files = (card.confirmedContextFiles || []).concat(card.attached || []);
       var payload = {
         prompt: card.text,
         project: proj,
@@ -853,6 +861,29 @@
                       } else if (parsed.status === 'error') {
                         pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
                       }
+                    }
+                    break;
+                  case 'context-review':
+                    try {
+                      if (parsed && parsed.id && parsed.files) {
+                        const ctx = parsed;
+                        ctx.files.forEach(function (f) { f.keep = true; });
+                        vm.pendingContextReview = ctx;
+                        vm.contextReviewCountdown = 15;
+                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 15s', {discovered: ctx.files});
+                        if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
+                        vm.contextReviewTimer = $interval(function () {
+                          vm.contextReviewCountdown--;
+                          if (vm.contextReviewCountdown <= 0) {
+                            $interval.cancel(vm.contextReviewTimer);
+                            vm.contextReviewTimer = null;
+                            vm.confirmContextReview();
+                          }
+                        }, 1000, 15);
+                        if (!$scope.$$phase) $scope.$apply();
+                      }
+                    } catch (e) {
+                      pushAgentLog('error', 'Context review error: ' + (e.message || e));
                     }
                     break;
                   case 'done':
@@ -1135,6 +1166,29 @@
         vm.pendingQuestion = null;
       }, function (err) {
         vm.questionError = 'Failed to submit: ' + (err.data || err.statusText || err);
+      });
+    };
+
+    vm.confirmContextReview = function () {
+      if (!vm.pendingContextReview) return;
+      var selected = [];
+      var files = vm.pendingContextReview.files;
+      if (files && files.length) {
+        files.forEach(function (f) {
+          if (f.keep !== false) selected.push(f.path);
+        });
+      }
+      $http.post('/api/agent/context-review/confirm', { id: vm.pendingContextReview.id, files: selected }).then(function () {
+        // Save confirmed files on the card for restart resilience
+        var card = findCardById(vm.activeCardId);
+        if (card && selected.length > 0) {
+          card.confirmedContextFiles = selected;
+          vm.saveCards();
+        }
+        vm.pendingContextReview = null;
+        if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; }
+      }, function (err) {
+        pushAgentLog('error', 'Failed to submit context review: ' + (err.statusText || err));
       });
     };
 

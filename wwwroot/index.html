@@ -606,6 +606,32 @@
     </div>
   </div>
 
+  <!-- CONTEXT REVIEW MODAL (files discovered by agent) -->
+  <div class="popup-overlay" ng-if="vm.pendingContextReview" ng-click="vm.confirmContextReview()">
+    <div class="popup-panel context-review-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-body">
+        <h3 style="margin:0 0 8px 0;">📋 Context Review</h3>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0;">
+          Select files to include in the context
+          <span ng-if="vm.contextReviewCountdown > 0" class="context-review-countdown">
+            — auto-confirming in {{vm.contextReviewCountdown}}s
+          </span>
+        </p>
+        <div class="context-review-files">
+          <label class="context-review-file" ng-repeat="f in vm.pendingContextReview.files track by f.path">
+            <input type="checkbox" ng-model="f.keep" />
+            <span class="context-review-path">{{f.path}}</span>
+          </label>
+        </div>
+      </div>
+      <div class="popup-footer">
+        <button class="primary" ng-click="vm.contextReviewCountdown = 0; vm.confirmContextReview()">
+          Confirm
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- DELETE CARD CONFIRMATION -->
   <div class="popup-overlay" ng-if="vm.confirmDeleteCardId" ng-click="vm.confirmDeleteCardId = null">
     <div class="popup-panel" ng-click="$event.stopPropagation()">
