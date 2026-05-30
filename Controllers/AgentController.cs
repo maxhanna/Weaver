@@ -1605,11 +1605,11 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     files = readFiles.Select(f => new { path = f }).ToList()
                 }, ct);
 
-                await EmitLog(emitSse, "info", "⏳ Awaiting context review (will auto-confirm in 30s)...", ct: ct);
+                await EmitLog(emitSse, "info", "⏳ Awaiting context review (will auto-confirm in 15s)...", ct: ct);
 
                 try
                 {
-                    var timeout = TimeSpan.FromSeconds(30);
+                    var timeout = TimeSpan.FromSeconds(15);
                     var confirmedFiles = await review.Answer.Task.WaitAsync(timeout, ct);
 
                     var confirmedSet = new HashSet<string>(confirmedFiles, StringComparer.OrdinalIgnoreCase);

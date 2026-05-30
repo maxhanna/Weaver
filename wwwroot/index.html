@@ -469,90 +469,115 @@
       </div>
       <div class="popup-body">
 
-        <div class="form-row">
-          <label>
-            <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
-          </label>
-        </div>
-        <div class="form-row">
-          <label>
-            <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
-          </label>
-        </div>
-        <div class="form-row">
-          <label>
-            <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
-          </label>
-        </div>
-        <div class="form-row">
-          <label>
-            <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
-          </label>
-        </div>
         <details>
+          <summary class="settings-header">Auto-queue</summary>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
+            </label>
+          </div>
+        </details>
+        <details>
+          <summary class="settings-header">Show terminal panel</summary>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
+            </label>
+          </div>
+        </details>
+        <details>
+          <summary class="settings-header">Show Ask AI panel</summary>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
+            </label>
+          </div>
+        </details>
+        <details>
+          <summary class="settings-header">Show Kanban board</summary>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
+            </label>
+          </div>
+        </details>
+        <details open>
           <summary class="settings-header">Llama.cpp / Ollama URL</summary>
           <div class="form-row">
             <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
             <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
           </div>
         </details>
-        <div class="form-row" style="display: flex; flex-direction: column;">
-          <label for="settings-build-commands" class="settings-header">Build Commands</label>
-          <textarea id="settings-build-commands" ng-model="vm.buildCommands"
-            placeholder="Enter build commands, one per line" rows="4"></textarea>
-        </div>
-        <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
-          <label class="settings-header">Email (IMAP)</label>
-          <div style="display:flex;gap:8px;margin-bottom:6px;">
-            <input ng-model="vm.emailImapServer" placeholder="imap.example.com" style="flex:1;" />
-            <input ng-model="vm.emailImapPort" type="number" placeholder="993" style="width:80px;" />
+        <details>
+          <summary class="settings-header">Build Commands</summary>
+          <details>
+            <label for="settings-build-commands" class="settings-header">Build Commands</label>
+            <textarea id="settings-build-commands" ng-model="vm.buildCommands"
+              placeholder="Enter build commands, one per line" rows="4"></textarea>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-            <input ng-model="vm.emailUsername" placeholder="Email username" style="flex:1;" />
-            <input ng-model="vm.emailPassword" type="password" placeholder="Password" style="flex:1;" />
+        </details>
+        <details>
+          <summary class="settings-header">Email (IMAP)</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+            <div style="display:flex;gap:8px;margin-bottom:6px;">
+              <input ng-model="vm.emailImapServer" placeholder="imap.example.com" style="flex:1;" />
+              <input ng-model="vm.emailImapPort" type="number" placeholder="993" style="width:80px;" />
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+              <input ng-model="vm.emailUsername" placeholder="Email username" style="flex:1;" />
+              <input ng-model="vm.emailPassword" type="password" placeholder="Password" style="flex:1;" />
+            </div>
+            <label style="font-size:12px;">
+              <input type="checkbox" ng-model="vm.emailUseSsl" /> Use SSL
+            </label>
+            <span class="settings-help">Configure IMAP credentials so the agent can read your email.</span>
           </div>
-          <label style="font-size:12px;">
-            <input type="checkbox" ng-model="vm.emailUseSsl" /> Use SSL
-          </label>
-          <span class="settings-help">Configure IMAP credentials so the agent can read your email.</span>
-        </div>
-        <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
-          <label class="settings-header">BugHosted.com (Remote Dashboard)</label>
-          <div style="display:flex;gap:8px;margin-bottom:6px;">
-            <input ng-model="vm.bughostedUrl" placeholder="https://bughosted.com" style="flex:1;" />
+        </details>
+        <details>
+          <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+            <div style="display:flex;gap:8px;margin-bottom:6px;">
+              <input ng-model="vm.bughostedUrl" placeholder="https://bughosted.com" style="flex:1;" />
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+              <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
+              <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+            </div>
+            <label style="font-size:12px;">
+              <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in sync)
+            </label>
+            <span class="settings-help">
+              When enabled, Maestro will send heartbeats and kanban data to bughosted.com.
+              You can send commands from the dashboard to execute locally.
+              <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
+              <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
+              <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
+            </span>
           </div>
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-            <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
-            <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+        </details>
+        <details>
+          <summary class="settings-header">Terminal Approval</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;">
+            <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>
+            <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
+              <option value="approveEach">Approve every command</option>
+              <option value="approveRoot">Approve command roots</option>
+              <option value="approveAll">Approve all commands</option>
+            </select>
+            <span class="settings-help">Enterprise mode blocks terminal execution until a user approves the queued
+              command.</span>
           </div>
-          <label style="font-size:12px;">
-            <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in sync)
-          </label>
-          <span class="settings-help">
-            When enabled, Maestro will send heartbeats and kanban data to bughosted.com.
-            You can send commands from the dashboard to execute locally.
-            <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
-            <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
-            <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
-          </span>
-        </div>
-        <div class="form-row" style="display:flex;flex-direction:column;">
-          <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>
-          <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
-            <option value="approveEach">Approve every command</option>
-            <option value="approveRoot">Approve command roots</option>
-            <option value="approveAll">Approve all commands</option>
-          </select>
-          <span class="settings-help">Enterprise mode blocks terminal execution until a user approves the queued
-            command.</span>
-        </div>
-        <div class="form-row" style="display:flex;flex-direction:column;"
-          ng-if="vm.terminalApprovalMode === 'approveRoot'">
-          <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
-          <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
-            placeholder="git, dotnet, rg, npm" />
-          <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
-        </div>
+        </details>
+        <details>
+          <summary class="settings-header">Approved Roots</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;"
+            ng-if="vm.terminalApprovalMode === 'approveRoot'">
+            <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
+            <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
+              placeholder="git, dotnet, rg, npm" />
+            <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
+          </div>
+        </details>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <details>
             <summary
@@ -640,6 +665,10 @@
             — auto-confirming in {{vm.contextReviewCountdown}}s
           </span>
         </p>
+        <div class="context-review-card-text" ng-if="vm.activeCardText">
+          <strong>Card Text:</strong>
+          <pre style="white-space:pre-wrap;margin:8px 0 0 0;font-size:12px;">{{vm.activeCardText}}</pre>
+        </div>
         <div class="context-review-files">
           <label class="context-review-file" ng-repeat="f in vm.pendingContextReview.files track by f.path">
             <input type="checkbox" ng-model="f.keep" />
