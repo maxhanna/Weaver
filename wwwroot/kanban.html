@@ -270,7 +270,10 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'doing','done')" class="success small" ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
+            <button ng-click="vm.moveCard(card.id,'doing','done')" 
+              class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small" 
+              title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
+              ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
             <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
