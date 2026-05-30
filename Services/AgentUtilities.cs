@@ -8,6 +8,226 @@ public static class AgentUtilities
     private static readonly HashSet<string> ExplorationStepTypes =
         new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
 
+    public static PipelineType ClassifyTask(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.CommandExecution;
+        var lower = prompt.ToLowerInvariant();
+
+        // Quick check: pure ping/health/status with no file changes
+        if (!TaskExpectsFileChanges(prompt) &&
+            Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+            return PipelineType.CommandExecution;
+
+        // Command execution: known simple intents (git, package_install, rename, etc.)
+        if (TryDetectSimpleIntent(prompt) != null)
+            return PipelineType.CommandExecution;
+
+        // Rename/move is always command-execution regardless of phrasing
+        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
+            return PipelineType.CommandExecution;
+
+        // Directory listing / exploration — needs agentic terminal control, not hallucination
+        if (Regex.IsMatch(lower, @"\b(list|what.*in|contents? of|(?:list|show|find|explore|browse)\s+files?\s+in|directory\s+(contents?|listing)|structure\s+of|tree)\b"))
+            return PipelineType.CommandExecution;
+
+        // System info / version / environment queries — needs terminal, not code edit
+        if (Regex.IsMatch(lower, @"\b(what\s+version|is\s+(\S+\s+)?(installed|running|available)|which\s+(port|process|version|branch)|disk\s+(usage|space|free)|how\s+much\s+(memory|disk|space)|free\s+(memory|disk|space)|running\s+process(es)?|environment\s+variables?|current\s+(directory|path|branch|time|date)|whoami|uptime|list\s+(process|service|container|running))\b"))
+            return PipelineType.CommandExecution;
+
+        // Network scanning / discovery
+        if (Regex.IsMatch(lower, @"\b(computers?\s+(\S+\s+)?on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts|(\S+\s+){0,2}on\s+(the\s+)?network)|connected\s+devices|what'?s?\s+(\S+\s+){0,3}on\s+((my|the)\s+)?network)\b"))
+            return PipelineType.CommandExecution;
+
+        // File operations — copy, duplicate, backup files
+        if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
+            return PipelineType.CommandExecution;
+
+        // Package/tool/software installation and management
+        if (Regex.IsMatch(lower, @"\b(install|uninstall|remove|update|upgrade|downgrade)\s+(\S+\s+){0,3}(package|tool|module|library|dependency|sdk|runtime|plugin|extension|app|application|software)s?\b"))
+            return PipelineType.CommandExecution;
+
+        // Docker / container operations
+        if (Regex.IsMatch(lower, @"\b(docker|container|compose|podman|kubernetes|kubectl|helm)\b"))
+            return PipelineType.CommandExecution;
+
+        // Process / service / server management
+        if (Regex.IsMatch(lower, @"\b(start|stop|restart|reload)\s+(service|process|daemon|server|application)\b"))
+            return PipelineType.CommandExecution;
+
+        // Read/show file content (cat/type) — just display, no edit
+        if (Regex.IsMatch(lower, @"\b(cat|type)\s+\S+"))
+            return PipelineType.CommandExecution;
+
+        // Check/verify/validate something without intending to change it
+        if (Regex.IsMatch(lower, @"\b(check\s+if|check\s+whether|verify|validate)\b") && !TaskExpectsFileChanges(prompt))
+            return PipelineType.CommandExecution;
+
+        // Create file — needs terminal + possibly web research, not code editing
+        if (Regex.IsMatch(lower, @"\bcreate\s+(a\s+)?(new\s+)?file\b"))
+            return PipelineType.CommandExecution;
+
+        // Web search or fetch — user wants info retrieved, not code edited
+        if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the))\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
+            return PipelineType.CommandExecution;
+
+        // Email — read emails, inbox, unread, etc., not code editing
+        if (Regex.IsMatch(lower, @"\b(email|inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email)\b"))
+            return PipelineType.CommandExecution;
+
+        // Default: needs the full planning pipeline
+        return PipelineType.CodeEdit;
+    }
+
+
+    /// <summary>
+    /// Detects simple, self-contained intents directly from the prompt string
+    /// without any LLM call or file discovery.
+    /// Returns a ready-to-execute AgentPlan, or null if the prompt needs full
+    /// pipeline analysis.
+    /// </summary>
+    public static AgentPlan? TryDetectSimpleIntent(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return null;
+
+        var p = prompt.Trim();
+        var lower = p.ToLowerInvariant();
+
+        // ── Rename / Move file ────────────────────────────────────────────────
+        // Matches: "rename X to Y", "rename X → Y", "move X to Y", etc.
+        // Deliberately lenient: captures any token that looks like a filename/path
+        var renameMatch = Regex.Match(p,
+            @"\b(?:rename|move)\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?\s+(?:to|→|-?>)\s+['""]?(\.?[\w./\\-]+(?:\.[\w.-]+)?)['""]?",
+            RegexOptions.IgnoreCase);
+        if (renameMatch.Success)
+        {
+            var src = renameMatch.Groups[1].Value.Replace('\\', '/').Trim('/', ' ');
+            var dst = renameMatch.Groups[2].Value.Replace('\\', '/').Trim('/', ' ');
+            // If dst is a bare name (no dir), inherit the source's directory
+            if (!dst.Contains('/') && src.Contains('/'))
+            {
+                var srcDir = src.Substring(0, src.LastIndexOf('/') + 1);
+                dst = srcDir + dst;
+            }
+            return new AgentPlan
+            {
+                Thinking = $"Direct file rename detected: {src} → {dst}",
+                Summary = $"Rename {src} to {dst}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_rename", Change = $"{src} → {dst}", Priority = 1 }
+                }
+            };
+        }
+
+        // ── Delete file ───────────────────────────────────────────────────────
+        var deleteMatch = Regex.Match(p,
+            @"\b(?:delete|remove)\s+(?:the\s+)?file\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?",
+            RegexOptions.IgnoreCase);
+        if (deleteMatch.Success)
+        {
+            var target = deleteMatch.Groups[1].Value.Replace('\\', '/');
+            return new AgentPlan
+            {
+                Thinking = $"Direct file delete detected: {target}",
+                Summary = $"Delete file {target}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_delete_file", Change = target, Priority = 1 }
+                }
+            };
+        }
+
+        // ── Git pull ──────────────────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(git\s+pull|pull\s+(all\s+)?change|pull\s+from\s+git|pull\s+latest)\b")
+            || (lower.Contains("pull") && lower.Contains("git") && !lower.Contains("request")))
+        {
+            return new AgentPlan
+            {
+                Thinking = "Direct git pull intent detected from prompt.",
+                Summary = "Pull latest changes from the remote repository and show the result.",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_git",  Change = "pull all changes",             Priority = 1 },
+                    new() { File = "_show", Change = "show what was pulled from git", Priority = 2 }
+                }
+            };
+        }
+
+        // ── Git commit ────────────────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(git\s+commit|commit\s+all|commit\s+change|commit\s+everything)\b"))
+        {
+            var msgMatch = Regex.Match(p, "\"([^\"]+)\"");
+            var msg = msgMatch.Success ? msgMatch.Groups[1].Value : $"Auto-commit {DateTime.Now:yyyy-MM-dd HH:mm}";
+            return new AgentPlan
+            {
+                Thinking = "Direct git commit intent detected.",
+                Summary = $"Commit all staged changes: {msg}",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_git", Change = $"commit all changes with message \"{msg}\"", Priority = 1 }
+                }
+            };
+        }
+
+        // ── Git push / sync ───────────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(git\s+(push|sync)|push\s+(to\s+)?(remote|origin|git)|sync\s+(with\s+)?remote)\b"))
+        {
+            return new AgentPlan
+            {
+                Thinking = "Direct git sync intent detected.",
+                Summary = "Sync with remote (pull then push).",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_git", Change = "sync with remote (pull then push)", Priority = 1 }
+                }
+            };
+        }
+
+        // ── Git revert / discard ──────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(git\s+revert|revert\s+all|discard\s+all|undo\s+all\s+change)\b"))
+        {
+            return new AgentPlan
+            {
+                Thinking = "Direct git revert intent detected.",
+                Summary = "Discard all local working-tree changes.",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_git", Change = "revert all changes", Priority = 1 }
+                }
+            };
+        }
+
+        // ── Ping / connectivity ───────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+        {
+            return new AgentPlan
+            {
+                Thinking = "Direct ping/connectivity check detected.",
+                Summary = "Test network connectivity.",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_ping", Change = p, Priority = 1 }
+                }
+            };
+        }
+
+        // ── Package install ───────────────────────────────────────────────────
+        if (Regex.IsMatch(lower, @"\b(install\s+package|npm\s+install|dotnet\s+add\s+package|pip\s+install)\b"))
+        {
+            return new AgentPlan
+            {
+                Thinking = "Direct package install intent detected.",
+                Summary = "Install the requested package.",
+                Plan = new List<PlanStep>
+                {
+                    new() { File = "_package_install", Change = p, Priority = 1 }
+                }
+            };
+        }
+
+        return null; // needs full pipeline
+    } 
+
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||
