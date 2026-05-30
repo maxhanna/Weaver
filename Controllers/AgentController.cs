@@ -263,25 +263,6 @@ public class AgentController : ControllerBase
     // ═════════════════════════════════════════════════════════════════════════
     //  FILE DISCOVERY HELPERS
     // ═════════════════════════════════════════════════════════════════════════
-
-    private static List<string> ExtractSearchKeywords(string prompt)
-    {
-        var result = new List<string>();
-        string[] priority = { "settings","terminal","popup","panel","toggle","config","visibility",
-                             "showSettingsPanel","autoQueue","delete","confirm","modal","overlay" };
-        foreach (var p in priority)
-            if (prompt.Contains(p, StringComparison.OrdinalIgnoreCase))
-                result.Add(p);
-
-        foreach (Match m in Regex.Matches(prompt, @"\b[a-zA-Z]{4,}\b"))
-        {
-            var w = m.Value;
-            if (!result.Contains(w, StringComparer.OrdinalIgnoreCase))
-                result.Add(w);
-        }
-        return result.Take(8).ToList();
-    }
-
     private List<string> FindLikelyFiles(string prompt, string projectRoot)
     {
         var matches = new List<string>();
@@ -367,128 +348,226 @@ public class AgentController : ControllerBase
         return target;
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  PHASE 1 — DISCOVER
-    //  Purely deterministic; no LLM calls.  Builds a rich context string
-    //  that later phases feed into their prompts.
-    // ═════════════════════════════════════════════════════════════════════════
-    private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
-        string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null, CancellationToken ct = default)
+    /// <summary>
+    /// Scores project files using task-type heuristics — no LLM required.
+    /// Detects intent (styling, HTML, JS, backend, config) from prompt keywords,
+    /// then assigns extension + filename scores. Returns ordered candidate list.
+    /// </summary>
+    private static List<string> ApplyTaskTypeHeuristics(string prompt, List<string> allFiles)
     {
-        // Fast path: if files are already attached, skip full discovery
-        if (attachedFiles != null && attachedFiles.Count > 0)
-            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
+        var lower = prompt.ToLowerInvariant();
 
-        await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: scanning project files…");
+        // Detect what kind of task this is (multiple can be true)
+        var isStyleTask = Regex.IsMatch(lower, @"\b(style|css|color|theme|layout|spacing|font|design|ui|ux|look|appear|brand|visual|margin|padding|border|shadow|panel|card)\b");
+        var isHtmlTask = Regex.IsMatch(lower, @"\b(html|template|page|view|markup|modal|popup|section|div)\b");
+        var isJsTask = Regex.IsMatch(lower, @"\b(javascript|script|function|event|click|toggle|show|hide|angular|react|vue|component|state|behavior)\b");
+        var isBackendTask = Regex.IsMatch(lower, @"\b(api|endpoint|controller|service|database|model|route|logic|backend|server|c#|csharp|dotnet)\b");
+        var isConfigTask = Regex.IsMatch(lower, @"\b(config|setting|option|appsettings|environment|json)\b");
 
-        var plan = new List<AgentStep>();
-        var idx = 0;
+        var meaningfulKeywords = ExtractMeaningfulKeywords(lower);
 
-        plan.Add(new AgentStep { Index = idx++, Type = "list", Path = "", Description = "Auto: list project root" });
-
-        // ── Grep keywords, but skip ones already mapped by file hints ─────
-        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot);
-        var hintedKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var hf in hintedFiles)
+        var scored = allFiles.Select(f =>
         {
-            // Infer keywords from hinted file paths (basename without extension)
-            var fileName = Path.GetFileNameWithoutExtension(hf);
-            if (!string.IsNullOrWhiteSpace(fileName))
-                hintedKeywords.Add(fileName);
-        }
+            var ext = Path.GetExtension(f).ToLowerInvariant();
+            var nameLow = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
+            var pathLow = f.ToLowerInvariant();
+            var score = 0;
 
-        foreach (var kw in ExtractSearchKeywords(prompt))
+            // ── Extension scoring by task type ──────────────────────────────
+            if (isStyleTask)
+            {
+                if (ext is ".css" or ".scss" or ".sass" or ".less") score += 120;
+                else if (ext is ".html" or ".htm") score += 60;
+                else if (ext is ".js" or ".ts") score += 20;
+            }
+            if (isHtmlTask)
+            {
+                if (ext is ".html" or ".htm") score += 120;
+                else if (ext is ".css" or ".scss") score += 50;
+                else if (ext is ".js" or ".ts") score += 30;
+            }
+            if (isJsTask)
+            {
+                if (ext is ".js" or ".ts" or ".jsx" or ".tsx") score += 120;
+                else if (ext is ".html" or ".htm") score += 40;
+            }
+            if (isBackendTask)
+            {
+                if (ext == ".cs") score += 120;
+                else if (ext == ".json") score += 30;
+            }
+            if (isConfigTask)
+            {
+                if (ext is ".json" or ".yaml" or ".yml") score += 120;
+            }
+
+            // ── Boost if the filename contains a meaningful prompt keyword ──
+            foreach (var kw in meaningfulKeywords)
+                if (nameLow.Contains(kw))
+                    score += 50;
+
+            // ── Frontend folder boost for frontend tasks ───────────────────
+            if ((isStyleTask || isHtmlTask || isJsTask) && pathLow.StartsWith("wwwroot/"))
+                score += 25;
+
+            // ── Penalize known-large / known-noisy files ───────────────────
+            // These are almost never the target of a specific edit request
+            if (nameLow.Contains("agentcontroller")) score -= 200;
+            if (nameLow == "filehints") score -= 200;
+            if (pathLow.EndsWith(".min.js")) score -= 300;
+            if (pathLow.EndsWith(".min.css")) score -= 300;
+
+            // ── Penalize non-text / generated artifacts ────────────────────
+            if (ext is ".dll" or ".exe" or ".pdb" or ".nupkg" or ".lock" or ".sum")
+                score -= 1000;
+
+            return (file: f, score);
+        })
+        .Where(x => x.score > 0)
+        .OrderByDescending(x => x.score)
+        .Take(50)
+        .Select(x => x.file)
+        .ToList();
+
+        // Fallback: if no file scored positively (e.g. novel task type), include
+        // common entry-point files so the LLM always has something to work with
+        if (scored.Count == 0)
         {
-            var kwLower = kw.ToLowerInvariant();
-
-            // If file hints already know about this keyword, read hinted files directly
-            var knownPaths = hintedFiles
-                .Where(hf => hf.Contains(kwLower, StringComparison.OrdinalIgnoreCase) ||
-                             Path.GetFileNameWithoutExtension(hf).Contains(kwLower, StringComparison.OrdinalIgnoreCase))
+            scored = allFiles
+                .Where(f =>
+                {
+                    var name = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    return name is "index" or "app" or "main" or "program" or "startup"
+                                or "styles" or "global" or "layout"
+                        && ext is ".html" or ".js" or ".ts" or ".css" or ".cs";
+                })
+                .Take(10)
                 .ToList();
-
-            if (knownPaths.Count > 0)
-            {
-                foreach (var kf in knownPaths)
-                {
-                    if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, kf, StringComparison.OrdinalIgnoreCase)))
-                        plan.Add(new AgentStep { Index = idx++, Type = "read", Path = kf, Description = $"Auto: read hinted file for '{kw}'", Prompt = prompt });
-                }
-            }
-            else
-            {
-                plan.Add(new AgentStep { Index = idx++, Type = "grep", Query = kw, Description = $"Auto: search codebase for '{kw}'" });
-            }
         }
 
-        // Likely files (skip if already added via hinted path)
-        foreach (var file in FindLikelyFiles(prompt, projectRoot))
+        return scored;
+    }
+
+
+    // ─── NEW METHOD ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Strips stopwords and generic action verbs from a prompt, returning
+    /// the domain-meaningful terms that are actually useful for file matching.
+    /// Replaces the old ExtractSearchKeywords which included words like "Make", "more",
+    /// "sensitive" that produce grep noise across every file in the codebase.
+    /// </summary>
+    private static List<string> ExtractMeaningfulKeywords(string lower)
+    {
+        var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            if (!plan.Any(s => s.Type == "read" && string.Equals(s.Path, file, StringComparison.OrdinalIgnoreCase)))
-                plan.Add(new AgentStep { Index = idx++, Type = "read", Path = file, Description = $"Auto: read candidate file {file}", Prompt = prompt });
+            // Articles, prepositions, conjunctions
+            "the","a","an","and","or","but","in","on","at","to","for","of","with","from",
+            "into","onto","upon","after","before","about","above","below","between",
+            // Pronouns
+            "this","that","it","its","their","our","my","your","his","her","we","they","i",
+            // Auxiliary verbs
+            "is","are","was","were","be","been","being","have","has","had",
+            "do","does","did","will","would","should","could","may","might","shall",
+            // Generic action verbs (too broad — match everything)
+            "make","making","makes","made",
+            "fix","fixing","fixes","fixed",
+            "add","adding","adds","added",
+            "change","changing","changes","changed",
+            "update","updating","updates","updated",
+            "edit","editing","edits","edited",
+            "modify","modifying","modifies","modified",
+            "create","creating","creates","created",
+            "delete","deleting","deletes","deleted",
+            "remove","removing","removes","removed",
+            "set","get","put","use","using","used",
+            "show","hide","display",
+            // Vague adjectives / adverbs
+            "more","less","some","any","all","no","not","also","very","just",
+            "nice","nicely","good","better","best","new","old","right","left",
+            "please","sure","now","then","when","where","how","why","what","which","who",
+            "out","up","down","so","if","else","really","quite","bit","little","lot",
+            // Common filler
+            "need","want","should","must","can","let","help","try","look","see"
+        };
+
+        return Regex.Matches(lower, @"\b[a-z]{3,}\b")
+            .Select(m => m.Value)
+            .Where(w => !stopwords.Contains(w))
+            .Distinct()
+            .Take(10)
+            .ToList();
+    }
+
+
+    // ─── NEW METHOD ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Makes a single LLM call to select the most relevant files from a
+    /// heuristic-filtered candidate list. Falls back to top candidates if the
+    /// call fails or returns no parseable files.
+    ///
+    /// This replaces N sequential ScoreSourceMaterial calls (one per grep-matched file)
+    /// with a single call that sees all candidates at once.
+    /// </summary>
+    private async Task<List<string>> SelectRelevantFilesWithLlm(
+        string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
+    {
+        if (candidates.Count == 0) return new List<string>();
+
+        var fileList = string.Join("\n", candidates);
+
+        const string system =
+            "You are a file relevance selector for a code editor agent. " +
+            "Given a task and a list of project files, pick the 3-7 files most likely to need reading or editing. " +
+            "Output ONLY valid JSON with no markdown fences or extra text: {\"files\": [\"path1\", \"path2\"]}";
+
+        var user = $"Task: {prompt}\n\nProject files:\n{fileList}\n\nSelect 3–7 files maximum.";
+
+        var (raw, _, err) = await CallLlmRaw(system, user, ct,
+            requestTimeout: TimeSpan.FromSeconds(25));
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn",
+                $"File selection LLM failed ({err ?? "empty"}) — using top heuristic candidates", ct: ct);
+            return candidates.Take(6).ToList();
         }
 
-        // ── Execute all discovery steps in parallel ──────────────────────
-        var steps = await ExecuteDiscoveryStepsConcurrent(plan, projectRoot, 0, emitSse);
-
-        // Teach the file-hints manager from grep results
-        foreach (var item in steps)
+        try
         {
-            if (item is not Dictionary<string, object?> r) continue;
-            if ((r.TryGetValue("type", out var t) ? t?.ToString() : "") != "grep") continue;
-            var query = r.TryGetValue("query", out var q) ? q?.ToString() :
-                         r.TryGetValue("pattern", out var pt) ? pt?.ToString() : "";
-            var output = r.TryGetValue("output", out var o) ? o?.ToString() : "";
-            if (!string.IsNullOrWhiteSpace(query) && !string.IsNullOrWhiteSpace(output))
-                _fileHints.LearnFromGrepOutput(query, output, projectRoot);
-        }
-
-        // ── Build discovery text with token budget ───────────────────────
-        var sb = new StringBuilder();
-        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
-        sb.AppendLine();
-        foreach (var item in steps)
-        {
-            if (item is not Dictionary<string, object?> r) continue;
-            var type = r.TryGetValue("type", out var t) ? t?.ToString() : ""; 
-            if (r.TryGetValue("output", out var output) && output != null)
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
             {
-                string? fileOutput = output.ToString();
-                string? path = r.GetValueOrDefault("path")?.ToString();
-                string? description = r.GetValueOrDefault("description")?.ToString();
-                if (string.IsNullOrEmpty(fileOutput))
-                {
-                        await EmitLog(emitSse, "info", "No output from step: " + description, ct: ct); 
-                        continue;
-                }
-                if (string.IsNullOrEmpty(path))
-                {
-                    await EmitLog(emitSse, "info", "No path from step: " + description, ct: ct);
-                    continue;
-                }
-                var isRelevant = await VerifySourceMaterial(prompt, fileOutput, emitSse, ct);
-                if (!isRelevant || string.IsNullOrEmpty(path))
-                {
-                    await EmitLog(emitSse, "info", "File : " + r.GetValueOrDefault("path") + " deemed irrelevant to the task, skipping.", new { Path = path, Material = fileOutput }, ct: ct); 
-                    continue;
-                } 
-                else
-                {
-                    await EmitLog(emitSse, "info", "File : " + r.GetValueOrDefault("path") + " deemed relevant to the task.", new { Path = path, Material = fileOutput }, ct: ct); 
-                }
-                sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
-                sb.AppendLine(output.ToString());
-                sb.AppendLine();
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
             }
-            if (r.TryGetValue("suggestions", out var sug) && sug is IEnumerable<object> list)
-                sb.AppendLine("Suggestions: " + string.Join(", ", list));
-        }
- 
-        var discoveryText = sb.ToString(); 
+            var start = cleaned.IndexOf('{');
+            var end = cleaned.LastIndexOf('}');
+            if (start >= 0 && end > start)
+                cleaned = cleaned.Substring(start, end - start + 1);
 
-        await EmitLog(emitSse, "info", $"Phase 1 complete — {steps.Count} discovery steps");
-        return (discoveryText, steps);
+            using var doc = JsonDocument.Parse(cleaned);
+            if (doc.RootElement.TryGetProperty("files", out var filesEl) &&
+                filesEl.ValueKind == JsonValueKind.Array)
+            {
+                var selected = filesEl.EnumerateArray()
+                    .Select(e => e.GetString()?.Replace('\\', '/') ?? "")
+                    .Where(f => !string.IsNullOrWhiteSpace(f))
+                    // Only accept files actually in the candidate list to prevent hallucination
+                    .Where(f => candidates.Any(c =>
+                        string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
+                    .Take(7)
+                    .ToList();
+
+                if (selected.Count > 0)
+                    return selected;
+            }
+        }
+        catch { /* fall through to fallback */ }
+
+        await EmitLog(emitSse, "warn",
+            "File selection response unparseable — using top heuristic candidates", ct: ct);
+        return candidates.Take(6).ToList();
     }
 
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
@@ -551,7 +630,6 @@ public class AgentController : ControllerBase
             try
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, ct);
-                if (content.Length > 100_000) content = content[..100_000];
 
                 // C# using statements
                 foreach (Match m in Regex.Matches(content, @"^using\s+([\w.]+)", RegexOptions.Multiline))
@@ -934,6 +1012,107 @@ FILE EDIT RULES (only when NOT using a special marker):
         }
 
         return parsedPlan;
+    }
+
+    private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
+    string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null,
+    CancellationToken ct = default)
+    {
+        if (attachedFiles != null && attachedFiles.Count > 0)
+            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
+
+        await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: enumerating project files…", ct: ct);
+        var allSteps = new List<object>();
+
+        // List root
+        var listStep = new AgentStep { Index = 0, Type = "list", Path = "", Description = "Auto: list project root" };
+        allSteps.AddRange(await ExecuteDiscoveryStepsConcurrent(new List<AgentStep> { listStep }, projectRoot, 0, emitSse));
+
+        if (!Directory.Exists(projectRoot)) return ("", allSteps);
+
+        // Enumerate all files (skip noise dirs)
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea" };
+
+        var allFiles = Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+            .Where(rel => !skipDirs.Any(d =>
+                rel.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase) ||
+                rel.Contains("/" + d + "/", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (allFiles.Count == 0) return ("", allSteps);
+
+        // Hinted files (pre-learned, highest trust)
+        var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot)
+            .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
+            .Take(4).ToList();
+
+        // Score by task type (no LLM)
+        var heuristicCandidates = ApplyTaskTypeHeuristics(prompt, allFiles);
+
+        var candidatePool = hintedFiles
+            .Concat(heuristicCandidates)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(60).ToList();
+
+        // One LLM call to pick which files to read
+        List<string> toRead;
+        if (candidatePool.Count <= 6)
+        {
+            toRead = candidatePool;
+            await EmitLog(emitSse, "info", $"Phase 1 — {candidatePool.Count} candidate(s), reading all", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates (1 LLM call)…", candidatePool, ct: ct);
+            var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
+            toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
+        }
+
+        // Verify files exist
+        toRead = toRead.Where(f =>
+        {
+            var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
+            return System.IO.File.Exists(full) && IsPathUnderRoot(full, projectRoot);
+        }).ToList();
+
+        await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
+
+        // Read in parallel
+        if (toRead.Count > 0)
+        {
+            var readPlan = toRead.Select((f, i) => new AgentStep
+            {
+                Index = i,
+                Type = "read",
+                Path = f,
+                Description = $"Auto: read {f}",
+                Prompt = prompt
+            }).ToList();
+
+            allSteps.AddRange(await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, allSteps.Count, emitSse));
+
+            foreach (var f in toRead)
+                _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
+        }
+
+        // Build discovery text
+        var sb = new StringBuilder();
+        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
+        sb.AppendLine();
+        foreach (var item in allSteps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (!r.TryGetValue("output", out var output) || output == null || string.IsNullOrEmpty(output.ToString())) continue;
+            sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
+            sb.AppendLine(output.ToString());
+            sb.AppendLine();
+        }
+
+        await EmitLog(emitSse, "info", $"Phase 1 complete — {allSteps.Count} steps, {toRead.Count} file(s) read", ct: ct);
+        return (sb.ToString(), allSteps);
     }
     /// <summary>
     /// Parses the LLM planning response into an AgentPlan.
@@ -1459,6 +1638,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - To search the web: {\"web_search\": \"query\"}");
         conversation.AppendLine("  - To fetch a URL: {\"web_fetch\": \"url\"}");
         conversation.AppendLine("  - To read emails: {\"email\": \"inbox\"} or {\"email\": \"validate\"}");
+        conversation.AppendLine("  - To show a result to the user: {\"message\": \"your answer here\"}");
         conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
         conversation.AppendLine($"  - Desktop path: {desktopPath}");
         conversation.AppendLine($"  - WRITE FILE: {fileCmd} -Path \"<path>\" -Value \"<content>\"");
@@ -1476,6 +1656,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         const int maxIterations = 15;
         var stepIndex = 0;
         string? summary = null;
+        var webScrapeFailureCount = 0;
+        var usedSearchQueries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var duplicateBlockCount = 0;
 
         for (var i = 0; i < maxIterations; i++)
         {
@@ -1531,6 +1714,15 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         conversation.AppendLine($"❌ REJECTED: '{cmd}' — mkdir creates DIRECTORIES, not files. Use: New-Item -ItemType File -Path \"<path>\" -Force");
                         conversation.AppendLine();
                         await EmitLog(emitSse, "warn", $"Rejected mkdir for file-like path: {cmd}", ct: ct);
+                        continue;
+                    }
+
+                    // Reject cd / Set-Location — terminal stays at project root
+                    if (cmdLower == "cd" || cmdLower.StartsWith("cd ") || cmdLower.Contains("set-location") || cmdLower.StartsWith("sl ") || cmdLower == "sl")
+                    {
+                        conversation.AppendLine($"❌ REJECTED: '{cmd}' — cd/Set-Location is not supported. The terminal stays in the project root. Use absolute paths in file commands.");
+                        conversation.AppendLine();
+                        await EmitLog(emitSse, "warn", $"Rejected cd command: {cmd}", ct: ct);
                         continue;
                     }
 
@@ -1600,6 +1792,22 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     conversation.AppendLine(outputLabel);
                     conversation.AppendLine(freshOutput);
                     conversation.AppendLine();
+
+                    // Track repeated web scraping failures and intervene
+                    if (isError && (cmdLower.Contains("invoke-webrequest") || cmdLower.Contains("curl ") ||
+                        cmdLower.Contains("wget ") || cmdLower.Contains("select-string") ||
+                        cmdLower.Contains("select -string") || cmdLower.Contains("regex")))
+                    {
+                        webScrapeFailureCount++;
+                        if (webScrapeFailureCount >= 3)
+                        {
+                            var msg = "⚠ INTERVENTION: Web scraping has failed " + webScrapeFailureCount + " times. STOP trying to scrape websites. If web_search results exist, extract the data from them and write directly to the target file. Do NOT retry scraping.";
+                            conversation.AppendLine(msg);
+                            conversation.AppendLine();
+                            await EmitLog(emitSse, "warn", msg, ct: ct);
+                        }
+                    }
+
                     continue;
                 }
 
@@ -1609,6 +1817,30 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     var query = searchEl.GetString() ?? "";
                     if (string.IsNullOrWhiteSpace(query))
                     { conversation.AppendLine("Empty web_search query — try again."); continue; }
+
+                    // If the exact same query was already searched, skip and force LLM to use existing results
+                    if (!usedSearchQueries.Add(query))
+                    {
+                        duplicateBlockCount++;
+                        if (duplicateBlockCount >= 2)
+                        {
+                            summary = $"I searched for information but couldn't find specific results. Try refining your search or checking retailer websites directly.";
+                            await EmitLog(emitSse, "warn", $"Duplicate web_search blocked twice — forcing done: {summary}", ct: ct);
+                            break;
+                        }
+                        var dupMsg = $"⚠ You already searched for \"{query}\" — the results are above. Read them and answer the user using {{\"message\": \"...\"}}. Do NOT repeat the same web_search.";
+                        conversation.AppendLine(dupMsg);
+                        conversation.AppendLine();
+                        await EmitLog(emitSse, "warn", $"Duplicate web_search[{i + 1}]: '{query}' — skipping", ct: ct);
+                        continue;
+                    }
+
+                    // After 3+ different searches with no answer, suggest trying web_fetch on specific URLs
+                    if (usedSearchQueries.Count >= 3)
+                    {
+                        conversation.AppendLine("ℹ HINT: If searches aren't giving specific results, try web_fetch with a retailer URL to look up inventory directly.");
+                        conversation.AppendLine();
+                    }
 
                     await EmitLog(emitSse, "step", $"▶ web_search[{i + 1}]: {query}", ct: ct);
                     var (searchOutput, searchErr) = await WebSearchAsync(query, ct);
@@ -1627,6 +1859,17 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     conversation.AppendLine("Results:");
                     conversation.AppendLine(searchOutput);
                     conversation.AppendLine();
+
+                    // Auto-extract phone numbers from search results
+                    var phones = ExtractPhoneNumbers(searchOutput);
+                    if (phones.Count > 0)
+                    {
+                        conversation.AppendLine("ℹ PHONE NUMBERS FOUND in search results — write these to the target file:");
+                        foreach (var p in phones)
+                            conversation.AppendLine("  " + p);
+                        conversation.AppendLine();
+                    }
+
                     continue;
                 }
 
@@ -1790,7 +2033,20 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             }
                             else
                             {
-                                conversation.AppendLine($"⚠ Error: Email validation failed — {status} This is NOT a transient error; retrying will not fix it. Do NOT retry — tell the user the email issue, then call {{\"done\": true}}.");
+                                var statusLower = status.ToLowerInvariant();
+                                if (statusLower.Contains("authentication") || statusLower.Contains("invalid credentials") || statusLower.Contains("app"))
+                                {
+                                    var emailCfg = await _configFile.LoadConfigAsync();
+                                    var server = (emailCfg.emailImapServer ?? "").ToLowerInvariant();
+                                    if (server.Contains("gmail") || server.Contains("google"))
+                                        conversation.AppendLine("⚠ Error: Gmail rejected the login. Google requires an App Password (not your regular password) when 2-factor authentication is enabled. Generate one at https://myaccount.google.com/apppasswords and save it as emailPassword in Settings. Then call {\"done\": true}.");
+                                    else if (server.Contains("outlook") || server.Contains("office") || server.Contains("live") || server.Contains("hotmail") || server.Contains("msn"))
+                                        conversation.AppendLine("⚠ Error: Outlook/Hotmail rejected the login. Microsoft requires an App Password (not your regular password) when 2-factor authentication is enabled. Generate one at https://account.live.com/password/apppasswords and save it as emailPassword in Settings. Then call {\"done\": true}.");
+                                    else
+                                        conversation.AppendLine("⚠ Error: The email server rejected the login. Check your username and password. Some providers require an App Password when 2-factor authentication is enabled. Then call {\"done\": true}.");
+                                }
+                                else
+                                    conversation.AppendLine($"⚠ Error: Email validation failed — {status} This is NOT a transient error; retrying will not fix it. Do NOT retry — tell the user the email issue, then call {{\"done\": true}}.");
                             }
                             conversation.AppendLine();
                             continue;
@@ -1841,8 +2097,20 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     catch (Exception ex)
                     {
                         var errMsg = $"⚠ Error: Email failed — {ex.Message} This is NOT a transient error; retrying will not fix it. Do NOT retry — tell the user the email issue, then call {{\"done\": true}}.";
+                        var exLower = ex.Message.ToLowerInvariant();
                         if (ex.Message.Contains("not configured", StringComparison.OrdinalIgnoreCase))
                             errMsg = "⚠ Error: Email is NOT configured. The user must set emailImapServer, emailUsername, and emailPassword in Settings or maestroconfig.json. Do NOT retry — tell the user to configure email first, then call {\"done\": true}.";
+                        else if (exLower.Contains("authentication") || exLower.Contains("invalid credentials") || exLower.Contains("app") || exLower.Contains("password"))
+                        {
+                            var emailCfg = await _configFile.LoadConfigAsync();
+                            var server = (emailCfg.emailImapServer ?? "").ToLowerInvariant();
+                            if (server.Contains("gmail") || server.Contains("google"))
+                                errMsg = "⚠ Error: Gmail rejected the login. Google requires an App Password (not your regular password) when 2-factor authentication is enabled. Generate one at https://myaccount.google.com/apppasswords and save it as emailPassword in Settings.";
+                            else if (server.Contains("outlook") || server.Contains("office") || server.Contains("live") || server.Contains("hotmail") || server.Contains("msn"))
+                                errMsg = "⚠ Error: Outlook/Hotmail rejected the login. Microsoft requires an App Password (not your regular password) when 2-factor authentication is enabled. Generate one at https://account.live.com/password/apppasswords and save it as emailPassword in Settings. If your account uses modern auth, enable 'Allow less secure apps' or use SMTP submission.";
+                            else
+                                errMsg = "⚠ Error: The email server rejected the login. Check that your username and password are correct. Some providers require an App Password (not your regular password) when 2-factor authentication is enabled.";
+                        }
                         var errResult = new Dictionary<string, object?>
                         {
                             ["index"] = stepIndex++, ["type"] = "email",
@@ -1881,6 +2149,51 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     conversation.AppendLine($"Web fetch [{i + 1}]: {url}");
                     conversation.AppendLine("Content:");
                     conversation.AppendLine(fetchOutput);
+                    conversation.AppendLine();
+
+                    // Auto-extract phone numbers from fetched content
+                    var fetchPhones = ExtractPhoneNumbers(fetchOutput);
+                    if (fetchPhones.Count > 0)
+                    {
+                        conversation.AppendLine("ℹ PHONE NUMBERS FOUND in fetched content:");
+                        foreach (var p in fetchPhones)
+                            conversation.AppendLine("  " + p);
+                        conversation.AppendLine();
+                    }
+
+                    // Detect empty or unhelpful fetch results and suggest web_search
+                    var fetchLower = fetchOutput.ToLowerInvariant();
+                    bool fetchEmpty = string.IsNullOrWhiteSpace(fetchOutput) ||
+                        fetchLower.Contains("no results") ||
+                        fetchLower.Contains("(no results") ||
+                        fetchLower.Contains("could not reach") ||
+                        fetchLower.Contains("error");
+                    if (!string.IsNullOrWhiteSpace(fetchErr) || fetchEmpty)
+                    {
+                        conversation.AppendLine("ℹ HINT: This URL returned no useful data. Try web_search with a specific query instead of scraping raw websites.");
+                        conversation.AppendLine();
+                    }
+
+                    continue;
+                }
+
+                // Message / result — display text to the user
+                if (root.TryGetProperty("message", out var msgEl) || root.TryGetProperty("result", out msgEl))
+                {
+                    var msgText = msgEl.GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(msgText))
+                    { conversation.AppendLine("Empty message — try again."); continue; }
+
+                    var msgResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex++,
+                        ["type"] = "message",
+                        ["output"] = msgText
+                    };
+                    steps.Add(msgResult);
+                    if (emitSse) await SendSse(Response, "step", msgResult, ct);
+
+                    conversation.AppendLine($"Message: {msgText}");
                     conversation.AppendLine();
                     continue;
                 }
@@ -4308,25 +4621,7 @@ Example:
         }
         return results;
     }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  TASK COMPLETION CHECK
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private static bool TaskRequirementsMet(
-        string prompt, List<string> targetPaths, string projectRoot, List<object> steps)
-    {
-        if (HasSuccessfulEdits(steps)) return true;
-        foreach (var rel in targetPaths)
-        {
-            var full = Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
-            if (!System.IO.File.Exists(full)) continue;
-            var content = System.IO.File.ReadAllText(full);
-            if (!IsTaskAlreadySatisfied(prompt, rel, content)) return false;
-        }
-        return targetPaths.Count > 0;
-    }
-
+ 
     /// <summary>
     /// Reads back edited files and asks the LLM whether the task is truly complete.
     /// This lets the agent review its work and either conclude or loop back for more edits.
@@ -4729,38 +5024,33 @@ If unsure, use CodeEdit.";
     }
 
 
-    private async Task<bool> VerifySourceMaterial(string prompt, string material, bool emitSse, CancellationToken ct)
+    private async Task<int> ScoreSourceMaterial(string prompt, string material, bool emitSse, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) return false;
-        var systemPrompt = @"Verify the source material is relevant to the user request. 
-        We are editing code, verify if the material could possibly contain any relevant information to edit the code required. 
-        We need to assess if any of the information in this file could be relevant to the user's request. 
-        Respond with JSON only: {""relevance"": ""true""} or {""relevance"": ""false""}
-        If unsure, use {""relevance"": ""false""}.
-        ## User Request:" + prompt + @"
-        ## Source Material:
-        ```" + material + @"```
-        ";
+        if (string.IsNullOrWhiteSpace(prompt)) return 0;
+        var systemPrompt = $@"Rate the relevance of the source material to the user request from 0-100.
+We are editing code. Rate how likely the material contains information relevant to the user's request.
+Respond with JSON only: {{""score"": <0-100>}}
+If unsure, score low.
+## User Request: {prompt}
+## Source Material:
+```{material}```
+";
 
         var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: _infiniteTimeout);
         if (string.IsNullOrWhiteSpace(raw))
         {
-            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt.", new { prompt, material, raw, err }, ct: ct);
-            return true;
+            await EmitLog(emitSse, "warn", "LLM failed to score material.", new { prompt, material, raw, err }, ct: ct);
+            return 0;
         }
 
         try
         {
             using var doc = JsonDocument.Parse(raw);
-            var relevanceStr = doc.RootElement.TryGetProperty("relevance", out var r) ? r.GetString() : null;
-            return relevanceStr switch
-            {
-                "true" => true,
-                "false" => false,
-                _ => true
-            };
+            if (doc.RootElement.TryGetProperty("score", out var r))
+                return Math.Clamp(r.GetInt32(), 0, 100);
+            return 0;
         }
-        catch { return true; }
+        catch { return 0; }
     }
     private static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
@@ -5847,6 +6137,35 @@ Analyze the build output. Is the environment healthy? What should we do next?";
             return (pairs[0].OldString, pairs[0].NewString, null);
 
         return (null, null, "Could not parse oldString/newString from code gen response");
+    }
+
+    /// <summary>
+    /// Extracts unique phone numbers from text using multiple common formats.
+    /// Matches North American (XXX-XXX-XXXX, (XXX) XXX-XXXX, XXX.XXX.XXXX, XXXXXXXXXX)
+    /// and international formats including leading +.
+    /// </summary>
+    private static List<string> ExtractPhoneNumbers(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
+
+        var phones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var patterns = new[]
+        {
+            @"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+            @"\+\d{1,3}[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        };
+        foreach (var pattern in patterns)
+        {
+            var matches = Regex.Matches(text, pattern);
+            foreach (Match m in matches)
+            {
+                var normalized = Regex.Replace(m.Value, @"[^\d+]", "");
+                if (normalized.Length >= 10) phones.Add(normalized);
+            }
+        }
+        var result = phones.ToList();
+        result.Sort();
+        return result;
     }
 
 }

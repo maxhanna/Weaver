@@ -129,8 +129,15 @@
 
           <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
             <details>
-              <summary>📋 Log ({{vm.agentActivityLogLength}})</summary>
-              <div class="log-entries">
+              <summary>
+                <span>📋 Log ({{vm.agentActivityLogLength}})</span>
+                <span class="log-font-controls">
+                  <button class="log-font-btn" ng-click="vm.decreaseLogFont(); $event.stopPropagation()" title="Decrease font size">−</button>
+                  <span class="log-font-size-label">{{vm.logFontSize}}px</span>
+                  <button class="log-font-btn" ng-click="vm.increaseLogFont(); $event.stopPropagation()" title="Increase font size">+</button>
+                </span>
+              </summary>
+              <div class="log-entries" ng-style="{'font-size': vm.logFontSize + 'px'}">
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
@@ -484,7 +491,7 @@
         </div>
         <div class="form-row">
           <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
-          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" />
+          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
         </div>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <label for="settings-build-commands" class="settings-header">Build Commands</label>

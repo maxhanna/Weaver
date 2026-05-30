@@ -43,18 +43,32 @@ public class EmailService
             ExistingServer = cfg.emailImapServer
         };
 
-        // Auto-infer Gmail IMAP settings from username
+        // Auto-infer IMAP settings from username
         if (!string.IsNullOrWhiteSpace(cfg.emailUsername))
         {
             var username = cfg.emailUsername.Trim().ToLowerInvariant();
             if (username.EndsWith("@gmail.com") || username.EndsWith("@googlemail.com"))
             {
-                if (string.IsNullOrWhiteSpace(cfg.emailImapServer))
+                if (cfg.emailImapServer == null || !cfg.emailImapServer.Contains("gmail.com", StringComparison.OrdinalIgnoreCase))
                 {
                     status.AutoServer = "imap.gmail.com";
                     status.AutoPort = 993;
                     status.AutoSsl = true;
                     cfg.emailImapServer = "imap.gmail.com";
+                    cfg.emailImapPort = 993;
+                    cfg.emailUseSsl = true;
+                    await _configFile.WriteConfigAsync(cfg);
+                }
+            }
+            else if (username.EndsWith("@outlook.com") || username.EndsWith("@hotmail.com") ||
+                     username.EndsWith("@live.com") || username.EndsWith("@msn.com"))
+            {
+                if (cfg.emailImapServer == null || !cfg.emailImapServer.Contains("office365.com", StringComparison.OrdinalIgnoreCase))
+                {
+                    status.AutoServer = "outlook.office365.com";
+                    status.AutoPort = 993;
+                    status.AutoSsl = true;
+                    cfg.emailImapServer = "outlook.office365.com";
                     cfg.emailImapPort = 993;
                     cfg.emailUseSsl = true;
                     await _configFile.WriteConfigAsync(cfg);

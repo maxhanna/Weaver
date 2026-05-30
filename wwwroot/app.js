@@ -71,6 +71,7 @@
     vm.streamingFilesEdited = [];
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
+    vm.logFontSize = 10;
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
@@ -115,6 +116,13 @@
           logContainer.scrollTop = logContainer.scrollHeight;
         }
       }, 10, false);
+    };
+
+    vm.increaseLogFont = function () {
+      vm.logFontSize = Math.min(vm.logFontSize + 2, 24);
+    };
+    vm.decreaseLogFont = function () {
+      vm.logFontSize = Math.max(vm.logFontSize - 2, 6);
     };
 
     // Auto-scroll agent log when new content is added.
@@ -219,41 +227,34 @@
 
     vm.saveSettings = function () {
       saveSettings();
-      // Check if default project has changed and save using the same logic as closeEditProjectsPanel
-      if (vm.settingsDefaultProject !== vm.defaultProject) {
-        $http.get('/api/config').then(function (resp) {
-          var cfg = resp.data || { projects: vm.projects };
-          cfg.projects = cfg.projects || vm.projects;
-          cfg.showTerminal = vm.showTerminal !== false;
-          cfg.showAI = vm.showAI !== false;
-          cfg.showKanban = vm.showKanban !== false;
-          cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
-          cfg.buildCommands = vm.buildCommands;
-          cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
-          cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
-            return r.trim().toLowerCase();
-          }).filter(Boolean);
-          cfg.fileHints = '';
-          cfg.emailImapServer = vm.emailImapServer || '';
-          cfg.emailImapPort = vm.emailImapPort || 993;
-          cfg.emailUseSsl = vm.emailUseSsl !== false;
-          cfg.emailUsername = vm.emailUsername || '';
-          cfg.emailPassword = vm.emailPassword || '';
-          return $http.post('/api/config/save', cfg);
-        }).then(function () {
-          vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
-          if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
-          vm.loadConfig(vm.defaultProject);
-          vm.closeSettingsPanel();
-        }, function (err) {
-          $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
-        });
-      } else {
-        // No change in default project, proceed as before
+      $http.get('/api/config').then(function (resp) {
+        var cfg = resp.data || { projects: vm.projects };
+        cfg.projects = cfg.projects || vm.projects;
+        cfg.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+        cfg.showTerminal = vm.showTerminal !== false;
+        cfg.showAI = vm.showAI !== false;
+        cfg.showKanban = vm.showKanban !== false;
+        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+        cfg.buildCommands = vm.buildCommands;
+        cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
+        cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+          return r.trim().toLowerCase();
+        }).filter(Boolean);
+        cfg.fileHints = '';
+        cfg.emailImapServer = vm.emailImapServer || '';
+        cfg.emailImapPort = vm.emailImapPort || 993;
+        cfg.emailUseSsl = vm.emailUseSsl !== false;
+        cfg.emailUsername = vm.emailUsername || '';
+        cfg.emailPassword = vm.emailPassword || '';
+        return $http.post('/api/config/save', cfg);
+      }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
-        vm.loadConfig();
+        if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
+        vm.loadConfig(vm.defaultProject);
         vm.closeSettingsPanel();
-      }
+      }, function (err) {
+        $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
+      });
     };
 
     // === Project config ===
@@ -306,55 +307,47 @@
       console.log(vm.selectedProject); 
       vm.loadConfig(vm.selectedProject);  
       vm.archiveCardCount = vm.state.archived.filter(x => x.filePath === vm.selectedProject).length; 
-      KanbanMixin.init(vm, $scope);  
     };
 
     vm.openEditProjectsPanel = function () {
       vm.newProjectName = '';
       vm.newProjectPath = '';
       vm.newProjectDescription = '';
+      vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.projects.forEach(function (p) { p._origPath = p.Path; });
       vm.showEditProjectsPanel = true;
     };
 
     vm.closeEditProjectsPanel = function () {
-      // Check if default project has changed
-      if (vm.settingsDefaultProject !== vm.defaultProject) {
-        $http.get('/api/config').then(function (resp) {
-          var cfg = resp.data || { projects: vm.projects };
-          cfg.projects = cfg.projects || vm.projects;
-          cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
-          cfg.showTerminal = vm.showTerminal !== false;
-          cfg.showAI = vm.showAI !== false;
-          cfg.showKanban = vm.showKanban !== false;
-          cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080"; 
-          cfg.buildCommands = vm.buildCommands;
-          cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
-          cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
-            return r.trim().toLowerCase();
-          }).filter(Boolean);
-          cfg.fileHints = '';
-          cfg.emailImapServer = vm.emailImapServer || '';
-          cfg.emailImapPort = vm.emailImapPort || 993;
-          cfg.emailUseSsl = vm.emailUseSsl !== false;
-          cfg.emailUsername = vm.emailUsername || '';
-          cfg.emailPassword = vm.emailPassword || '';
-          return $http.post('/api/config/save', cfg);
-        }).then(function () {
-          vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
-          if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
-          vm.loadConfig();
-          vm.showEditProjectsPanel = false;
-        }, function (err) {
-          $window.alert('Failed to save default project: ' + (err.data || err.statusText || err));
-          vm.showEditProjectsPanel = false;
-        });
-      } else {
-        // No change, proceed as before
+      $http.get('/api/config').then(function (resp) {
+        var cfg = resp.data || { projects: vm.projects };
+        cfg.projects = cfg.projects || vm.projects;
+        cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
+        cfg.showTerminal = vm.showTerminal !== false;
+        cfg.showAI = vm.showAI !== false;
+        cfg.showKanban = vm.showKanban !== false;
+        cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+        cfg.buildCommands = vm.buildCommands;
+        cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
+        cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+          return r.trim().toLowerCase();
+        }).filter(Boolean);
+        cfg.fileHints = '';
+        cfg.emailImapServer = vm.emailImapServer || '';
+        cfg.emailImapPort = vm.emailImapPort || 993;
+        cfg.emailUseSsl = vm.emailUseSsl !== false;
+        cfg.emailUsername = vm.emailUsername || '';
+        cfg.emailPassword = vm.emailPassword || '';
+        return $http.post('/api/config/save', cfg);
+      }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
+        if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
         vm.loadConfig();
         vm.showEditProjectsPanel = false;
-      }
+      }, function (err) {
+        $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
+        vm.showEditProjectsPanel = false;
+      });
     };
 
     vm.addProjectFromPanel = function () {
@@ -767,7 +760,7 @@
           vm.streamingActive = false;
           resumeTerminalPolling();
           vm.agentResult = { error: 'Server error: ' + response.status };
-          try { $scope.$digest(); } catch {}
+          $scope.$applyAsync();
           return;
         }
         var reader = response.body.getReader();
@@ -926,14 +919,14 @@
                 }
               }
             }
-            try { $scope.$digest(); } catch (e) { /* digest already in progress or infdig — skip */ }
+            $scope.$applyAsync();
             readNext();
-          }).catch(function (readErr) {
+            }).catch(function (readErr) {
             if (readErr && readErr.name === 'AbortError') return;
             vm.streamingActive = false;
             resumeTerminalPolling();
             vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
-            try { $scope.$digest(); } catch (e) { }
+            $scope.$applyAsync();
           });
         }
         readNext();
@@ -947,7 +940,7 @@
         } else {
           vm.agentResult = { error: 'Connection failed: ' + err.message };
         }
-        try { $scope.$digest(); } catch (e) { }
+        $scope.$applyAsync();
       });
     };
 
@@ -1070,14 +1063,22 @@
       });
     };
     vm.refreshTerminal = function () {
-      $http.get('/api/terminal/output').then(function (resp) { vm.terminalOutput = resp.data.output || ''; });
+      fetch('/api/terminal/output').then(function (r) { return r.json(); }).then(function (data) {
+        var newOutput = (data && data.output) || '';
+        if (newOutput !== vm.terminalOutput) {
+          vm.terminalOutput = newOutput;
+          if (!$scope.$$phase) $scope.$digest();
+        }
+      });
     };
 
     vm.refreshTerminalApprovals = function () {
-      $http.get('/api/terminal/approvals/pending').then(function (resp) {
-        vm.pendingTerminalApprovals = (resp.data && resp.data.approvals) || [];
+      fetch('/api/terminal/approvals/pending').then(function (r) { return r.json(); }).then(function (data) {
+        vm.pendingTerminalApprovals = (data && data.approvals) || [];
+        if (!$scope.$$phase) $scope.$digest();
       }, function () {
         vm.pendingTerminalApprovals = [];
+        if (!$scope.$$phase) $scope.$digest();
       });
     };
 
@@ -1171,15 +1172,15 @@
     // (Angular sees a watcher — the terminal output string length / scroll geometry —
     // still dirty after 10 passes and throws).  Pausing the interval during streaming
     // and resuming on done/error keeps exactly one digest source active at a time.
-    var _terminalInterval = $interval(vm.refreshTerminal, 3000);
-    var _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500);
+    var _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
+    var _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
 
     function pauseTerminalPolling() {
       if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
       if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
     }
     function resumeTerminalPolling() {
-      if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000);
-      if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500);
+      if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
+      if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
     }
   }]);

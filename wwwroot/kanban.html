@@ -25,9 +25,8 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card) rows=" 2" ng-click="$event.stopPropagation()"
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
-            </textarea>
             <button ng-click="vm.recordVoice(card)" class="small-icon"
               ng-class="{'recording': vm.isRecording}"
               title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"

@@ -13,12 +13,18 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
     return state;
   }
 
+  var _cardsCache = {};
+  var _cardsVersion = 0;
+
   return {
     init: function(vm, $scope) {
       vm.state = loadCards();
- 
+      _cardsCache = {};
+      _cardsVersion = 0;
+
       vm.saveCards = function() {
         $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state));
+        _cardsVersion++;
       };
 
       vm.filterCards = function (cards) {
@@ -32,8 +38,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       vm.cardsForProject = function (col) {
         var all = vm.state[col] || [];
         if (!vm.selectedProject) return all;
+        var key = col + '|' + vm.selectedProject + '|' + (vm.searchFilter || '');
+        var cached = _cardsCache[key];
+        if (cached && cached._version === _cardsVersion && cached._length === all.length) return cached;
         var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
-        return vm.filterCards(filtered);
+        var result = vm.filterCards(filtered);
+        result._version = _cardsVersion;
+        result._length = all.length;
+        _cardsCache[key] = result;
+        return result;
       };
 
       vm.addCard = function (col) {
@@ -558,7 +571,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
                 }
               }
               vm.saveCards();
-              if ($scope) { try { $scope.$digest(); } catch (e) {} }
+              if ($scope) { $scope.$applyAsync(); }
             });
           });
         } catch (e) { console.error('dragdrop error', e); }

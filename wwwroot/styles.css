@@ -1586,6 +1586,40 @@ h3 .small.ghost:hover {
 	cursor: pointer;
 	font-size: 11px;
 	color: var(--muted);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.log-font-controls {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	margin-left: auto;
+}
+
+.log-font-btn {
+	background: none;
+	border: 1px solid var(--border-color, #555);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 11px;
+	line-height: 1;
+	padding: 0 4px;
+	border-radius: 3px;
+	user-select: none;
+}
+
+.log-font-btn:hover {
+	background: rgba(255,255,255,0.1);
+	color: var(--text);
+}
+
+.log-font-size-label {
+	font-size: 10px;
+	color: var(--muted);
+	min-width: 24px;
+	text-align: center;
 }
 
 .agent-activity-log .log-entries {
