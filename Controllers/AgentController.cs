@@ -4325,7 +4325,7 @@ Types:
 - CommandExecution: anything that should be done in terminal, including git operations, directory listing, renames, system info queries, ping, network scanning, package installation, process management, file content display (cat/type), and any check/verify that does not imply file changes.
 - CodeEdit: modify files, add features, fix bugs, refactor, implement (any content change)
 
-If unsure, use CodeEdit.";
+If unsure, use CodeEdit. Pay special attention if the user pasted a diff, logs or code snippet — that strongly implies CodeEdit. Do NOT use CommandExecution for code snippets.";
 
         var (raw, _, err) = await CallLlmRaw(systemPrompt, prompt, ct, requestTimeout: _infiniteTimeout);
         if (string.IsNullOrWhiteSpace(raw))
