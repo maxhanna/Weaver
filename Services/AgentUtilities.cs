@@ -4,7 +4,9 @@ using System.Text.RegularExpressions;
 namespace MaestroBackend.Services;
 
 public static class AgentUtilities
-{
+{ 
+    private const int CompactThreshold75 = 2100;
+    private const int CompactThreshold90 = 2520;
     private static readonly HashSet<string> ExplorationStepTypes =
         new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
 
@@ -767,4 +769,90 @@ public static class AgentUtilities
         }
     }
 
+    public static int EstimateTokens(string text) =>
+        string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
+
+    public static string CompactDiscoveryContext(string discoveryContext, HashSet<string> keepFull)
+    {
+        if (string.IsNullOrEmpty(discoveryContext) || EstimateTokens(discoveryContext) < CompactThreshold75)
+            return discoveryContext;
+
+        var sb = new StringBuilder(discoveryContext.Length / 2);
+        var blocks = discoveryContext.Split("### ", StringSplitOptions.None);
+        foreach (var block in blocks)
+        {
+            if (string.IsNullOrWhiteSpace(block)) continue;
+            var header = block;
+            var contentStart = block.IndexOf('\n');
+            string? body = null;
+            if (contentStart > 0)
+            {
+                header = block[..contentStart].Trim();
+                body = block[contentStart..].Trim();
+            }
+            // Extract file path from header: "read path/to/file" or "path/to/file"
+            var filePath = header.StartsWith("read ", StringComparison.Ordinal)
+                ? header[5..].Trim()
+                : header.Trim();
+            if (filePath == null || keepFull.Contains(filePath))
+            {
+                sb.Append("### ").Append(block);
+                continue;
+            }
+            var lines = (body ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            sb.Append("### ").AppendLine(header);
+            sb.Append("  [compacted — ").Append(lines.Length).AppendLine(" lines]");
+            if (lines.Length > 0)
+            {
+                var first = lines[0].Trim();
+                if (first.Length > 0) sb.Append("  first: ").AppendLine(first.Length > 200 ? first[..200] + "…" : first);
+                if (lines.Length > 1)
+                {
+                    var last = lines[^1].Trim();
+                    if (last.Length > 0 && last != first)
+                        sb.Append("  last:  ").AppendLine(last.Length > 200 ? last[..200] + "…" : last);
+                }
+            }
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    public static void CompactConversation(StringBuilder conversation, int keepLastTurns = 3)
+    {
+        if (conversation == null || conversation.Length == 0) return;
+        var text = conversation.ToString();
+        if (EstimateTokens(text) < CompactThreshold90) return;
+
+        var turns = text.Split("Command [", StringSplitOptions.None);
+        if (turns.Length <= keepLastTurns + 1) return;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Prior context (compacted)");
+        sb.AppendLine("Earlier commands and their results are summarized below.");
+        sb.AppendLine("The last " + keepLastTurns + " turns are preserved in full after this.");
+        sb.AppendLine();
+
+        var lines = new List<string>();
+        for (var i = 1; i < turns.Length - keepLastTurns; i++)
+        {
+            var cmdText = turns[i];
+            var nl = cmdText.IndexOf('\n');
+            lines.Add("  " + (nl > 0 ? cmdText[..nl].Trim() : cmdText.Trim()));
+        }
+        if (lines.Count > 0)
+        {
+            sb.AppendLine("Executed:");
+            foreach (var l in lines) sb.AppendLine(l);
+        }
+        sb.AppendLine();
+
+        // Keep initial system prompt + task (turns[0]) + last N turns in full
+        sb.Append(turns[0]);
+        for (var i = Math.Max(1, turns.Length - keepLastTurns); i < turns.Length; i++)
+            sb.Append("Command [").Append(turns[i]);
+
+        conversation.Clear();
+        conversation.Append(sb.ToString());
+    }
 }

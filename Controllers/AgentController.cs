@@ -18,7 +18,10 @@ public class AgentController : ControllerBase
     private readonly FileHintsManager _fileHints;
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
-    private const int MaxFileContextChars = 24_000; 
+    private const int MaxFileContextChars = 24_000;
+    private const int ContentTokenBudget = 2800;
+    private const int CompactThreshold75 = 2100;
+    private const int CompactThreshold90 = 2520;
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
@@ -967,6 +970,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         {
             ct.ThrowIfCancellationRequested();
 
+            // Compact conversation if over budget before sending to LLM
+            AgentUtilities.CompactConversation(conversation);
+
             var systemMsg = "You are a terminal agent. Output only JSON.";
             var (raw, _, err) = await CallLlmRaw(systemMsg, conversation.ToString(), ct,
                 requestTimeout: TimeSpan.FromSeconds(30));
@@ -1690,6 +1696,17 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         plan = expandedPlan;
         discoveryContext = expandedContext;
+
+        // ── Compact discovery context: keep full content only for plan files ──
+        var beforeTokens = AgentUtilities.EstimateTokens(discoveryContext);
+        var planFiles = new HashSet<string>(plan.Plan
+            .Select(p => p.File?.Replace('\\', '/'))
+            .Where(f => !string.IsNullOrWhiteSpace(f)), StringComparer.OrdinalIgnoreCase);
+        discoveryContext = AgentUtilities.CompactDiscoveryContext(discoveryContext, planFiles);
+        var afterTokens = AgentUtilities.EstimateTokens(discoveryContext);
+        if (afterTokens < beforeTokens)
+            await EmitLog(emitSse, "info",
+                $"Compacted discovery context: {beforeTokens} → {afterTokens} tokens ({beforeTokens - afterTokens} saved)", ct: ct);
 
         // ── Phase 3: EXECUTE PLAN ─────────────────────────────────────────
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
@@ -2915,6 +2932,7 @@ Example:
     {
         var results = new List<object>();
         var terminalStarted = false;
+        var editContentCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var step in steps)
         {
@@ -2940,7 +2958,9 @@ Example:
                 switch (step.Type?.ToLowerInvariant())
                 {
                     case "edit":
-                        await ExecuteEditStep(step, projectRoot, result);
+                        // Pass edit cache so consecutive edits to the same file
+                        // use the in-memory content after the previous edit(s)
+                        await ExecuteEditStep(step, projectRoot, result, editContentCache);
                         break;
                     case "command":
                         if (!terminalStarted) { _terminal.Start(); terminalStarted = true; }
@@ -3098,7 +3118,7 @@ Example:
     }
 
 
-    private async Task ExecuteEditStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
+    private async Task ExecuteEditStep(AgentStep step, string projectRoot, Dictionary<string, object?> result, Dictionary<string, string>? contentCache = null)
     {
         var rawPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
         // Absolute path (contains drive letter or starts with /) or relative to project
@@ -3112,28 +3132,37 @@ Example:
         result["path"] = step.Path;
         var oldString = step.OldString ?? "";
         var newString = step.NewString ?? "";
-        var fileExists = System.IO.File.Exists(targetPath);
 
-        if (!fileExists)
+        // Use in-memory cache for consecutive edits to the same file
+        // so each subsequent edit sees the content after prior edits
+        string content;
+        if (contentCache != null && contentCache.TryGetValue(targetPath, out var cached))
         {
-            if (string.IsNullOrEmpty(oldString) && !string.IsNullOrEmpty(newString))
+            content = cached;
+        }
+        else
+        {
+            if (!System.IO.File.Exists(targetPath))
             {
-                var dir = Path.GetDirectoryName(targetPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
-                result["oldStartLine"] = 0;
-                PopulateEditResult(result, "created", step.Path!, null, newString, newString);
+                if (string.IsNullOrEmpty(oldString) && !string.IsNullOrEmpty(newString))
+                {
+                    var dir = Path.GetDirectoryName(targetPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
+                    result["oldStartLine"] = 0;
+                    PopulateEditResult(result, "created", step.Path!, null, newString, newString);
+                    if (contentCache != null) contentCache[targetPath] = newString;
+                    return;
+                }
+                var suggestions = AgentUtilities.FindSimilarFiles(step.Path ?? "", projectRoot);
+                result["status"] = "error";
+                result["error"] = $"File does not exist: {step.Path}. Use a path from discovery.";
+                result["suggestions"] = suggestions;
                 return;
             }
-            var suggestions = AgentUtilities.FindSimilarFiles(step.Path ?? "", projectRoot);
-            result["status"] = "error";
-            result["error"] = $"File does not exist: {step.Path}. Use a path from discovery.";
-            result["suggestions"] = suggestions;
-            return;
+            content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
         }
-
-        var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
 
         if (string.IsNullOrEmpty(oldString))
         {
@@ -3143,6 +3172,7 @@ Example:
             result["oldStartLine"] = startLine;
             content += newString;
             await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
+            if (contentCache != null) contentCache[targetPath] = content;
             PopulateEditResult(result, "modified", step.Path!, null, newString, newString);
             return;
         }
@@ -3184,6 +3214,7 @@ Example:
         result["oldStartLine"] = normOldContent[..diffIdx].Count(c => c == '\n');
 
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
+        if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
     }
 
