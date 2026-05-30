@@ -473,7 +473,7 @@ public class AgentController : ControllerBase
 
 Given a task and the contents of project files, output a structured plan. 
 For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field.
-When describing changes, be very specific and detailed. The more precise you are, the better the agent can execute the plan.
+When describing changes, be very specific and detailed. Include line numbers if possible. The more precise you are, the better the agent can execute the plan.
 
 OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
 {
@@ -493,9 +493,10 @@ Make it specific and accurate.
 
 FILE EDIT RULES (only when NOT using a special marker): 
 - Priority 1 = most important file. Sort by priority ascending.
-- When describing changes, quote exact existing code to modify.
+- When describing changes, quote exact existing code to modify. Include line numbers if possible.
 - DO NOT write any code yet. DO NOT include oldString or newString.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
+- Each change must be a unique change. No other change in the plan should have the same change description, or you should make it more specific until they are all unique.
 - If you're unsure about exact code, describe the location and intent clearly.";
 
         var analysisPrompt = new StringBuilder();
@@ -4828,8 +4829,8 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
                 continue;
             }
 
-            var (os, ns, parseErr) = ExtractEditFromCodeGen(codeRaw);
-            if (os == null)
+            var (oldStr, newStr, parseErr) = ExtractEditFromCodeGen(codeRaw);
+            if (oldStr == null)
             {
                 snippets.Add((step, null, null, parseErr));
                 await EmitLog(emitSse, "warn",
@@ -4838,7 +4839,7 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
             }
 
             // Skip if LLM returned empty (indicating nothing to do)
-            if (string.IsNullOrEmpty(os) && string.IsNullOrEmpty(ns))
+            if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr))
             {
                 await EmitLog(emitSse, "info",
                     $"  Step {step.Index + 1}: no change needed (skipped)", ct: ct);
@@ -4846,9 +4847,9 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
             }
 
             // Validate the edit against current working content
-            if (!string.IsNullOrEmpty(os))
+            if (!string.IsNullOrEmpty(oldStr))
             {
-                var (replaced, newContent, matchErr, _) = TryReplace(workingContent, os, ns ?? "");
+                var (replaced, newContent, matchErr, _) = TryReplace(workingContent, oldStr, newStr ?? "");
                 if (!replaced)
                 {
                     snippets.Add((step, null, null, matchErr ?? "oldString not found in working content"));
@@ -4858,14 +4859,14 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
                 }
                 workingContent = newContent;
             }
-            else if (!string.IsNullOrEmpty(ns))
+            else if (!string.IsNullOrEmpty(newStr))
             {
-                workingContent = step.ChangeType == "prepend" ? ns + workingContent : workingContent + ns;
+                workingContent = step.ChangeType == "prepend" ? newStr + workingContent : workingContent + newStr;
             }
 
-            snippets.Add((step, os, ns, null));
+            snippets.Add((step, oldStr, newStr, null));
             changesApplied++;
-            changesLog.AppendLine($"  Step {step.Index + 1} ({step.Description}): replaced {os?.Length ?? 0} chars with {ns?.Length ?? 0} chars");
+            changesLog.AppendLine($"  Step {step.Index + 1} ({step.Description}): replaced {oldStr?.Length ?? 0} chars with {newStr?.Length ?? 0} chars");
         }
 
         var successfulSnippets = snippets.Where(s => s.oldString != null).ToList();
@@ -4901,17 +4902,17 @@ Check ALL edits collectively for:
         var finalEdits = new List<(string oldString, string newString, string description)>();
         var allEditsDesc = new StringBuilder();
 
-        foreach (var (step, os, ns, _) in successfulSnippets)
+        foreach (var (step, oldStr, newStr, _) in successfulSnippets)
         {
             allEditsDesc.AppendLine($"### Edit {step.Index + 1}: {step.Description}");
             allEditsDesc.AppendLine($"Target: {step.TargetArea}");
             allEditsDesc.AppendLine("oldString:");
             allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine(os);
+            allEditsDesc.AppendLine(oldStr);
             allEditsDesc.AppendLine("```");
             allEditsDesc.AppendLine("newString:");
             allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine(ns);
+            allEditsDesc.AppendLine(newStr);
             allEditsDesc.AppendLine("```");
             allEditsDesc.AppendLine();
         }
