@@ -1609,7 +1609,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
                 try
                 {
-                    var timeout = TimeSpan.FromSeconds(15);
+                    var timeout = TimeSpan.FromSeconds(30);
                     var confirmedFiles = await review.Answer.Task.WaitAsync(timeout, ct);
 
                     var confirmedSet = new HashSet<string>(confirmedFiles, StringComparer.OrdinalIgnoreCase);
