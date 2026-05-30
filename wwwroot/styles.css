@@ -326,14 +326,7 @@ header h1 {
 	border-color: var(--accent);
 }
 
-.settings-panel input[type='checkbox']:checked::after {
-	content: '✓';
-	color: white;
-	font-size: 12px;
-	display: block;
-	text-align: center;
-	line-height: 1;
-}
+
 
 .settings-panel label {
 	display: flex;
@@ -2591,18 +2584,19 @@ h3 .small.ghost:hover {
 	flex: 1;
 	word-break: break-all;
 }
-
 .file-picker-list {
 	max-height: 300px;
 	overflow-y: auto;
 }
-
-.file-picker-list .entry {
+.file-picker-list .entry .checkbox {
+	width: 16px;
+	height: 16px;
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	border-radius: 3px;
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 6px;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+	justify-content: center;
+	position: relative; 
 	cursor: pointer;
 	font-size: 13px;
 }
@@ -2623,6 +2617,7 @@ h3 .small.ghost:hover {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	position: relative;
 }
 
 .file-picker-list .entry .checkbox.checked {
@@ -2635,6 +2630,7 @@ h3 .small.ghost:hover {
   color: white;
   font-size: 11px;
   font-weight: 700;
+  position: absolute;
 }
 
 .muted {
