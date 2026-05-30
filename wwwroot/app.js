@@ -627,6 +627,21 @@
       vm.pickerCardId = cardId;
       vm.pickerPath = '';
       vm.pickerSelected = [];
+      // Check if the card already has attached files and pre-select them
+      ['todo', 'doing', 'done'].forEach(function (col) {
+        var cards = vm.state[col];
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === cardId) {
+            var attached = cards[i].attached;
+            if (attached && Array.isArray(attached)) {
+              vm.pickerSelected = attached.slice(); // Create a copy to avoid reference issues
+            } else if (attached) {
+              vm.pickerSelected = [attached]; // Convert single string to array
+            }
+            break;
+          }
+        }
+      });
       vm.showFilePicker = true;
       vm.loadPickerEntries();
     };
@@ -1311,7 +1326,9 @@
     };
 
     vm.confirmContextReview = function () {
-      if (!vm.pendingContextReview) return;
+      if (vm.contextReviewCountdown <= 0 || !vm.pendingContextReview) return;
+      vm.contextReviewCountdown = 0; 
+     
       var selected = [];
       var files = vm.pendingContextReview.files;
       if (files && files.length) {
