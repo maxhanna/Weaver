@@ -37,12 +37,12 @@
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
-          <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
-            <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-              <span>📎</span><span class="name">{{f}}</span>
-              <span class="remove" ng-click="vm.removeAttachment(card.id); $event.stopPropagation()">✕</span>
+            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+                <span>📎</span><span class="name">{{f}}</span>
+                <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'todo'); $event.stopPropagation()">✕</span>
+              </div>
             </div>
-          </div>
           <div class="card-actions">
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
@@ -260,7 +260,7 @@
                   <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                      <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -399,7 +399,7 @@
                   <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                      <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>

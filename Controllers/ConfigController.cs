@@ -59,7 +59,7 @@ public class ConfigController : ControllerBase
         try
         {
             var incoming = JsonSerializer.Deserialize<FrontendConfig>(body.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
-            // Preserve existing email credentials if frontend omits them (common for password fields)
+            // Preserve existing credentials if frontend omits them (password fields)
             var existing = await _configFile.LoadConfigAsync();
             if (string.IsNullOrWhiteSpace(incoming.emailPassword) && !string.IsNullOrWhiteSpace(existing.emailPassword))
                 incoming.emailPassword = existing.emailPassword;
@@ -67,6 +67,12 @@ public class ConfigController : ControllerBase
                 incoming.emailUsername = existing.emailUsername;
             if (string.IsNullOrWhiteSpace(incoming.emailImapServer) && !string.IsNullOrWhiteSpace(existing.emailImapServer))
                 incoming.emailImapServer = existing.emailImapServer;
+            if (string.IsNullOrWhiteSpace(incoming.bughostedPassword) && !string.IsNullOrWhiteSpace(existing.bughostedPassword))
+                incoming.bughostedPassword = existing.bughostedPassword;
+            if (string.IsNullOrWhiteSpace(incoming.bughostedUsername) && !string.IsNullOrWhiteSpace(existing.bughostedUsername))
+                incoming.bughostedUsername = existing.bughostedUsername;
+            if (string.IsNullOrWhiteSpace(incoming.bughostedUrl) && !string.IsNullOrWhiteSpace(existing.bughostedUrl))
+                incoming.bughostedUrl = existing.bughostedUrl;
             await _configFile.WriteConfigAsync(incoming);
             return Ok(incoming);
         }

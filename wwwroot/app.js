@@ -179,6 +179,13 @@
     vm.emailUseSsl = true;
     vm.emailUsername = '';
     vm.emailPassword = '';
+    vm.bughostedUrl = '';
+    vm.bughostedUsername = '';
+    vm.bughostedPassword = '';
+    vm.bughostedHeartbeatEnabled = false;
+    vm.bughostedClientId = '';
+    vm.bughostedStatus = 'disconnected';
+    vm.remoteCommands = [];
 
     // === Load settings from localStorage ===
     function loadSettings() {
@@ -249,11 +256,19 @@
         cfg.emailUseSsl = vm.emailUseSsl !== false;
         cfg.emailUsername = vm.emailUsername || '';
         cfg.emailPassword = vm.emailPassword || '';
+        cfg.bughostedUrl = vm.bughostedUrl || '';
+        cfg.bughostedUsername = vm.bughostedUsername || '';
+        cfg.bughostedPassword = vm.bughostedPassword || '';
+        cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
         if (vm.settingsDefaultProject) vm.selectedProject = vm.settingsDefaultProject;
         vm.loadConfig(vm.defaultProject);
+        // Disconnect from bughosted if heartbeat was disabled
+        if (!vm.bughostedHeartbeatEnabled && vm.bughostedClientId) {
+          vm.bughostedLogout();
+        }
         vm.closeSettingsPanel();
       }, function (err) {
         $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
@@ -288,6 +303,13 @@
         vm.emailUseSsl = cfg.emailUseSsl !== false;
         vm.emailUsername = cfg.emailUsername || '';
         vm.emailPassword = cfg.emailPassword || '';
+        vm.bughostedUrl = cfg.bughostedUrl || '';
+        vm.bughostedUsername = cfg.bughostedUsername || '';
+        vm.bughostedPassword = cfg.bughostedPassword || '';
+        vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
+        if (vm.bughostedHeartbeatEnabled && vm.bughostedUrl && vm.bughostedUsername && !vm.bughostedClientId) {
+          vm.bughostedLogin();
+        }
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -341,6 +363,10 @@
         cfg.emailUseSsl = vm.emailUseSsl !== false;
         cfg.emailUsername = vm.emailUsername || '';
         cfg.emailPassword = vm.emailPassword || '';
+        cfg.bughostedUrl = vm.bughostedUrl || '';
+        cfg.bughostedUsername = vm.bughostedUsername || '';
+        cfg.bughostedPassword = vm.bughostedPassword || '';
+        cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
         return $http.post('/api/config/save', cfg);
       }).then(function () {
         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -350,6 +376,108 @@
       }, function (err) {
         $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
         vm.showEditProjectsPanel = false;
+      });
+    };
+
+    // === BugHosted.com Integration ===
+    vm.bughostedLogin = function () {
+      if (!vm.bughostedUrl || !vm.bughostedUsername || !vm.bughostedPassword) return;
+      vm.bughostedStatus = 'connecting';
+      $http.post('/api/bughosted/login', {
+        Url: vm.bughostedUrl,
+        Username: vm.bughostedUsername,
+        Password: vm.bughostedPassword
+      }).then(function (resp) {
+        vm.bughostedClientId = resp.data.clientId;
+        vm.bughostedStatus = 'connected';
+        startBughostedHeartbeat();
+        startBughostedCommandPolling();
+      }, function () {
+        vm.bughostedStatus = 'error';
+        vm.bughostedClientId = '';
+      });
+    };
+
+    vm.bughostedLogout = function () {
+      if (vm.bughostedClientId) {
+        $http.post('/api/bughosted/logout', { clientId: vm.bughostedClientId });
+      }
+      vm.bughostedClientId = '';
+      vm.bughostedStatus = 'disconnected';
+      stopBughostedHeartbeat();
+      stopBughostedCommandPolling();
+    };
+
+    vm.bughostedToggle = function () {
+      if (vm.bughostedStatus === 'connected' || vm.bughostedClientId) {
+        vm.bughostedLogout();
+      } else {
+        vm.bughostedLogin();
+      }
+    };
+
+    var _bhHeartbeatTimer = null;
+    function startBughostedHeartbeat() {
+      stopBughostedHeartbeat();
+      _bhHeartbeatTimer = $interval(function () {
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        var data = {
+          clientId: vm.bughostedClientId,
+          kanbanData: JSON.stringify(vm.state)
+        };
+        $http.post('/api/bughosted/heartbeat', data).then(function (resp) {
+          vm.bughostedStatus = 'connected';
+        }, function () {
+          vm.bughostedStatus = 'error';
+        });
+        $scope.$digest();
+      }, 30000, 0, false);
+    }
+    function stopBughostedHeartbeat() {
+      if (_bhHeartbeatTimer) { $interval.cancel(_bhHeartbeatTimer); _bhHeartbeatTimer = null; }
+    }
+
+    var _bhCommandTimer = null;
+    function startBughostedCommandPolling() {
+      stopBughostedCommandPolling();
+      _bhCommandTimer = $interval(function () {
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId))
+          .then(function (resp) {
+            var cmds = resp.data || [];
+            cmds.forEach(function (cmd) {
+              var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
+              if (!existing && cmd.command) {
+                vm.remoteCommands.push(cmd);
+                vm.executeRemoteCommand(cmd);
+              }
+            });
+            $scope.$digest();
+          });
+      }, 15000, 0, false);
+    }
+    function stopBughostedCommandPolling() {
+      if (_bhCommandTimer) { $interval.cancel(_bhCommandTimer); _bhCommandTimer = null; }
+    }
+
+    vm.executeRemoteCommand = function (cmd) {
+      if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
+        var card = { Text: cmd.params.text };
+        if (cmd.params.project) card.filePath = cmd.params.project;
+        vm.addCard(card);
+      } else if (cmd.command === 'moveCard' && cmd.params) {
+        vm.moveCard(cmd.params.cardId, cmd.params.status);
+      } else if (cmd.command === 'archiveCard' && cmd.params) {
+        vm.archiveCard(cmd.params.cardId);
+      } else if (cmd.command === 'stopAgent') {
+        vm.stopAgent && vm.stopAgent();
+      }
+      // Acknowledge execution
+      $http.post('/api/bughosted/commands/ack', {
+        clientId: vm.bughostedClientId,
+        commandId: cmd.id,
+        status: 'executed',
+        result: 'ok'
       });
     };
 

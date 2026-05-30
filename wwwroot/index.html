@@ -177,7 +177,7 @@
               <div ng-if="vm.planItems.length" class="plan-items-list">
                 <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
                   ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                  <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                   <span class="plan-item-file" title="{{item.file}}">{{item.file}}</span>
                   <span class="plan-item-change" title="{{item.change}}">{{item.change}}</span>
                 </div>
@@ -512,6 +512,26 @@
             <input type="checkbox" ng-model="vm.emailUseSsl" /> Use SSL
           </label>
           <span class="settings-help">Configure IMAP credentials so the agent can read your email.</span>
+        </div>
+        <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+          <label class="settings-header">BugHosted.com (Remote Dashboard)</label>
+          <div style="display:flex;gap:8px;margin-bottom:6px;">
+            <input ng-model="vm.bughostedUrl" placeholder="https://bughosted.com" style="flex:1;" />
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <input ng-model="vm.bughostedUsername" placeholder="Username" style="flex:1;" />
+            <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
+          </div>
+          <label style="font-size:12px;">
+            <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in sync)
+          </label>
+          <span class="settings-help">
+            When enabled, Maestro will send heartbeats and kanban data to bughosted.com.
+            You can send commands from the dashboard to execute locally.
+            <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
+            <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
+            <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
+          </span>
         </div>
         <div class="form-row" style="display:flex;flex-direction:column;">
           <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>

@@ -260,16 +260,21 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         return [];
       };
 
-      vm.removeAttachment = function (cardId) {
-        ['todo', 'doing', 'done'].forEach(function (col) {
-          var cards = vm.state[col];
-          for (var i = 0; i < cards.length; i++) {
-            if (cards[i].id === cardId) {
-              cards[i].attached = [];
-              break;
+      vm.removeAttachment = function (cardId, attachmentName, col) {
+        var cards = vm.state[col]; // col : 'todo', 'doing', or 'done'
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === cardId) {
+            var attached = cards[i].attached;
+            if (Array.isArray(attached)) {
+              var index = attached.indexOf(attachmentName);
+              if (index !== -1) {
+                attached.splice(index, 1);
+              }
             }
+            break;
           }
-        });
+        }
+        
         vm.saveCards();
       };
 

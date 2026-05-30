@@ -26,6 +26,10 @@ public class FrontendConfig
     public bool emailUseSsl { get; set; } = true;
     public string? emailUsername { get; set; }
     public string? emailPassword { get; set; }
+    public string? bughostedUrl { get; set; }
+    public string? bughostedUsername { get; set; }
+    public string? bughostedPassword { get; set; }
+    public bool bughostedHeartbeatEnabled { get; set; } = false;
 }
 
 public class ConfigFileService
