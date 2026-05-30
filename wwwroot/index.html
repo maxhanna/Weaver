@@ -482,31 +482,25 @@
               <input type="checkbox" ng-model="vm.autoQueue" /> Auto-queue: process next Todo card when one completes
             </label>
           </div>
-        </details>
+        </details> 
         <details>
-          <summary class="settings-header">Show terminal panel</summary>
-          <div class="form-row">
-            <label>
-              <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
-            </label>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Show Ask AI panel</summary>
+          <summary class="settings-header">Panels</summary>
           <div class="form-row">
             <label>
               <input type="checkbox" ng-model="vm.showAI" /> Show Ask AI panel
             </label>
           </div>
-        </details>
-        <details>
-          <summary class="settings-header">Show Kanban board</summary>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showTerminal" /> Show terminal panel
+            </label>
+          </div>
           <div class="form-row">
             <label>
               <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
             </label>
           </div>
-        </details>
+        </details> 
         <details>
           <summary class="settings-header">Llama.cpp / Ollama URL</summary>
           <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
