@@ -57,26 +57,24 @@ button {
 button:hover {
 	border-color: var(--accent);
 }
-
-button:disabled {
-	opacity: 0.4;
-	cursor: not-allowed;
-}
-
-button.primary {
-	background: var(--brand-gradient);
-	border: none;
-	color: #012;
-	font-weight: 600;
-	padding: 8px 16px;
-	border-radius: 8px;
+popup-link.about-panel {
+	color: var(--accent);
+	text-decoration: none;
+	font-weight: 500;
 	transition: all 0.2s ease;
-	box-shadow: var(--brand-shadow);
+	border-radius: 6px;
+	padding: 8px 12px;
+	border: var(--border);
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-button.primary:hover {
-	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.4);
+popup-link.about-panel:hover {
+	background: rgba(255, 255, 255, 0.15);
+	border-color: var(--accent);
+	color: var(--accent);
 	transform: translateY(-1px);
+	box-shadow: 0 2px 8px rgba(255, 255, 255, 0.1);
 }
 
 button.btn-ready {
@@ -680,14 +678,15 @@ header h1 {
 }
 
 .popup-header.about-panel {
-    background: var(--brand-gradient);
-    padding: 16px 20px;
+    background: rgba(6, 182, 212, 0.15);
+    padding: 24px;
     border-bottom: var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 24px;
+    margin-bottom: 28px;
     border-radius: 8px 8px 0 0;
+    backdrop-filter: blur(10px);
 }
 
 .popup-header.about-panel h2 {
@@ -698,9 +697,11 @@ header h1 {
 }
 
 .popup-body.about-panel {
-    padding: 0;
+    padding: 24px;
     margin-bottom: 24px;
     line-height: 1.6;
+    color: var(--text);
+    font-size: 14px;
 }
 
 .popup-footer.about-panel {
@@ -715,7 +716,7 @@ header h1 {
 
 /* About Panel Content Styling */
 .popup-body.about-panel {
-    padding: 0;
+    padding: 24px;
     margin-bottom: 24px;
     line-height: 1.6;
     color: var(--text);
@@ -727,6 +728,8 @@ header h1 {
     font-size: 14px;
     color: var(--muted);
     line-height: 1.6;
+    padding: 4px 0;
+    transition: all 0.2s ease;
 }
 
 .popup-body.about-panel h2 {
@@ -736,14 +739,16 @@ header h1 {
     font-weight: 600;
     line-height: 1.4;
     letter-spacing: -0.05em;
+    padding: 0 8px;
 }
 
 .popup-body.about-panel h3 {
-    color: var(--accent);
+    color: var(--text);
     margin: 20px 0 12px 0;
     font-size: 16px;
     font-weight: 600;
     line-height: 1.4;
+    padding: 4px 0;
 }
 
 .popup-body.about-panel h2 + p,
@@ -761,6 +766,8 @@ header h1 {
     margin-top: 32px;
     padding-top: 24px;
     border-top: var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
 }
 
 .faq-item.about-panel {
@@ -769,7 +776,8 @@ header h1 {
     border-radius: 8px;
     overflow: hidden;
     background: var(--surface);
-    padding: 12px;
+    padding: 20px;
+    transition: all 0.2s ease;
 }
 
 .faq-toggle.about-panel {
@@ -786,10 +794,13 @@ header h1 {
     justify-content: space-between;
     align-items: center;
     transition: all 0.2s ease;
+    border-radius: 8px;
+    margin-bottom: 8px;
 }
 
 .faq-toggle.about-panel:hover {
     background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
 }
 
 .faq-content.about-panel {
@@ -798,6 +809,9 @@ header h1 {
     max-height: 500px;
     overflow: auto;
     transition: all 0.3s ease;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 .faq-container.about-panel > summary {
@@ -891,12 +905,15 @@ header h1 {
 	border-radius: 6px;
 	padding: 8px 12px;
 	border: var(--border);
+	background: rgba(255, 255, 255, 0.05);
 }
 
 .popup-link.about-panel:hover {
-	background: rgba(6, 182, 212, 0.1);
+	background: rgba(255, 255, 255, 0.15);
 	border-color: var(--accent);
 	color: var(--accent);
+	transform: translateY(-1px);
+	box-shadow: 0 2px 8px rgba(255, 255, 255, 0.1);
 }
 
 h1 .brand-text {

@@ -22,7 +22,9 @@
     vm.buildCommands = "";
     vm.terminalApprovalMode = 'approveAll';
     vm.approvedTerminalRoots = [];
+    vm.disallowedTerminalRoots = [];
     vm.approvedTerminalRootsText = '';
+    vm.disallowedTerminalRootsText = '';
     vm.pendingTerminalApprovals = [];
     vm.aiChatMessages = [];
     vm.aiChatInput = '';
@@ -250,6 +252,9 @@
         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
         }).filter(Boolean);
+        cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) {
+          return r.trim().toLowerCase();
+        }).filter(Boolean);
         cfg.fileHints = '';
         cfg.emailImapServer = vm.emailImapServer || '';
         cfg.emailImapPort = vm.emailImapPort || 993;
@@ -297,6 +302,8 @@
         vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
         vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
         vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
+        vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
+        vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
         vm.fileHintsData = [];
         vm.emailImapServer = cfg.emailImapServer || '';
         vm.emailImapPort = cfg.emailImapPort || 993;
@@ -355,6 +362,9 @@
         cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
+          return r.trim().toLowerCase();
+        }).filter(Boolean);
+        cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';

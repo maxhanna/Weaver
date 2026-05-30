@@ -16,9 +16,12 @@
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
       <svg class="brand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <!-- Brain for AI -->
-        <path d="M12 2C13.1 2 14 2.9 14 4C14 5.1 13.1 6 12 6C10.9 6 10 5.1 10 4C10 2.9 10.9 2 12 2Z" fill="var(--brand-secondary)" />
-        <path d="M12 8C13.1 8 14 8.9 14 10C14 11.1 13.1 12 12 12C10.9 12 10 11.1 10 10C10 8.9 10.9 8 12 8Z" fill="var(--brand-secondary)" />
-        <path d="M12 14C13.1 14 14 14.9 14 16C14 17.1 13.1 18 12 18C10.9 18 10 17.1 10 16C10 14.9 10.9 14 12 14Z" fill="var(--brand-secondary)" />
+        <path d="M12 2C13.1 2 14 2.9 14 4C14 5.1 13.1 6 12 6C10.9 6 10 5.1 10 4C10 2.9 10.9 2 12 2Z"
+          fill="var(--brand-secondary)" />
+        <path d="M12 8C13.1 8 14 8.9 14 10C14 11.1 13.1 12 12 12C10.9 12 10 11.1 10 10C10 8.9 10.9 8 12 8Z"
+          fill="var(--brand-secondary)" />
+        <path d="M12 14C13.1 14 14 14.9 14 16C14 17.1 13.1 18 12 18C10.9 18 10 17.1 10 16C10 14.9 10.9 14 12 14Z"
+          fill="var(--brand-secondary)" />
         <!-- Kanban grid for tasks -->
         <rect x="2" y="2" width="20" height="20" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" />
         <rect x="6" y="6" width="12" height="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" />
@@ -132,9 +135,11 @@
               <summary>
                 <span>📋 Log ({{vm.agentActivityLogLength}})</span>
                 <span class="log-font-controls">
-                  <button class="log-font-btn" ng-click="vm.decreaseLogFont(); $event.stopPropagation()" title="Decrease font size">−</button>
+                  <button class="log-font-btn" ng-click="vm.decreaseLogFont(); $event.stopPropagation()"
+                    title="Decrease font size">−</button>
                   <span class="log-font-size-label">{{vm.logFontSize}}px</span>
-                  <button class="log-font-btn" ng-click="vm.increaseLogFont(); $event.stopPropagation()" title="Increase font size">+</button>
+                  <button class="log-font-btn" ng-click="vm.increaseLogFont(); $event.stopPropagation()"
+                    title="Increase font size">+</button>
                 </span>
               </summary>
               <div class="log-entries" ng-style="{'font-size': vm.logFontSize + 'px'}">
@@ -177,7 +182,8 @@
               <div ng-if="vm.planItems.length" class="plan-items-list">
                 <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
                   ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                  <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                    '⬜'}}</span>
                   <span class="plan-item-file" title="{{item.file}}">{{item.file}}</span>
                   <span class="plan-item-change" title="{{item.change}}">{{item.change}}</span>
                 </div>
@@ -458,7 +464,7 @@
       <button ng-click="vm.closeDiscordPanel()">Close</button>
     </div>
   </div>
-</div>
+  </div>
 
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
@@ -501,24 +507,19 @@
             </label>
           </div>
         </details>
-        <details open>
+        <details>
           <summary class="settings-header">Llama.cpp / Ollama URL</summary>
-          <div class="form-row">
-            <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
-            <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
-          </div>
+          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
         </details>
         <details>
           <summary class="settings-header">Build Commands</summary>
-          <details>
-            <label for="settings-build-commands" class="settings-header">Build Commands</label>
-            <textarea id="settings-build-commands" ng-model="vm.buildCommands"
-              placeholder="Enter build commands, one per line" rows="4"></textarea>
-          </div>
+          <textarea id="settings-build-commands" ng-model="vm.buildCommands"
+            placeholder="Enter build commands, one per line" rows="4"></textarea>
         </details>
         <details>
           <summary class="settings-header">Email (IMAP)</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+          <div class="form-row"
+            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
             <div style="display:flex;gap:8px;margin-bottom:6px;">
               <input ng-model="vm.emailImapServer" placeholder="imap.example.com" style="flex:1;" />
               <input ng-model="vm.emailImapPort" type="number" placeholder="993" style="width:80px;" />
@@ -535,7 +536,8 @@
         </details>
         <details>
           <summary class="settings-header">BugHosted.com (Remote Dashboard)</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
+          <div class="form-row"
+            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
             <div style="display:flex;gap:8px;margin-bottom:6px;">
               <input ng-model="vm.bughostedUrl" placeholder="https://bughosted.com" style="flex:1;" />
             </div>
@@ -544,7 +546,8 @@
               <input ng-model="vm.bughostedPassword" type="password" placeholder="Password" style="flex:1;" />
             </div>
             <label style="font-size:12px;">
-              <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in sync)
+              <input type="checkbox" ng-model="vm.bughostedHeartbeatEnabled" /> Enable heartbeat (keep dashboard in
+              sync)
             </label>
             <span class="settings-help">
               When enabled, Maestro will send heartbeats and kanban data to bughosted.com.
@@ -557,25 +560,27 @@
         </details>
         <details>
           <summary class="settings-header">Terminal Approval</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;">
-            <label for="settings-terminal-approval" class="settings-header">Terminal Approval</label>
-            <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
-              <option value="approveEach">Approve every command</option>
-              <option value="approveRoot">Approve command roots</option>
-              <option value="approveAll">Approve all commands</option>
-            </select>
-            <span class="settings-help">Enterprise mode blocks terminal execution until a user approves the queued
-              command.</span>
-          </div>
-        </details>
-        <details>
-          <summary class="settings-header">Approved Roots</summary>
-          <div class="form-row" style="display:flex;flex-direction:column;"
-            ng-if="vm.terminalApprovalMode === 'approveRoot'">
-            <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
-            <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
-              placeholder="git, dotnet, rg, npm" />
-            <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
+          <div>
+            <div>
+              <select id="settings-terminal-approval" ng-model="vm.terminalApprovalMode">
+                <option value="approveEach">Approve every command</option>
+                <option value="approveRoot">Approve command roots</option>
+                <option value="approveAll">Approve all commands</option>
+              </select>
+            </div>
+            <div class="form-row" style="display:flex;flex-direction:column;">
+              <div>
+                <label for="settings-approved-roots" class="settings-header">Approved Roots</label>
+                <input id="settings-approved-roots" ng-model="vm.approvedTerminalRootsText"
+                  placeholder="git, dotnet, rg, npm" />
+              </div>
+              <div>
+                <label for="settings-disallowed-roots" class="settings-header">Disallowed Roots</label>
+                <input id="settings-disallowed-roots" ng-model="vm.disallowedTerminalRootsText"
+                  placeholder="git, dotnet, rg, npm" />
+              </div>
+              <span class="settings-help">Comma-separated executables that may run without another prompt.</span>
+            </div>
           </div>
         </details>
         <div class="form-row" style="display: flex; flex-direction: column;">
@@ -632,20 +637,16 @@
     <div class="popup-panel" ng-click="$event.stopPropagation()">
       <div class="popup-body">
         <h3 style="margin:0 0 12px 0;">❓ {{vm.pendingQuestion.question}}</h3>
-        <div ng-repeat="field in vm.pendingQuestion.fields track by field.key"
-          style="margin-bottom:10px;">
+        <div ng-repeat="field in vm.pendingQuestion.fields track by field.key" style="margin-bottom:10px;">
           <label style="display:block;font-size:12px;font-weight:600;margin-bottom:3px;">{{field.label}}</label>
-          <input ng-if="field.type!=='password'"
-            ng-model="vm.questionAnswers[field.key]"
+          <input ng-if="field.type!=='password'" ng-model="vm.questionAnswers[field.key]"
             placeholder="{{field.defaultValue || field.label}}"
             style="width:100%;padding:6px 8px;font-size:14px;box-sizing:border-box;" />
-          <input ng-if="field.type==='password'"
-            type="password"
-            ng-model="vm.questionAnswers[field.key]"
-            placeholder="{{field.label}}"
-            style="width:100%;padding:6px 8px;font-size:14px;box-sizing:border-box;" />
+          <input ng-if="field.type==='password'" type="password" ng-model="vm.questionAnswers[field.key]"
+            placeholder="{{field.label}}" style="width:100%;padding:6px 8px;font-size:14px;box-sizing:border-box;" />
         </div>
-        <div ng-if="vm.questionError" style="color:var(--error);font-size:12px;margin-top:4px;">{{vm.questionError}}</div>
+        <div ng-if="vm.questionError" style="color:var(--error);font-size:12px;margin-top:4px;">{{vm.questionError}}
+        </div>
       </div>
       <div class="popup-footer">
         <button ng-click="vm.cancelQuestion()">Cancel</button>

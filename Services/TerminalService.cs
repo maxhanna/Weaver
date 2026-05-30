@@ -129,6 +129,13 @@ public class TerminalService : IDisposable
             : cfg.terminalApprovalMode;
         var root = ExtractCommandRoot(command);
 
+        if (cfg.disallowedTerminalRoots.Contains(root, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedAccessException($"Execution of terminal commands with root '{root}' is disallowed by configuration.");
+        }
+        await _configFile.WriteConfigAsync(cfg);
+
+
         if (mode.Equals("approveAll", StringComparison.OrdinalIgnoreCase))
             return;
 
