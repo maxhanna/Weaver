@@ -870,7 +870,7 @@
                         ctx.files.forEach(function (f) { f.keep = true; });
                         vm.pendingContextReview = ctx;
                         vm.contextReviewCountdown = 15;
-                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 15s', {discovered: ctx.files});
+                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 15s');
                         if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
                         vm.contextReviewTimer = $interval(function () {
                           vm.contextReviewCountdown--;
@@ -879,8 +879,8 @@
                             vm.contextReviewTimer = null;
                             vm.confirmContextReview();
                           }
-                        }, 1000, 15);
-                        if (!$scope.$$phase) $scope.$apply();
+                          $scope.$digest();
+                        }, 1000, 15, false);
                       }
                     } catch (e) {
                       pushAgentLog('error', 'Context review error: ' + (e.message || e));
