@@ -713,6 +713,144 @@ header h1 {
     border-radius: 0 0 8px 8px;
 }
 
+/* About Panel Content Styling */
+.popup-body.about-panel {
+    padding: 0;
+    margin-bottom: 24px;
+    line-height: 1.6;
+    color: var(--text);
+}
+
+.popup-body.about-panel p {
+    margin: 0 0 16px 0;
+    font-size: 14px;
+    color: var(--muted);
+}
+
+.popup-body.about-panel h2 {
+    color: var(--text);
+    margin: 24px 0 16px 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.popup-body.about-panel h3 {
+    color: var(--accent);
+    margin: 20px 0 12px 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* FAQ Section within About Panel */
+.faq-section.about-panel {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: var(--border);
+}
+
+.faq-item.about-panel {
+    margin-bottom: 16px;
+    border: var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+}
+
+.faq-toggle.about-panel {
+    background: var(--panel);
+    border: none;
+    color: var(--text);
+    width: 100%;
+    padding: 16px 20px;
+    text-align: left;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s ease;
+}
+
+.faq-toggle.about-panel:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.faq-content.about-panel {
+    background: var(--surface);
+    padding: 20px;
+    max-height: 500px;
+    overflow: auto;
+    transition: all 0.3s ease;
+}
+
+.faq-container.about-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 4px 0;
+}
+
+.faq-container.about-panel > summary::-webkit-details-marker {
+    display: none;
+}
+
+.faq-container.about-panel > summary h3 {
+    display: inline;
+    margin: 0;
+    color: var(--text);
+}
+
+.faq-container.about-panel details {
+    margin-bottom: 16px;
+    border: var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+}
+
+.faq-container.about-panel details summary {
+    background: var(--panel);
+    padding: 16px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s ease;
+    color: var(--text);
+}
+
+.faq-container.about-panel details summary::-webkit-details-marker {
+    display: none;
+}
+
+.faq-container.about-panel details summary:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.faq-container.about-panel details summary::after {
+    content: '▼';
+    font-size: 12px;
+    transition: transform 0.3s ease;
+}
+
+.faq-container.about-panel details[open] > summary::after {
+    transform: rotate(180deg);
+}
+
+.faq-container.about-panel details > :not(summary) {
+    padding: 20px;
+    background: var(--surface);
+}
+
+.faq-container.about-panel details > :not(summary) p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
 .popup-link {
 	color: var(--accent);
 	text-decoration: none;

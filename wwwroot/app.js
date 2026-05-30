@@ -713,8 +713,11 @@
       // Clear previous analysis for this fresh run
       delete card.agentAnalysis;
       delete card.agentLog;
-      // Clear confirmed context files if the task text changed since last run
+      // If task text changed, remove context-discovered files from attachments
       if (card.confirmedContextFiles && card._lastRunText && card.text !== card._lastRunText) {
+        var remove = card.confirmedContextFiles;
+        var attached = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
+        card.attached = attached.filter(function (f) { return remove.indexOf(f) === -1; });
         delete card.confirmedContextFiles;
       }
 
@@ -738,7 +741,7 @@
       vm.activeCardText = card.text;
       card._lastRunText = card.text;
 
-      var files = (card.confirmedContextFiles || []).concat(card.attached || []);
+      var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
       var payload = {
         prompt: card.text,
         project: proj,
@@ -1179,10 +1182,16 @@
         });
       }
       $http.post('/api/agent/context-review/confirm', { id: vm.pendingContextReview.id, files: selected }).then(function () {
-        // Save confirmed files on the card for restart resilience
+        // Save confirmed files on the card as attachments for restart resilience
         var card = findCardById(vm.activeCardId);
         if (card && selected.length > 0) {
           card.confirmedContextFiles = selected;
+          // Merge into card.attached (dedup)
+          var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
+          selected.forEach(function (f) {
+            if (existing.indexOf(f) === -1) existing.push(f);
+          });
+          card.attached = existing;
           vm.saveCards();
         }
         vm.pendingContextReview = null;

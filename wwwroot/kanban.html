@@ -43,11 +43,6 @@
               <span class="remove" ng-click="vm.removeAttachment(card.id); $event.stopPropagation()">✕</span>
             </div>
           </div>
-          <div class="attachments" ng-if="card.confirmedContextFiles && card.confirmedContextFiles.length">
-            <div class="attachment context-file" ng-repeat="f in card.confirmedContextFiles track by f">
-              <span>📋</span><span class="name">{{f}}</span>
-            </div>
-          </div>
           <div class="card-actions">
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
@@ -130,11 +125,6 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name">{{f}}</span>
-            </div>
-          </div>
-          <div class="attachments" ng-if="card.confirmedContextFiles && card.confirmedContextFiles.length">
-            <div class="attachment context-file" ng-repeat="f in card.confirmedContextFiles track by f">
-              <span>📋</span><span class="name">{{f}}</span>
             </div>
           </div>
           <!-- Live agent output on Doing cards -->
@@ -317,11 +307,6 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name">{{f}}</span>
-            </div>
-          </div>
-          <div class="attachments" ng-if="card.confirmedContextFiles && card.confirmedContextFiles.length">
-            <div class="attachment context-file" ng-repeat="f in card.confirmedContextFiles track by f">
-              <span>📋</span><span class="name">{{f}}</span>
             </div>
           </div>
           <!-- Agent analysis shown on Done cards -->
