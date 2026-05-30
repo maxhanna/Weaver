@@ -903,10 +903,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         return (allSteps, summary, complete, thinking);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  COMMAND EXECUTION PIPELINE  —  agentic LLM↔terminal loop
-    // ═════════════════════════════════════════════════════════════════════════
-
     private async Task<(List<object> steps, string summary, string thinking)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct)
     {
@@ -925,7 +921,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             return (steps, fastPlan.Summary, fastPlan.Thinking ?? "");
         }
 
-        // Agentic loop: LLM decides commands, sees output, reiterates
         await EmitLog(emitSse, "info", "CommandExecution (agentic): LLM has terminal control", ct: ct);
         _terminal.Start();
 
@@ -2152,7 +2147,6 @@ Be concise — 2-4 sentences max.";
             }
         }
     }
-
 
     private async Task RunEditingPipeline(
         PlanStep item,
