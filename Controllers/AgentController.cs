@@ -496,6 +496,7 @@ FILE EDIT RULES (only when NOT using a special marker):
 - When describing changes, quote exact existing code to modify. Include line numbers if possible.
 - DO NOT write any code yet. DO NOT include oldString or newString.
 - CRITICAL: Only reference code that actually exists in the provided file contents.
+- Every change in the plan must be a change. Do not include a change unless there is something to change in the file. If the file is perfect as-is, do not include it in the plan.
 - Each change must be a unique change. No other change in the plan should have the same change description, or you should make it more specific until they are all unique.
 - If you're unsure about exact code, describe the location and intent clearly.";
 
