@@ -210,6 +210,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           card.ready = false;
           // Preserve agentAnalysis/agentLog for previous-analysis display
           vm.activeCardId = null;
+          if (vm.streamingActive && vm.activeCardId === card.id) {
+            vm.stopAgent(card);
+          }
         }
         if (from === 'doing' && to === 'done') {
           // Only clear activeCardId if it's not part of the current project

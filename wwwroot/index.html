@@ -489,10 +489,13 @@
             <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
           </label>
         </div>
-        <div class="form-row">
-          <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
-          <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
-        </div>
+        <details>
+          <summary class="settings-header">Llama.cpp / Ollama URL</summary>
+          <div class="form-row">
+            <label for="settings-llama" class="settings-header">Llama.cpp / Ollama URL</label>
+            <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
+          </div>
+        </details>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <label for="settings-build-commands" class="settings-header">Build Commands</label>
           <textarea id="settings-build-commands" ng-model="vm.buildCommands"
