@@ -54,6 +54,16 @@ button {
 	gap: 6px;
 }
 
+a {
+	color: var(--accent);
+	text-decoration: none;
+	transition: all 0.2s ease;
+}
+
+a:hover {
+	color: var(--accent-2);
+	text-decoration: underline;
+}
 button:hover {
 	border-color: var(--accent);
 }

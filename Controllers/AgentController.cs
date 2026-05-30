@@ -1678,7 +1678,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         if (emitSse)
             await SendSse(Response, "plan",
-                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, contextSize = discoveryContext.Length }, ct);
 
         // ── Phase 2.5: CROSS-FILE DISCOVERY ───────────────────────────────
         // After planning, scan each planned file for imports, service calls,
@@ -1686,7 +1686,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         // are discovered, the LLM decides whether the plan needs updating.
         await EmitLog(emitSse, "info", "CodeEdit: Phase 2.5 — CROSS-FILE DISCOVERY", ct: ct);
         if (emitSse)
-            await SendSse(Response, "phase", new { phase = "cross-file-discovery", message = "Scanning for cross-file references..." }, ct);
+            await SendSse(Response, "phase", new { phase = "cross-file-discovery", message = "Scanning for cross-file references...", contextSize = discoveryContext.Length }, ct);
 
         var (expandedPlan, expandedContext) = await ExpandDiscoveryFromPlan(
             plan, prompt, projectRoot, discoveryContext, emitSse, ct);
