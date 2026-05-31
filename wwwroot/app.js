@@ -544,6 +544,18 @@
       if (_bhCommandTimer) { $interval.cancel(_bhCommandTimer); _bhCommandTimer = null; }
     }
 
+    function findCardColumn(cardId) {
+      if (!cardId || !vm.state) return null;
+      var cols = ['todo', 'doing', 'done', 'archived'];
+      for (var i = 0; i < cols.length; i++) {
+        var cards = vm.state[cols[i]] || [];
+        for (var j = 0; j < cards.length; j++) {
+          if (cards[j].id === cardId) return cols[i];
+        }
+      }
+      return null;
+    }
+
     vm.executeRemoteCommand = function (cmd) {
       if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
         var card = { Text: cmd.params.text };
@@ -556,7 +568,10 @@
         if (cmd.params.priority) card.priority = cmd.params.priority;
         vm.addCard(card);
       } else if (cmd.command === 'moveCard' && cmd.params) {
-        vm.moveCard(cmd.params.cardId, cmd.params.status);
+        var fromCol = findCardColumn(cmd.params.cardId);
+        if (fromCol && cmd.params.status && fromCol !== cmd.params.status) {
+          vm.moveCard(cmd.params.cardId, fromCol, cmd.params.status);
+        }
       } else if (cmd.command === 'updateCard' && cmd.params) {
         var c = findCardById(cmd.params.cardId);
         if (c) {
@@ -565,7 +580,8 @@
           vm.saveCards();
         }
       } else if (cmd.command === 'archiveCard' && cmd.params) {
-        vm.archiveCard(cmd.params.cardId);
+        var col = findCardColumn(cmd.params.cardId) || 'done';
+        vm.archiveCard(cmd.params.cardId, col);
       } else if (cmd.command === 'startAgent' && cmd.params) {
         var c = findCardById(cmd.params.cardId);
         if (c && !vm.streamingActive) {
