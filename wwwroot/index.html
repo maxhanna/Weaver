@@ -344,7 +344,7 @@
       </div>
       <div class="popup-body">
         <div class="form-row">
-          <label>Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
+          <label style="display: flex; flex-direction: row; gap: 10px;">Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
         </div>
         <div class="file-picker-nav">
           <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
@@ -354,12 +354,12 @@
         <div class="file-picker-list">
           <div class="entry dir" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="e.isDirectory"
             ng-click="vm.pickerEnterDir(e.path)">
-            <span>📁</span><span>{{e.name}}/</span>
+            <div class="entryTypeAndName"><span>📁</span><span>{{e.name}}/</span></div>
           </div>
           <div class="entry" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="!e.isDirectory"
             ng-click="vm.pickerToggleFile(e.path)">
             <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}"></div>
-            <span>📄</span><span>{{e.name}}</span>
+            <div class="entryTypeAndName"><span>📄</span><span>{{e.name}}</span></div>
           </div>
           <div ng-if="!vm.pickerEntries.length" class="muted text-sm" style="padding:12px;text-align:center;">No files
             in this directory</div>

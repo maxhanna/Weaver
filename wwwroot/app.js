@@ -572,8 +572,12 @@ vm.changeProject = function () {
       return null;
     }
 
+    function uid() { return Math.random().toString(36).slice(2, 9); }
+    
     vm.executeRemoteCommand = function (cmd) {
+      console.log('Executing remote command:', cmd);
       if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
+        console.log('Executing task command from remote:', cmd);
         var card = {
           id: uid(),
           text: cmd.params.text,
@@ -584,7 +588,8 @@ vm.changeProject = function () {
         };
         vm.state.todo.push(card);
         vm.saveCards();
-      } else if (cmd.command === 'addCard' && cmd.params) {
+      } else if (cmd.command === 'addCard') {
+        console.log('Adding card from remote command:', cmd);
         var card = {
           id: uid(),
           text: cmd.params.text || cmd.params.title || '',
@@ -594,13 +599,16 @@ vm.changeProject = function () {
           attached: []
         };
         vm.state.todo.push(card);
+        console.log('Added card from remote command:', card);
         vm.saveCards();
       } else if (cmd.command === 'moveCard' && cmd.params) {
+        console.log('Moving card from remote command:', cmd);
         var fromCol = findCardColumn(cmd.params.cardId);
         if (fromCol && cmd.params.status && fromCol !== cmd.params.status) {
           vm.moveCard(cmd.params.cardId, fromCol, cmd.params.status);
         }
       } else if (cmd.command === 'updateCard' && cmd.params) {
+        console.log('Updating card from remote command:', cmd);
         var c = findCardById(cmd.params.cardId);
         if (c) {
           if (cmd.params.text) c.text = cmd.params.text;
@@ -608,14 +616,17 @@ vm.changeProject = function () {
           vm.saveCards();
         }
       } else if (cmd.command === 'archiveCard' && cmd.params) {
+        console.log('Archiving card from remote command:', cmd);
         var col = findCardColumn(cmd.params.cardId) || 'done';
         vm.archiveCard(cmd.params.cardId, col);
       } else if (cmd.command === 'startAgent' && cmd.params) {
+        console.log('Starting agent from remote command:', cmd);
         var c = findCardById(cmd.params.cardId);
         if (c && !vm.streamingActive) {
           vm.executeAgent(c);
         }
       } else if (cmd.command === 'stopAgent') {
+        console.log('Stopping agent from remote command:', cmd);
         var activeCard = findCardById(vm.activeCardId);
         vm.stopAgent && vm.stopAgent(activeCard);
       }
