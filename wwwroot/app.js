@@ -529,6 +529,10 @@
         $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId))
           .then(function (resp) {
             var cmds = resp.data || [];
+            // API returns params as 'parameters' JSON string — parse into 'params'
+            if (cmd.parameters && !cmd.params) {
+              try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
+            }
             cmds.forEach(function (cmd) {
               var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
               if (!existing && cmd.command) {
