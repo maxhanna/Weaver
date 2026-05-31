@@ -280,6 +280,31 @@
       });
     };
 
+    vm.countArchivedCards = function () {
+      if (!vm.state || !vm.state.archived) {
+        vm.archiveCardCount = 0;
+        return;
+      }
+
+      // Handle different archived data structures
+      if (Array.isArray(vm.state.archived)) {
+        // If archived is an array, filter by current project
+        vm.archiveCardCount = vm.state.archived.filter(function (card) {
+          return card.filePath === vm.selectedProject;
+        }).length;
+      } else if (typeof vm.state.archived === 'object') {
+        // If archived is an object, check if it has project keys
+        var archivedData = vm.state.archived[vm.selectedProject];
+        if (Array.isArray(archivedData)) {
+          vm.archiveCardCount = archivedData.length;
+        } else {
+          vm.archiveCardCount = 0;
+        }
+      } else {
+        vm.archiveCardCount = 0;
+      }
+    }; 
+    
     // === Project config ===
     function normalizeProjects(raw) {
       return raw.map(function (p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
@@ -317,6 +342,7 @@
         if (vm.bughostedHeartbeatEnabled && vm.bughostedUrl && vm.bughostedUsername && !vm.bughostedClientId) {
           vm.bughostedLogin();
         }
+
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -324,6 +350,8 @@
       });
 
       console.log('Config loaded. Selected project:', vm.selectedProject, project);
+      // Initialize archive card count after state is loaded
+      vm.countArchivedCards();
     };
     vm.loadConfig();
 
@@ -333,12 +361,13 @@
       return p ? (p.Description || '') : '';
     };
 
-    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
-    
+    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; }; 
+
     vm.changeProject = function () { 
       console.log(vm.selectedProject); 
-      vm.loadConfig(vm.selectedProject);  
-      vm.archiveCardCount = vm.state.archived.filter(x => x.filePath === vm.selectedProject).length; 
+      vm.loadConfig(vm.selectedProject).then(function() {
+        vm.countArchivedCards();
+      });  
     };
 
     vm.openEditProjectsPanel = function () {
@@ -852,9 +881,7 @@
       vm.clarificationReply = '';
       vm.agentResult = null;
       vm.executeAgent(card);
-    };
-
-    // === Agent Execution (streaming) ===
+    }; 
 
     vm.executeAgent = function (card) {
       if (!card) return;
@@ -1401,4 +1428,4 @@
       if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
       if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
     }
-  }]);
+  }]);    

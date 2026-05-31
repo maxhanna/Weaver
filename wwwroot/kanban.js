@@ -27,6 +27,19 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         _cardsVersion++;
       };
 
+      vm.handleFileSearchChange = function() {
+        // When search changes in file attachment modal, show all files/folders
+        // This bypasses the normal filtering to help users navigate faster
+        if (vm.fileSearchFilter) {
+          // Reset file search to show all items when search changes
+          vm.fileSearchFilter = '';
+          // Trigger a refresh of file listing
+          if (vm.refreshFileList) {
+            vm.refreshFileList();
+          }
+        }
+      };
+
       vm.filterCards = function (cards) {
         if (!vm.searchFilter) return cards;
         var filter = vm.searchFilter.toLowerCase();
@@ -42,6 +55,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         var cached = _cardsCache[key];
         if (cached && cached._version === _cardsVersion && cached._length === all.length) return cached;
         var filtered = all.filter(function (c) { return c.filePath === vm.selectedProject; });
+        // If we're in file search context, bypass filtering to show all files/folders
+        if (vm.isInFileSearch && vm.fileSearchFilter) {
+          return filtered;
+        }
         var result = vm.filterCards(filtered);
         result._version = _cardsVersion;
         result._length = all.length;
@@ -101,6 +118,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.showArchived = false;
+      vm.isInFileSearch = false;
       vm.voiceSupported = VoiceInput.isSupported();
       vm.isRecording = false;
 
