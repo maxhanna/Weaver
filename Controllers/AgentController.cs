@@ -400,36 +400,35 @@ public class AgentController : ControllerBase
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
-        const string systemPrompt = @"You are a coding specialist agent.
+        const string systemPrompt = @"You are a unified software-engineering agent. Plan ALL work in one pass.
 
-Given a task and the contents of project files, output a structured plan. 
-For EDITING EXISTING FILES: use the actual relative file path (e.g. ""src/app.js"") in the file field.
-When describing changes, be very specific and detailed. Include line numbers if possible. The more precise you are, the better the agent can execute the plan.
+AVAILABLE STEP TYPES (put one in the ""file"" field):
+  relative/path.ext     — Edit an existing file (must appear in discovery context below)
+  _command              — Run any terminal command (PowerShell syntax)
+  _create_file          — Create a new file: ""path.ext: describe what to generate""
+  _web_search           — Search the web; put the query in ""change""
+  _web_fetch            — Fetch a URL; put the full URL in ""change""
+  _git                  — Git operation (commit, pull, push, revert, branch)
+  _rename               — Rename: ""old → new""
+  _delete_file          — Delete: ""path.ext""
+  _show                 — Display text to the user
 
-OUTPUT FORMAT — respond with ONLY this JSON object, no markdown, no extra text:
+RULES:
+1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
+2. WEB BEFORE CODE — if you need current API docs/library versions, add _web_search at the TOP of the plan
+3. EXACT LOCATIONS — for file edits, include exact line numbers or function/class names in ""change""
+4. ATOMIC STEPS — one logical change per step, one step per file
+5. REAL PATHS ONLY — only reference files that exist in the discovery context below
+
+OUTPUT — respond with ONLY this JSON, no markdown, no extra text:
 {
-  ""thinking"": ""Task Summary: <one-paragraph summary of what the user asked for, in your own words, referencing specific files, lines, or behaviors. Do NOT copy the user's prompt verbatim.>"",
-  ""summary"":  ""<concrete description of what changes will be made, to which files>"",
+  ""thinking"": ""<analyze the task; name files; state if commands or web searches are needed first>"",
+  ""summary"":  ""<one sentence: what the completed plan will accomplish>"",
   ""plan"": [
-    {
-      ""file"": ""relative/path/to/file"",
-      ""change"": ""description of what to do. Be very detailed."",
-      ""priority"": 1
-    }
+    { ""file"": ""_command"",    ""change"": ""mkdir -p src/components/Button"",              ""priority"": 1 },
+    { ""file"": ""relative/path"",""change"": ""Line 5: add import ..."",                      ""priority"": 2 }
   ]
-}
-
-The ""change"" field is CRITICAL — it will be passed directly to the handler so it knows exactly what to do.
-Make it specific and accurate.
-
-FILE EDIT RULES (only when NOT using a special marker): 
-- Priority 1 = most important file. Sort by priority ascending.
-- When describing changes, quote exact existing code to modify. Include line numbers if possible.
-- DO NOT write any code yet. DO NOT include oldString or newString.
-- CRITICAL: Only reference code that actually exists in the provided file contents.
-- Every change in the plan must be a change. Do not include a change unless there is something to change in the file. If the file is perfect as-is, do not include it in the plan.
-- Each change must be a unique change. No other change in the plan should have the same change description, or you should make it more specific until they are all unique.
-- If you're unsure about exact code, describe the location and intent clearly.";
+}";
 
         var analysisPrompt = new StringBuilder();
         analysisPrompt.AppendLine("## Task");
@@ -1036,21 +1035,28 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
-        PipelineType? pipelineType = await TryClassifyWithLlm(prompt, emitSse, ct);
-        if (pipelineType == null)
+        // ── Fast path: known intents (git, ping, rename, package_install) ──
+        var fastPlan = AgentUtilities.TryDetectSimpleIntent(prompt);
+        if (fastPlan != null)
         {
-            await EmitLog(emitSse, "warn", "LLM failed to classify the prompt. Attempting to classify manually.", ct: ct);
-            pipelineType = AgentUtilities.ClassifyTask(prompt);
+            await EmitLog(emitSse, "info", $"Fast-path → {fastPlan.Summary}", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "plan",
+                    new { thinking = fastPlan.Thinking, summary = fastPlan.Summary, items = fastPlan.Plan }, ct);
+            var fastSteps = new List<object>();
+            await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, fastSteps);
+            var (fc, _) = await VerificationPipeline(prompt, fastSteps, projectRoot, emitSse, ct);
+            return (fastSteps, fastPlan.Summary, fc, fastPlan.Thinking ?? "");
         }
 
-        await EmitLog(emitSse, "info", $"Router → {pipelineType} pipeline", ct: ct);
+        // ── Route: agentic for terminal/research, unified for code+commands ──
+        var pipelineType = AgentUtilities.ClassifyTask(prompt);
+        await EmitLog(emitSse, "info", $"Router → {pipelineType}", ct: ct);
 
-        // ── Route to the right pipeline ───────────────────────────────────
         var (allSteps, summary, thinking) = pipelineType switch
         {
             PipelineType.CommandExecution => await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct),
-            PipelineType.CodeEdit => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
-            _ => await CodeEditPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
+            _ => await UnifiedPipeline(prompt, projectRoot, emitSse, ct, attachedFiles: attachedFiles),
         };
 
         // ── Verification Pipeline ─────────────────────────────────────────
@@ -1091,7 +1097,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     var refreshedSteps = await RefreshEditedFilesFromDisk(allSteps, projectRoot, emitSse, ct);
                     var reprisalContext = AgentUtilities.BuildDiscoveryTextFromSteps(refreshedSteps);
 
-                    var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(
+                    var (reprisalSteps, reprisalSummary, reprisalThinking) = await UnifiedPipeline(
                         reprisalPrompt, projectRoot, emitSse, ct,
                         prebuiltDiscoveryContext: reprisalContext,
                         prebuiltDiscoverySteps: refreshedSteps.Where(s =>
@@ -1856,7 +1862,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     //  CODE EDIT PIPELINE  —  discover → plan → edit → review loop
     // ═════════════════════════════════════════════════════════════════════════
 
-    private async Task<(List<object> steps, string summary, string thinking)> CodeEditPipeline(
+    private async Task<(List<object> steps, string summary, string thinking)> UnifiedPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         string? prebuiltDiscoveryContext = null,
@@ -2107,7 +2113,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
             await EmitLog(emitSse, "info", $"Debug build attempt {attempt + 1}/{maxAttempts}", ct: ct);
 
-            var (steps, summary, thinking) = await CodeEditPipeline(debugPrompt, projectRoot, emitSse, ct);
+            var (steps, summary, thinking) = await UnifiedPipeline(debugPrompt, projectRoot, emitSse, ct);
             allSteps.AddRange(steps);
             lastSummary = summary ?? lastSummary;
             lastThinking = thinking ?? lastThinking;
@@ -2501,14 +2507,14 @@ Be concise — 2-4 sentences max.";
         // ── Editing Pipeline ────────────────────────────────────────────────
         // 1. Analyze & Plan, 2. Generate Code, 3. Review & Apply
         // ──────────────────────────────────────────────────────────────────────
-        editSteps = await RunMultiPhasePipeline(
-            fileTask, relPath, fileContent, discoveryContext, projectRoot, emitSse, ct);
+        // editSteps = await (
+        //     fileTask, relPath, fileContent, discoveryContext, projectRoot, emitSse, ct);
 
         // ── Fallback: direct single-call edit if multi-phase produced nothing ──
         if (editSteps.Count == 0)
         {
-            await EmitLog(emitSse, "info",
-                $"Multi-phase pipeline produced no edits for {relPath} — falling back to direct LLM edit", ct: ct);
+            // await EmitLog(emitSse, "info",
+            //     $"Multi-phase pipeline produced no edits for {relPath} — falling back to direct LLM edit", ct: ct);
 
             var infoRequestCount = 0;
             var attempt = 0;

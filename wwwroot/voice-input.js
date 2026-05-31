@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
   var recognition = null;
@@ -9,6 +9,7 @@ angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
   var timerHandle = null;
   var baseText = '';
   var lastProcessedIndex = -1;
+  var scope = null;
 
   var SpeechRecognition = $window.SpeechRecognition || $window.webkitSpeechRecognition;
 

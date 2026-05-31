@@ -239,7 +239,10 @@ public static class AgentUtilities
         file.Equals("_display", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase);
+        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase);
 
     public static string InferTargetFolder(string fileName, string projectRoot)
     {
@@ -498,7 +501,8 @@ public static class AgentUtilities
 
         var specialMarkers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "_git", "_ping", "_show", "_display", "_create_file", "_package_install"
+            "_git", "_ping", "_show", "_display", "_create_file", "_package_install",
+            "_command", "_web_search", "_web_fetch"
         };
         return !specialMarkers.Contains(path);
     }
@@ -626,7 +630,7 @@ public static class AgentUtilities
 
         return (null, null, "Could not parse oldString/newString from code gen response");
     }
-
+ 
     public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
