@@ -210,15 +210,19 @@
     }
 
     vm.saveFileHints = function () {
-      var projectKey = vm.selectedProject || vm.defaultProject || '__default__';
-      var hints = vm.fileHintsData.map(function (h) {
-        return {
-          Keywords: h.keywords.split(',').map(function (k) { return k.trim(); }).filter(Boolean),
-          Files: h.files.filter(Boolean)
+      var payload = { Projects: {} };
+      vm.fileHintsData.forEach(function (entry) {
+        var projectKey = entry.projectPath || vm.selectedProject || vm.defaultProject || '__default__';
+        payload.Projects[projectKey] = {
+          Hints: entry.hints.map(function (h) {
+            return {
+              Keywords: h.keywords.split(',').map(function (k) { return k.trim(); }).filter(Boolean),
+              Files: h.files.filter(Boolean)
+            };
+          }),
+          AutoLearned: []
         };
       });
-      var payload = { Projects: {} };
-      payload.Projects[projectKey] = { Hints: hints, AutoLearned: [] };
       return $http.put('/api/filehints', payload).then(function () {
         vm.closeSettingsPanel();
       }, function (err) {
@@ -226,17 +230,25 @@
       });
     };
 
-    vm.addHint = function () {
-      vm.fileHintsData.push({ keywords: '', files: [''] });
+    vm.addHint = function (projectIndex) {
+      if (vm.fileHintsData[projectIndex]) {
+        vm.fileHintsData[projectIndex].hints.push({ keywords: '', files: [''] });
+      }
     };
-    vm.removeHint = function (index) {
-      vm.fileHintsData.splice(index, 1);
+    vm.removeHint = function (projectIndex, hintIndex) {
+      if (vm.fileHintsData[projectIndex]) {
+        vm.fileHintsData[projectIndex].hints.splice(hintIndex, 1);
+      }
     };
-    vm.addFileToHint = function (hintIndex) {
-      vm.fileHintsData[hintIndex].files.push('');
+    vm.addFileToHint = function (projectIndex, hintIndex) {
+      if (vm.fileHintsData[projectIndex] && vm.fileHintsData[projectIndex].hints[hintIndex]) {
+        vm.fileHintsData[projectIndex].hints[hintIndex].files.push('');
+      }
     };
-    vm.removeFileFromHint = function (hintIndex, fileIndex) {
-      vm.fileHintsData[hintIndex].files.splice(fileIndex, 1);
+    vm.removeFileFromHint = function (projectIndex, hintIndex, fileIndex) {
+      if (vm.fileHintsData[projectIndex] && vm.fileHintsData[projectIndex].hints[hintIndex]) {
+        vm.fileHintsData[projectIndex].hints[hintIndex].files.splice(fileIndex, 1);
+      }
     };
 
     vm.saveSettings = function () {
@@ -350,7 +362,6 @@
       });
 
       console.log('Config loaded. Selected project:', vm.selectedProject, project);
-      // Initialize archive card count after state is loaded
       vm.countArchivedCards();
     };
     vm.loadConfig();
@@ -363,12 +374,15 @@
 
     vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; }; 
 
-    vm.changeProject = function () { 
-      console.log(vm.selectedProject); 
-      vm.loadConfig(vm.selectedProject).then(function() {
-        vm.countArchivedCards();
-      });  
-    };
+vm.changeProject = function () { 
+  console.log(vm.selectedProject); 
+  vm.loadConfig(vm.selectedProject).then(function() {
+    // Ensure cards are loaded before counting archived cards
+    $timeout(function() {
+      vm.countArchivedCards();
+    }, 100);
+  });  
+};
 
     vm.openEditProjectsPanel = function () {
       vm.newProjectName = '';
@@ -514,7 +528,6 @@
             vm.bughostedStatus = 'error';
           }
         });
-        $scope.$digest();
       }, 30000, 0, false);
     }
     function stopBughostedHeartbeat() {
@@ -529,18 +542,17 @@
         $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId))
           .then(function (resp) {
             var cmds = resp.data || [];
-            // API returns params as 'parameters' JSON string — parse into 'params'
-            if (cmd.parameters && !cmd.params) {
-              try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
-            }
             cmds.forEach(function (cmd) {
+              // parse JSON string into object
+              if (cmd.parameters && !cmd.params) {
+                try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
+              }
               var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
               if (!existing && cmd.command) {
                 vm.remoteCommands.push(cmd);
                 vm.executeRemoteCommand(cmd);
               }
             });
-            $scope.$digest();
           });
       }, 15000, 0, false);
     }
@@ -562,15 +574,27 @@
 
     vm.executeRemoteCommand = function (cmd) {
       if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
-        var card = { Text: cmd.params.text };
-        if (cmd.params.project) card.filePath = cmd.params.project;
-        if (cmd.params.priority) card.priority = cmd.params.priority;
-        vm.addCard(card);
+        var card = {
+          id: uid(),
+          text: cmd.params.text,
+          filePath: cmd.params.project || vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: cmd.params.priority || 'medium',
+          attached: []
+        };
+        vm.state.todo.push(card);
+        vm.saveCards();
       } else if (cmd.command === 'addCard' && cmd.params) {
-        var card = { Text: cmd.params.text || cmd.params.title || '' };
-        if (cmd.params.project) card.filePath = cmd.params.project;
-        if (cmd.params.priority) card.priority = cmd.params.priority;
-        vm.addCard(card);
+        var card = {
+          id: uid(),
+          text: cmd.params.text || cmd.params.title || '',
+          filePath: cmd.params.project || vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: cmd.params.priority || 'medium',
+          attached: []
+        };
+        vm.state.todo.push(card);
+        vm.saveCards();
       } else if (cmd.command === 'moveCard' && cmd.params) {
         var fromCol = findCardColumn(cmd.params.cardId);
         if (fromCol && cmd.params.status && fromCol !== cmd.params.status) {
@@ -664,29 +688,22 @@
         try {
           var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
           if (store && store.Projects) {
-            var keys = Object.keys(store.Projects);
-            var projKey = vm.selectedProject || keys[0];
-            if (projKey && store.Projects[projKey]) {
-              var proj = store.Projects[projKey];
-              if (proj.Hints) {
-                vm.fileHintsData = proj.Hints.map(function (h) {
+            vm.projects.forEach(function (p) {
+              var proj = store.Projects[p.Path];
+              vm.fileHintsData.push({
+                projectPath: p.Path,
+                hints: proj && proj.Hints ? proj.Hints.map(function (h) {
                   return {
                     keywords: (h.Keywords || []).join(', '),
                     files: (h.Files || []).length > 0 ? h.Files.slice() : ['']
                   };
-                });
-              }
-            } else if (keys.length) {
-              var proj = store.Projects[keys[0]];
-              if (proj.Hints) {
-                vm.fileHintsData = proj.Hints.map(function (h) {
-                  return {
-                    keywords: (h.Keywords || []).join(', '),
-                    files: (h.Files || []).length > 0 ? h.Files.slice() : ['']
-                  };
-                });
-              }
-            }
+                }) : []
+              });
+            });
+          } else {
+            vm.projects.forEach(function (p) {
+              vm.fileHintsData.push({ projectPath: p.Path, hints: [] });
+            });
           }
         } catch (e) {
           vm.fileHintsData = [];
@@ -712,6 +729,7 @@
 
     // === Cards (managed by KanbanMixin) ===
     KanbanMixin.init(vm, $scope);
+    vm.countArchivedCards();
 
 
 
@@ -1137,18 +1155,21 @@
                         ctx.files.forEach(function (f) { f.keep = true; });
                         vm.pendingContextReview = ctx;
                         vm._contextReviewSubmitted = false;
-                        vm.contextReviewCountdown = 15;
-                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 15s');
+                        vm.contextReviewCountdown = 5;
+                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
                         if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
+                        if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); }
+                        // Countdown display only
                         vm.contextReviewTimer = $interval(function () {
                           vm.contextReviewCountdown--;
-                          if (vm.contextReviewCountdown <= 0) {
-                            $interval.cancel(vm.contextReviewTimer);
-                            vm.contextReviewTimer = null;
+                          if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
+                        }, 1000, 5, false);
+                        // Auto-confirm once after 5s (doesn't get stuck on HTTP failure)
+                        vm.contextReviewAutoConfirm = $timeout(function () {
+                          if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
                             vm.confirmContextReview();
                           }
-                          $scope.$digest();
-                        }, 1000, 15, false);
+                        }, 5000);
                       }
                     } catch (e) {
                       pushAgentLog('error', 'Context review error: ' + (e.message || e));
@@ -1437,12 +1458,19 @@
       });
     };
 
+    vm.dismissContextReview = function () {
+      if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; }
+      if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); vm.contextReviewAutoConfirm = null; }
+      vm.pendingContextReview = null;
+      vm._contextReviewSubmitted = false;
+    };
+
     vm.confirmContextReview = function () {
-      if (!vm.pendingContextReview) return;
-      if (vm.contextReviewCountdown <= 0 && vm._contextReviewSubmitted) return;
+      if (!vm.pendingContextReview || vm._contextReviewSubmitted) return;
       vm._contextReviewSubmitted = true;
-      vm.contextReviewCountdown = 0; 
-     
+      if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; }
+      if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); vm.contextReviewAutoConfirm = null; }
+
       var selected = [];
       var files = vm.pendingContextReview.files;
       if (files && files.length) {
@@ -1451,11 +1479,9 @@
         });
       }
       $http.post('/api/agent/context-review/confirm', { id: vm.pendingContextReview.id, files: selected }).then(function () {
-        // Save confirmed files on the card as attachments for restart resilience
         var card = findCardById(vm.activeCardId);
         if (card && selected.length > 0) {
           card.confirmedContextFiles = selected;
-          // Merge into card.attached (dedup)
           var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
           selected.forEach(function (f) {
             if (existing.indexOf(f) === -1) existing.push(f);
@@ -1465,7 +1491,6 @@
         }
         vm.pendingContextReview = null;
         vm._contextReviewSubmitted = false;
-        if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; }
       }, function (err) {
         vm._contextReviewSubmitted = false;
         pushAgentLog('error', 'Failed to submit context review: ' + (err.statusText || err));
