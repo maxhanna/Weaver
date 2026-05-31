@@ -9,7 +9,7 @@ Maestro is an advanced agentic backend system that enables AI-driven automation 
 
 ## Run
 
-From the `backend` folder:
+From the `Maestro` folder:
 
 ```bash
 dotnet restore
