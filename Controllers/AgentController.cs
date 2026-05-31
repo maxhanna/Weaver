@@ -78,76 +78,7 @@ public class AgentController : ControllerBase
         await response.Body.FlushAsync(ct);
     }
  
-
-    /// <summary>
-    /// Makes a single LLM call to select the most relevant files from a
-    /// heuristic-filtered candidate list. Falls back to top candidates if the
-    /// call fails or returns no parseable files.
-    ///
-    /// This replaces N sequential ScoreSourceMaterial calls (one per grep-matched file)
-    /// with a single call that sees all candidates at once.
-    /// </summary>
-    private async Task<List<string>> SelectRelevantFilesWithLlm(
-        string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
-    {
-        if (candidates.Count == 0) return new List<string>();
-
-        var fileList = string.Join("\n", candidates);
-
-        const string system =
-            "You are a file relevance selector for a code editor agent. " +
-            "Given a task and a list of project files, pick the 3-7 files most likely to need reading or editing. " +
-            "Output ONLY valid JSON with no markdown fences or extra text: {\"files\": [\"path1\", \"path2\"]}";
-
-        var user = $"Task: {prompt}\n\nProject files:\n{fileList}\n\nSelect 3–7 files maximum.";
-
-        var (raw, _, err) = await CallLlmRaw(system, user, ct,
-            requestTimeout: TimeSpan.FromSeconds(25));
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            await EmitLog(emitSse, "warn",
-                $"File selection LLM failed ({err ?? "empty"}) — using top heuristic candidates", ct: ct);
-            return candidates.Take(6).ToList();
-        }
-
-        try
-        {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
-            {
-                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                if (m.Success) cleaned = m.Groups[1].Value.Trim();
-            }
-            var start = cleaned.IndexOf('{');
-            var end = cleaned.LastIndexOf('}');
-            if (start >= 0 && end > start)
-                cleaned = cleaned.Substring(start, end - start + 1);
-
-            using var doc = JsonDocument.Parse(cleaned);
-            if (doc.RootElement.TryGetProperty("files", out var filesEl) &&
-                filesEl.ValueKind == JsonValueKind.Array)
-            {
-                var selected = filesEl.EnumerateArray()
-                    .Select(e => e.GetString()?.Replace('\\', '/') ?? "")
-                    .Where(f => !string.IsNullOrWhiteSpace(f))
-                    // Only accept files actually in the candidate list to prevent hallucination
-                    .Where(f => candidates.Any(c =>
-                        string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
-                    .Take(7)
-                    .ToList();
-
-                if (selected.Count > 0)
-                    return selected;
-            }
-        }
-        catch { /* fall through to fallback */ }
-
-        await EmitLog(emitSse, "warn",
-            "File selection response unparseable — using top heuristic candidates", ct: ct);
-        return candidates.Take(6).ToList();
-    }
-
+ 
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
         List<string> attachedFiles, string projectRoot, bool emitSse)
     {
@@ -551,22 +482,33 @@ FILE EDIT RULES (only when NOT using a special marker):
     }
 
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
-    string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null,
-    CancellationToken ct = default)
+     string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null,
+     CancellationToken ct = default)
     {
+        // Fast path: if files are already attached, skip full discovery
         if (attachedFiles != null && attachedFiles.Count > 0)
             return await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
 
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: enumerating project files…", ct: ct);
+
         var allSteps = new List<object>();
 
-        // List root
-        var listStep = new AgentStep { Index = 0, Type = "list", Path = "", Description = "Auto: list project root" };
-        allSteps.AddRange(await ExecuteDiscoveryStepsConcurrent(new List<AgentStep> { listStep }, projectRoot, 0, emitSse));
+        // ── Step 1: List project root (fast, no LLM) ───────────────────────────
+        var listStep = new AgentStep
+        {
+            Index = 0,
+            Type = "list",
+            Path = "",
+            Description = "Auto: list project root"
+        };
+        var listResults = await ExecuteDiscoveryStepsConcurrent(
+            new List<AgentStep> { listStep }, projectRoot, 0, emitSse);
+        allSteps.AddRange(listResults);
 
-        if (!Directory.Exists(projectRoot)) return ("", allSteps);
+        if (!Directory.Exists(projectRoot))
+            return ("", allSteps);
 
-        // Enumerate all files (skip noise dirs)
+        // ── Step 2: Enumerate all project files (fast, no LLM) ────────────────
         var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages", ".vs", ".idea" };
 
@@ -577,45 +519,63 @@ FILE EDIT RULES (only when NOT using a special marker):
                 rel.Contains("/" + d + "/", StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
-        if (allFiles.Count == 0) return ("", allSteps);
+        if (allFiles.Count == 0)
+            return ("", allSteps);
 
-        // Hinted files (pre-learned, highest trust)
+        // ── Step 3: Fast heuristic pre-filter (zero LLM calls) ────────────────
+        // File hints are learned associations from past runs — highest trust
         var hintedFiles = _fileHints.GetFilesForPrompt(prompt, projectRoot)
             .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
-            .Take(4).ToList();
+            .Take(4)
+            .ToList();
 
-        // Score by task type (no LLM)
-        var heuristicCandidates = AgentUtilities.ApplyTaskTypeHeuristics(prompt, allFiles);
+        // Score all files by task type — returns ordered list, no LLM
+        var heuristicCandidates = ApplyTaskTypeHeuristics(prompt, allFiles);
 
+        // Candidate pool = hints (trusted) + top heuristic results, deduped, max 60
         var candidatePool = hintedFiles
             .Concat(heuristicCandidates)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(60).ToList();
+            .Take(60)
+            .ToList();
 
-        // One LLM call to pick which files to read
+        // ── Step 4: ONE LLM call to pick which files to read ──────────────────
         List<string> toRead;
         if (candidatePool.Count <= 6)
         {
+            // Small enough — just read them all, no LLM needed
             toRead = candidatePool;
-            await EmitLog(emitSse, "info", $"Phase 1 — {candidatePool.Count} candidate(s), reading all", ct: ct);
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — {candidatePool.Count} candidate(s), reading all directly", ct: ct);
         }
         else
         {
-            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates (1 LLM call)…", candidatePool, ct: ct);
+            await EmitLog(emitSse, "info",
+                $"Phase 1 — selecting from {candidatePool.Count} candidates (1 LLM call)…", ct: ct);
             var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
-            toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
+
+            // Always include hinted files even if LLM didn't select them
+            toRead = hintedFiles
+                .Concat(selected)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToList();
         }
 
-        // Verify files exist
-        toRead = toRead.Where(f =>
-        {
-            var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
-            return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
-        }).ToList();
+        // Verify files actually exist on disk (guard against hallucination)
+        toRead = toRead
+            .Where(f =>
+            {
+                var full = Path.GetFullPath(
+                    Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
+                return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
+            })
+            .ToList();
 
-        await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
+        await EmitLog(emitSse, "info",
+            $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
 
-        // Read in parallel
+        // ── Step 5: Read selected files in PARALLEL ────────────────────────────
         if (toRead.Count > 0)
         {
             var readPlan = toRead.Select((f, i) => new AgentStep
@@ -627,14 +587,258 @@ FILE EDIT RULES (only when NOT using a special marker):
                 Prompt = prompt
             }).ToList();
 
-            allSteps.AddRange(await ExecuteDiscoveryStepsConcurrent(readPlan, projectRoot, allSteps.Count, emitSse));
+            var readResults = await ExecuteDiscoveryStepsConcurrent(
+                readPlan, projectRoot, allSteps.Count, emitSse);
+            allSteps.AddRange(readResults);
 
+            // Teach file hints from confirmed reads so future runs skip the LLM call
             foreach (var f in toRead)
                 _fileHints.LearnFromGrepOutput(prompt, f, projectRoot);
         }
 
-        await EmitLog(emitSse, "info", $"Phase 1 complete — {allSteps.Count} steps, {toRead.Count} file(s) read", ct: ct);
-        return (AgentUtilities.BuildDiscoveryTextFromSteps(allSteps), allSteps);
+        // ── Build discovery text ───────────────────────────────────────────────
+        var sb = new StringBuilder();
+        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
+        sb.AppendLine();
+        foreach (var item in allSteps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (!r.TryGetValue("output", out var output) ||
+                output == null || string.IsNullOrEmpty(output.ToString())) continue;
+
+            sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
+            sb.AppendLine(output.ToString());
+            sb.AppendLine();
+        }
+
+        await EmitLog(emitSse, "info",
+            $"Phase 1 complete — {allSteps.Count} steps, {toRead.Count} file(s) read", ct: ct);
+        return (sb.ToString(), allSteps);
+    }
+
+
+    // ─── NEW METHOD ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Scores project files using task-type heuristics — no LLM required.
+    /// Detects intent (styling, HTML, JS, backend, config) from prompt keywords,
+    /// then assigns extension + filename scores. Returns ordered candidate list.
+    /// </summary>
+    private static List<string> ApplyTaskTypeHeuristics(string prompt, List<string> allFiles)
+    {
+        var lower = prompt.ToLowerInvariant();
+
+        // Detect what kind of task this is (multiple can be true)
+        var isStyleTask = Regex.IsMatch(lower, @"\b(style|css|color|theme|layout|spacing|font|design|ui|ux|look|appear|brand|visual|margin|padding|border|shadow|panel|card)\b");
+        var isHtmlTask = Regex.IsMatch(lower, @"\b(html|template|page|view|markup|modal|popup|section|div)\b");
+        var isJsTask = Regex.IsMatch(lower, @"\b(javascript|script|function|event|click|toggle|show|hide|angular|react|vue|component|state|behavior)\b");
+        var isBackendTask = Regex.IsMatch(lower, @"\b(api|endpoint|controller|service|database|model|route|logic|backend|server|c#|csharp|dotnet)\b");
+        var isConfigTask = Regex.IsMatch(lower, @"\b(config|setting|option|appsettings|environment|json)\b");
+
+        var meaningfulKeywords = ExtractMeaningfulKeywords(lower);
+
+        var scored = allFiles.Select(f =>
+        {
+            var ext = Path.GetExtension(f).ToLowerInvariant();
+            var nameLow = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
+            var pathLow = f.ToLowerInvariant();
+            var score = 0;
+
+            // ── Extension scoring by task type ──────────────────────────────
+            if (isStyleTask)
+            {
+                if (ext is ".css" or ".scss" or ".sass" or ".less") score += 120;
+                else if (ext is ".html" or ".htm") score += 60;
+                else if (ext is ".js" or ".ts") score += 20;
+            }
+            if (isHtmlTask)
+            {
+                if (ext is ".html" or ".htm") score += 120;
+                else if (ext is ".css" or ".scss") score += 50;
+                else if (ext is ".js" or ".ts") score += 30;
+            }
+            if (isJsTask)
+            {
+                if (ext is ".js" or ".ts" or ".jsx" or ".tsx") score += 120;
+                else if (ext is ".html" or ".htm") score += 40;
+            }
+            if (isBackendTask)
+            {
+                if (ext == ".cs") score += 120;
+                else if (ext == ".json") score += 30;
+            }
+            if (isConfigTask)
+            {
+                if (ext is ".json" or ".yaml" or ".yml") score += 120;
+            }
+
+            // ── Boost if the filename contains a meaningful prompt keyword ──
+            foreach (var kw in meaningfulKeywords)
+                if (nameLow.Contains(kw))
+                    score += 50;
+
+            // ── Frontend folder boost for frontend tasks ───────────────────
+            if ((isStyleTask || isHtmlTask || isJsTask) && pathLow.StartsWith("wwwroot/"))
+                score += 25;
+
+            // ── Penalize known-large / known-noisy files ───────────────────
+            // These are almost never the target of a specific edit request
+            if (nameLow.Contains("agentcontroller")) score -= 200;
+            if (nameLow == "filehints") score -= 200;
+            if (pathLow.EndsWith(".min.js")) score -= 300;
+            if (pathLow.EndsWith(".min.css")) score -= 300;
+
+            // ── Penalize non-text / generated artifacts ────────────────────
+            if (ext is ".dll" or ".exe" or ".pdb" or ".nupkg" or ".lock" or ".sum")
+                score -= 1000;
+
+            return (file: f, score);
+        })
+        .Where(x => x.score > 0)
+        .OrderByDescending(x => x.score)
+        .Take(50)
+        .Select(x => x.file)
+        .ToList();
+
+        // Fallback: if no file scored positively (e.g. novel task type), include
+        // common entry-point files so the LLM always has something to work with
+        if (scored.Count == 0)
+        {
+            scored = allFiles
+                .Where(f =>
+                {
+                    var name = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    return name is "index" or "app" or "main" or "program" or "startup"
+                                or "styles" or "global" or "layout"
+                        && ext is ".html" or ".js" or ".ts" or ".css" or ".cs";
+                })
+                .Take(10)
+                .ToList();
+        }
+
+        return scored;
+    }
+
+
+    // ─── NEW METHOD ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Strips stopwords and generic action verbs from a prompt, returning
+    /// the domain-meaningful terms that are actually useful for file matching.
+    /// Replaces the old ExtractSearchKeywords which included words like "Make", "more",
+    /// "sensitive" that produce grep noise across every file in the codebase.
+    /// </summary>
+    private static List<string> ExtractMeaningfulKeywords(string lower)
+    {
+        var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        // Articles, prepositions, conjunctions
+        "the","a","an","and","or","but","in","on","at","to","for","of","with","from",
+        "into","onto","upon","after","before","about","above","below","between",
+        // Pronouns
+        "this","that","it","its","their","our","my","your","his","her","we","they","i",
+        // Auxiliary verbs
+        "is","are","was","were","be","been","being","have","has","had",
+        "do","does","did","will","would","should","could","may","might","shall",
+        // Generic action verbs (too broad — match everything)
+        "make","making","makes","made",
+        "fix","fixing","fixes","fixed",
+        "add","adding","adds","added",
+        "change","changing","changes","changed",
+        "update","updating","updates","updated",
+        "edit","editing","edits","edited",
+        "modify","modifying","modifies","modified",
+        "create","creating","creates","created",
+        "delete","deleting","deletes","deleted",
+        "remove","removing","removes","removed",
+        "set","get","put","use","using","used",
+        "show","hide","display",
+        // Vague adjectives / adverbs
+        "more","less","some","any","all","no","not","also","very","just",
+        "nice","nicely","good","better","best","new","old","right","left",
+        "please","sure","now","then","when","where","how","why","what","which","who",
+        "out","up","down","so","if","else","really","quite","bit","little","lot",
+        // Common filler
+        "need","want","should","must","can","let","help","try","look","see"
+    };
+
+        return Regex.Matches(lower, @"\b[a-z]{3,}\b")
+            .Select(m => m.Value)
+            .Where(w => !stopwords.Contains(w))
+            .Distinct()
+            .Take(10)
+            .ToList();
+    }
+
+
+    // ─── NEW METHOD ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Makes a single LLM call to select the most relevant files from a
+    /// heuristic-filtered candidate list. Falls back to top candidates if the
+    /// call fails or returns no parseable files.
+    ///
+    /// This replaces N sequential ScoreSourceMaterial calls (one per grep-matched file)
+    /// with a single call that sees all candidates at once.
+    /// </summary>
+    private async Task<List<string>> SelectRelevantFilesWithLlm(
+        string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
+    {
+        if (candidates.Count == 0) return new List<string>();
+
+        var fileList = string.Join("\n", candidates);
+
+        const string system =
+            "You are a file relevance selector for a code editor agent. " +
+            "Given a task and a list of project files, pick the 3-7 files most likely to need reading or editing. " +
+            "Output ONLY valid JSON with no markdown fences or extra text: {\"files\": [\"path1\", \"path2\"]}";
+
+        var user = $"Task: {prompt}\n\nProject files:\n{fileList}\n\nSelect 3–7 files maximum.";
+
+        var (raw, _, err) = await CallLlmRaw(system, user, ct,
+            requestTimeout: TimeSpan.FromSeconds(25));
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn",
+                $"File selection LLM failed ({err ?? "empty"}) — using top heuristic candidates", ct: ct);
+            return candidates.Take(6).ToList();
+        }
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var start = cleaned.IndexOf('{');
+            var end = cleaned.LastIndexOf('}');
+            if (start >= 0 && end > start)
+                cleaned = cleaned.Substring(start, end - start + 1);
+
+            using var doc = JsonDocument.Parse(cleaned);
+            if (doc.RootElement.TryGetProperty("files", out var filesEl) &&
+                filesEl.ValueKind == JsonValueKind.Array)
+            {
+                var selected = filesEl.EnumerateArray()
+                    .Select(e => e.GetString()?.Replace('\\', '/') ?? "")
+                    .Where(f => !string.IsNullOrWhiteSpace(f))
+                    // Only accept files actually in the candidate list to prevent hallucination
+                    .Where(f => candidates.Any(c =>
+                        string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
+                    .Take(7)
+                    .ToList();
+
+                if (selected.Count > 0)
+                    return selected;
+            }
+        }
+        catch { /* fall through to fallback */ }
+
+        await EmitLog(emitSse, "warn",
+            "File selection response unparseable — using top heuristic candidates", ct: ct);
+        return candidates.Take(6).ToList();
     }
 
     /// <summary>
@@ -2433,18 +2637,39 @@ Be concise — 2-4 sentences max.";
 
             var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
 
-            // Collect near-match snippets reported by TryReplace failures.
+            // ── BUG 3 FIX: collect context from BOTH "error" and "skipped" results ──
+            // Old code only collected from "error" — but no-op edits are "skipped",
+            // so the retry got no context and blindly repeated the same bad edit.
             var nearMatches = batchResults
                 .OfType<Dictionary<string, object?>>()
-                .Where(r => r.TryGetValue("status", out var st) && st?.ToString() == "error")
-                .Select(r => r.TryGetValue("snippet", out var sn) ? sn?.ToString() : null)
+                .Where(r => r.TryGetValue("status", out var st) &&
+                            (st?.ToString() == "error" || st?.ToString() == "skipped"))
+                .Select(r =>
+                {
+                    // For "error": use the near-match snippet from TryReplace failure
+                    if (r.TryGetValue("snippet", out var sn) && !string.IsNullOrWhiteSpace(sn?.ToString()))
+                        return sn.ToString();
+                    // For "skipped": the oldString itself is the near-match context
+                    if (r.TryGetValue("oldStringPreview", out var op) && !string.IsNullOrWhiteSpace(op?.ToString()))
+                        return $"[Previous no-op edit — oldString was identical to newString]: {op}";
+                    return null;
+                })
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .ToList();
 
+            // Build a note about what failed so the retry LLM understands the situation
+            var hasSkipped = batchResults
+                .OfType<Dictionary<string, object?>>()
+                .Any(r => r.TryGetValue("status", out var st) && st?.ToString() == "skipped");
+            var retryContext = hasSkipped
+                ? discoveryContext + "\n\n⚠ PREVIOUS ATTEMPT WARNING: The last code generation returned oldString==newString (no-op). " +
+                  "You MUST produce a newString that is DIFFERENT from oldString and actually implements the required change."
+                : discoveryContext;
+
             var (retryRaw, _, _) = await CallLlmSingleFileEdit(
                 fileTask, relPath, freshContent, projectRoot,
-                attempt: 2 + retryAttempt,      // signals RETRY to the prompt
-                discoveryContext,
+                attempt: 2 + retryAttempt,
+                retryContext,
                 ct,
                 nearMatchSnippets: nearMatches!);
 
@@ -2464,9 +2689,9 @@ Be concise — 2-4 sentences max.";
                 appliedEdit = retryResults.Any(r =>
                     r is Dictionary<string, object?> rd &&
                     rd.TryGetValue("status", out var rs) && rs?.ToString() == "done");
-                batchResults = retryResults; // feed back for near-match collection
+                batchResults = retryResults;
             }
-        }
+        } 
 
         // ── Build verification after each successful edit ──────────────
         if (appliedEdit)
@@ -4508,73 +4733,44 @@ If unsure, use CodeEdit. Pay special attention if the user pasted a diff, logs o
     //  MULTI-PHASE ROBUST EDITING PIPELINE
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Runs the multi-phase pipeline: Deep Analysis → Detailed Plan → Code Generation → Review → Conversion.
-    /// Returns a list of AgentStep edits ready to execute, or empty list if the pipeline failed.
-    /// </summary>
     private async Task<List<AgentStep>> RunMultiPhasePipeline(
         string taskPrompt, string relativePath, string fileContent,
         string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct)
     {
-        // ── Phase 1: Analyze & Plan ───────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "analyze-plan", message = $"Analyzing & planning changes for {relativePath}…" }, ct);
+        // ── Phase 1: Analyze & Plan ───────────────────────────────────────────────
+        await SendSse(Response, "phase",
+            new { phase = "analyze-plan", message = $"Analyzing & planning changes for {relativePath}…" }, ct);
 
-        const string planSystemPrompt = @"You are a senior software engineer analyzing a task and producing a detailed implementation plan.
+        // Concise plan prompt — avoids bloat that confuses small LLMs
+        const string planSystemPrompt =
+            "You are a software engineer. Analyze the task and file, then output a JSON implementation plan.\n\n" +
+            "Output ONLY valid JSON, no markdown:\n" +
+            "{\n" +
+            "  \"thinking\": \"brief analysis\",\n" +
+            "  \"steps\": [\n" +
+            "    { \"description\": \"what to change\", \"targetArea\": \"where in the file\", \"changeType\": \"edit\" }\n" +
+            "  ]\n" +
+            "}\n\n" +
+            "changeType: \"edit\" | \"append\" | \"prepend\" | \"create\"\n" +
+            "Keep steps small (1–15 lines each). Do NOT write code yet.";
 
-First, analyze the task and file content. Then generate a step-by-step plan to implement the task. 
-Each step should be a single, focused change (1-15 lines of code) which does not overlap with other steps.
-
-Output ONLY valid JSON with this exact structure (no markdown fences, no other text):
-{
-  ""thinking"": ""your analysis and reasoning about the overall approach"",
-  ""steps"": [
-    {
-      ""description"": ""what this step does"",
-      ""targetArea"": ""which part of the file to modify (method name, class, line range, or exact code context)"",
-      ""changeType"": ""edit""
-    }
-  ]
-}
-
-Rules:
-- changeType must be one of: ""edit"", ""append"" (add to end), ""prepend"" (add to beginning), ""create"" (new file content).
-- Prefer MANY small focused steps (1-15 lines each) over one large step.
-- If any file creation is planned, create the file first before editing existing files. 
-- Each step should be independently verifiable and produce a change that can be reviewed in isolation.
-- Keep descriptions clear and actionable.";
-
-        var planUser = $@"## Task
-{taskPrompt}
-
-## File
-{relativePath}
-
-## Full File Content
-```
-{fileContent}
-```
-
-## Project Context
-{(string.IsNullOrWhiteSpace(discoveryContext) ? "(none)" : discoveryContext)}
-
-Analyze what needs to change and output a detailed implementation plan as JSON with a 'steps' array.";
+        var planUser = $"## Task\n{taskPrompt}\n\n## File: {relativePath}\n```\n{fileContent}\n```" +
+            (string.IsNullOrWhiteSpace(discoveryContext) ? "" : $"\n\n## Project Context\n{discoveryContext}");
 
         var (planRaw, planErr) = await CallLlmRawText(planSystemPrompt, planUser, ct,
             requestTimeout: TimeSpan.FromMinutes(10), maxTokens: MaxFileContextChars / 2);
 
         if (string.IsNullOrWhiteSpace(planRaw))
         {
-            await EmitLog(emitSse, "warn",
-                $"Analyze/Plan failed for {relativePath}: {planErr ?? "empty response"}", ct: ct);
+            await EmitLog(emitSse, "warn", $"Analyze/Plan failed for {relativePath}: {planErr ?? "empty"}", ct: ct);
             return new List<AgentStep>();
         }
 
         var detailedSteps = ParseDetailedPlanSteps(planRaw);
         if (detailedSteps == null || detailedSteps.Count == 0)
         {
-            await EmitLog(emitSse, "warn",
-                $"Analyze/Plan produced no steps for {relativePath}", ct: ct);
+            await EmitLog(emitSse, "warn", $"Analyze/Plan produced no steps for {relativePath}", ct: ct);
             return new List<AgentStep>();
         }
 
@@ -4584,9 +4780,8 @@ Analyze what needs to change and output a detailed implementation plan as JSON w
         for (var i = 0; i < detailedSteps.Count; i++)
             detailedSteps[i].Index = i;
 
-        // ── Build full plan overview for context chain ─────────────────────
         var planOverview = new StringBuilder();
-        planOverview.AppendLine($"## Complete Plan ({detailedSteps.Count} steps)");
+        planOverview.AppendLine($"## Plan ({detailedSteps.Count} steps)");
         for (var pi = 0; pi < detailedSteps.Count; pi++)
         {
             var ps = detailedSteps[pi];
@@ -4594,79 +4789,52 @@ Analyze what needs to change and output a detailed implementation plan as JSON w
         }
         var fullPlanText = planOverview.ToString();
 
-        // ── Generate Code per Step ──────────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "generate-code", message = $"Generating code for {relativePath} ({detailedSteps.Count} steps)…" }, ct);
+        // ── Phase 2: Generate Code per Step ──────────────────────────────────────
+        await SendSse(Response, "phase",
+            new { phase = "generate-code", message = $"Generating code for {relativePath} ({detailedSteps.Count} steps)…" }, ct);
 
-        const string codeGenSystemPrompt = @"You are generating ONE precise code edit for ONE step of a larger plan.
-
-You are given:
-- The FULL plan with ALL steps (so you know what other changes are being made)
-- Which step THIS is (step N of M)
-- What previous steps already changed
-- The current state of the file
-
-Your ONLY job: Output the oldString/newString for THIS step.
-
-Output ONLY valid JSON (no markdown fences, no other text):
-{
-  ""oldString"": ""the EXACT code to replace (must literally appear in CURRENT file content)"",
-  ""newString"": ""the replacement code""
-}
-
-CRITICAL — Do NOT violate these rules:
-1. oldString MUST be 1-15 lines and LITERALLY appear in the CURRENT file content shown
-2. Change ONLY the code in oldString — do NOT add/remove/modify anything else
-3. Do NOT add imports, comments, error handling, or unrelated code outside oldString
-4. oldString and newString must NOT be identical
-5. If the step says ""edit"", oldString must be a real code block, not empty
-6. For ""append"" changeType, set oldString to """" and newString to the code to append
-7. For ""prepend"" changeType, set oldString to """" and newString to the code to prepend
-8. For ""create"" changeType (new file), set oldString to """" and newString to the full file content
-9. Preserve indentation exactly in both oldString and newString
-10. If this step's change has already been applied by a previous step, return {""oldString"":"""",""newString"":""""} to skip";
+        // Concise code gen prompt — focus on the exact contract, no padding
+        const string codeGenSystemPrompt =
+            "Output ONLY valid JSON (no markdown):\n" +
+            "{ \"oldString\": \"exact code to replace\", \"newString\": \"replacement code\" }\n\n" +
+            "Rules:\n" +
+            "1. oldString MUST literally appear in CURRENT file content (1–15 lines, exact whitespace)\n" +
+            "2. oldString and newString MUST be different\n" +
+            "3. For append: oldString=\"\", newString=code to add\n" +
+            "4. For prepend: oldString=\"\", newString=code to add\n" +
+            "5. If step already done: { \"oldString\": \"\", \"newString\": \"\" }\n" +
+            "6. Make ONLY the change for this step — nothing else";
 
         var snippets = new List<(DetailedPlanStep step, string? oldString, string? newString, string? error)>();
         var workingContent = fileContent;
         var changesLog = new StringBuilder();
-        changesLog.AppendLine("## Changes Applied So Far");
+        changesLog.AppendLine("## Changes Applied So Far (use this to avoid re-applying)");
         var changesApplied = 0;
 
         foreach (var step in detailedSteps)
         {
             await EmitLog(emitSse, "info", $"  Generating code: {step.Description}", ct: ct);
 
-            var codeUser = $@"## Original Task
-{taskPrompt}
-
-## File
-{relativePath}
-
-## Plan Context
-{fullPlanText}
-
-## This Step: Step {step.Index + 1} of {detailedSteps.Count}
-Description: {step.Description}
-Target Area: {step.TargetArea}
-Change Type: {step.ChangeType}
-
-{changesLog}
-
-## Current File Content
-```
-{workingContent}
-```
-
-Generate the exact oldString and newString for THIS step only. Do NOT make changes belonging to other steps.";
- 
+            var codeUser =
+                $"## Task\n{taskPrompt}\n\n" +
+                $"## File: {relativePath}\n\n" +
+                fullPlanText + "\n" +
+                $"## THIS Step: Step {step.Index + 1} of {detailedSteps.Count}\n" +
+                $"Description: {step.Description}\n" +
+                $"Target: {step.TargetArea}\n" +
+                $"Type: {step.ChangeType}\n\n" +
+                changesLog + "\n" +
+                $"## Current File Content\n```\n{workingContent}\n```\n\n" +
+                "Generate oldString and newString for THIS step only.";
 
             var (codeRaw, codeErr) = await CallLlmRawText(codeGenSystemPrompt, codeUser, ct,
                 requestTimeout: TimeSpan.FromMinutes(10));
 
             if (string.IsNullOrWhiteSpace(codeRaw))
             {
-                snippets.Add((step, null, null, codeErr ?? "Empty response"));
-                await EmitLog(emitSse, "warn",
-                    $"  Code gen failed for step {step.Index + 1}: {codeErr ?? "empty"}", ct: ct);
+                snippets.Add((step, null, null, codeErr ?? "empty response"));
+                await EmitLog(emitSse, "warn", $"  Step {step.Index + 1}: code gen failed — {codeErr ?? "empty"}", ct: ct);
+                changesLog.AppendLine($"  Step {step.Index + 1} FAILED: {codeErr ?? "empty response"}");
                 continue;
             }
 
@@ -4674,20 +4842,67 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
             if (oldStr == null)
             {
                 snippets.Add((step, null, null, parseErr));
-                await EmitLog(emitSse, "warn",
-                    $"  Code gen parse failed for step {step.Index + 1}: {parseErr}", ct: ct);
+                await EmitLog(emitSse, "warn", $"  Step {step.Index + 1}: parse failed — {parseErr}", ct: ct);
+                changesLog.AppendLine($"  Step {step.Index + 1} FAILED (parse): {parseErr}");
                 continue;
             }
 
-            // Skip if LLM returned empty (indicating nothing to do)
+            // Skip signal (empty old+new means step was already done)
             if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(newStr))
             {
-                await EmitLog(emitSse, "info",
-                    $"  Step {step.Index + 1}: no change needed (skipped)", ct: ct);
+                await EmitLog(emitSse, "info", $"  Step {step.Index + 1}: already done (skipped)", ct: ct);
+                changesLog.AppendLine($"  Step {step.Index + 1}: skipped (already applied)");
                 continue;
             }
 
-            // Validate the edit against current working content
+            // ── BUG 1 FIX: Catch no-op (oldStr==newStr) before it becomes an edit step ──
+            // TryReplace succeeds on identical strings, so this must be caught explicitly.
+            // Retry once with explicit feedback before giving up on this step.
+            if (!string.IsNullOrEmpty(oldStr) &&
+                string.Equals(AgentUtilities.NormalizeLineEndings(oldStr),
+                              AgentUtilities.NormalizeLineEndings(newStr ?? ""),
+                              StringComparison.Ordinal))
+            {
+                await EmitLog(emitSse, "warn",
+                    $"  Step {step.Index + 1}: oldString==newString (no-op) — retrying with feedback", ct: ct);
+
+                var noOpRetryUser = codeUser +
+                    "\n\n⚠ CRITICAL: Your previous response had oldString IDENTICAL to newString — that is a no-op. " +
+                    "You MUST produce a DIFFERENT newString that actually implements the change. " +
+                    "The file still needs this step applied.";
+
+                var (retryRaw, _) = await CallLlmRawText(codeGenSystemPrompt, noOpRetryUser, ct,
+                    requestTimeout: TimeSpan.FromMinutes(10));
+
+                if (!string.IsNullOrWhiteSpace(retryRaw))
+                {
+                    var (ros, rns, _) = AgentUtilities.ExtractEditFromCodeGen(retryRaw);
+                    if (ros != null && !string.IsNullOrEmpty(ros) &&
+                        !string.Equals(AgentUtilities.NormalizeLineEndings(ros),
+                                       AgentUtilities.NormalizeLineEndings(rns ?? ""),
+                                       StringComparison.Ordinal))
+                    {
+                        oldStr = ros;
+                        newStr = rns;
+                        // Fall through to TryReplace validation below
+                        await EmitLog(emitSse, "info", $"  Step {step.Index + 1}: retry produced valid edit", ct: ct);
+                    }
+                    else
+                    {
+                        snippets.Add((step, null, null, "no-op after retry"));
+                        changesLog.AppendLine($"  Step {step.Index + 1} FAILED: still no-op after retry");
+                        continue;
+                    }
+                }
+                else
+                {
+                    snippets.Add((step, null, null, "no-op, retry returned empty"));
+                    changesLog.AppendLine($"  Step {step.Index + 1} FAILED: no-op, retry empty");
+                    continue;
+                }
+            }
+
+            // Validate against working content with TryReplace
             if (!string.IsNullOrEmpty(oldStr))
             {
                 var (replaced, newContent, matchErr, _) = TryReplace(workingContent, oldStr, newStr ?? "");
@@ -4695,146 +4910,75 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
                 {
                     snippets.Add((step, null, null, matchErr ?? "oldString not found in working content"));
                     await EmitLog(emitSse, "warn",
-                        $"  Code gen step {step.Index + 1}: oldString does not match current content — {matchErr}", ct: ct);
+                        $"  Step {step.Index + 1}: oldString not found — {matchErr}", ct: ct);
+                    changesLog.AppendLine($"  Step {step.Index + 1} FAILED (not found): {matchErr}");
                     continue;
                 }
                 workingContent = newContent;
             }
             else if (!string.IsNullOrEmpty(newStr))
             {
-                workingContent = step.ChangeType == "prepend" ? newStr + workingContent : workingContent + newStr;
+                workingContent = step.ChangeType == "prepend"
+                    ? newStr + workingContent
+                    : workingContent + newStr;
             }
 
             snippets.Add((step, oldStr, newStr, null));
             changesApplied++;
-            changesLog.AppendLine($"  Step {step.Index + 1} ({step.Description}): replaced {oldStr?.Length ?? 0} chars with {newStr?.Length ?? 0} chars");
+            changesLog.AppendLine(
+                $"  Step {step.Index + 1} ({step.Description}): " +
+                $"replaced {oldStr?.Length ?? 0} chars → {newStr?.Length ?? 0} chars");
         }
+
+        // ── BUG 2 FIX: Phase 4 review REMOVED ────────────────────────────────────
+        // The old review was:
+        //   1. An extra LLM call (~5-10s)
+        //   2. Its result was ALWAYS ignored (finalEdits built from successfulSnippets regardless)
+        //   3. Produced confusing "Phase 4 complete — 1 edits approved" even on rejection
+        //   4. TryReplace in ExecuteEditStep is the real gate — it's already applied above
+        // Skip it entirely. The no-op check above and TryReplace validation are sufficient gates.
 
         var successfulSnippets = snippets.Where(s => s.oldString != null).ToList();
         if (successfulSnippets.Count == 0)
         {
             await EmitLog(emitSse, "warn",
-                $"Phase 3 (Code Gen) produced no valid code — all {snippets.Count} steps failed", ct: ct);
+                $"Code gen produced no valid edits — all {snippets.Count} steps failed", ct: ct);
             return new List<AgentStep>();
         }
 
         await EmitLog(emitSse, "info",
-            $"Phase 3 (Code Gen) complete — {successfulSnippets.Count}/{detailedSteps.Count} steps produced edits", ct: ct);
+            $"Code gen complete — {successfulSnippets.Count}/{detailedSteps.Count} steps produced edits", ct: ct);
 
-        // ── Phase 4: Review & Refine all edits together ─────────────────────
-        await SendSse(Response, "phase", new { phase = "review-code", message = $"Reviewing {successfulSnippets.Count} edits for {relativePath}…" }, ct);
-
-        const string reviewSystemPrompt = @"You are a meticulous code reviewer. Review ALL code changes for a file together.
-
-Output ONLY valid JSON (no markdown fences, no other text):
-{
-  ""approved"": true/false,
-  ""feedback"": ""if not approved, describe which edit needs fixing and why""
-}
-
-Check ALL edits collectively for:
-1. Duplication — are any edits doing the same thing?
-2. Conflicts — do any edits overlap or conflict with each other?
-3. Correctness — does each edit do what the plan step describes?
-4. oldString accuracy — will each oldString literally match the current file?
-5. Scope — is each edit making ONLY the described change (no extra modifications)?
-6. Integration — do the edits work together to complete the original task?";
-
-        var finalEdits = new List<(string oldString, string newString, string description)>();
-        var allEditsDesc = new StringBuilder();
-
-        foreach (var (step, oldStr, newStr, _) in successfulSnippets)
-        {
-            allEditsDesc.AppendLine($"### Edit {step.Index + 1}: {step.Description}");
-            allEditsDesc.AppendLine($"Target: {step.TargetArea}");
-            allEditsDesc.AppendLine("oldString:");
-            allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine(oldStr);
-            allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine("newString:");
-            allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine(newStr);
-            allEditsDesc.AppendLine("```");
-            allEditsDesc.AppendLine();
-        }
-
-        var reviewUser = $@"## Original Task
-{taskPrompt}
-
-## File
-{relativePath}
-
-## Complete Plan
-{fullPlanText}
-
-## All Generated Edits for This File
-{allEditsDesc}
-
-Review ALL edits above collectively. Are they correct, non-duplicating, and scoped to ONLY the described change?";
-
-        var (reviewRaw, reviewErr) = await CallLlmRawText(reviewSystemPrompt, reviewUser, ct);
-
-        if (!string.IsNullOrWhiteSpace(reviewRaw))
-        {
-            var (approved, feedback) = AgentUtilities.TryParseReviewResponse(reviewRaw);
-            if (approved == true)
-            {
-                await EmitLog(emitSse, "info",
-                    $"  Review approved all {successfulSnippets.Count} edits for {relativePath}", ct: ct);
-            }
-            else
-            {
-                await EmitLog(emitSse, "warn",
-                    $"  Review feedback for {relativePath}: {feedback}", ct: ct);
-            }
-        }
-        else if (!string.IsNullOrWhiteSpace(reviewErr))
-        {
-            await EmitLog(emitSse, "warn",
-                $"  Review call failed for {relativePath}: {reviewErr}", ct: ct);
-        }
-
-        // Use all generated edits regardless of review outcome
-        // (the editing pipeline's TryReplace will catch any literal mismatches)
-        finalEdits = successfulSnippets
-            .Where(s => s.oldString != null)
-            .Select(s => (s.oldString ?? "", s.newString ?? "", s.step.Description))
-            .ToList();
-
-        await EmitLog(emitSse, "info",
-            $"Phase 4 (Review) complete — {finalEdits.Count} edits approved", ct: ct);
-
-        // ── Phase 5: Convert to AgentStep list ─────────────────────────────
-        var editSteps = new List<AgentStep>();
-        foreach (var (oldString, newString, description) in finalEdits)
-        {
-            if (string.IsNullOrEmpty(oldString) && string.IsNullOrEmpty(newString)) continue;
-            editSteps.Add(new AgentStep
+        var editSteps = successfulSnippets
+            .Where(s => !string.IsNullOrEmpty(s.oldString) || !string.IsNullOrEmpty(s.newString))
+            .Select(s => new AgentStep
             {
                 Type = "edit",
                 Path = relativePath,
-                OldString = oldString,
-                NewString = newString,
-                Description = description
-            });
-        }
+                OldString = s.oldString ?? "",
+                NewString = s.newString ?? "",
+                Description = s.step.Description
+            })
+            .ToList();
 
-        // ── Phase 6: Smart Build Validation ────────────────────────────────
+        // Smart Build Validation (only if build command configured)
         if (editSteps.Count > 0)
         {
             var cfg = await _configFile.LoadConfigAsync();
             var buildCmd = cfg.buildCommands;
             if (!string.IsNullOrWhiteSpace(buildCmd))
             {
-                await SendSse(Response, "phase", new { phase = "build-check", message = $"Checking build for {relativePath}…" }, ct);
+                await SendSse(Response, "phase",
+                    new { phase = "build-check", message = $"Checking build for {relativePath}…" }, ct);
                 await RunSmartBuildCheck(projectRoot, buildCmd, emitSse, ct);
             }
         }
 
         await EmitLog(emitSse, "info",
-            $"Multi-phase pipeline complete: {editSteps.Count} edit(s) for {relativePath}", ct: ct);
+            $"Editing pipeline complete: {editSteps.Count} edit(s) for {relativePath}", ct: ct);
         return editSteps;
     }
+
 
     private async Task RunSmartBuildCheck(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
     {
