@@ -4522,15 +4522,8 @@ If unsure, use CodeEdit. Pay special attention if the user pasted a diff, logs o
 
         const string planSystemPrompt = @"You are a senior software engineer analyzing a task and producing a detailed implementation plan.
 
-First, analyze the task and file content. Consider:
-1. Architecture — how does this change fit into the existing code structure?
-2. Design patterns — what patterns are appropriate?
-3. Edge cases — what boundary conditions or error states must be handled?
-4. Potential pitfalls — what could go wrong with a naive implementation?
-5. Best practices — idiomatic code, naming, separation of concerns, error handling
-6. Dependencies — what imports, services, or config changes are needed?
-
-Then generate a step-by-step plan. Each step should be a single, focused change (1-15 lines of code) which does not overlap with other steps.
+First, analyze the task and file content. Then generate a step-by-step plan to implement the task. 
+Each step should be a single, focused change (1-15 lines of code) which does not overlap with other steps.
 
 Output ONLY valid JSON with this exact structure (no markdown fences, no other text):
 {
@@ -4545,11 +4538,11 @@ Output ONLY valid JSON with this exact structure (no markdown fences, no other t
 }
 
 Rules:
-- changeType must be one of: ""edit"", ""append"" (add to end), ""prepend"" (add to beginning), ""create"" (new file content)
-- Prefer MANY small focused steps (1-15 lines each) over one large step
+- changeType must be one of: ""edit"", ""append"" (add to end), ""prepend"" (add to beginning), ""create"" (new file content).
+- Prefer MANY small focused steps (1-15 lines each) over one large step.
 - If any file creation is planned, create the file first before editing existing files. 
-- Each step should be independently verifiable
-- Keep descriptions clear and actionable";
+- Each step should be independently verifiable and produce a change that can be reviewed in isolation.
+- Keep descriptions clear and actionable.";
 
         var planUser = $@"## Task
 {taskPrompt}
@@ -4586,7 +4579,7 @@ Analyze what needs to change and output a detailed implementation plan as JSON w
         }
 
         await EmitLog(emitSse, "info",
-            $"Analyze/Plan complete — {detailedSteps.Count} steps", ct: ct);
+            $"Analyze/Plan complete — {detailedSteps.Count} steps", new { detailedSteps }, ct: ct);
 
         for (var i = 0; i < detailedSteps.Count; i++)
             detailedSteps[i].Index = i;
