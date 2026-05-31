@@ -9,28 +9,18 @@ Maestro is an advanced agentic backend system that enables AI-driven automation 
 
 ## Run
 
-From the `backend` folder:
+From the `Maestro` folder:
 
 ```bash
 dotnet restore
 dotnet run
 ```
 
-The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000` or `http://localhost:5001`).
+The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
 
 ## Configuration
 
-`maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address.
-
-
-## Currently supported agentic tools : 
-_git
-_package_install 
-_ping 
-_show / _display 
-_create_file 
-relative/path/to/file (for editing),
-_grep (future)
+`maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
 
 ## Agentic Orchestration Router
 ```
