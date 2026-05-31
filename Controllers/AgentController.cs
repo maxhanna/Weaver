@@ -2294,10 +2294,9 @@ Be concise — 2-4 sentences max.";
         var noEditsNeeded = false;
         var editHistory = new List<(string path, string preContent)>();
 
-        // ── Multi-Phase Robust Editing Pipeline ─────────────────────────────
-        // Phase 1: Deep Analysis, Phase 2: Detailed Plan, Phase 3: Code Gen,
-        // Phase 4: Review & Refine, Phase 5: Apply
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Editing Pipeline ────────────────────────────────────────────────
+        // 1. Analyze & Plan, 2. Generate Code, 3. Review & Apply
+        // ──────────────────────────────────────────────────────────────────────
         editSteps = await RunMultiPhasePipeline(
             fileTask, relPath, fileContent, discoveryContext, projectRoot, emitSse, ct);
 
@@ -4518,12 +4517,12 @@ If unsure, use CodeEdit. Pay special attention if the user pasted a diff, logs o
         string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct)
     {
-        // ── Phase 1: Deep Analysis ─────────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "deep-analyze", message = $"Analyzing {relativePath}…" }, ct);
+        // ── Phase 1: Analyze & Plan ───────────────────────────────────────
+        await SendSse(Response, "phase", new { phase = "analyze-plan", message = $"Analyzing & planning changes for {relativePath}…" }, ct);
 
-        const string analysisSystemPrompt = @"You are a senior software engineer performing deep code analysis.
+        const string planSystemPrompt = @"You are a senior software engineer analyzing a task and producing a detailed implementation plan.
 
-Analyze the following task and file content. Consider:
+First, analyze the task and file content. Consider:
 1. Architecture — how does this change fit into the existing code structure?
 2. Design patterns — what patterns are appropriate?
 3. Edge cases — what boundary conditions or error states must be handled?
@@ -4531,48 +4530,11 @@ Analyze the following task and file content. Consider:
 5. Best practices — idiomatic code, naming, separation of concerns, error handling
 6. Dependencies — what imports, services, or config changes are needed?
 
-Output a concise analysis (2-5 paragraphs). Focus on what matters for implementing this specific change.";
-
-        var analysisUser = $@"## Task
-{taskPrompt}
-
-## File
-{relativePath}
-
-## Full File Content
-```
-{fileContent}
-```
-
-## Project Context
-{(string.IsNullOrWhiteSpace(discoveryContext) ? "(none)" : discoveryContext)}
-
-Analyze deeply what needs to change and how to implement it correctly.";
-
-        var (analysisRaw, analysisErr) = await CallLlmRawText(analysisSystemPrompt, analysisUser, ct);
-
-        if (string.IsNullOrWhiteSpace(analysisRaw))
-        {
-            await EmitLog(emitSse, "warn",
-                $"Phase 1 (Analysis) failed for {relativePath}: {analysisErr ?? "empty response"}", ct: ct);
-            return new List<AgentStep>();
-        }
-
-        // Trim analysis to a reasonable context size
-        var analysis = analysisRaw;
-        await EmitLog(emitSse, "info", $"Phase 1 (Analysis) complete — {analysis.Length} chars", analysis, ct: ct);
-
-        // ── Phase 2: Detailed Plan ─────────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "detailed-plan", message = $"Planning changes for {relativePath}…" }, ct);
-
-        const string planSystemPrompt = @"You are a senior software engineer creating a detailed implementation plan.
-
-Based on the analysis provided, generate a step-by-step plan for implementing the required changes.
-Each step should be a single, focused change (1-15 lines of code).
+Then generate a step-by-step plan. Each step should be a single, focused change (1-15 lines of code) which does not overlap with other steps.
 
 Output ONLY valid JSON with this exact structure (no markdown fences, no other text):
 {
-  ""thinking"": ""your reasoning about the overall approach"",
+  ""thinking"": ""your analysis and reasoning about the overall approach"",
   ""steps"": [
     {
       ""description"": ""what this step does"",
@@ -4600,13 +4562,10 @@ Rules:
 {fileContent}
 ```
 
-## Deep Analysis
-{analysis}
-
 ## Project Context
 {(string.IsNullOrWhiteSpace(discoveryContext) ? "(none)" : discoveryContext)}
 
-Generate a detailed implementation plan as JSON with a 'steps' array.";
+Analyze what needs to change and output a detailed implementation plan as JSON with a 'steps' array.";
 
         var (planRaw, planErr) = await CallLlmRawText(planSystemPrompt, planUser, ct,
             requestTimeout: TimeSpan.FromMinutes(10), maxTokens: MaxFileContextChars / 2);
@@ -4614,7 +4573,7 @@ Generate a detailed implementation plan as JSON with a 'steps' array.";
         if (string.IsNullOrWhiteSpace(planRaw))
         {
             await EmitLog(emitSse, "warn",
-                $"Phase 2 (Plan) failed for {relativePath}: {planErr ?? "empty response"}", ct: ct);
+                $"Analyze/Plan failed for {relativePath}: {planErr ?? "empty response"}", ct: ct);
             return new List<AgentStep>();
         }
 
@@ -4622,12 +4581,12 @@ Generate a detailed implementation plan as JSON with a 'steps' array.";
         if (detailedSteps == null || detailedSteps.Count == 0)
         {
             await EmitLog(emitSse, "warn",
-                $"Phase 2 (Plan) produced no steps for {relativePath}", ct: ct);
+                $"Analyze/Plan produced no steps for {relativePath}", ct: ct);
             return new List<AgentStep>();
         }
 
         await EmitLog(emitSse, "info",
-            $"Phase 2 (Plan) complete — {detailedSteps.Count} steps", ct: ct);
+            $"Analyze/Plan complete — {detailedSteps.Count} steps", ct: ct);
 
         for (var i = 0; i < detailedSteps.Count; i++)
             detailedSteps[i].Index = i;
@@ -4642,7 +4601,7 @@ Generate a detailed implementation plan as JSON with a 'steps' array.";
         }
         var fullPlanText = planOverview.ToString();
 
-        // ── Phase 3: Generate Code per Step ────────────────────────────────
+        // ── Generate Code per Step ──────────────────────────────────────────
         await SendSse(Response, "phase", new { phase = "generate-code", message = $"Generating code for {relativePath} ({detailedSteps.Count} steps)…" }, ct);
 
         const string codeGenSystemPrompt = @"You are generating ONE precise code edit for ONE step of a larger plan.
@@ -4689,9 +4648,7 @@ CRITICAL — Do NOT violate these rules:
 ## File
 {relativePath}
 
-## Analysis Context
-{analysis}
-
+## Plan Context
 {fullPlanText}
 
 ## This Step: Step {step.Index + 1} of {detailedSteps.Count}

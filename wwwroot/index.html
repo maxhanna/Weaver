@@ -546,7 +546,14 @@
               <span ng-if="vm.bughostedStatus === 'connected'" style="color:#4caf50;"> Connected</span>
               <span ng-if="vm.bughostedStatus === 'disconnected'" style="color:#f44336;"> Disconnected</span>
               <span ng-if="vm.bughostedStatus === 'error'" style="color:#ff9800;"> Connection error</span>
+              <span ng-if="vm.bughostedTesting" style="color:#ff9800;"> Testing…</span>
+              <span ng-if="vm.bughostedTestResult === 'ok'" style="color:#4caf50;"> Test OK</span>
+              <span ng-if="vm.bughostedTestResult === 'fail'" style="color:#f44336;"> Test failed: {{vm.bughostedTestError}}</span>
             </span>
+            <div style="display:flex;gap:6px;margin-top:6px;">
+              <button ng-click="vm.bughostedTestConnection()" ng-disabled="vm.bughostedTesting || !vm.bughostedUsername" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);"> Test Connection</button>
+              <button ng-click="vm.bughostedForceReconnect()" style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);"> ↻ Reconnect</button>
+            </div>
           </div>
         </details>
         <details>

@@ -78,9 +78,7 @@ public class BughostedController : ControllerBase
             };
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
-            if (!httpRes.IsSuccessStatusCode)
-                return StatusCode((int)httpRes.StatusCode, body);
-            return Ok(body);
+            return Ok(new { remoteStatus = (int)httpRes.StatusCode, remoteBody = body });
         }
         catch (Exception ex)
         {
@@ -139,6 +137,36 @@ public class BughostedController : ControllerBase
         catch (Exception ex)
         {
             return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("test")]
+    public async Task<IActionResult> TestConnection([FromBody] BughostedLoginRequest req)
+    {
+        try
+        {
+            var cfg = await _configFile.LoadConfigAsync();
+            var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
+            var client = _clientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(10);
+            var payload = JsonSerializer.Serialize(new { username = req.Username, password = req.Password });
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/maestro/login")
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var httpRes = await client.SendAsync(httpReq);
+            sw.Stop();
+            var body = await httpRes.Content.ReadAsStringAsync();
+            return Ok(new { success = httpRes.IsSuccessStatusCode, statusCode = (int)httpRes.StatusCode, latencyMs = sw.ElapsedMilliseconds, detail = body });
+        }
+        catch (TaskCanceledException)
+        {
+            return Ok(new { success = false, error = "Timed out" });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
         }
     }
 

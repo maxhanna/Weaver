@@ -186,6 +186,9 @@
     vm.bughostedHeartbeatEnabled = false;
     vm.bughostedClientId = '';
     vm.bughostedStatus = 'disconnected';
+    vm.bughostedTesting = false;
+    vm.bughostedTestResult = '';
+    vm.bughostedTestError = '';
     vm.remoteCommands = [];
 
     // === Load settings from localStorage ===
@@ -450,6 +453,38 @@
       }
     };
 
+    vm.bughostedTestConnection = function () {
+      if (!vm.bughostedUsername || !vm.bughostedPassword) return;
+      vm.bughostedTesting = true;
+      vm.bughostedTestResult = '';
+      $http.post('/api/bughosted/test', {
+        Username: vm.bughostedUsername,
+        Password: vm.bughostedPassword
+      }).then(function (resp) {
+        var d = resp.data;
+        if (d.success) {
+          vm.bughostedTestResult = 'ok';
+        } else {
+          vm.bughostedTestResult = 'fail';
+          vm.bughostedTestError = d.error || 'HTTP ' + d.statusCode;
+        }
+        vm.bughostedTesting = false;
+      }, function () {
+        vm.bughostedTestResult = 'fail';
+        vm.bughostedTestError = 'Cannot reach server';
+        vm.bughostedTesting = false;
+      });
+    };
+
+    vm.bughostedForceReconnect = function () {
+      vm.bughostedLogout();
+      _bhHeartbeatFailCount = 0;
+      $timeout(function () {
+        vm.bughostedLogin();
+      }, 300);
+    };
+
+    var _bhHeartbeatFailCount = 0;
     var _bhHeartbeatTimer = null;
     function startBughostedHeartbeat() {
       stopBughostedHeartbeat();
@@ -470,10 +505,14 @@
             activeCardText: vm.activeCardText || ''
           })
         };
-        $http.post('/api/bughosted/heartbeat', data).then(function (resp) {
+        $http.post('/api/bughosted/heartbeat', data).then(function () {
+          _bhHeartbeatFailCount = 0;
           vm.bughostedStatus = 'connected';
         }, function () {
-          vm.bughostedStatus = 'error';
+          _bhHeartbeatFailCount++;
+          if (_bhHeartbeatFailCount >= 3) {
+            vm.bughostedStatus = 'error';
+          }
         });
         $scope.$digest();
       }, 30000, 0, false);
