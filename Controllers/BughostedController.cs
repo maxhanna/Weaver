@@ -10,6 +10,7 @@ public class BughostedController : ControllerBase
     private readonly ConfigFileService _configFile;
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
+    private const string DefaultBugHostedUrl = "https://bughosted.com";
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
 
     public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config)
@@ -23,15 +24,13 @@ public class BughostedController : ControllerBase
     public async Task<IActionResult> Login([FromBody] BughostedLoginRequest req)
     {
         var cfg = await _configFile.LoadConfigAsync();
-        var url = (req.Url ?? cfg.bughostedUrl ?? "").TrimEnd('/');
-        if (string.IsNullOrWhiteSpace(url))
-            return BadRequest(new { error = "bughosted URL not configured" });
+        var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
 
         try
         {
             var client = _clientFactory.CreateClient();
             var payload = JsonSerializer.Serialize(new { username = req.Username, password = req.Password });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/api/maestro/login")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/maestro/login")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -73,12 +72,14 @@ public class BughostedController : ControllerBase
                 status = "online",
                 kanbanData = req.KanbanData
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/api/maestro/heartbeat")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/heartbeat")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
             return Ok(body);
         }
         catch (Exception ex)
@@ -96,9 +97,11 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/api/maestro/commands?token={session.Token}");
+            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/maestro/commands?token={session.Token}");
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
             return Content(body, "application/json");
         }
         catch (Exception ex)
@@ -123,12 +126,14 @@ public class BughostedController : ControllerBase
                 status = req.Status,
                 result = req.Result
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/api/maestro/commands/ack")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/commands/ack")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
             return Ok(body);
         }
         catch (Exception ex)
@@ -148,7 +153,6 @@ public class BughostedController : ControllerBase
 
 public class BughostedLoginRequest
 {
-    public string? Url { get; set; }
     public string Username { get; set; } = "";
     public string Password { get; set; } = "";
 }
@@ -177,5 +181,5 @@ public class BughostedSession
     public string Token { get; set; } = "";
     public string? ClientId { get; set; }
     public string? Url { get; set; }
-    public string? User { get; set; }
+    public System.Text.Json.JsonElement? User { get; set; }
 }

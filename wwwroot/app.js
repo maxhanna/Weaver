@@ -181,7 +181,6 @@
     vm.emailUseSsl = true;
     vm.emailUsername = '';
     vm.emailPassword = '';
-    vm.bughostedUrl = '';
     vm.bughostedUsername = '';
     vm.bughostedPassword = '';
     vm.bughostedHeartbeatEnabled = false;
@@ -261,7 +260,6 @@
         cfg.emailUseSsl = vm.emailUseSsl !== false;
         cfg.emailUsername = vm.emailUsername || '';
         cfg.emailPassword = vm.emailPassword || '';
-        cfg.bughostedUrl = vm.bughostedUrl || '';
         cfg.bughostedUsername = vm.bughostedUsername || '';
         cfg.bughostedPassword = vm.bughostedPassword || '';
         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
@@ -335,11 +333,10 @@
         vm.emailUseSsl = cfg.emailUseSsl !== false;
         vm.emailUsername = cfg.emailUsername || '';
         vm.emailPassword = cfg.emailPassword || '';
-        vm.bughostedUrl = cfg.bughostedUrl || '';
         vm.bughostedUsername = cfg.bughostedUsername || '';
         vm.bughostedPassword = cfg.bughostedPassword || '';
         vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
-        if (vm.bughostedHeartbeatEnabled && vm.bughostedUrl && vm.bughostedUsername && !vm.bughostedClientId) {
+        if (vm.bughostedHeartbeatEnabled && vm.bughostedUsername && !vm.bughostedClientId) {
           vm.bughostedLogin();
         }
 
@@ -402,7 +399,6 @@
         cfg.emailUseSsl = vm.emailUseSsl !== false;
         cfg.emailUsername = vm.emailUsername || '';
         cfg.emailPassword = vm.emailPassword || '';
-        cfg.bughostedUrl = vm.bughostedUrl || '';
         cfg.bughostedUsername = vm.bughostedUsername || '';
         cfg.bughostedPassword = vm.bughostedPassword || '';
         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
@@ -420,10 +416,9 @@
 
     // === BugHosted.com Integration ===
     vm.bughostedLogin = function () {
-      if (!vm.bughostedUrl || !vm.bughostedUsername || !vm.bughostedPassword) return;
+      if (!vm.bughostedUsername || !vm.bughostedPassword) return;
       vm.bughostedStatus = 'connecting';
       $http.post('/api/bughosted/login', {
-        Url: vm.bughostedUrl,
         Username: vm.bughostedUsername,
         Password: vm.bughostedPassword
       }).then(function (resp) {
@@ -462,7 +457,18 @@
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         var data = {
           clientId: vm.bughostedClientId,
-          kanbanData: JSON.stringify(vm.state)
+          kanbanData: JSON.stringify({
+            projects: (vm.projects || []).map(function (p) {
+              return { Name: p.Name, Path: p.Path, Description: p.Description };
+            }),
+            state: vm.state,
+            agentActive: vm.streamingActive || false,
+            agentPhase: vm.streamingPhase || '',
+            agentThinking: vm.streamingThinking || '',
+            agentSummary: vm.streamingSummary || '',
+            activeCardId: vm.activeCardId || null,
+            activeCardText: vm.activeCardText || ''
+          })
         };
         $http.post('/api/bughosted/heartbeat', data).then(function (resp) {
           vm.bughostedStatus = 'connected';
@@ -503,13 +509,32 @@
       if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
         var card = { Text: cmd.params.text };
         if (cmd.params.project) card.filePath = cmd.params.project;
+        if (cmd.params.priority) card.priority = cmd.params.priority;
+        vm.addCard(card);
+      } else if (cmd.command === 'addCard' && cmd.params) {
+        var card = { Text: cmd.params.text || cmd.params.title || '' };
+        if (cmd.params.project) card.filePath = cmd.params.project;
+        if (cmd.params.priority) card.priority = cmd.params.priority;
         vm.addCard(card);
       } else if (cmd.command === 'moveCard' && cmd.params) {
         vm.moveCard(cmd.params.cardId, cmd.params.status);
+      } else if (cmd.command === 'updateCard' && cmd.params) {
+        var c = findCardById(cmd.params.cardId);
+        if (c) {
+          if (cmd.params.text) c.text = cmd.params.text;
+          if (cmd.params.priority) c.priority = cmd.params.priority;
+          vm.saveCards();
+        }
       } else if (cmd.command === 'archiveCard' && cmd.params) {
         vm.archiveCard(cmd.params.cardId);
+      } else if (cmd.command === 'startAgent' && cmd.params) {
+        var c = findCardById(cmd.params.cardId);
+        if (c && !vm.streamingActive) {
+          vm.executeAgent(c);
+        }
       } else if (cmd.command === 'stopAgent') {
-        vm.stopAgent && vm.stopAgent();
+        var activeCard = findCardById(vm.activeCardId);
+        vm.stopAgent && vm.stopAgent(activeCard);
       }
       // Acknowledge execution
       $http.post('/api/bughosted/commands/ack', {
@@ -1052,6 +1077,7 @@
                         const ctx = parsed;
                         ctx.files.forEach(function (f) { f.keep = true; });
                         vm.pendingContextReview = ctx;
+                        vm._contextReviewSubmitted = false;
                         vm.contextReviewCountdown = 15;
                         pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 15s');
                         if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
@@ -1133,14 +1159,14 @@
                 }
               }
             }
-            $scope.$applyAsync();
+            try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
             readNext();
             }).catch(function (readErr) {
             if (readErr && readErr.name === 'AbortError') return;
             vm.streamingActive = false;
             resumeTerminalPolling();
             vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
-            $scope.$applyAsync();
+            try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
           });
         }
         readNext();
@@ -1353,7 +1379,9 @@
     };
 
     vm.confirmContextReview = function () {
-      if (vm.contextReviewCountdown <= 0 || !vm.pendingContextReview) return;
+      if (!vm.pendingContextReview) return;
+      if (vm.contextReviewCountdown <= 0 && vm._contextReviewSubmitted) return;
+      vm._contextReviewSubmitted = true;
       vm.contextReviewCountdown = 0; 
      
       var selected = [];
@@ -1377,8 +1405,10 @@
           vm.saveCards();
         }
         vm.pendingContextReview = null;
+        vm._contextReviewSubmitted = false;
         if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); vm.contextReviewTimer = null; }
       }, function (err) {
+        vm._contextReviewSubmitted = false;
         pushAgentLog('error', 'Failed to submit context review: ' + (err.statusText || err));
       });
     };

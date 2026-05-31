@@ -882,11 +882,15 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
                     attempt++;
                     await EmitLog(emitSse, "info", $"Reprisal attempt #{attempt}", feedback, ct: ct);
-                    var reprisalContext = AgentUtilities.ReconstructDiscoveryContext(allSteps);
+
+                    // Refresh context: re-read edited files from disk so LLM sees current state
+                    var refreshedSteps = await RefreshEditedFilesFromDisk(allSteps, projectRoot, emitSse, ct);
+                    var reprisalContext = AgentUtilities.BuildDiscoveryTextFromSteps(refreshedSteps);
+
                     var (reprisalSteps, reprisalSummary, reprisalThinking) = await CodeEditPipeline(
                         reprisalPrompt, projectRoot, emitSse, ct,
                         prebuiltDiscoveryContext: reprisalContext,
-                        prebuiltDiscoverySteps: allSteps.Where(s =>
+                        prebuiltDiscoverySteps: refreshedSteps.Where(s =>
                         {
                             if (s is not Dictionary<string, object?> r) return false;
                             var t = r.TryGetValue("type", out var tv) ? tv?.ToString() : "";
@@ -906,6 +910,94 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         return (allSteps, summary, complete, thinking);
+    }
+
+    /// <summary>
+    /// Re-reads edited files from disk so reprisal attempts see current file state,
+    /// not stale newContent captured from a previous edit step.
+    /// </summary>
+    private async Task<List<object>> RefreshEditedFilesFromDisk(List<object> steps, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        // Collect unique paths from edit/rename/create steps
+        var editedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in steps)
+        {
+            if (item is not Dictionary<string, object?> r) continue;
+            var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+            if (type is not ("edit" or "rename" or "create" or "write")) continue;
+            var path = r.TryGetValue("path", out var p) ? p?.ToString() : "";
+            if (!string.IsNullOrWhiteSpace(path))
+                editedPaths.Add(path.Replace('\\', '/'));
+        }
+
+        if (editedPaths.Count == 0)
+            return steps;
+
+        await EmitLog(emitSse, "info", $"Reprisal: refreshing {editedPaths.Count} edited file(s) from disk", editedPaths, ct: ct);
+
+        // Build a result list: copy over all non-read steps, then append fresh reads
+        var result = new List<object>();
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in steps)
+        {
+            // Include discovery steps as-is; skip old edit outputs with stale newContent
+            if (item is Dictionary<string, object?> r)
+            {
+                var type = r.TryGetValue("type", out var t) ? t?.ToString() : "";
+                if (type is "list" or "grep" or "glob" or "read")
+                {
+                    result.Add(item);
+                    if (r.TryGetValue("path", out var p) && p?.ToString() is string rp && !string.IsNullOrWhiteSpace(rp))
+                        seenPaths.Add(rp.Replace('\\', '/'));
+                }
+                // Skip old edit/create/write/rename steps — we'll re-read current content
+            }
+        }
+
+        // Re-read edited files from disk to get current state
+        var freshReads = new List<object>();
+        foreach (var relPath in editedPaths)
+        {
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue; // file was deleted
+
+            string content;
+            try
+            {
+                content = await System.IO.File.ReadAllTextAsync(fullPath, ct);
+            }
+            catch { continue; }
+
+            var readStep = new Dictionary<string, object?>
+            {
+                ["type"] = "read",
+                ["path"] = relPath,
+                ["description"] = $"Auto: re-read {relPath} (post-edit)",
+                ["output"] = content,
+                ["index"] = result.Count
+            };
+            // If this path was already read in discovery, overwrite with fresh data
+            var existingIdx = result.FindIndex(e =>
+                e is Dictionary<string, object?> er &&
+                er.TryGetValue("type", out var et) && et?.ToString() == "read" &&
+                er.TryGetValue("path", out var ep) && ep?.ToString()?.Replace('\\', '/') == relPath);
+            if (existingIdx >= 0)
+                result[existingIdx] = readStep;
+            else
+                freshReads.Add(readStep);
+        }
+
+        result.AddRange(freshReads);
+
+        // Log summary
+        var freshCount = result.Count(e =>
+            e is Dictionary<string, object?> er &&
+            er.TryGetValue("type", out var et) && et?.ToString() == "read" &&
+            er.TryGetValue("path", out var ep) && editedPaths.Contains(ep?.ToString()?.Replace('\\', '/') ?? ""));
+        await EmitLog(emitSse, "info", $"Reprisal: {freshCount}/{editedPaths.Count} edited files refreshed from disk", ct: ct);
+
+        return result;
     }
 
     private async Task<(List<object> steps, string summary, string thinking)> CommandExecutionPipeline(
