@@ -880,8 +880,26 @@ vm.changeProject = function () {
       vm.loadPickerEntries();
     };
 
-    vm.onSearchChange = function () {
+    // Debounce function to prevent rapid successive searches
+    function debounce(func, wait) {
+      let timeout;
+      return function executedFunction(...args) {
+        const later = () => {
+          clearTimeout(timeout);
+          func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+      };
+    }
+
+    // Debounced version of onSearchChange
+    vm.debouncedOnSearchChange = debounce(function() {
       vm.loadPickerEntries();
+    }, 300); // 300ms delay
+
+    vm.onSearchChange = function () {
+      vm.debouncedOnSearchChange();
     };
 
     vm.clearSearch = function () {
