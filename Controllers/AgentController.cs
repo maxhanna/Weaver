@@ -1,5 +1,4 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -14,10 +13,11 @@ public class AgentController : ControllerBase
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
-    private readonly TerminalService _terminal;
+    private readonly ITerminalService _terminal;
     private readonly FileHintsManager _fileHints;
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
+    private readonly IAgentPendingStore _pendingStore;
     private const int MaxFileContextChars = 24_000;
     private const int ContentTokenBudget = 2800;
     private const int CompactThreshold75 = 2100;
@@ -25,13 +25,11 @@ public class AgentController : ControllerBase
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
-    private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
-    private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
-        IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
-        ConfigFileService configFile, EmailService emailService)
+        IWebHostEnvironment env, ITerminalService terminal, FileHintsManager fileHints,
+        ConfigFileService configFile, EmailService emailService, IAgentPendingStore pendingStore)
     {
         _clientFactory = cf;
         _config = config;
@@ -40,6 +38,7 @@ public class AgentController : ControllerBase
         _fileHints = fileHints;
         _configFile = configFile;
         _emailService = emailService;
+        _pendingStore = pendingStore;
     }
  
     private string ResolveWorkspaceRoot()
@@ -540,7 +539,7 @@ FILE EDIT RULES (only when NOT using a special marker):
         if (objStart >= 0 && objEnd > objStart)
             cleanedRaw = cleanedRaw.Substring(objStart, objEnd - objStart + 1);
 
-        var parsedPlan = ParsePlan(cleanedRaw);
+        var parsedPlan = AgentUtilities.ParsePlan(cleanedRaw);
         if (parsedPlan == null)
         {
             await EmitLog(emitSse, "error", "Failed to parse plan.", ct: ct);
@@ -644,42 +643,7 @@ FILE EDIT RULES (only when NOT using a special marker):
     /// </summary>
     public AgentPlan? ParsePlan(string jsonString)
     {
-        if (string.IsNullOrWhiteSpace(jsonString)) return null;
-
-        // ── Step 1: strip markdown fences ─────────────────────────────────────
-        var cleaned = jsonString.Trim();
-        if (cleaned.StartsWith("```"))
-        {
-            var fenceMatch = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-            cleaned = fenceMatch.Success ? fenceMatch.Groups[1].Value.Trim() : cleaned.TrimStart('`');
-        }
-
-        // ── Step 2: extract first balanced JSON object ─────────────────────────
-        var objStart = cleaned.IndexOf('{');
-        var objEnd = cleaned.LastIndexOf('}');
-        if (objStart >= 0 && objEnd > objStart)
-            cleaned = cleaned.Substring(objStart, objEnd - objStart + 1);
-
-        var opts = new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-            ReadCommentHandling = JsonCommentHandling.Skip,
-            AllowTrailingCommas = true
-        };
-
-        // ── Step 3: try candidates with progressively more aggressive repair ───
-        foreach (var candidate in AgentUtilities.GeneratePlanJsonCandidates(cleaned))
-        {
-            try
-            {
-                var result = JsonSerializer.Deserialize<AgentPlan>(candidate, opts);
-                if (result?.Plan != null) return result;
-            }
-            catch { /* try next */ }
-        }
-
-        Console.Error.WriteLine($"[ParsePlan] All repair strategies failed. Raw snippet: {cleaned[..Math.Min(200, cleaned.Length)]}");
-        return null;
+        return AgentUtilities.ParsePlan(jsonString);
     }
 
 
@@ -1333,7 +1297,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             Fields = questionFields,
                             CreatedUtc = DateTime.UtcNow
                         };
-                        _pendingQuestions[pendingId] = pending;
+                        _pendingStore.SetQuestion(pending);
 
                         // Send SSE question event
                         await SendSse(Response, "question", new
@@ -1390,7 +1354,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         }
                         finally
                         {
-                            _pendingQuestions.TryRemove(pendingId, out _);
+                            _pendingStore.TryRemoveQuestion(pendingId, out _);
                         }
 
                         if (qError != null)
@@ -1689,7 +1653,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     CreatedUtc = DateTime.UtcNow,
                     Answer = new TaskCompletionSource<List<string>>()
                 };
-                _pendingContextReviews[reviewId] = review;
+                _pendingStore.SetContextReview(review);
 
                 await SendSse(Response, "context-review", new
                 {
@@ -1742,7 +1706,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 catch (OperationCanceledException) { }
                 finally
                 {
-                    _pendingContextReviews.TryRemove(reviewId, out _);
+                    _pendingStore.TryRemoveContextReview(reviewId, out _);
                 }
             }
         }
@@ -2651,7 +2615,7 @@ Be concise — 2-4 sentences max.";
     [HttpGet("questions/pending")]
     public IActionResult GetPendingQuestions()
     {
-        var list = _pendingQuestions.Values
+        var list = _pendingStore.GetQuestions()
             .OrderBy(q => q.CreatedUtc)
             .Select(q => new
             {
@@ -2667,7 +2631,7 @@ Be concise — 2-4 sentences max.";
     [HttpPost("questions/answer")]
     public async Task<IActionResult> AnswerQuestion([FromBody] QuestionAnswerRequest req)
     {
-        if (!_pendingQuestions.TryRemove(req.Id, out var pending))
+        if (!_pendingStore.TryRemoveQuestion(req.Id, out var pending))
             return NotFound("Question not found or already answered");
 
         pending.Answer.TrySetResult(req.Answers);
@@ -2677,7 +2641,7 @@ Be concise — 2-4 sentences max.";
     [HttpPost("context-review/confirm")]
     public IActionResult ConfirmContextReview([FromBody] ContextReviewAnswer req)
     {
-        if (!_pendingContextReviews.TryRemove(req.Id, out var pending))
+        if (!_pendingStore.TryRemoveContextReview(req.Id, out var pending))
             return NotFound("Context review not found or already answered");
         pending.Answer.TrySetResult(req.Files ?? pending.Files);
         return Ok(new { status = "confirmed" });
@@ -4518,7 +4482,8 @@ If unsure, use CodeEdit. Pay special attention if the user pasted a diff, logs o
         CancellationToken ct)
     {
         // ── Phase 1: Analyze & Plan ───────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "analyze-plan", message = $"Analyzing & planning changes for {relativePath}…" }, ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "analyze-plan", message = $"Analyzing & planning changes for {relativePath}…" }, ct);
 
         const string planSystemPrompt = @"You are a senior software engineer analyzing a task and producing a detailed implementation plan.
 
@@ -4595,7 +4560,8 @@ Analyze what needs to change and output a detailed implementation plan as JSON w
         var fullPlanText = planOverview.ToString();
 
         // ── Generate Code per Step ──────────────────────────────────────────
-        await SendSse(Response, "phase", new { phase = "generate-code", message = $"Generating code for {relativePath} ({detailedSteps.Count} steps)…" }, ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "generate-code", message = $"Generating code for {relativePath} ({detailedSteps.Count} steps)…" }, ct);
 
         const string codeGenSystemPrompt = @"You are generating ONE precise code edit for ONE step of a larger plan.
 
@@ -4722,7 +4688,8 @@ Generate the exact oldString and newString for THIS step only. Do NOT make chang
             $"Phase 3 (Code Gen) complete — {successfulSnippets.Count}/{detailedSteps.Count} steps produced edits", ct: ct);
 
         // ── Phase 4: Review & Refine all edits together ─────────────────────
-        await SendSse(Response, "phase", new { phase = "review-code", message = $"Reviewing {successfulSnippets.Count} edits for {relativePath}…" }, ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "review-code", message = $"Reviewing {successfulSnippets.Count} edits for {relativePath}…" }, ct);
 
         const string reviewSystemPrompt = @"You are a meticulous code reviewer. Review ALL code changes for a file together.
 
@@ -4826,7 +4793,8 @@ Review ALL edits above collectively. Are they correct, non-duplicating, and scop
             var buildCmd = cfg.buildCommands;
             if (!string.IsNullOrWhiteSpace(buildCmd))
             {
-                await SendSse(Response, "phase", new { phase = "build-check", message = $"Checking build for {relativePath}…" }, ct);
+                if (emitSse)
+                    await SendSse(Response, "phase", new { phase = "build-check", message = $"Checking build for {relativePath}…" }, ct);
                 await RunSmartBuildCheck(projectRoot, buildCmd, emitSse, ct);
             }
         }
@@ -4950,13 +4918,16 @@ Analyze the build output. Is the environment healthy? What should we do next?";
                         $"Build check needs user input: {decision.Summary}", ct: ct);
                     if (!string.IsNullOrWhiteSpace(decision.UserQuestion))
                     {
-                        await SendSse(Response, "log", new
+                        if (emitSse)
                         {
-                            ts = DateTime.UtcNow.ToString("o"),
-                            level = "info",
-                            message = $"Build question: {decision.UserQuestion}",
-                            detail = new { buildOutput = allOutput.ToString() }
-                        }, ct);
+                            await SendSse(Response, "log", new
+                            {
+                                ts = DateTime.UtcNow.ToString("o"),
+                                level = "info",
+                                message = $"Build question: {decision.UserQuestion}",
+                                detail = new { buildOutput = allOutput.ToString() }
+                            }, ct);
+                        }
                     }
                     // Exit the build check loop — don't block the pipeline
                     return;

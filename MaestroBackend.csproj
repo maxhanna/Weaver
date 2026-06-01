@@ -7,9 +7,15 @@
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.17.0" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <EmbeddedResource Remove="tests\**\*" />
+    <None Remove="tests\**\*" />
+    <Content Remove="tests\**\*" />
+  </ItemGroup>
 
   <!-- Automatically Runs the standalone C# Script script before compiling your backend -->
-  <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">
+  <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild" Condition="'$(RunLint)' != 'false'">
     <Message Importance="high" Text="Preparing C# Script Environment for JS evaluation..." />
     
     <!-- 1. Install standard C# script runner locally if not present -->

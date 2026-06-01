@@ -3,3 +3,5 @@
 **/obj/
 maestroconfig.json
 filehints.json
+tests/TestResultsCoverage/
+**/TestResults/

@@ -18,6 +18,20 @@ dotnet run
 
 The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
 
+## Tests
+
+The repository baseline now includes:
+
+- `tests\MaestroBackend.UnitTests` for pure logic and parsing behavior
+- `tests\MaestroBackend.ApiIntegrationTests` for HTTP contract and side-effect coverage
+
+Run them from the `Maestro` folder:
+
+```bash
+dotnet test tests\MaestroBackend.UnitTests\MaestroBackend.UnitTests.csproj
+dotnet test tests\MaestroBackend.ApiIntegrationTests\MaestroBackend.ApiIntegrationTests.csproj
+```
+
 ## Configuration
 
 `maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
