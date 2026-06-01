@@ -517,6 +517,25 @@ vm.changeProject = function () {
             agentSummary: vm.streamingSummary || '',
             activeCardId: vm.activeCardId || null,
             activeCardText: vm.activeCardText || ''
+          }),
+          settings: JSON.stringify({
+            llamaUrl: vm.llamaUrl,
+            buildCommands: vm.buildCommands,
+            terminalApprovalMode: vm.terminalApprovalMode,
+            approvedTerminalRoots: vm.approvedTerminalRoots,
+            disallowedTerminalRoots: vm.disallowedTerminalRoots,
+            emailImapServer: vm.emailImapServer,
+            emailImapPort: vm.emailImapPort,
+            emailUseSsl: vm.emailUseSsl,
+            emailUsername: vm.emailUsername,
+            emailPassword: vm.emailPassword,
+            defaultProject: vm.defaultProject || vm.selectedProject,
+            showTerminal: vm.showTerminal,
+            showAI: vm.showAI,
+            showKanban: vm.showKanban,
+            bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
+            bughostedUsername: vm.bughostedUsername,
+            bughostedPassword: vm.bughostedPassword
           })
         };
         $http.post('/api/bughosted/heartbeat', data).then(function () {
@@ -629,6 +648,32 @@ vm.changeProject = function () {
         console.log('Stopping agent from remote command:', cmd);
         var activeCard = findCardById(vm.activeCardId);
         vm.stopAgent && vm.stopAgent(activeCard);
+      } else if (cmd.command === 'updateSettings' && cmd.params) {
+        console.log('Updating settings from remote command:', cmd);
+        if (cmd.params.llamaUrl !== undefined) vm.llamaUrl = cmd.params.llamaUrl;
+        if (cmd.params.buildCommands !== undefined) vm.buildCommands = cmd.params.buildCommands;
+        if (cmd.params.terminalApprovalMode !== undefined) vm.terminalApprovalMode = cmd.params.terminalApprovalMode;
+        if (cmd.params.approvedTerminalRoots !== undefined) {
+          vm.approvedTerminalRoots = cmd.params.approvedTerminalRoots;
+          vm.approvedTerminalRootsText = (cmd.params.approvedTerminalRoots || []).join(', ');
+        }
+        if (cmd.params.disallowedTerminalRoots !== undefined) {
+          vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
+          vm.disallowedTerminalRootsText = (cmd.params.disallowedTerminalRoots || []).join(', ');
+        }
+        if (cmd.params.emailImapServer !== undefined) vm.emailImapServer = cmd.params.emailImapServer;
+        if (cmd.params.emailImapPort !== undefined) vm.emailImapPort = cmd.params.emailImapPort;
+        if (cmd.params.emailUseSsl !== undefined) vm.emailUseSsl = cmd.params.emailUseSsl;
+        if (cmd.params.emailUsername !== undefined) vm.emailUsername = cmd.params.emailUsername;
+        if (cmd.params.emailPassword !== undefined) vm.emailPassword = cmd.params.emailPassword;
+        if (cmd.params.defaultProject !== undefined) vm.settingsDefaultProject = cmd.params.defaultProject;
+        if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
+        if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
+        if (cmd.params.showKanban !== undefined) vm.showKanban = cmd.params.showKanban;
+        if (cmd.params.bughostedHeartbeatEnabled !== undefined) vm.bughostedHeartbeatEnabled = cmd.params.bughostedHeartbeatEnabled;
+        if (cmd.params.bughostedUsername !== undefined) vm.bughostedUsername = cmd.params.bughostedUsername;
+        if (cmd.params.bughostedPassword !== undefined) vm.bughostedPassword = cmd.params.bughostedPassword;
+        vm.saveSettings();
       }
       // Acknowledge execution
       $http.post('/api/bughosted/commands/ack', {

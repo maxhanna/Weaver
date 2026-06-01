@@ -27,12 +27,12 @@
           <div class="card-text">
             <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
-            <button ng-click="vm.recordVoice(card)" class="small-icon"
+            <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
               ng-class="{'recording': vm.isRecording}"
               title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"
               ng-show="vm.voiceSupported">🎤</button>
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button> 
           </div>
-          <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
