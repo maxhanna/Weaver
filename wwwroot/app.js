@@ -172,6 +172,7 @@
     vm.pickerPath = '';
     vm.pickerEntries = [];
     vm.pickerSelected = [];
+    vm.isSearchResult = false;
 
     // Settings
     vm.settingsDefaultProject = '';
@@ -610,7 +611,7 @@ vm.changeProject = function () {
       } else if (cmd.command === 'addCard') {
         console.log('Adding card from remote command:', cmd);
         var card = {
-          id: uid(),
+          id: cmd.params.cardId || uid(),
           text: cmd.params.text || cmd.params.title || '',
           filePath: cmd.params.project || vm.selectedProject,
           createdAt: new Date().toISOString(),
@@ -648,6 +649,13 @@ vm.changeProject = function () {
         console.log('Stopping agent from remote command:', cmd);
         var activeCard = findCardById(vm.activeCardId);
         vm.stopAgent && vm.stopAgent(activeCard);
+      } else if (cmd.command === 'changeCardText' && cmd.params && cmd.params.cardId) {
+        console.log('Changing card text from remote command:', cmd);
+        var card = findCardById(cmd.params.cardId);
+        if (card && cmd.params.text !== undefined) {
+          card.text = cmd.params.text;
+          vm.saveCards();
+        }
       } else if (cmd.command === 'updateSettings' && cmd.params) {
         console.log('Updating settings from remote command:', cmd);
         if (cmd.params.llamaUrl !== undefined) vm.llamaUrl = cmd.params.llamaUrl;
@@ -839,23 +847,45 @@ vm.changeProject = function () {
       vm.pickerPath = '';
       vm.pickerEntries = [];
       vm.pickerSelected = [];
+      vm.isSearchResult = false;
+      vm.searchFilter = '';
     };
 
     vm.loadPickerEntries = function () {
       var params = { project: vm.selectedProject };
-      if (vm.pickerPath) params.path = vm.pickerPath;
+      if (vm.searchFilter && vm.searchFilter.trim()) {
+        params.search = vm.searchFilter.trim();
+        vm.pickerPath = '';
+      } else if (vm.pickerPath) {
+        params.path = vm.pickerPath;
+      }
       $http.get('/api/editor/list', { params: params }).then(function (resp) {
         vm.pickerEntries = (resp.data && resp.data.entries) || [];
+        vm.isSearchResult = !!(resp.data && resp.data.search);
       }, function () { vm.pickerEntries = []; });
     };
 
-    vm.pickerEnterDir = function (path) { vm.pickerPath = path; vm.loadPickerEntries(); };
+    vm.pickerEnterDir = function (path) {
+      vm.pickerPath = path;
+      vm.searchFilter = '';
+      vm.isSearchResult = false;
+      vm.loadPickerEntries();
+    };
 
     vm.pickerUpDir = function () {
       if (!vm.pickerPath) return;
       var segs = vm.pickerPath.split('/').filter(function (s) { return s && s.length; });
       segs.pop();
       vm.pickerPath = segs.join('/');
+      vm.loadPickerEntries();
+    };
+
+    vm.onSearchChange = function () {
+      vm.loadPickerEntries();
+    };
+
+    vm.clearSearch = function () {
+      vm.searchFilter = '';
       vm.loadPickerEntries();
     };
 
@@ -893,11 +923,21 @@ vm.changeProject = function () {
     }
 
     var _lastLogKey = '';
+
     function pushAgentLog(level, message, detail) {
       if (!message || level === 'status') return;
-      var key = level + '|' + message;
-      if (key === _lastLogKey && level !== 'error' && level !== 'warn') return;
-      _lastLogKey = key;
+
+      // Normalise by stripping all digits so "Plan score: 88/100" and
+      // "Plan score: 90/100" are treated as duplicates and suppressed.
+      function normalise(s) { return (s || '').replace(/\d+/g, '#'); }
+
+      var recentDupe = vm.agentActivityLog.length > 0 &&
+        vm.agentActivityLog.slice(-3).some(function (e) {
+          return e.level === level && normalise(e.message) === normalise(message);
+        });
+
+      if (recentDupe && level !== 'error' && level !== 'warn') return;
+
       var entry = {
         ts: new Date().toLocaleTimeString(),
         level: level || 'info',
@@ -906,9 +946,7 @@ vm.changeProject = function () {
       };
       vm.agentActivityLog.push(entry);
       vm.agentActivityLogLength = vm.agentActivityLog.length;
-      if (vm.agentActivityLogLength > 80) vm.agentActivityLog.shift();
-      // Scroll after every real push.  invokeApply=false (see scrollToBottom) keeps
-      // this DOM write out of Angular's digest cycle so no infdig is possible.
+      if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift(); // was 80
       vm.scrollToBottom();
     }
 
@@ -917,11 +955,30 @@ vm.changeProject = function () {
       return vm.streamingSteps.find(function (s) { return s.index === vm.activeStepIndex; }) || null;
     };
 
+
     function formatLogDetail(detail) {
       if (!detail) return '';
-      if (typeof detail === 'string') return detail;
+
+      // If detail is a plain string, try to detect + pretty-print embedded JSON.
+      // The backend logs the raw LLM output (which failed to parse) as a string.
+      // Displaying it as formatted JSON makes the bug immediately obvious.
+      if (typeof detail === 'string') {
+        var trimmed = detail.trim();
+        if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length > 2) {
+          try {
+            return JSON.stringify(JSON.parse(trimmed), null, 2);
+          } catch (e) {
+            // Not valid JSON — show with a clear warning so the user knows
+            // this is the broken output that caused the parse failure.
+            return '⚠ (NOT valid JSON — this is why parsing failed)\n\n' + detail;
+          }
+        }
+        return detail;
+      }
+
       if (typeof detail !== 'object') return String(detail);
 
+      // Recursive pretty-formatter for objects/arrays (unchanged from original).
       function fmt(val, indent) {
         if (val === null || val === undefined) return indent + '—';
         if (typeof val === 'boolean') return indent + (val ? 'yes' : 'no');
@@ -936,12 +993,11 @@ vm.changeProject = function () {
             var bullet = indent + '  ';
             if (item !== null && typeof item === 'object') {
               var inner = fmt(item, indent + '    ');
-              var lines = inner.split('\n');
-              lines[0] = bullet + '- ' + lines[0].trim();
-              for (var j = 1; j < lines.length; j++) {
-                lines[j] = bullet + '  ' + lines[j].trim();
-              }
-              items.push(lines.join('\n'));
+              var ls = inner.split('\n');
+              ls[0] = bullet + '- ' + ls[0].trim();
+              for (var j = 1; j < ls.length; j++)
+                ls[j] = bullet + '  ' + ls[j].trim();
+              items.push(ls.join('\n'));
             } else {
               items.push(bullet + '- ' + fmt(item, '').trim());
             }
@@ -955,7 +1011,9 @@ vm.changeProject = function () {
         for (var i = 0; i < keys.length; i++) {
           var k = keys[i];
           var v = val[k];
-          var label = k.replace(/([A-Z])/g, ' $1').replace(/^./, function (s) { return s.toUpperCase(); });
+          var label = k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/^./, function (s) { return s.toUpperCase(); });
           if (v !== null && typeof v === 'object') {
             lines.push(indent + label + ':');
             lines.push(fmt(v, indent + '  '));
@@ -968,6 +1026,7 @@ vm.changeProject = function () {
 
       return fmt(detail, '');
     }
+
 
     function refreshFilesEditedFromSteps() {
       var seen = {};
@@ -1134,14 +1193,29 @@ vm.changeProject = function () {
               var eventName = '';
               var data = '';
 
+              // IMPROVED: only the FIRST "event:" line wins; multiple "data:" lines are
+              // joined with \n as the SSE spec requires (RFC 8895 §9.2.6).
+              var eventLineFound = false;
               for (var l = 0; l < lines.length; l++) {
-                if (lines[l].startsWith('event: ')) eventName = lines[l].substring(7);
-                else if (lines[l].startsWith('data: ')) data += lines[l].substring(6);
+                var line = lines[l];
+                if (!eventLineFound && line.startsWith('event: ')) {
+                  eventName = line.substring(7).trim();
+                  eventLineFound = true;
+                } else if (line.startsWith('data: ')) {
+                  data = data ? data + '\n' + line.substring(6) : line.substring(6);
+                }
               }
+              // Trim trailing whitespace that creeps in from CRLF-terminated streams.
+              data = data.trimEnd ? data.trimEnd() : data.replace(/\s+$/, '');
 
               if (eventName) {
                 var parsed = null;
-                try { parsed = JSON.parse(data); } catch (e) { }
+                try { parsed = JSON.parse(data); } catch (e) {
+                  // Only log unparseable data for non-trivial payloads
+                  if (data && data.length > 2) {
+                    console.warn('[SSE] Failed to parse data for event "' + eventName + '":', data.slice(0, 120));
+                  }
+                }
 
                 switch (eventName) {
                   case 'log':
@@ -1174,13 +1248,30 @@ vm.changeProject = function () {
                       pushAgentLog('summary', parsed.text);
                     }
                     break;
+
                   case 'plan':
                     if (parsed && parsed.items && parsed.items.length) {
                       vm.planItems = parsed.items.map(function (item, i) {
-                        return { index: i, file: item.File || item.file, change: item.Change || item.change, priority: item.Priority || item.priority, done: false };
+                        return {
+                          index: i,
+                          file: item.File || item.file || '?',
+                          change: item.Change || item.change || '',
+                          priority: item.Priority || item.priority || i + 1,
+                          done: false
+                        };
                       });
+                      // Show the plan summary immediately if available
+                      if (parsed.summary) {
+                        pushAgentLog('info', '📋 Plan: ' + parsed.summary,
+                          { itemCount: parsed.items.length, score: parsed.score });
+                      }
+                    } else if (parsed && parsed.score !== undefined) {
+                      // Plan object arrived but with no items — likely a failed parse on the backend
+                      pushAgentLog('warn',
+                        'Plan returned score ' + parsed.score + '/100 but has no items — check logs',
+                        parsed);
                     }
-                    break;
+                    break; 
                   case 'show':
                     if (parsed && parsed.text) {
                       vm.aiResponse = parsed.text;

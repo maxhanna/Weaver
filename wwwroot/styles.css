@@ -2592,19 +2592,6 @@ h3 .small.ghost:hover {
 	gap: 5px;
 }
 
-.file-picker-list .entry .checkbox {
-	width: 16px;
-	height: 16px;
-	border: 1px solid rgba(255, 255, 255, 0.2);
-	border-radius: 3px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	position: relative;
-	cursor: pointer;
-	font-size: 13px;
-}
-
 .file-picker-list .entry:hover {
 	background: rgba(255, 255, 255, 0.02);
 }
@@ -2621,7 +2608,7 @@ h3 .small.ghost:hover {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	position: relative;
+	cursor: pointer;
 }
 
 .file-picker-list .entry .checkbox.checked {
@@ -2629,12 +2616,19 @@ h3 .small.ghost:hover {
 	border-color: var(--accent);
 }
 
-.file-picker-list .entry .checkbox.checked::after {
-	content: '✓';
-	color: white;
-	font-size: 11px;
+.file-picker-list .entry .checkbox .checkmark {
+	color: #fff;
+	font-size: 13px;
 	font-weight: 700;
-	position: absolute;
+	line-height: 1;
+}
+
+.file-picker-list .entry:hover {
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.file-picker-list .entry.dir {
+	font-weight: 600;
 }
 
 .muted {
