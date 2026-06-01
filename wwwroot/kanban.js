@@ -1,16 +1,12 @@
 ﻿'use strict';
 
-angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, VoiceInput) {
-  var STORAGE_KEY = 'maestroconfig.cards';
-
+angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, VoiceInput, $http) { 
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
   function loadCards() {
-    var raw = $window.localStorage.getItem(STORAGE_KEY);
-    var state = raw ? JSON.parse(raw) : { todo: [], doing: [], done: [], archived: [] };
-    if (!state.archived) state.archived = [];  
-
-    return state;
+    // Return a default state immediately; actual persisted state will be
+    // loaded asynchronously after the controller initializes.
+    return { todo: [], doing: [], done: [], archived: [] };
   }
 
   var _cardsCache = {};
@@ -18,12 +14,31 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
   return {
     init: function(vm, $scope) {
-      vm.state = loadCards();
+      // Start with an immediate default state, then replace with persisted
+      // state loaded from the server when available.
+      vm.state = { todo: [], doing: [], done: [], archived: [] };
+      $http.get('/api/boarddata/load').then(function (resp) {
+        try {
+          var data = resp.data;
+          if (typeof data === 'string') {
+            data = JSON.parse(data);
+          }
+          if (data && (data.todo || data.doing || data.done || data.archived)) {
+            vm.state = data;
+          }
+        } catch (e) {
+          console.warn('Failed to parse boarddata from server, using default state');
+        }
+        if ($scope) $scope.$applyAsync();
+      }, function () { /* ignore load errors, keep default state */ });
       _cardsCache = {};
       _cardsVersion = 0;
 
       vm.saveCards = function() {
-        $window.localStorage.setItem(STORAGE_KEY, JSON.stringify(vm.state));
+        // Save to .boarddata file
+        $http.post('/api/boarddata/save', vm.state).catch(function(err) {
+          console.error('Failed to save to .boarddata file:', err);
+        });
         _cardsVersion++;
       };
 
@@ -231,6 +246,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           if (vm.streamingActive && vm.activeCardId === card.id) {
             vm.stopAgent(card);
           }
+          // Scroll to the card after moving it back to To Do
+          $timeout(function() {
+            var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
+            if (cardElement) {
+              cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          }, 0);
         }
         if (from === 'doing' && to === 'done') {
           // Only clear activeCardId if it's not part of the current project
@@ -245,6 +267,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           if (card.filePath !== vm.selectedProject) {
             vm.activeCardId = null;
           }
+          // Scroll to the card after moving it back to To Do
+          $timeout(function() {
+            var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
+            if (cardElement) {
+              cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          }, 0);
         }
         if (from === 'todo' && to === 'done') {
           card.ready = false;
@@ -273,6 +302,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.state.done.splice(idx, 1);
         vm.state.todo.push(card);
         vm.saveCards();
+        // Scroll to the card after reopening it to To Do
+        $timeout(function() {
+          var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
+          if (cardElement) {
+            cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        }, 0);
       };
 
       vm.getAttachedFiles = function (card) {

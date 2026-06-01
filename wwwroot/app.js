@@ -325,7 +325,7 @@
     }
 
     vm.loadConfig = function (project) {
-      $http.get('/api/config').then(function (resp) {
+      return $http.get('/api/config').then(function (resp) {
         var cfg = resp.data || {};
         var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
           { Name: 'Project Alpha', Path: '../project-alpha' }
@@ -855,7 +855,10 @@ vm.changeProject = function () {
       var params = { project: vm.selectedProject };
       if (vm.searchFilter && vm.searchFilter.trim()) {
         params.search = vm.searchFilter.trim();
-        vm.pickerPath = '';
+        // Preserve the current path for search operations to ensure they stay within the current directory
+        if (vm.pickerPath) {
+          params.path = vm.pickerPath;
+        }
       } else if (vm.pickerPath) {
         params.path = vm.pickerPath;
       }

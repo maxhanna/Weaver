@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using System.IO;
@@ -113,7 +113,16 @@ public class FileEditController : ControllerBase
             if (!string.IsNullOrWhiteSpace(search))
             {
                 var searchTerm = search.Trim();
-                var matchingDirs = Directory.EnumerateDirectories(projectRoot, "*", SearchOption.AllDirectories)
+                // Determine the search root based on whether a path is specified
+                var searchRoot = string.IsNullOrWhiteSpace(path) ? projectRoot : Path.GetFullPath(Path.Combine(projectRoot, path.Trim()));
+                
+                // Validate that the search root is within the project root
+                if (!searchRoot.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return BadRequest("Path outside project root is not allowed.");
+                }
+                
+                var matchingDirs = Directory.EnumerateDirectories(searchRoot, "*", SearchOption.AllDirectories)
                     .Where(d => Path.GetFileName(d).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
                     .Select(d => new
                     {
@@ -122,7 +131,7 @@ public class FileEditController : ControllerBase
                         isDirectory = true
                     });
 
-                var matchingFiles = Directory.EnumerateFiles(projectRoot, "*", SearchOption.AllDirectories)
+                var matchingFiles = Directory.EnumerateFiles(searchRoot, "*", SearchOption.AllDirectories)
                     .Where(f => Path.GetFileName(f).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
                     .Select(f => new
                     {
@@ -140,11 +149,13 @@ public class FileEditController : ControllerBase
             var relativePath = (path ?? "").Trim();
             var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
 
+            // Ensure the target path is within the project root
             if (!targetFull.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
             {
                 return BadRequest("Path outside project root is not allowed.");
             }
 
+            // If a specific file is requested, return its info
             if (System.IO.File.Exists(targetFull))
             {
                 return Ok(new
@@ -155,6 +166,13 @@ public class FileEditController : ControllerBase
                 });
             }
 
+            // If the path is a file but doesn't exist, return not found
+            if (System.IO.File.Exists(targetFull))
+            {
+                return NotFound("File not found.");
+            }
+
+            // If the path is not a directory, return not found
             if (!Directory.Exists(targetFull))
             {
                 return NotFound("Directory not found.");
