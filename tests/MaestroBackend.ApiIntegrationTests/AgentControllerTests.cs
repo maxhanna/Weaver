@@ -414,12 +414,12 @@ class HelperService
 """, Encoding.UTF8);
         await WriteConfigAsync(buildCommands: "");
 
-        var completenessChecks = 0;
+        var planCalls = 0;
         var createFileCalls = 0;
         var (client, _, factory) = CreateClientWithAgentServices(
             responder: request => CrossFileCodeEditResponse(
                 request,
-                () => completenessChecks++,
+                () => planCalls++,
                 () => createFileCalls++));
 
         using (factory)
@@ -433,7 +433,7 @@ class HelperService
 
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             Assert.True(json.RootElement.GetProperty("complete").GetBoolean());
-            Assert.Equal(1, completenessChecks);
+            Assert.Equal(1, planCalls);
             Assert.Equal(1, createFileCalls);
 
             var steps = json.RootElement.GetProperty("steps");
@@ -962,83 +962,31 @@ var (client, _, store, factory) = CreateClientWithAgentServicesAndPendingStore(
 
     private static HttpResponseMessage CrossFileCodeEditResponse(
         HttpRequestMessage request,
-        Action? onCompletenessCheck = null,
+        Action? onPlan = null,
         Action? onCreateFile = null)
     {
         if (request.RequestUri?.AbsolutePath != "/v1/chat/completions")
             return new HttpResponseMessage(HttpStatusCode.NotFound);
 
-        var (system, user) = ReadLlmMessages(request);
+        var (system, _) = ReadLlmMessages(request);
 
-        if (system.Contains("Classify the user request", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"pipeline":"CodeEdit"}""");
-
-        if (system.Contains("You are a coding specialist agent.", StringComparison.Ordinal))
+        // Phase 2 — PLAN: one unified plan carrying inline edits + a file-creation step.
+        // score=100 so the planner accepts it on the first attempt (no retry loop).
+        if (system.StartsWith("You are a software-engineering agent.", StringComparison.Ordinal))
         {
+            onPlan?.Invoke();
             return CreateChatCompletionResponse(
                 """
-                {"thinking":"Update the target flow, create a note, and adjust the helper output.","summary":"Create a note file and update the target and helper files.","plan":[{"file":"_create_file","change":"create file Notes/GeneratedNote.txt containing a generated note about the helper update","priority":1},{"file":"Target.cs","change":"Prefix the BuildMessage result with the target label.","priority":2}]}
+                {"thinking":"Update the target and helper output and add a generated note file.","summary":"Edit Target.cs and HelperService.cs and create a note file.","score":100,"plan":[{"file":"_create_file","change":"Notes/GeneratedNote.txt: a generated note about the helper update","oldString":"","newString":"","priority":1},{"file":"Target.cs","change":"Prefix the BuildMessage result with the target label.","oldString":"        return HelperService.DoWork();","newString":"        return \"Target: \" + HelperService.DoWork();","priority":2},{"file":"HelperService.cs","change":"Update DoWork to return the new helper text.","oldString":"        return \"old helper\";","newString":"        return \"updated helper\";","priority":3}]}
                 """);
         }
 
-        if (system.Contains("You are a plan validation specialist.", StringComparison.Ordinal))
-        {
-            onCompletenessCheck?.Invoke();
-            return CreateChatCompletionResponse(
-                """
-                {"complete":false,"confidence":"medium","reasoning":"HelperService.cs also needs to change because Target.cs calls HelperService.DoWork().","additions":[{"file":"HelperService.cs","change":"Update DoWork to return the new helper text."}]}
-                """);
-        }
-
+        // _create_file content generation
         if (system.Contains("You are a file creation assistant.", StringComparison.Ordinal))
         {
             onCreateFile?.Invoke();
             return CreateChatCompletionResponse("Generated note: helper output updated.");
         }
-
-        if (system.Contains("You are a senior software engineer analyzing a task", StringComparison.Ordinal))
-        {
-            if (user.Contains("## File\r\nTarget.cs", StringComparison.Ordinal) || user.Contains("## File\nTarget.cs", StringComparison.Ordinal))
-            {
-                return CreateChatCompletionResponse(
-                    """
-                    {"thinking":"Update the target return statement.","steps":[{"description":"Prefix the helper result in BuildMessage","targetArea":"BuildMessage return statement","changeType":"edit"}]}
-                    """);
-            }
-
-            if (user.Contains("## File\r\nHelperService.cs", StringComparison.Ordinal) || user.Contains("## File\nHelperService.cs", StringComparison.Ordinal))
-            {
-                return CreateChatCompletionResponse(
-                    """
-                    {"thinking":"Update the helper return string.","steps":[{"description":"Change the helper return string","targetArea":"DoWork return statement","changeType":"edit"}]}
-                    """);
-            }
-        }
-
-        if (system.Contains("You are generating ONE precise code edit", StringComparison.Ordinal))
-        {
-            if (user.Contains("## File\r\nTarget.cs", StringComparison.Ordinal) || user.Contains("## File\nTarget.cs", StringComparison.Ordinal))
-            {
-                return CreateChatCompletionResponse(
-                    """
-                    {"oldString":"        return HelperService.DoWork();","newString":"        return \"Target: \" + HelperService.DoWork();"}
-                    """);
-            }
-
-            if (user.Contains("## File\r\nHelperService.cs", StringComparison.Ordinal) || user.Contains("## File\nHelperService.cs", StringComparison.Ordinal))
-            {
-                return CreateChatCompletionResponse(
-                    """
-                    {"oldString":"        return \"old helper\";","newString":"        return \"updated helper\";"}
-                    """);
-            }
-        }
-
-        if (system.Contains("You are a meticulous code reviewer.", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"approved":true,"feedback":""}""");
-
-        if (system.Contains("You are a code review agent.", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"complete":true,"feedback":""}""");
 
         return new HttpResponseMessage(HttpStatusCode.BadRequest)
         {
@@ -1051,40 +999,16 @@ var (client, _, store, factory) = CreateClientWithAgentServicesAndPendingStore(
         if (request.RequestUri?.AbsolutePath != "/v1/chat/completions")
             return new HttpResponseMessage(HttpStatusCode.NotFound);
 
-        var (system, user) = ReadLlmMessages(request);
+        var (system, _) = ReadLlmMessages(request);
 
-        if (system.Contains("Classify the user request", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"pipeline":"CodeEdit"}""");
-
-        if (system.Contains("You are a coding specialist agent.", StringComparison.Ordinal))
+        // Phase 2 — PLAN: a single edit to the attached file, with inline oldString/newString.
+        if (system.StartsWith("You are a software-engineering agent.", StringComparison.Ordinal))
         {
             return CreateChatCompletionResponse(
                 """
-                {"thinking":"Update the attached file message.","summary":"Modify AttachedTarget.cs to return the new message.","plan":[{"file":"AttachedTarget.cs","change":"Change ReadMessage so it returns the updated value.","priority":1}]}
+                {"thinking":"Update the attached file message.","summary":"Modify AttachedTarget.cs to return the new message.","score":100,"plan":[{"file":"AttachedTarget.cs","change":"Change ReadMessage so it returns the updated value.","oldString":"        return \"before\";","newString":"        return \"after\";","priority":1}]}
                 """);
         }
-
-        if (system.Contains("You are a senior software engineer analyzing a task", StringComparison.Ordinal))
-        {
-            return CreateChatCompletionResponse(
-                """
-                {"thinking":"Update the return value.","steps":[{"description":"Change the ReadMessage return value","targetArea":"ReadMessage return statement","changeType":"edit"}]}
-                """);
-        }
-
-        if (system.Contains("You are generating ONE precise code edit", StringComparison.Ordinal))
-        {
-            return CreateChatCompletionResponse(
-                """
-                {"oldString":"        return \"before\";","newString":"        return \"after\";"}
-                """);
-        }
-
-        if (system.Contains("You are a meticulous code reviewer.", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"approved":true,"feedback":""}""");
-
-        if (system.Contains("You are a code review agent.", StringComparison.Ordinal))
-            return CreateChatCompletionResponse("""{"complete":true,"feedback":""}""");
 
         return new HttpResponseMessage(HttpStatusCode.BadRequest)
         {

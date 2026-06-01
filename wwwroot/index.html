@@ -344,22 +344,25 @@
       </div>
       <div class="popup-body">
         <div class="form-row">
-          <label>Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
+          <label style="display: flex; flex-direction: row; gap: 10px;">Project: <span style="width: 200%">{{vm.selectedProject}}</span></label>
         </div>
         <div class="file-picker-nav">
-          <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath">⬆ Up</button>
-          <span>{{vm.pickerPath || '/'}}</span>
+          <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.pickerPath || vm.isSearchResult">⬆ Up</button>
+          <span>{{vm.isSearchResult ? '🔍 Search results' : (vm.pickerPath || '/')}}</span>
+          <button class="small" ng-click="vm.clearSearch()" ng-if="vm.searchFilter" style="margin-left:auto;">✕ Clear</button>
         </div>
-        <input type="text" ng-model="vm.searchFilter" placeholder="Search files..." class="search-input" />
+        <input type="text" ng-model="vm.searchFilter" placeholder="Search files..." class="search-input" ng-change="vm.onSearchChange()" />
         <div class="file-picker-list">
-          <div class="entry dir" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="e.isDirectory"
+          <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
             ng-click="vm.pickerEnterDir(e.path)">
-            <span>📁</span><span>{{e.name}}/</span>
+            <div class="entryTypeAndName"><span>📁</span><span>{{vm.isSearchResult ? e.path + '/' : e.name + '/'}}</span></div>
           </div>
-          <div class="entry" ng-repeat="e in vm.pickerEntries | filter:vm.searchFilter" ng-if="!e.isDirectory"
+          <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory"
             ng-click="vm.pickerToggleFile(e.path)">
-            <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}"></div>
-            <span>📄</span><span>{{e.name}}</span>
+            <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}">
+              <span ng-show="vm.pickerSelected.indexOf(e.path)!==-1" class="checkmark">✔</span>
+            </div>
+            <div class="entryTypeAndName"><span>📄</span><span>{{vm.isSearchResult ? e.path : e.name}}</span></div>
           </div>
           <div ng-if="!vm.pickerEntries.length" class="muted text-sm" style="padding:12px;text-align:center;">No files
             in this directory</div>
@@ -591,32 +594,35 @@
               <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
                 Map keywords to files so the agent knows where to look.
               </span>
-              <div ng-repeat="hint in vm.fileHintsData track by $index"
-                style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                  <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
-                  <input ng-model="hint.keywords" placeholder="comma-separated keywords"
-                    style="flex:1;padding:4px 8px;font-size:12px;" />
-                </div>
-                <div style="margin-left:4px;">
-                  <span style="font-size:12px;color:var(--muted);">Files:</span>
-                  <div ng-repeat="file in hint.files track by $index"
-                    style="display:flex;align-items:center;gap:4px;margin:4px 0;">
-                    <input ng-model="hint.files[$index]" placeholder="file path"
-                      style="flex:1;padding:3px 6px;font-size:12px;" />
-                    <button ng-click="vm.removeFileFromHint($parent.$index, $index)" title="Remove file"
-                      style="padding:2px 6px;font-size:11px;">✕</button>
+              <details ng-repeat="project in vm.projects track by $index" style="margin-bottom:8px;">
+                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
+                <div ng-repeat="hint in vm.fileHintsData[$index].hints track by $index"
+                  style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
+                    <input ng-model="hint.keywords" placeholder="comma-separated keywords"
+                      style="flex:1;padding:4px 8px;font-size:12px;" />
                   </div>
-                  <button ng-click="vm.addFileToHint($index)" style="padding:2px 8px;font-size:11px;margin-top:2px;">+
-                    File</button>
+                  <div style="margin-left:4px;">
+                    <span style="font-size:12px;color:var(--muted);">Files:</span>
+                    <div ng-repeat="file in hint.files track by $index"
+                      style="display:flex;align-items:center;gap:4px;margin:4px 0;">
+                      <input ng-model="hint.files[$index]" placeholder="file path"
+                        style="flex:1;padding:3px 6px;font-size:12px;" />
+                      <button ng-click="vm.removeFileFromHint($parent.$parent.$index, $parent.$index, $index)" title="Remove file"
+                        style="padding:2px 6px;font-size:11px;">✕</button>
+                    </div>
+                    <button ng-click="vm.addFileToHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;margin-top:2px;">+
+                      File</button>
+                  </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+                    <button ng-click="vm.removeHint($parent.$index, $index)" style="padding:2px 8px;font-size:11px;color:var(--error);">✕
+                      Remove</button>
+                  </div>
                 </div>
-                <div style="display:flex;justify-content:flex-end;margin-top:6px;">
-                  <button ng-click="vm.removeHint($index)" style="padding:2px 8px;font-size:11px;color:var(--error);">✕
-                    Remove</button>
-                </div>
-              </div>
-              <button ng-click="vm.addHint()" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add Keyword
-                Mapping</button>
+                <button ng-click="vm.addHint($index)" style="padding:4px 10px;font-size:12px;margin-top:4px;">+ Add Keyword
+                  Mapping</button>
+              </details>
               <button class="small primary" ng-click="vm.saveFileHints()" style="margin-top:8px;">Save File
                 Hints</button>
             </div>
@@ -654,14 +660,20 @@
   </div>
 
   <!-- CONTEXT REVIEW MODAL (files discovered by agent) -->
-  <div class="popup-overlay" ng-if="vm.pendingContextReview" ng-click="vm.confirmContextReview()">
+  <div class="popup-overlay" ng-if="vm.pendingContextReview" ng-click="vm.dismissContextReview()">
     <div class="popup-panel context-review-panel" ng-click="$event.stopPropagation()">
+      <div class="popup-header">
+        <strong>📋 Context Review</strong>
+        <button class="popup-close" ng-click="vm.dismissContextReview()">✕</button>
+      </div>
       <div class="popup-body">
-        <h3 style="margin:0 0 8px 0;">📋 Context Review</h3>
         <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0;">
           Select files to include in the context
           <span ng-if="vm.contextReviewCountdown > 0" class="context-review-countdown">
             — auto-confirming in {{vm.contextReviewCountdown}}s
+          </span>
+          <span ng-if="vm.contextReviewCountdown <= 0 && vm.pendingContextReview && vm._contextReviewSubmitted" class="context-review-countdown">
+            — submitting…
           </span>
         </p>
         <div class="context-review-card-text" ng-if="vm.activeCardText">

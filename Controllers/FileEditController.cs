@@ -97,7 +97,7 @@ public class FileEditController : ControllerBase
     }
 
     [HttpGet("list")]
-    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "")
+    public IActionResult List([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string search = "")
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
         string workspaceRoot = !string.IsNullOrWhiteSpace(configuredRoot)
@@ -106,31 +106,60 @@ public class FileEditController : ControllerBase
 
         var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var projectRoot = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
-        var relativePath = (path ?? "").Trim();
-        var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
-
-        if (!targetFull.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            return BadRequest("Path outside project root is not allowed.");
-        }
-
-        if (System.IO.File.Exists(targetFull))
-        {
-            return Ok(new
-            {
-                path = Path.GetRelativePath(projectRoot, targetFull).Replace("\\", "/"),
-                name = Path.GetFileName(targetFull),
-                isDirectory = false
-            });
-        }
-
-        if (!Directory.Exists(targetFull))
-        {
-            return NotFound("Directory not found.");
-        }
 
         try
         {
+            // Recursive search when a search term is provided
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var searchTerm = search.Trim();
+                var matchingDirs = Directory.EnumerateDirectories(projectRoot, "*", SearchOption.AllDirectories)
+                    .Where(d => Path.GetFileName(d).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Select(d => new
+                    {
+                        name = Path.GetFileName(d),
+                        path = Path.GetRelativePath(projectRoot, d).Replace("\\", "/"),
+                        isDirectory = true
+                    });
+
+                var matchingFiles = Directory.EnumerateFiles(projectRoot, "*", SearchOption.AllDirectories)
+                    .Where(f => Path.GetFileName(f).IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Select(f => new
+                    {
+                        name = Path.GetFileName(f),
+                        path = Path.GetRelativePath(projectRoot, f).Replace("\\", "/"),
+                        isDirectory = false
+                    });
+
+                var searchEntries = matchingDirs.Concat(matchingFiles).OrderByDescending(x => x.isDirectory).ThenBy(x => x.name);
+
+                return Ok(new { path = "", entries = searchEntries, search = searchTerm });
+            }
+
+            // Normal directory listing when no search term
+            var relativePath = (path ?? "").Trim();
+            var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
+
+            if (!targetFull.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest("Path outside project root is not allowed.");
+            }
+
+            if (System.IO.File.Exists(targetFull))
+            {
+                return Ok(new
+                {
+                    path = Path.GetRelativePath(projectRoot, targetFull).Replace("\\", "/"),
+                    name = Path.GetFileName(targetFull),
+                    isDirectory = false
+                });
+            }
+
+            if (!Directory.Exists(targetFull))
+            {
+                return NotFound("Directory not found.");
+            }
+
             var dirs = Directory.GetDirectories(targetFull).Select(d => new
             {
                 name = Path.GetFileName(d),

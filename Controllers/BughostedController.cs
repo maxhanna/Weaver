@@ -75,7 +75,8 @@ public class BughostedController : ControllerBase
                 token = session.Token,
                 clientId = session.ClientId,
                 status = "online",
-                kanbanData = req.KanbanData
+                kanbanData = req.KanbanData,
+                settings = req.Settings
             });
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/heartbeat")
             {
@@ -84,6 +85,58 @@ public class BughostedController : ControllerBase
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
             return Ok(new { remoteStatus = (int)httpRes.StatusCode, remoteBody = body });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("settings")]
+    public async Task<IActionResult> PostSettings([FromBody] BughostedSettingsRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGet(req.ClientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var payload = JsonSerializer.Serialize(new
+            {
+                token = session.Token,
+                settingsData = req.SettingsData
+            });
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/settings")
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
+            return Ok(body);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("settings")]
+    public async Task<IActionResult> GetSettings([FromQuery] string clientId)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGet(clientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/maestro/settings?token={session.Token}");
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+            if (!httpRes.IsSuccessStatusCode)
+                return StatusCode((int)httpRes.StatusCode, body);
+            return Content(body, "application/json");
         }
         catch (Exception ex)
         {
@@ -194,6 +247,7 @@ public class BughostedHeartbeatRequest
 {
     public string ClientId { get; set; } = "";
     public string? KanbanData { get; set; }
+    public string? Settings { get; set; }
 }
 
 public class BughostedAckRequest
@@ -207,6 +261,12 @@ public class BughostedAckRequest
 public class BughostedLogoutRequest
 {
     public string ClientId { get; set; } = "";
+}
+
+public class BughostedSettingsRequest
+{
+    public string ClientId { get; set; } = "";
+    public string? SettingsData { get; set; }
 }
 
 public class BughostedSession

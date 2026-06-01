@@ -25,8 +25,9 @@ public static class AgentUtilities
         if (TryDetectSimpleIntent(prompt) != null)
             return PipelineType.CommandExecution;
 
-        // Rename/move is always command-execution regardless of phrasing
-        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}\bto\b"))
+        // Rename/move requires a dot (file extension) or path separator between the verb and "to"
+        // (avoids matching prose like "move a card from column X to column Y")
+        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}(\.\w+|[\\/]).{0,60}\bto\b"))
             return PipelineType.CommandExecution;
 
         // Directory listing / exploration — needs agentic terminal control, not hallucination
@@ -279,7 +280,11 @@ public static class AgentUtilities
         file.Equals("_display", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_ping", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_package_install", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase);
+        file.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
+        file.Equals("_explore", StringComparison.OrdinalIgnoreCase);
 
     public static string InferTargetFolder(string fileName, string projectRoot)
     {
@@ -538,7 +543,8 @@ public static class AgentUtilities
 
         var specialMarkers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "_git", "_ping", "_show", "_display", "_create_file", "_package_install"
+            "_git", "_ping", "_show", "_display", "_create_file", "_package_install",
+            "_command", "_web_search", "_web_fetch", "_explore"
         };
         return !specialMarkers.Contains(path);
     }
@@ -666,7 +672,7 @@ public static class AgentUtilities
 
         return (null, null, "Could not parse oldString/newString from code gen response");
     }
-
+ 
     public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();

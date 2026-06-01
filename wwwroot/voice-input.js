@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
   var recognition = null;
@@ -9,6 +9,7 @@ angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
   var timerHandle = null;
   var baseText = '';
   var lastProcessedIndex = -1;
+  var scope = null;
 
   var SpeechRecognition = $window.SpeechRecognition || $window.webkitSpeechRecognition;
 
@@ -93,6 +94,11 @@ angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
 
       startTimer(scope);
       recognition.start();
+      // Add recording class to button when starting
+      var recordButton = document.getElementById('card-' + currentCard.id).getElementsByClassName('recordButton')[0];
+      if (recordButton) {
+        recordButton.classList.add('recording');
+      }
     },
 
     stop: function () {
@@ -107,6 +113,11 @@ angular.module('kanbanApp').factory('VoiceInput', function ($window, $timeout) {
       active = false;
       timer = 0;
       currentCard = null;
+      // Remove recording class from button when stopping
+      var recordButton = document.getElementsByClassName('recording')[0];
+      if (recordButton) {
+        recordButton.classList.remove('recording');
+      }
     },
 
     reset: cleanup
