@@ -135,19 +135,20 @@ public class AgentController : ControllerBase
     - 50-79 = moderate concerns (missing steps, uncertain edits)
     - 0-49 = major gaps (insufficient context, unclear requirements)
  
-### FILE EDIT GUIDELINES ###
+### FILE EDIT RULES ###
   - For each file, specify EXACT changes with line numbers or function/class names.
   - 'oldString': the EXACT existing code to replace (1-5 lines, must literally appear in the file)
   - 'newString': the replacement code
   - Prefer MANY small edits over one large edit.
+  - Preserve exact indentation in both oldString and newString. The end result must fit seamlessly into the existing code with no indentation changes needed beyond what you provide.
+  - Escape newlines as \\n, but do not change indentation or spacing in oldString or newString.
   - Double-check spelling and whitespace in oldString. It has to match exactly whats in the file.
-
-### FILE EDIT RULES ###
-  - oldString must be 1–5 lines of existing code copied verbatim from the file (Or blank if we are inserting code in a new file).
+  - oldString must be 1-5 lines of existing code copied verbatim from the file.
+  - oldString must never be blank for an existing file edit. For insertions, use an existing anchor as oldString and include that same anchor plus inserted code in newString.
+  - For brand-new files, use _create_file instead of a relative/path.ext edit.
   - oldString must never contain new code.
   - CRITICAL: oldString and newString MUST NOT MATCH. If you need to add code that was not there previously, you can use oldString as an anchor point and add new code above, below, or inline, but oldString itself must be unchanged from the file. This allows the system to find the exact location to apply the edit.
   - CRITICAL: Prefer MANY small targeted atomic edits over one large edit. Add more edits if needed to cover the change. Make code edits as small as possible 1-5 lines MAX.
-  - Preserve indentation exactly in both oldString and newString. The end result must fit seamlessly into the existing code with no indentation changes needed beyond what you provide.
 
 ### EXAMPLE OUTPUT — respond with ONLY this type of JSON structure, no markdown, no extra text ###
 {
@@ -156,7 +157,7 @@ public class AgentController : ControllerBase
   ""score"": <0-100>,
   ""plan"": [
     { ""file"": ""_command"", ""change"": ""mkdir -p src/components/Button"", ""oldString"": """", ""newString"": """", ""priority"": 1 },
-    { ""file"": ""relative/path"",""change"": ""Line 5: add import ..."", ""oldString"": """", ""newString"": """", ""priority"": 2 }
+    { ""file"": ""relative/path"", ""change"": ""Line 5: add import ..."", ""oldString"": ""using System.Text;"", ""newString"": ""using System.Text;\nusing System.Text.Json;"", ""priority"": 2 }
   ]
 }";
 
@@ -684,44 +685,27 @@ public class AgentController : ControllerBase
             AllowTrailingCommas = true
         };
 
-        // ── Step 2: locate the last complete JSON object that contains "plan" ──
-        // Strategy: find every { position from last to first, extract the balanced
-        // {…} block with proper string-aware brace matching, and try to parse it
-        // as AgentPlan.  This handles preamble text, embedded code fences, etc.
-        var allOpenBraces = new List<int>();
-        var ob = cleaned.LastIndexOf('{');
-        while (ob >= 0)
+        // Step 2: locate complete JSON objects that contain a plan. Try the
+        // outermost blocks first so we do not accidentally parse an inner step.
+        var jsonBlocks = AgentUtilities.ExtractJsonBlocks(cleaned)
+            .Where(LooksLikePlanJson)
+            .OrderByDescending(b => b.Length)
+            .ToList();
+
+        if (LooksLikePlanJson(cleaned) && cleaned.StartsWith("{"))
+            jsonBlocks.Insert(0, cleaned);
+
+        var firstBrace = cleaned.IndexOf('{');
+        var lastBrace = cleaned.LastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace)
         {
-            allOpenBraces.Add(ob);
-            if (ob == 0) break;
-            ob = cleaned.LastIndexOf('{', ob - 1);
+            var broadCandidate = cleaned.Substring(firstBrace, lastBrace - firstBrace + 1);
+            if (LooksLikePlanJson(broadCandidate))
+                jsonBlocks.Add(broadCandidate);
         }
 
-        foreach (var openBrace in allOpenBraces)
+        foreach (var candidate in jsonBlocks.Distinct())
         {
-            // Walk forward with string-aware brace matching
-            var depth = 0;
-            var inStr = false;
-            var closeBrace = -1;
-            for (var i = openBrace; i < cleaned.Length; i++)
-            {
-                var c = cleaned[i];
-                if (inStr)
-                {
-                    if (c == '\\') { i++; continue; }
-                    if (c == '"') inStr = false;
-                    continue;
-                }
-                if (c == '"') { inStr = true; continue; }
-                if (c == '{') depth++;
-                else if (c == '}') { depth--; if (depth == 0) { closeBrace = i; break; } }
-            }
-            if (closeBrace < 0) continue;
-
-            var candidate = cleaned.Substring(openBrace, closeBrace - openBrace + 1);
-            if (!candidate.Contains("\"plan\"", StringComparison.OrdinalIgnoreCase))
-                continue;
-
             foreach (var repaired in AgentUtilities.GeneratePlanJsonCandidates(candidate))
             {
                 try
@@ -733,9 +717,33 @@ public class AgentController : ControllerBase
             }
         }
 
+        // Fallback: some small models return the plan array directly.
+        var arrayCandidates = new List<string> { cleaned };
+        var firstBracket = cleaned.IndexOf('[');
+        var lastBracket = cleaned.LastIndexOf(']');
+        if (firstBracket >= 0 && lastBracket > firstBracket)
+            arrayCandidates.Add(cleaned.Substring(firstBracket, lastBracket - firstBracket + 1));
+
+        foreach (var block in arrayCandidates.Distinct())
+        {
+            try
+            {
+                var candidate = block.Trim();
+                if (!candidate.StartsWith("[")) continue;
+                var steps = JsonSerializer.Deserialize<List<PlanStep>>(candidate, opts);
+                if (steps is { Count: > 0 })
+                    return new AgentPlan { Summary = "Parsed direct plan array", Plan = steps };
+            }
+            catch { }
+        }
+
         Console.Error.WriteLine($"[ParsePlan] All repair strategies failed. Raw snippet: {cleaned[..Math.Min(200, cleaned.Length)]}");
         return null;
     }
+
+    private static bool LooksLikePlanJson(string text) =>
+        !string.IsNullOrWhiteSpace(text) &&
+        Regex.IsMatch(text, @"""?plan""?\s*:", RegexOptions.IgnoreCase);
 
 
     /// <summary>
@@ -935,7 +943,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         
         if (requiresReplan)
         { 
-            var history = new List<string>();
+            var history = new List<string>
+            {
+                BuildFailedEditHistory(allSteps)
+            };
 
             for (var attempt = 0; attempt < 3; attempt++)
             {
@@ -974,6 +985,42 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         return (allSteps, plan, complete);  
+    }
+
+    private static string BuildFailedEditHistory(List<object> allSteps)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Concrete verification failures from the previous execution:");
+        var failures = allSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(step =>
+                step.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                (!step.TryGetValue("status", out var st) || st?.ToString() != "done"))
+            .ToList();
+
+        if (failures.Count == 0)
+        {
+            sb.AppendLine("- No failed edit dictionaries were available.");
+            return sb.ToString();
+        }
+
+        foreach (var failure in failures.Take(8))
+        {
+            sb.AppendLine($"- Path: {failure.GetValueOrDefault("path")}");
+            sb.AppendLine($"  Status: {failure.GetValueOrDefault("status")}");
+            if (failure.TryGetValue("error", out var error) && error != null)
+                sb.AppendLine($"  Error: {error}");
+            if (failure.TryGetValue("reason", out var reason) && reason != null)
+                sb.AppendLine($"  Reason: {reason}");
+            if (failure.TryGetValue("snippet", out var snippet) && snippet != null)
+                sb.AppendLine($"  Nearby snippet: {snippet}");
+            if (failure.TryGetValue("oldString", out var oldString) && oldString != null)
+                sb.AppendLine($"  Failed oldString: {AgentUtilities.Truncate(oldString.ToString() ?? "", 1200)}");
+            else if (failure.TryGetValue("oldStringPreview", out var oldPreview) && oldPreview != null)
+                sb.AppendLine($"  Failed oldString: {AgentUtilities.Truncate(oldPreview.ToString() ?? "", 1200)}");
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1727,6 +1774,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             if (plan == null) { throw new InvalidOperationException("Re-plan after exploration returned empty."); }
         }
 
+        plan = await RepairPlanEditAnchors(prompt, plan, projectRoot, emitSse, ct);
+
 
         // ── Compact discovery context in background (don't block LLM) ──
         var ctxForCompaction = discoveryContext;
@@ -1956,6 +2005,125 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         return discoveryContext;
+    }
+
+    private async Task<AgentPlan> RepairPlanEditAnchors(
+        string prompt, AgentPlan plan, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var contentCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var repairedCount = 0;
+        var checkedCount = 0;
+
+        foreach (var item in plan.Plan.Where(p => AgentUtilities.IsRelativePath(p.File ?? "")))
+        {
+            checkedCount++;
+            var relPath = item.File.Replace('\\', '/');
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+            if (!AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
+            {
+                await EmitLog(emitSse, "warn", $"Plan edit path outside project root: {relPath}", ct: ct);
+                continue;
+            }
+
+            if (!System.IO.File.Exists(fullPath))
+            {
+                var suggestions = AgentUtilities.FindSimilarFiles(relPath, projectRoot);
+                var exactNameMatches = suggestions
+                    .Where(s => string.Equals(Path.GetFileName(s), Path.GetFileName(relPath), StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (exactNameMatches.Count == 1)
+                {
+                    item.File = exactNameMatches[0].Replace('\\', '/');
+                    relPath = item.File;
+                    fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                    await EmitLog(emitSse, "info", $"Corrected plan path to {relPath}", ct: ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "warn", $"Plan edit file not found: {relPath}", new { suggestions }, ct: ct);
+                    continue;
+                }
+            }
+
+            if (!contentCache.TryGetValue(fullPath, out var content))
+            {
+                content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                contentCache[fullPath] = content;
+            }
+
+            var validation = ValidatePlannedEdit(content, item);
+            if (validation.ok)
+            {
+                contentCache[fullPath] = validation.newContent!;
+                continue;
+            }
+
+            var history = new List<(string oldString, string newString, int score, string reason)>
+            {
+                (item.OldString ?? "", item.NewString ?? "", validation.score, validation.reason)
+            };
+
+            for (var attempt = 0; attempt < 2 && !validation.ok; attempt++)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Repairing edit anchor for {relPath} ({attempt + 1}/2): {validation.reason}", ct: ct);
+                var corrected = await CorrectEdit(prompt, relPath, content, item.Change, history, attempt, emitSse, ct);
+                if (corrected == null) break;
+
+                var originalOld = item.OldString ?? "";
+                var originalNew = item.NewString ?? "";
+                item.OldString = corrected.Value.oldString;
+                item.NewString = corrected.Value.newString;
+
+                validation = ValidatePlannedEdit(content, item);
+                if (validation.ok)
+                {
+                    contentCache[fullPath] = validation.newContent!;
+                    repairedCount++;
+                    break;
+                }
+
+                history.Add((item.OldString ?? "", item.NewString ?? "", validation.score, validation.reason));
+                item.OldString = originalOld;
+                item.NewString = originalNew;
+            }
+        }
+
+        if (checkedCount > 0)
+        {
+            await EmitLog(emitSse, repairedCount > 0 ? "success" : "info",
+                repairedCount > 0
+                    ? $"Preflight repaired {repairedCount} edit anchor(s)"
+                    : $"Preflight checked {checkedCount} edit anchor(s)",
+                ct: ct);
+        }
+
+        return plan;
+    }
+
+    private static (bool ok, string reason, int score, string? newContent) ValidatePlannedEdit(string content, PlanStep item)
+    {
+        var oldString = item.OldString ?? "";
+        var newString = item.NewString ?? "";
+        if (string.IsNullOrWhiteSpace(oldString))
+            return (false, "No oldString provided", 0, null);
+        if (oldString.Trim() == newString.Trim())
+            return (false, "oldString and newString are identical", 3, null);
+
+        var (replaced, newContent, matchError, snippet) = TryReplace(content, oldString, newString);
+        if (!replaced)
+        {
+            var reason = matchError ?? "oldString not found in file";
+            if (!string.IsNullOrWhiteSpace(snippet))
+                reason += $". Nearby content: {snippet}";
+            return (false, reason, 1, null);
+        }
+
+        var (approved, verifyReason, score) = VerifyEdit(oldString, newString, content, newContent);
+        return approved
+            ? (true, verifyReason, score, newContent)
+            : (false, verifyReason, score, null);
     }
   
     private async Task ExecutePlan(string prompt, string projectRoot, bool emitSse, string discoveryContext, AgentPlan plan, CancellationToken ct, List<object> allResults)
@@ -2416,14 +2584,15 @@ Be concise — 2-4 sentences max.";
         }
 
         var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-        if (!content.Contains(item.OldString!, StringComparison.Ordinal))
+        var (replaced, newContent, matchError, snippet) = TryReplace(content, item.OldString!, item.NewString ?? "");
+        if (!replaced)
         {
-            await EmitLog(emitSse, "warn", $"oldString not found in {relPath}", ct: ct);
-            return (false, "oldString not found in file", 0);
+            var matchReason = matchError ?? "oldString not found in file";
+            if (!string.IsNullOrWhiteSpace(snippet))
+                matchReason += $". Nearby content: {snippet}";
+            await EmitLog(emitSse, "warn", $"{matchReason} ({relPath})", ct: ct);
+            return (false, matchReason, 1);
         }
-
-        // Compute edit in memory — don't write to disk yet
-        var newContent = content.Replace(item.OldString!, item.NewString ?? "");
 
         // Programmatic verification
         var (approved, reason, score) = VerifyEdit(item.OldString!, item.NewString ?? "", content, newContent);
@@ -2450,7 +2619,10 @@ Be concise — 2-4 sentences max.";
         if (oldContent == newContent)
             return (false, "Edit produced no change — oldString and newString are identical?", 3);
 
-        if (!string.IsNullOrEmpty(newString) && !newContent.Contains(newString, StringComparison.Ordinal))
+        var normalizedNewString = AgentUtilities.NormalizeLineEndings(newString);
+        var normalizedNewContent = AgentUtilities.NormalizeLineEndings(newContent);
+        if (!string.IsNullOrEmpty(normalizedNewString) &&
+            !normalizedNewContent.Contains(normalizedNewString, StringComparison.Ordinal))
             return (false, "newString not found after replacement", 4);
 
         return (true, "Programmatic check passed", 10);
@@ -2473,7 +2645,7 @@ Be concise — 2-4 sentences max.";
             if (attempt > 0)
             {
                 var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-                var corrected = await CorrectEdit(relPath, freshContent, history, attempt, emitSse, ct);
+                var corrected = await CorrectEdit("", relPath, freshContent, item.Change, history, attempt, emitSse, ct);
                 if (corrected == null) return false;
                 // Bail if CorrectEdit returned identical strings — LLM has nothing to fix
                 if ((corrected.Value.oldString ?? "").Trim() == (corrected.Value.newString ?? "").Trim())
@@ -2505,17 +2677,26 @@ Be concise — 2-4 sentences max.";
     /// previous failed attempts with their scores and reasons.
     /// </summary>
     private async Task<(string oldString, string newString)?> CorrectEdit(
-        string relPath, string fileContent,
+        string originalPrompt, string relPath, string fileContent, string changeDesc,
         List<(string oldString, string newString, int score, string reason)> history,
         int attempt, bool emitSse, CancellationToken ct)
     {
         var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(originalPrompt))
+        {
+            sb.AppendLine("## Original task");
+            sb.AppendLine(originalPrompt);
+            sb.AppendLine();
+        }
+        if (!string.IsNullOrWhiteSpace(changeDesc))
+        {
+            sb.AppendLine("## Planned change for this file");
+            sb.AppendLine(changeDesc);
+            sb.AppendLine();
+        }
         sb.AppendLine($"## File: {relPath}");
         sb.AppendLine();
-        sb.AppendLine("### Current file content:");
-        sb.AppendLine("```");
-        sb.AppendLine(fileContent.Length > 3000 ? fileContent[..3000] + "\n...(truncated)" : fileContent);
-        sb.AppendLine("```");
+        sb.AppendLine(BuildEditCorrectionContext(fileContent, changeDesc, history));
         sb.AppendLine();
         sb.AppendLine("### Previous failed attempts (oldest → newest):");
         for (var i = 0; i < history.Count; i++)
@@ -2530,6 +2711,8 @@ Be concise — 2-4 sentences max.";
         sb.AppendLine("Produce corrected oldString/newString that will pass verification.");
         sb.AppendLine("- oldString must be exact code that appears verbatim in the file");
         sb.AppendLine("- newString is the replacement (or anchor + insertion)");
+        sb.AppendLine("- For insertions, oldString should be a small existing anchor and newString should contain that same anchor plus inserted code");
+        sb.AppendLine("- Do not include line numbers or excerpt labels in oldString");
         sb.AppendLine("- Match indentation and spacing precisely");
         sb.AppendLine($"- Previous attempt scored {history.Last().score}/10 — improve on it");
 
@@ -2542,7 +2725,9 @@ Output ONLY valid JSON:
 Rules:
 - oldString MUST exist verbatim in the file content shown above
 - Both fields use escaped newlines (\\n) for multi-line values
-- Preserve exact indentation and spacing
+- Preserve exact indentation and spacing. Escape newlines as \\n, but do not change indentation or spacing in oldString or newString.
+- For insertions, use an existing anchor as oldString and include that same anchor in newString with the inserted code around it.
+- Never return identical oldString and newString.
 - Learn from previous attempts — if score was low on indentation, fix that";
 
 
@@ -2551,15 +2736,7 @@ Rules:
 
         try
         {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
-            {
-                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                if (m.Success) cleaned = m.Groups[1].Value.Trim();
-            }
-            using var doc = JsonDocument.Parse(cleaned);
-            var os = doc.RootElement.TryGetProperty("oldString", out var o) ? o.GetString() : null;
-            var ns = doc.RootElement.TryGetProperty("newString", out var n) ? n.GetString() : null;
+            var (os, ns, parseError) = AgentUtilities.ExtractEditFromCodeGen(raw);
             if (string.IsNullOrWhiteSpace(os)) return null;
             return (os, ns ?? "");
         }
@@ -2568,6 +2745,105 @@ Rules:
             await EmitLog(emitSse, "warn", $"Failed to parse correction for {relPath}", ct: ct);
             return null;
         }
+    }
+
+    private static string BuildEditCorrectionContext(
+        string fileContent, string changeDesc,
+        List<(string oldString, string newString, int score, string reason)> history)
+    {
+        var normalized = AgentUtilities.NormalizeLineEndings(fileContent);
+        var sb = new StringBuilder();
+
+        if (normalized.Length <= MaxFileContextChars)
+        {
+            sb.AppendLine("### Current file content");
+            sb.AppendLine("```");
+            sb.AppendLine(normalized);
+            sb.AppendLine("```");
+            return sb.ToString();
+        }
+
+        var tokens = ExtractCorrectionTokens(changeDesc, history);
+        var lines = normalized.Split('\n');
+        var hitLines = new SortedSet<int>();
+
+        if (tokens.Count > 0)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (tokens.Any(t => line.Contains(t, StringComparison.OrdinalIgnoreCase)))
+                    hitLines.Add(i);
+            }
+        }
+
+        var windows = new List<(int start, int end)>();
+        foreach (var hit in hitLines.Take(12))
+        {
+            var start = Math.Max(0, hit - 30);
+            var end = Math.Min(lines.Length - 1, hit + 30);
+            if (windows.Count > 0 && start <= windows[^1].end + 5)
+                windows[^1] = (windows[^1].start, Math.Max(windows[^1].end, end));
+            else
+                windows.Add((start, end));
+        }
+
+        if (windows.Count == 0)
+        {
+            var headLines = Math.Min(lines.Length, 180);
+            var tailStart = Math.Max(headLines, lines.Length - 180);
+            windows.Add((0, headLines - 1));
+            if (tailStart < lines.Length)
+                windows.Add((tailStart, lines.Length - 1));
+        }
+
+        sb.AppendLine("### Current file excerpts");
+        sb.AppendLine("Copy only code from inside the fenced blocks. Do not copy excerpt labels.");
+        var usedChars = 0;
+        foreach (var window in windows)
+        {
+            var excerpt = string.Join('\n', lines.Skip(window.start).Take(window.end - window.start + 1));
+            if (usedChars + excerpt.Length > MaxFileContextChars)
+                excerpt = excerpt[..Math.Max(0, MaxFileContextChars - usedChars)];
+            if (string.IsNullOrWhiteSpace(excerpt)) break;
+
+            sb.AppendLine($"Lines {window.start + 1}-{window.end + 1}:");
+            sb.AppendLine("```");
+            sb.AppendLine(excerpt);
+            sb.AppendLine("```");
+            usedChars += excerpt.Length;
+            if (usedChars >= MaxFileContextChars) break;
+        }
+
+        return sb.ToString();
+    }
+
+    private static HashSet<string> ExtractCorrectionTokens(
+        string changeDesc,
+        List<(string oldString, string newString, int score, string reason)> history)
+    {
+        var common = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "string", "public", "private", "protected", "internal", "static", "readonly",
+            "return", "await", "async", "using", "namespace", "class", "void", "var",
+            "new", "null", "true", "false", "this", "base", "file", "change", "oldString",
+            "newString", "reason", "score"
+        };
+
+        var text = new StringBuilder(changeDesc ?? "");
+        foreach (var h in history)
+        {
+            text.AppendLine(h.oldString);
+            text.AppendLine(h.newString);
+            text.AppendLine(h.reason);
+        }
+
+        return Regex.Matches(text.ToString(), @"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
+            .Select(m => m.Value)
+            .Where(t => !common.Contains(t))
+            .OrderByDescending(t => t.Length)
+            .Take(40)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
