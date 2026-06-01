@@ -7,10 +7,10 @@ using System.Text.RegularExpressions;
 [Route("api/terminal")]
 public class TerminalController : ControllerBase
 {
-    private readonly ITerminalService _terminal;
+    private readonly TerminalService _terminal;
     private const int MaxOutputChars = 24_000;
 
-    public TerminalController(ITerminalService terminal) => _terminal = terminal;
+    public TerminalController(TerminalService terminal) => _terminal = terminal;
 
     [HttpPost("start")]
     public IActionResult Start()

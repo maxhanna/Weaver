@@ -6,7 +6,7 @@ using System.Collections.Concurrent;
 
 namespace MaestroBackend.Services;
 
-public class TerminalService : ITerminalService, IDisposable
+public class TerminalService : IDisposable
 {
     private Process? _process;
     private readonly StringBuilder _buffer = new();
@@ -168,16 +168,6 @@ public class TerminalService : ITerminalService, IDisposable
         var trimmed = command.Trim();
         trimmed = Regex.Replace(trimmed, @"^(?:cmd(?:\.exe)?\s+/c|powershell(?:\.exe)?\s+-command)\s+", "",
             RegexOptions.IgnoreCase).Trim();
-        if (trimmed.Length >= 2 && (trimmed[0] == '"' || trimmed[0] == '\''))
-        {
-            var quote = trimmed[0];
-            var endQuote = trimmed.IndexOf(quote, 1);
-            if (endQuote > 1)
-            {
-                var quotedPath = trimmed.Substring(1, endQuote - 1);
-                return Path.GetFileNameWithoutExtension(quotedPath).ToLowerInvariant();
-            }
-        }
         var match = Regex.Match(trimmed, @"^[""']?([A-Za-z0-9_.:\-\\/]+)");
         if (!match.Success) return trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
         var root = match.Groups[1].Value.Trim('"', '\'');

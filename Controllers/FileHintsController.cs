@@ -1,5 +1,4 @@
 ﻿using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using System.IO;
 
@@ -9,12 +8,7 @@ namespace MaestroBackend.Controllers
     [Route("api/[controller]")]
     public class FileHintsController : ControllerBase
     {
-        private readonly string _filePath;
-
-        public FileHintsController(IWebHostEnvironment env)
-        {
-            _filePath = Path.Combine(env.ContentRootPath, "filehints.json");
-        }
+        private readonly string _filePath = "filehints.json";
 
         [HttpGet]
         public IActionResult GetFileHints()

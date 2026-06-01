@@ -202,7 +202,7 @@ public static class AgentUtilities
         }
 
         // ── Ping / connectivity ───────────────────────────────────────────────
-        if (Regex.IsMatch(lower, @"\b(ping\s+\S+|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+        if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
         {
             return new AgentPlan
             {
@@ -230,7 +230,7 @@ public static class AgentUtilities
         }
 
         return null; // needs full pipeline
-    }
+    } 
 
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||

@@ -14,20 +14,21 @@ public class AgentController : ControllerBase
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
-    private readonly ITerminalService _terminal;
+    private readonly TerminalService _terminal;
     private readonly FileHintsManager _fileHints;
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
-    private readonly IAgentPendingStore _pendingStore;
     private const int MaxFileContextChars = 24_000;
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
+    private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
+    private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
-        IWebHostEnvironment env, ITerminalService terminal, FileHintsManager fileHints,
-        ConfigFileService configFile, EmailService emailService, IAgentPendingStore pendingStore)
+        IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
+        ConfigFileService configFile, EmailService emailService)
     {
         _clientFactory = cf;
         _config = config;
@@ -36,7 +37,6 @@ public class AgentController : ControllerBase
         _fileHints = fileHints;
         _configFile = configFile;
         _emailService = emailService;
-        _pendingStore = pendingStore;
     }
  
     private string ResolveWorkspaceRoot()
@@ -1412,7 +1412,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             Fields = questionFields,
                             CreatedUtc = DateTime.UtcNow
                         };
-                        _pendingStore.SetQuestion(pending);
+                        _pendingQuestions[pendingId] = pending;
 
                         // Send SSE question event
                         await SendSse(Response, "question", new
@@ -1469,7 +1469,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         }
                         finally
                         {
-                            _pendingStore.TryRemoveQuestion(pendingId, out _);
+                            _pendingQuestions.TryRemove(pendingId, out _);
                         }
 
                         if (qError != null)
@@ -1945,7 +1945,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     CreatedUtc = DateTime.UtcNow,
                     Answer = new TaskCompletionSource<List<string>>()
                 };
-                _pendingStore.SetContextReview(review);
+                _pendingContextReviews[reviewId] = review;
 
                 await SendSse(Response, "context-review", new
                 {
@@ -1999,7 +1999,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 catch (OperationCanceledException) { }
                 finally
                 {
-                    _pendingStore.TryRemoveContextReview(reviewId, out _);
+                    _pendingContextReviews.TryRemove(reviewId, out _);
                 }
             }
         }
@@ -2988,7 +2988,7 @@ Rules:
     [HttpGet("questions/pending")]
     public IActionResult GetPendingQuestions()
     {
-        var list = _pendingStore.GetQuestions()
+        var list = _pendingQuestions.Values
             .OrderBy(q => q.CreatedUtc)
             .Select(q => new
             {
@@ -3004,7 +3004,7 @@ Rules:
     [HttpPost("questions/answer")]
     public async Task<IActionResult> AnswerQuestion([FromBody] QuestionAnswerRequest req)
     {
-        if (!_pendingStore.TryRemoveQuestion(req.Id, out var pending))
+        if (!_pendingQuestions.TryRemove(req.Id, out var pending))
             return NotFound("Question not found or already answered");
 
         pending.Answer.TrySetResult(req.Answers);
@@ -3014,7 +3014,7 @@ Rules:
     [HttpPost("context-review/confirm")]
     public IActionResult ConfirmContextReview([FromBody] ContextReviewAnswer req)
     {
-        if (!_pendingStore.TryRemoveContextReview(req.Id, out var pending))
+        if (!_pendingContextReviews.TryRemove(req.Id, out var pending))
             return NotFound("Context review not found or already answered");
         pending.Answer.TrySetResult(req.Files ?? pending.Files);
         return Ok(new { status = "confirmed" });

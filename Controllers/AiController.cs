@@ -81,12 +81,9 @@ public class AiController : ControllerBase
         var target = baseUrl.TrimEnd('/') + "/" + (path ?? string.Empty).TrimStart('/');
         var client = _clientFactory.CreateClient("llama");
         var body = await new StreamReader(Request.Body).ReadToEndAsync();
-        var mediaType = string.IsNullOrWhiteSpace(Request.ContentType)
-            ? "application/json"
-            : Request.ContentType.Split(';', 2)[0].Trim();
         try
         {
-            var resp = await client.PostAsync(target, new StringContent(body, Encoding.UTF8, mediaType));
+            var resp = await client.PostAsync(target, new StringContent(body, Encoding.UTF8, Request.ContentType ?? "application/json"));
             var text = await resp.Content.ReadAsStringAsync();
             return Content(text, resp.Content.Headers.ContentType?.ToString() ?? "application/json");
         }
