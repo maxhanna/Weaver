@@ -268,7 +268,9 @@ public static class AgentUtilities
             }
         }
 
+#if DEBUG
         Console.Error.WriteLine($"[ParsePlan] All repair strategies failed. Raw snippet: {cleaned[..Math.Min(200, cleaned.Length)]}");
+#endif
         return null;
     }
 

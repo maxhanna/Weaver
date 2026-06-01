@@ -22,14 +22,14 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 The repository baseline now includes:
 
-- `tests\MaestroBackend.UnitTests` for pure logic and parsing behavior
-- `tests\MaestroBackend.ApiIntegrationTests` for HTTP contract and side-effect coverage
+- `tests/MaestroBackend.UnitTests` for pure logic and parsing behavior
+- `tests/MaestroBackend.ApiIntegrationTests` for HTTP contract and side-effect coverage
 
 Run them from the `Maestro` folder:
 
 ```bash
-dotnet test tests\MaestroBackend.UnitTests\MaestroBackend.UnitTests.csproj
-dotnet test tests\MaestroBackend.ApiIntegrationTests\MaestroBackend.ApiIntegrationTests.csproj
+dotnet test tests/MaestroBackend.UnitTests/MaestroBackend.UnitTests.csproj
+dotnet test tests/MaestroBackend.ApiIntegrationTests/MaestroBackend.ApiIntegrationTests.csproj
 ```
 
 ## Configuration

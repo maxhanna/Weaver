@@ -23,6 +23,9 @@ public sealed class AgentPendingStore : IAgentPendingStore
 
     public void SetQuestion(PendingQuestion question)
     {
+        if (string.IsNullOrWhiteSpace(question.Id))
+            throw new ArgumentException("Question id cannot be null, empty, or whitespace.", nameof(question));
+
         _pendingQuestions[question.Id] = question;
     }
 
@@ -33,6 +36,9 @@ public sealed class AgentPendingStore : IAgentPendingStore
 
     public void SetContextReview(PendingContextReview review)
     {
+        if (string.IsNullOrWhiteSpace(review.Id))
+            throw new ArgumentException("Review id cannot be null, empty, or whitespace.", nameof(review));
+
         _pendingContextReviews[review.Id] = review;
     }
 
