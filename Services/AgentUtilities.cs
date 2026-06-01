@@ -202,7 +202,7 @@ public static class AgentUtilities
         }
 
         // ── Ping / connectivity ───────────────────────────────────────────────
-        if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+        if (Regex.IsMatch(lower, @"\b(ping\s+\S+|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
         {
             return new AgentPlan
             {
@@ -230,7 +230,49 @@ public static class AgentUtilities
         }
 
         return null; // needs full pipeline
-    } 
+    }
+
+    public static AgentPlan? ParsePlan(string jsonString)
+    {
+        if (string.IsNullOrWhiteSpace(jsonString)) return null;
+
+        var cleaned = jsonString.Trim();
+        if (cleaned.StartsWith("```"))
+        {
+            var fenceMatch = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            cleaned = fenceMatch.Success ? fenceMatch.Groups[1].Value.Trim() : cleaned.TrimStart('`');
+        }
+
+        var objStart = cleaned.IndexOf('{');
+        var objEnd = cleaned.LastIndexOf('}');
+        if (objStart >= 0 && objEnd > objStart)
+            cleaned = cleaned.Substring(objStart, objEnd - objStart + 1);
+
+        var opts = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+
+        foreach (var candidate in GeneratePlanJsonCandidates(cleaned))
+        {
+            try
+            {
+                var result = JsonSerializer.Deserialize<AgentPlan>(candidate, opts);
+                if (result?.Plan != null) return result;
+            }
+            catch
+            {
+                // Try the next repaired candidate.
+            }
+        }
+
+#if DEBUG
+        Console.Error.WriteLine($"[ParsePlan] All repair strategies failed. Raw snippet: {cleaned[..Math.Min(200, cleaned.Length)]}");
+#endif
+        return null;
+    }
 
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||

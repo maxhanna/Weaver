@@ -2,9 +2,11 @@
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddSingleton<TerminalService>();
+builder.Services.AddSingleton<ITerminalService, TerminalService>();
 builder.Services.AddSingleton<ConfigFileService>();
 builder.Services.AddSingleton<EmailService>();
+builder.Services.AddSingleton<IAgentPendingStore, AgentPendingStore>();
+builder.Services.AddSingleton<IBughostedSessionStore, BughostedSessionStore>();
 
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
@@ -30,3 +32,5 @@ app.MapControllers();
 app.MapFallbackToFile("index.html");
 
 app.Run();
+
+public partial class Program { }
