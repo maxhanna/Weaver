@@ -10,19 +10,14 @@ public class BughostedController : ControllerBase
     private readonly ConfigFileService _configFile;
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
-    private readonly IBughostedSessionStore _sessions;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
+    private static readonly Dictionary<string, BughostedSession> _sessions = new();
 
-    public BughostedController(
-        ConfigFileService configFile,
-        IHttpClientFactory clientFactory,
-        IConfiguration config,
-        IBughostedSessionStore sessions)
+    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config)
     {
         _configFile = configFile;
         _clientFactory = clientFactory;
         _config = config;
-        _sessions = sessions;
     }
 
     [HttpPost("login")]
@@ -51,7 +46,7 @@ public class BughostedController : ControllerBase
 
             session.ClientId = Guid.NewGuid().ToString("N");
             session.Url = url;
-            _sessions.Set(session);
+            _sessions[session.ClientId] = session;
 
             return Ok(new { clientId = session.ClientId, token = session.Token, user = session.User });
         }
@@ -64,7 +59,7 @@ public class BughostedController : ControllerBase
     [HttpPost("heartbeat")]
     public async Task<IActionResult> Heartbeat([FromBody] BughostedHeartbeatRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGet(req.ClientId, out var session))
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGetValue(req.ClientId, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         try
@@ -95,7 +90,7 @@ public class BughostedController : ControllerBase
     [HttpPost("settings")]
     public async Task<IActionResult> PostSettings([FromBody] BughostedSettingsRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGet(req.ClientId, out var session))
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGetValue(req.ClientId, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         try
@@ -125,7 +120,7 @@ public class BughostedController : ControllerBase
     [HttpGet("settings")]
     public async Task<IActionResult> GetSettings([FromQuery] string clientId)
     {
-        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGet(clientId, out var session))
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         try
@@ -147,7 +142,7 @@ public class BughostedController : ControllerBase
     [HttpGet("commands")]
     public async Task<IActionResult> GetCommands([FromQuery] string clientId)
     {
-        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGet(clientId, out var session))
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         try
@@ -169,7 +164,7 @@ public class BughostedController : ControllerBase
     [HttpPost("commands/ack")]
     public async Task<IActionResult> AckCommand([FromBody] BughostedAckRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGet(req.ClientId, out var session))
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGetValue(req.ClientId, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         try
