@@ -151,7 +151,8 @@ public class AgentController : ControllerBase
   - Preserve exact indentation in both oldString and newString. The end result must fit seamlessly into the existing code with no indentation changes needed beyond what you provide.
   - Escape newlines as \\n, but do not change indentation or spacing in oldString or newString.
   - Double-check spelling and whitespace in oldString. It has to match exactly whats in the file.
-  - oldString must be 1-5 lines of existing code copied verbatim from the file.
+  - oldString must be MAXIMUM 50 characters of existing code copied verbatim from the file.
+  - newString must be MAXIMUM 50 characters of the replacement code, exactly as it should appear in the file after the edit. We need to create many small edits rather then 1 large edit.
   - oldString must never be blank for an existing file edit. For insertions, use an existing anchor as oldString and include that same anchor plus inserted code in newString.
   - For brand-new files, use _create_file instead of a relative/path.ext edit.
   - oldString must never contain new code.
