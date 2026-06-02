@@ -61,6 +61,19 @@ public class ConfigController : ControllerBase
             var incoming = JsonSerializer.Deserialize<FrontendConfig>(body.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
             // Preserve existing credentials if frontend omits them (password fields)
             var existing = await _configFile.LoadConfigAsync();
+
+            // Preserve account passwords when frontend omits them
+            if (incoming.emailAccounts != null && existing.emailAccounts != null)
+            {
+                for (var i = 0; i < incoming.emailAccounts.Count; i++)
+                {
+                    var inc = incoming.emailAccounts[i];
+                    if (string.IsNullOrWhiteSpace(inc.password) && i < existing.emailAccounts.Count)
+                        inc.password = existing.emailAccounts[i].password;
+                }
+            }
+
+            // Legacy single-field fallback preservation
             if (string.IsNullOrWhiteSpace(incoming.emailPassword) && !string.IsNullOrWhiteSpace(existing.emailPassword))
                 incoming.emailPassword = existing.emailPassword;
             if (string.IsNullOrWhiteSpace(incoming.emailUsername) && !string.IsNullOrWhiteSpace(existing.emailUsername))

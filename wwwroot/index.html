@@ -130,6 +130,27 @@
             </div>
           </div>
 
+          <!-- Latest log entry (prettified) -->
+          <div class="agent-latest-log" ng-if="vm.agentActivityLog.length">
+            <div class="latest-log-header">
+              <span class="latest-log-badge" ng-class="vm.agentActivityLog[vm.agentActivityLog.length-1].level">{{vm.agentActivityLog[vm.agentActivityLog.length-1].level}}</span>
+              <span class="latest-log-ts">{{vm.agentActivityLog[vm.agentActivityLog.length-1].ts}}</span>
+              <span class="latest-log-label">latest</span>
+            </div>
+            <div class="latest-log-msg" ng-class="vm.agentActivityLog[vm.agentActivityLog.length-1].level">
+              {{vm.agentActivityLog[vm.agentActivityLog.length-1].message}}
+            </div>
+            <div class="latest-log-detail" ng-if="vm.agentActivityLog[vm.agentActivityLog.length-1].detail">
+              <pre>{{vm.formatLogDetail(vm.agentActivityLog[vm.agentActivityLog.length-1].detail)}}</pre>
+            </div>
+          </div>
+
+          <!-- Steering input (always visible) -->
+          <div class="steering-section">
+            <input type="text" class="steering-input" ng-model="vm.steeringContext" placeholder="Steer the agent (optional)..." />
+            <button class="steering-clear-btn" ng-click="vm.steeringContext = ''" title="Clear steering">&times;</button>
+          </div>
+
           <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
             <details>
               <summary>
@@ -288,15 +309,6 @@
               </div>
               <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
                 {{vm.agentResult.summary}}</div>
-              <div class="files-edited-panel" ng-if="vm.agentResult.filesEdited && vm.agentResult.filesEdited.length">
-                <strong>Files changed ({{vm.agentResult.filesEdited.length}})</strong>
-                <div class="file-edit-chip" ng-repeat="f in vm.agentResult.filesEdited">{{f.path}} <span
-                    class="chip-meta">{{f.editAction}}</span></div>
-              </div>
-              <details ng-if="vm.agentResult.thinking">
-                <summary>🧠 Reasoning</summary>
-                <pre class="streaming-text">{{vm.agentResult.thinking}}</pre>
-              </details>
             </div>
           </div>
         </div>
@@ -516,19 +528,47 @@
         <details>
           <summary class="settings-header">Email (IMAP)</summary>
           <div class="form-row"
-            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;">
-            <div style="display:flex;gap:8px;margin-bottom:6px;">
-              <input ng-model="vm.emailImapServer" placeholder="imap.example.com" style="flex:1;" />
-              <input ng-model="vm.emailImapPort" type="number" placeholder="993" style="width:80px;" />
+            style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;gap:12px;">
+            <div ng-repeat="acct in vm.emailAccounts track by $index" style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;background:rgba(255,255,255,0.03);">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                <span style="font-size:13px;font-weight:600;color:var(--text);">Account {{$index + 1}}</span>
+                <button ng-click="vm.removeEmailAccount($index)" style="background:none;border:none;color:#ff5252;cursor:pointer;font-size:13px;">✕ Remove</button>
+              </div>
+              <div style="display:flex;gap:8px;margin-bottom:6px;">
+                <input ng-model="acct.label" placeholder="Label (e.g., Gmail, Work)" style="flex:1;" />
+              </div>
+              <div style="display:flex;gap:8px;margin-bottom:6px;">
+                <input ng-model="acct.imapServer" placeholder="imap.example.com" style="flex:1;" ng-change="vm.checkEmailServer($index)" />
+                <input ng-model="acct.imapPort" type="number" placeholder="993" style="width:80px;" />
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                <input ng-model="acct.username" placeholder="Email username" style="flex:1;" />
+                <input ng-model="acct.password" type="password" placeholder="Password" style="flex:1;" />
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;">
+                <label style="font-size:12px;">
+                  <input type="checkbox" ng-model="acct.useSsl" /> Use SSL
+                </label>
+                <button ng-click="vm.testEmailConnection($index)" ng-disabled="acct.testing"
+                  style="padding:4px 12px;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--text);"> Test Connection</button>
+                <span ng-if="acct.testResult" style="font-size:12px;" ng-class="acct.testResult.success ? 'success-text' : 'error-text'">{{acct.testResult.message}}</span>
+              </div>
+              <div ng-if="acct.showAppPasswordInstructions" class="app-password-instructions" style="margin-top:8px;">
+                <span class="settings-help">If you have 2FA enabled, you'll need an app password instead of your regular password.</span>
+                <div class="app-password-steps">
+                  <p ng-if="acct.showAppPasswordInstructions === 'google'">For <strong>Google</strong> accounts:</p>
+                  <p ng-if="acct.showAppPasswordInstructions === 'microsoft'">For <strong>Outlook/Hotmail</strong> accounts:</p>
+                  <ol>
+                    <li ng-if="acct.showAppPasswordInstructions === 'google'">Go to <a href="https://myaccount.google.com/apppasswords" target="_blank">Google App Passwords</a></li>
+                    <li ng-if="acct.showAppPasswordInstructions === 'microsoft'">Go to <a href="https://account.live.com/password/apppasswords" target="_blank">Microsoft App Passwords</a></li>
+                    <li>Generate a new app password</li>
+                    <li>Copy and paste it into the Password field above</li>
+                  </ol>
+                </div>
+              </div>
             </div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-              <input ng-model="vm.emailUsername" placeholder="Email username" style="flex:1;" />
-              <input ng-model="vm.emailPassword" type="password" placeholder="Password" style="flex:1;" />
-            </div>
-            <label style="font-size:12px;">
-              <input type="checkbox" ng-model="vm.emailUseSsl" /> Use SSL
-            </label>
-            <span class="settings-help">Configure IMAP credentials so the agent can read your email.</span>
+            <button ng-click="vm.addEmailAccount()" style="padding:6px 16px;font-size:13px;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;cursor:pointer;color:var(--accent);width:100%;">+ Add Email Account</button>
+            <span class="settings-help">Configure one or more IMAP accounts so the agent can read your email.</span>
           </div>
         </details>
         <details>

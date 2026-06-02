@@ -80,6 +80,7 @@
     vm.activeStepIndex = null;
     vm.lastPhaseLogged = '';
     vm.agentResult = null;
+    vm.steeringContext = '';
     vm.clarificationReply = '';
     vm.abortController = null;
     vm.lastStreamingSteps = [];
@@ -177,11 +178,7 @@
     // Settings
     vm.settingsDefaultProject = '';
     vm.fileHintsData = [];
-    vm.emailImapServer = '';
-    vm.emailImapPort = 993;
-    vm.emailUseSsl = true;
-    vm.emailUsername = '';
-    vm.emailPassword = '';
+    vm.emailAccounts = [];
     vm.bughostedUsername = '';
     vm.bughostedPassword = '';
     vm.bughostedHeartbeatEnabled = false;
@@ -271,11 +268,16 @@
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';
-        cfg.emailImapServer = vm.emailImapServer || '';
-        cfg.emailImapPort = vm.emailImapPort || 993;
-        cfg.emailUseSsl = vm.emailUseSsl !== false;
-        cfg.emailUsername = vm.emailUsername || '';
-        cfg.emailPassword = vm.emailPassword || '';
+        cfg.emailAccounts = vm.emailAccounts.map(function(a) {
+          return {
+            imapServer: a.imapServer || '',
+            imapPort: a.imapPort || 993,
+            useSsl: a.useSsl !== false,
+            username: a.username || '',
+            password: a.password || '',
+            label: a.label || ''
+          };
+        });
         cfg.bughostedUsername = vm.bughostedUsername || '';
         cfg.bughostedPassword = vm.bughostedPassword || '';
         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
@@ -291,6 +293,65 @@
         vm.closeSettingsPanel();
       }, function (err) {
         $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
+      });
+    };
+
+    vm.addEmailAccount = function() {
+      vm.emailAccounts.push({
+        imapServer: '',
+        imapPort: 993,
+        useSsl: true,
+        username: '',
+        password: '',
+        label: '',
+        showAppPasswordInstructions: false,
+        testing: false,
+        testResult: null
+      });
+    };
+
+    vm.removeEmailAccount = function(index) {
+      vm.emailAccounts.splice(index, 1);
+    };
+
+    vm.checkEmailServer = function(index) {
+      var acct = vm.emailAccounts[index];
+      if (!acct) return;
+      if (acct.imapServer) {
+        var lower = acct.imapServer.toLowerCase();
+        if (lower.includes('gmail.com') || lower.includes('googlemail.com')) {
+          acct.showAppPasswordInstructions = 'google';
+        } else if (lower.includes('outlook.com') || lower.includes('hotmail.com') || lower.includes('live.com') || lower.includes('msn.com')) {
+          acct.showAppPasswordInstructions = 'microsoft';
+        } else {
+          acct.showAppPasswordInstructions = false;
+        }
+      } else {
+        acct.showAppPasswordInstructions = false;
+      }
+    };
+
+    vm.testEmailConnection = function(index) {
+      var acct = vm.emailAccounts[index];
+      if (!acct) return;
+      if (!acct.imapServer || !acct.username || !acct.password) {
+        acct.testResult = { success: false, message: 'Please fill in all fields' };
+        return;
+      }
+      acct.testing = true;
+      acct.testResult = null;
+      $http.post('/api/email/test', {
+        imapServer: acct.imapServer,
+        imapPort: acct.imapPort,
+        useSsl: acct.useSsl,
+        username: acct.username,
+        password: acct.password
+      }).then(function(response) {
+        acct.testing = false;
+        acct.testResult = response.data;
+      }).catch(function(error) {
+        acct.testing = false;
+        acct.testResult = { success: false, message: 'Connection test failed: ' + (error.data || error.statusText || 'Unknown error') };
       });
     };
 
@@ -344,11 +405,37 @@
         vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
         vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
         vm.fileHintsData = [];
-        vm.emailImapServer = cfg.emailImapServer || '';
-        vm.emailImapPort = cfg.emailImapPort || 993;
-        vm.emailUseSsl = cfg.emailUseSsl !== false;
-        vm.emailUsername = cfg.emailUsername || '';
-        vm.emailPassword = cfg.emailPassword || '';
+        vm.emailAccounts = (cfg.emailAccounts || []).map(function(a) {
+          return {
+            imapServer: a.imapServer || '',
+            imapPort: a.imapPort || 993,
+            useSsl: a.useSsl !== false,
+            username: a.username || '',
+            password: a.password || '',
+            label: a.label || '',
+            showAppPasswordInstructions: false,
+            testing: false,
+            testResult: null
+          };
+        });
+        // If no accounts but legacy fields exist, migrate
+        if (vm.emailAccounts.length === 0 && (cfg.emailUsername || cfg.emailImapServer)) {
+          var label = '';
+          if (cfg.emailUsername && cfg.emailUsername.indexOf('@') > 0) {
+            label = cfg.emailUsername.split('@')[0];
+          }
+          vm.emailAccounts.push({
+            imapServer: cfg.emailImapServer || '',
+            imapPort: cfg.emailImapPort || 993,
+            useSsl: cfg.emailUseSsl !== false,
+            username: cfg.emailUsername || '',
+            password: cfg.emailPassword || '',
+            label: label,
+            showAppPasswordInstructions: false,
+            testing: false,
+            testResult: null
+          });
+        }
         vm.bughostedUsername = cfg.bughostedUsername || '';
         vm.bughostedPassword = cfg.bughostedPassword || '';
         vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
@@ -365,6 +452,12 @@
       console.log('Config loaded. Selected project:', vm.selectedProject, project);
       vm.countArchivedCards();
     };
+
+
+    // Ensure at least one email account slot exists in the UI
+    if (vm.emailAccounts.length === 0) {
+      vm.addEmailAccount();
+    }
     vm.loadConfig();
 
     vm.getSelectedProjectDescription = function () {
@@ -412,11 +505,16 @@ vm.changeProject = function () {
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';
-        cfg.emailImapServer = vm.emailImapServer || '';
-        cfg.emailImapPort = vm.emailImapPort || 993;
-        cfg.emailUseSsl = vm.emailUseSsl !== false;
-        cfg.emailUsername = vm.emailUsername || '';
-        cfg.emailPassword = vm.emailPassword || '';
+        cfg.emailAccounts = vm.emailAccounts.map(function(a) {
+          return {
+            imapServer: a.imapServer || '',
+            imapPort: a.imapPort || 993,
+            useSsl: a.useSsl !== false,
+            username: a.username || '',
+            password: a.password || '',
+            label: a.label || ''
+          };
+        });
         cfg.bughostedUsername = vm.bughostedUsername || '';
         cfg.bughostedPassword = vm.bughostedPassword || '';
         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
@@ -525,11 +623,7 @@ vm.changeProject = function () {
             terminalApprovalMode: vm.terminalApprovalMode,
             approvedTerminalRoots: vm.approvedTerminalRoots,
             disallowedTerminalRoots: vm.disallowedTerminalRoots,
-            emailImapServer: vm.emailImapServer,
-            emailImapPort: vm.emailImapPort,
-            emailUseSsl: vm.emailUseSsl,
-            emailUsername: vm.emailUsername,
-            emailPassword: vm.emailPassword,
+            emailAccounts: vm.emailAccounts,
             defaultProject: vm.defaultProject || vm.selectedProject,
             showTerminal: vm.showTerminal,
             showAI: vm.showAI,
@@ -679,11 +773,7 @@ vm.changeProject = function () {
           vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
           vm.disallowedTerminalRootsText = (cmd.params.disallowedTerminalRoots || []).join(', ');
         }
-        if (cmd.params.emailImapServer !== undefined) vm.emailImapServer = cmd.params.emailImapServer;
-        if (cmd.params.emailImapPort !== undefined) vm.emailImapPort = cmd.params.emailImapPort;
-        if (cmd.params.emailUseSsl !== undefined) vm.emailUseSsl = cmd.params.emailUseSsl;
-        if (cmd.params.emailUsername !== undefined) vm.emailUsername = cmd.params.emailUsername;
-        if (cmd.params.emailPassword !== undefined) vm.emailPassword = cmd.params.emailPassword;
+        if (cmd.params.emailAccounts !== undefined) vm.emailAccounts = cmd.params.emailAccounts;
         if (cmd.params.defaultProject !== undefined) vm.settingsDefaultProject = cmd.params.defaultProject;
         if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
         if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
@@ -1175,7 +1265,8 @@ vm.changeProject = function () {
         project: proj,
         files: files,
         maxIterations: 5,
-        maxStepsPerBatch: 8
+        maxStepsPerBatch: 8,
+        steeringContext: vm.steeringContext || ''
       };
 
       // Move to Doing
@@ -1356,6 +1447,7 @@ vm.changeProject = function () {
                   case 'done':
                     vm.streamingActive = false;
                     resumeTerminalPolling();
+                    vm.steeringContext = '';
                     var editsApplied = parsed && parsed.editsApplied;
                     var incomplete = parsed && parsed.incomplete;
                     if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
@@ -1566,6 +1658,13 @@ vm.changeProject = function () {
         if (newOutput !== vm.terminalOutput) {
           vm.terminalOutput = newOutput;
           if (!$scope.$$phase) $scope.$digest();
+          // Scroll to bottom of terminal output
+          $timeout(function () {
+            var terminalOutput = document.querySelector('.terminalOutput');
+            if (terminalOutput) {
+              terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            }
+          }, 0, false);
         }
       });
     };

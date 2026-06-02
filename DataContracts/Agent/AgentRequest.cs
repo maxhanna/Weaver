@@ -6,4 +6,5 @@ public class AgentRequest
     public List<string> Files { get; set; } = new();
     public int? MaxIterations { get; set; }
     public int? MaxStepsPerBatch { get; set; }
+    public string? SteeringContext { get; set; }
 }

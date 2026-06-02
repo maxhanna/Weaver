@@ -113,6 +113,45 @@ button.brand-button {
 }
 
 button.brand-enhanced {
+
+.app-password-instructions {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.app-password-instructions p {
+  margin: 8px 0 4px 0;
+  font-size: 12px;
+}
+
+.app-password-instructions ol {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+  font-size: 11px;
+}
+
+.app-password-instructions li {
+  margin-bottom: 4px;
+}
+
+.app-password-steps {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.success-text {
+  color: #4caf50;
+}
+
+.error-text {
+  color: #ff5252;
+}
+
 	background: var(--brand-gradient);
 	border: none;
 	color: #012;
@@ -1788,6 +1827,149 @@ h3 .small.ghost:hover {
 	font-family: ui-monospace, monospace;
 	font-size: 11px;
 	color: var(--accent);
+}
+
+/* ── Latest log entry (prettified) ── */
+.agent-latest-log {
+	margin-top: 8px;
+	padding: 10px;
+	border-radius: 8px;
+	background: linear-gradient(135deg, #0a1a3a, #0d1f42);
+	border: 1px solid rgba(6, 182, 212, 0.15);
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+.latest-log-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+
+.latest-log-badge {
+	font-size: 9px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: rgba(6, 182, 212, 0.15);
+	color: var(--accent);
+}
+
+.latest-log-badge.warn {
+	background: rgba(251, 191, 36, 0.15);
+	color: #fbbf24;
+}
+
+.latest-log-badge.error {
+	background: rgba(248, 113, 113, 0.15);
+	color: var(--error);
+}
+
+.latest-log-badge.success {
+	background: rgba(74, 222, 128, 0.15);
+	color: #4ade80;
+}
+
+.latest-log-ts {
+	font-size: 10px;
+	color: var(--muted);
+	opacity: 0.6;
+}
+
+.latest-log-label {
+	font-size: 9px;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: var(--muted);
+	opacity: 0.4;
+	margin-left: auto;
+}
+
+.latest-log-msg {
+	font-size: 13px;
+	font-weight: 500;
+	color: #e2e8f0;
+	line-height: 1.4;
+	word-break: break-word;
+}
+
+.latest-log-msg.warn {
+	color: #fbbf24;
+}
+
+.latest-log-msg.error {
+	color: var(--error);
+}
+
+.latest-log-msg.success {
+	color: #4ade80;
+}
+
+.latest-log-detail {
+	margin-top: 8px;
+}
+
+.latest-log-detail pre {
+	font-size: 11px;
+	font-family: ui-monospace, monospace;
+	background: rgba(0, 0, 0, 0.3);
+	border-radius: 6px;
+	padding: 8px;
+	max-height: 120px;
+	overflow: auto;
+	white-space: pre-wrap;
+	color: #94a3b8;
+	border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* ── Steering input ── */
+.steering-section {
+	margin-top: 8px;
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+.steering-input {
+	flex: 1;
+	font-size: 12px;
+	font-family: ui-monospace, monospace;
+	padding: 6px 10px;
+	border-radius: 6px;
+	border: 1px solid rgba(6, 182, 212, 0.2);
+	background: rgba(0, 0, 0, 0.25);
+	color: #e2e8f0;
+	outline: none;
+	transition: border-color 0.15s ease;
+}
+
+.steering-input:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 8px rgba(6, 182, 212, 0.15);
+}
+
+.steering-input::placeholder {
+	color: rgba(148, 163, 184, 0.4);
+}
+
+.steering-clear-btn {
+	background: none;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 14px;
+	line-height: 1;
+	padding: 4px 8px;
+	border-radius: 4px;
+	transition: all 0.15s ease;
+}
+
+.steering-clear-btn:hover {
+	background: rgba(248, 113, 113, 0.15);
+	border-color: var(--error);
+	color: var(--error);
 }
 
 .agent-activity-log {

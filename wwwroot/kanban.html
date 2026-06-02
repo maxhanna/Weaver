@@ -276,7 +276,6 @@
               ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
             <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
-            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}" ng-disabled="vm.activeCardId === card.id">✕
               Delete</button>
           </div>
@@ -414,9 +413,7 @@
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
-            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
-              Delete</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕ Delete</button>
           </div>
         </div>
       </div>

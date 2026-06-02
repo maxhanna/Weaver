@@ -10,6 +10,16 @@ public class ProjectDto
     public string Description { get; set; } = "";
 }
 
+public class EmailAccountConfig
+{
+    public string? imapServer { get; set; }
+    public int imapPort { get; set; } = 993;
+    public bool useSsl { get; set; } = true;
+    public string? username { get; set; }
+    public string? password { get; set; }
+    public string? label { get; set; }
+}
+
 public class FrontendConfig
 {
     public List<ProjectDto> projects { get; set; } = new();
@@ -22,6 +32,9 @@ public class FrontendConfig
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
+    // Multiple email accounts
+    public List<EmailAccountConfig> emailAccounts { get; set; } = new();
+    // Legacy single-account fields (kept for backward compat with existing configs)
     public string? emailImapServer { get; set; }
     public int emailImapPort { get; set; } = 993;
     public bool emailUseSsl { get; set; } = true;
@@ -57,7 +70,24 @@ public class ConfigFileService
         {
             var text = await System.IO.File.ReadAllTextAsync(_configPath);
             var cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return cfg ?? new FrontendConfig();
+            cfg ??= new FrontendConfig();
+
+            // Migration: populate emailAccounts from legacy single-account fields
+            if (cfg.emailAccounts.Count == 0 &&
+                !string.IsNullOrWhiteSpace(cfg.emailUsername))
+            {
+                cfg.emailAccounts.Add(new EmailAccountConfig
+                {
+                    imapServer = cfg.emailImapServer,
+                    imapPort = cfg.emailImapPort,
+                    useSsl = cfg.emailUseSsl,
+                    username = cfg.emailUsername,
+                    password = cfg.emailPassword,
+                    label = cfg.emailUsername.Contains('@') ? cfg.emailUsername[..cfg.emailUsername.IndexOf('@')] : cfg.emailUsername
+                });
+            }
+
+            return cfg;
         }
         catch
         {
@@ -67,6 +97,23 @@ public class ConfigFileService
 
     public async Task WriteConfigAsync(FrontendConfig cfg)
     {
+        // Sync legacy single-account fields from first email account for backward compat
+        if (cfg.emailAccounts.Count > 0)
+        {
+            var first = cfg.emailAccounts[0];
+            cfg.emailImapServer = first.imapServer;
+            cfg.emailImapPort = first.imapPort;
+            cfg.emailUseSsl = first.useSsl;
+            cfg.emailUsername = first.username;
+            cfg.emailPassword = first.password;
+        }
+        else
+        {
+            cfg.emailImapServer = null;
+            cfg.emailUsername = null;
+            cfg.emailPassword = null;
+        }
+
         var json = JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true });
         var tmp = _configPath + ".tmp";
         await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8);
