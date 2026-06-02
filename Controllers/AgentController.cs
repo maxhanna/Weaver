@@ -24,6 +24,12 @@ public class AgentController : ControllerBase
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
+    private static readonly string[] UnsafeEditMarkers =
+    {
+        "…(truncated)",
+        "â€¦(truncated)",
+        "...(truncated)"
+    };
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -278,8 +284,10 @@ public class AgentController : ControllerBase
             {
                 sb.AppendLine($"Summary: {h.summary}");
             }
-            sb.AppendLine("Raw output:");
-            sb.AppendLine(h.raw.Length > 3000 ? h.raw[..3000] + "\n…(truncated)" : h.raw);
+            sb.AppendLine(h.raw.Length > 3000
+                ? "Raw output preview (first 3000 characters only; omitted remainder is not part of the output):"
+                : "Raw output:");
+            sb.AppendLine(h.raw.Length > 3000 ? h.raw[..3000] : h.raw);
             sb.AppendLine();
         }
         sb.AppendLine("### PROJECT ROOT ###");
@@ -901,8 +909,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             return (steps, fastPlan, true);
         }
  
-        var pipelineType = AgentUtilities.ClassifyTask(prompt);
-        await EmitLog(emitSse, "info", $"Router → {pipelineType}", ct: ct);
+        var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
+        await EmitLog(emitSse, "info", $"Router → {pipelineType}", new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
 
         var (allSteps, plan) = pipelineType switch
         {
@@ -1015,12 +1023,18 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             if (failure.TryGetValue("snippet", out var snippet) && snippet != null)
                 sb.AppendLine($"  Nearby snippet: {snippet}");
             if (failure.TryGetValue("oldString", out var oldString) && oldString != null)
-                sb.AppendLine($"  Failed oldString: {AgentUtilities.Truncate(oldString.ToString() ?? "", 1200)}");
+                sb.AppendLine($"  Failed oldString preview: {PreviewForPrompt(oldString.ToString() ?? "", 1200)}");
             else if (failure.TryGetValue("oldStringPreview", out var oldPreview) && oldPreview != null)
-                sb.AppendLine($"  Failed oldString: {AgentUtilities.Truncate(oldPreview.ToString() ?? "", 1200)}");
+                sb.AppendLine($"  Failed oldString preview: {PreviewForPrompt(oldPreview.ToString() ?? "", 1200)}");
         }
 
         return sb.ToString();
+    }
+
+    private static string PreviewForPrompt(string value, int maxChars)
+    {
+        if (value.Length <= maxChars) return value;
+        return value[..maxChars] + "\n[Preview ended; omitted remainder is not code.]";
     }
 
     /// <summary>
@@ -1102,7 +1116,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
         var isWindows = OperatingSystem.IsWindows();
         var shellName = isWindows ? "PowerShell" : "Bash";
-        var desktopPath = isWindows ? "$env:USERPROFILE\\Desktop" : "$HOME/Desktop";
+        var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         var fileCmd = isWindows ? "Set-Content" : "tee";
         var redirectOp = isWindows ? "| Set-Content" : ">";
 
@@ -1121,6 +1135,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
         conversation.AppendLine($"  - Desktop path: {desktopPath}");
         conversation.AppendLine($"  - WRITE FILE: {fileCmd} -Path \"<path>\" -Value \"<content>\"");
+        conversation.AppendLine($"  - MULTI-LINE VALUES: use \\n for newlines in JSON. For here-strings, use @\\\"\\n...\\n\\\"@");
         conversation.AppendLine("  - CREATE FILE: New-Item -ItemType File -Path \"<path>\" -Force");
         conversation.AppendLine("  - NEVER use mkdir, curl, wget, jq, python, Set-Location, cd, or bash syntax — they do NOT work here");
         conversation.AppendLine("  - If a command shows ⚠ Error:, read it and try a DIFFERENT command");
@@ -1187,6 +1202,19 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     {
                         conversation.AppendLine("Empty command — try again.");
                         continue;
+                    }
+
+                    // Sanitize: replace embedded newlines with PowerShell separators.
+                    // JSON \n in the command becomes actual newlines in the C# string,
+                    // which breaks WriteLineAsync to the terminal pipe. Joining with "; "
+                    // prevents truncation of multi-line commands.
+                    // NOTE: PowerShell here-strings (@""@ / @''@) rely on multi-line syntax
+                    // and are handled correctly by the terminal pipe, so we skip them.
+                    if ((cmd.Contains('\n') || cmd.Contains('\r')) && !cmd.Contains("@\"") && !cmd.Contains("@'"))
+                    {
+                        var sanitized = cmd.Replace("\r\n", "; ").Replace("\r", "; ").Replace("\n", "; ");
+                        await EmitLog(emitSse, "info", $"⚠ cmd contained newlines — joined: {sanitized}", ct: ct);
+                        cmd = sanitized;
                     }
 
                     // Validate: reject mkdir for file-like paths (creates directories not files)
@@ -2106,12 +2134,15 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     {
         var oldString = item.OldString ?? "";
         var newString = item.NewString ?? "";
+        var unsafeReason = GetUnsafeEditPayloadReason(oldString, newString);
+        if (unsafeReason != null)
+            return (false, unsafeReason, 0, null);
         if (string.IsNullOrWhiteSpace(oldString))
             return (false, "No oldString provided", 0, null);
         if (oldString.Trim() == newString.Trim())
             return (false, "oldString and newString are identical", 3, null);
 
-        var (replaced, newContent, matchError, snippet) = TryReplace(content, oldString, newString);
+        var (replaced, newContent, matchError, snippet) = TryReplacePrecise(content, oldString, newString);
         if (!replaced)
         {
             var reason = matchError ?? "oldString not found in file";
@@ -2583,8 +2614,15 @@ Be concise — 2-4 sentences max.";
             return (false, "oldString and newString are identical — no change to apply", 3);
         }
 
+        var unsafeReason = GetUnsafeEditPayloadReason(item.OldString ?? "", item.NewString ?? "");
+        if (unsafeReason != null)
+        {
+            await EmitLog(emitSse, "warn", $"Edit rejected for {relPath}: {unsafeReason}", ct: ct);
+            return (false, unsafeReason, 0);
+        }
+
         var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-        var (replaced, newContent, matchError, snippet) = TryReplace(content, item.OldString!, item.NewString ?? "");
+        var (replaced, newContent, matchError, snippet) = TryReplacePrecise(content, item.OldString!, item.NewString ?? "");
         if (!replaced)
         {
             var matchReason = matchError ?? "oldString not found in file";
@@ -2704,8 +2742,8 @@ Be concise — 2-4 sentences max.";
             var h = history[i];
             sb.AppendLine($"--- Attempt {i + 1} — Score {h.score}/10 ---");
             sb.AppendLine($"Reason: {h.reason}");
-            sb.AppendLine($"oldString:\n```\n{h.oldString}\n```");
-            sb.AppendLine($"newString:\n```\n{h.newString}\n```");
+            sb.AppendLine($"oldString:\n```\n{RemoveUnsafeEditMarkersForPrompt(h.oldString)}\n```");
+            sb.AppendLine($"newString:\n```\n{RemoveUnsafeEditMarkersForPrompt(h.newString)}\n```");
             sb.AppendLine();
         }
         sb.AppendLine("Produce corrected oldString/newString that will pass verification.");
@@ -2728,6 +2766,7 @@ Rules:
 - Preserve exact indentation and spacing. Escape newlines as \\n, but do not change indentation or spacing in oldString or newString.
 - For insertions, use an existing anchor as oldString and include that same anchor in newString with the inserted code around it.
 - Never return identical oldString and newString.
+- Never output omitted-content placeholders such as ...(truncated), …(truncated), or â€¦(truncated).
 - Learn from previous attempts — if score was low on indentation, fix that";
 
 
@@ -3445,6 +3484,14 @@ Rules:
         var oldString = step.OldString ?? "";
         var newString = step.NewString ?? "";
 
+        var unsafeReason = GetUnsafeEditPayloadReason(oldString, newString);
+        if (unsafeReason != null)
+        {
+            result["status"] = "error";
+            result["error"] = unsafeReason;
+            return;
+        }
+
         // Use in-memory cache for consecutive edits to the same file
         // so each subsequent edit sees the content after prior edits
         string content;
@@ -3489,7 +3536,7 @@ Rules:
             return;
         }
 
-        var (replaced, newContent, matchError, snippet) = TryReplace(content, oldString, newString);
+        var (replaced, newContent, matchError, snippet) = TryReplacePrecise(content, oldString, newString);
         if (!replaced)
         {
             // Enhanced error reporting with context
@@ -3592,6 +3639,67 @@ Rules:
     /// Pass 5 – single-line collapsed-whitespace match.
     /// Pass 6 – token-overlap similarity (≥85% of meaningful tokens match).
     /// </summary>
+    private static (bool ok, string content, string? error, string? snippet) TryReplacePrecise(
+        string content, string oldString, string newString)
+    {
+        content = AgentUtilities.NormalizeLineEndings(content);
+        oldString = AgentUtilities.NormalizeLineEndings(oldString);
+        newString = AgentUtilities.NormalizeLineEndings(newString);
+
+        if (string.IsNullOrEmpty(oldString))
+            return (false, content, "oldString is empty", null);
+
+        var firstIdx = content.IndexOf(oldString, StringComparison.Ordinal);
+        if (firstIdx < 0)
+            return (false, content, "oldString not found exactly in file", BuildExactMatchHint(content, oldString));
+
+        var secondIdx = content.IndexOf(oldString, firstIdx + oldString.Length, StringComparison.Ordinal);
+        if (secondIdx >= 0)
+            return (false, content, "oldString is ambiguous; it appears more than once. Use a longer unique anchor.", null);
+
+        return (true, content[..firstIdx] + newString + content[(firstIdx + oldString.Length)..], null, null);
+    }
+
+    private static string? BuildExactMatchHint(string content, string oldString)
+    {
+        var patternLines = oldString.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0)
+            .OrderByDescending(l => l.Length)
+            .Take(3)
+            .ToList();
+
+        if (patternLines.Count == 0) return null;
+
+        var fileLines = content.Split('\n');
+        var hints = fileLines
+            .Where(l => patternLines.Any(p => l.Contains(p, StringComparison.Ordinal)))
+            .Take(3)
+            .ToList();
+
+        return hints.Count > 0 ? string.Join("\n", hints) : null;
+    }
+
+    private static string? GetUnsafeEditPayloadReason(string oldString, string newString)
+    {
+        foreach (var marker in UnsafeEditMarkers)
+        {
+            if (oldString.Contains(marker, StringComparison.OrdinalIgnoreCase) ||
+                newString.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                return $"Edit contains generated placeholder marker '{marker}'. Ask for the full exact code instead of applying omitted content.";
+        }
+
+        return null;
+    }
+
+    private static string RemoveUnsafeEditMarkersForPrompt(string value)
+    {
+        var sanitized = value;
+        foreach (var marker in UnsafeEditMarkers)
+            sanitized = sanitized.Replace(marker, "[placeholder marker removed]", StringComparison.OrdinalIgnoreCase);
+        return sanitized;
+    }
+
     private static (bool ok, string content, string? error, string? snippet) TryReplace(
         string content, string oldString, string newString)
     {
@@ -4293,9 +4401,16 @@ Rules:
             var hasError = false;
             foreach (var edit in fileEdits)
             {
+                var unsafeReason = GetUnsafeEditPayloadReason(edit.OldString, edit.NewString ?? "");
+                if (unsafeReason != null)
+                {
+                    results.Add(new EditResult { Path = filePath, Status = "error", Error = unsafeReason });
+                    hasError = true;
+                    break;
+                }
                 if (!fileExists && string.IsNullOrEmpty(edit.OldString)) { content = edit.NewString ?? ""; continue; }
                 if (string.IsNullOrEmpty(edit.OldString)) { content += edit.NewString ?? ""; continue; }
-                var (ok, newContent, err, _) = TryReplace(content, edit.OldString, edit.NewString ?? "");
+                var (ok, newContent, err, _) = TryReplacePrecise(content, edit.OldString, edit.NewString ?? "");
                 if (!ok) { results.Add(new EditResult { Path = filePath, Status = "error", Error = err }); hasError = true; break; }
                 content = newContent;
             }

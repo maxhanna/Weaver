@@ -11,75 +11,114 @@ public static class AgentUtilities
     private static readonly HashSet<string> ExplorationStepTypes =
         new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
 
-    public static PipelineType ClassifyTask(string prompt)
+    public static (PipelineType Type, double CommandScore, double EditScore) ClassifyTask(string prompt)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) return PipelineType.CommandExecution;
+        if (string.IsNullOrWhiteSpace(prompt)) return (PipelineType.CommandExecution, 100, 0);
         var lower = prompt.ToLowerInvariant();
 
-        // Quick check: pure ping/health/status with no file changes
-        if (!TaskExpectsFileChanges(prompt) &&
-            Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
-            return PipelineType.CommandExecution;
+        // ── Score-based routing ──────────────────────────────────────────────
+        // Both pipelines get weighted scores. The highest-confidence pipeline
+        // wins. This is more robust than the old first-match-wins chain for
+        // ambiguous prompts like "augment the email settings in the UI panel".
+        double cmdScore = 0;
+        double editScore = 0;
 
-        // Command execution: known simple intents (git, package_install, rename, etc.)
-        if (TryDetectSimpleIntent(prompt) != null)
-            return PipelineType.CommandExecution;
+        // ── CommandExecution signals (high-weight, unambiguous) ──────────────
+        if (TryDetectSimpleIntent(prompt) != null) cmdScore += 100;
 
-        // Rename/move requires a dot (file extension) or path separator between the verb and "to"
-        // (avoids matching prose like "move a card from column X to column Y")
-        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}(\.\w+|[\\/]).{0,60}\bto\b"))
-            return PipelineType.CommandExecution;
+        if (Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+            cmdScore += 80;
 
-        // Directory listing / exploration — needs agentic terminal control, not hallucination
-        if (Regex.IsMatch(lower, @"\b(list|what.*in|contents? of|(?:list|show|find|explore|browse)\s+files?\s+in|directory\s+(contents?|listing)|structure\s+of|tree)\b"))
-            return PipelineType.CommandExecution;
-
-        // System info / version / environment queries — needs terminal, not code edit
-        if (Regex.IsMatch(lower, @"\b(what\s+version|is\s+(\S+\s+)?(installed|running|available)|which\s+(port|process|version|branch)|disk\s+(usage|space|free)|how\s+much\s+(memory|disk|space)|free\s+(memory|disk|space)|running\s+process(es)?|environment\s+variables?|current\s+(directory|path|branch|time|date)|whoami|uptime|list\s+(process|service|container|running))\b"))
-            return PipelineType.CommandExecution;
-
-        // Network scanning / discovery
-        if (Regex.IsMatch(lower, @"\b(computers?\s+(\S+\s+)?on\s+(the\s+)?network|network\s+(scan|devices?|computers?|discover)|scan\s+(network|devices?|ports?)|find\s+(devices?|computers?|hosts|(\S+\s+){0,2}on\s+(the\s+)?network)|connected\s+devices|what'?s?\s+(\S+\s+){0,3}on\s+((my|the)\s+)?network)\b"))
-            return PipelineType.CommandExecution;
-
-        // File operations — copy, duplicate, backup files
-        if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
-            return PipelineType.CommandExecution;
-
-        // Package/tool/software installation and management
-        if (Regex.IsMatch(lower, @"\b(install|uninstall|remove|update|upgrade|downgrade)\s+(\S+\s+){0,3}(package|tool|module|library|dependency|sdk|runtime|plugin|extension|app|application|software)s?\b"))
-            return PipelineType.CommandExecution;
-
-        // Docker / container operations
-        if (Regex.IsMatch(lower, @"\b(docker|container|compose|podman|kubernetes|kubectl|helm)\b"))
-            return PipelineType.CommandExecution;
-
-        // Process / service / server management
-        if (Regex.IsMatch(lower, @"\b(start|stop|restart|reload)\s+(service|process|daemon|server|application)\b"))
-            return PipelineType.CommandExecution;
-
-        // Read/show file content (cat/type) — just display, no edit
         if (Regex.IsMatch(lower, @"\b(cat|type)\s+\S+"))
-            return PipelineType.CommandExecution;
+            cmdScore += 70;
 
-        // Check/verify/validate something without intending to change it
-        if (Regex.IsMatch(lower, @"\b(check\s+if|check\s+whether|verify|validate)\b") && !TaskExpectsFileChanges(prompt))
-            return PipelineType.CommandExecution;
+        if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
+            cmdScore += 60;
 
-        // Create file — needs terminal + possibly web research, not code editing
-        if (Regex.IsMatch(lower, @"\bcreate\s+(a\s+)?(new\s+)?file\b"))
-            return PipelineType.CommandExecution;
+        if (Regex.IsMatch(lower, @"\b(list|what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree)\b"))
+            cmdScore += 60;
 
-        // Web search or fetch — user wants info retrieved, not code edited
+        if (Regex.IsMatch(lower, @"\b(inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email|read\s+mail|check\s+mail)\b"))
+            cmdScore += 85;
+
+        if (Regex.IsMatch(lower, @"\b(docker|container|compose|podman|kubernetes|kubectl|helm)\b"))
+            cmdScore += 60;
+
+        if (Regex.IsMatch(lower, @"\b(start|stop|restart|reload)\s+(service|process|daemon|server|application)\b"))
+            cmdScore += 60;
+
+        if (Regex.IsMatch(lower, @"\b(install|uninstall|remove|update|upgrade|downgrade)\s+(package|tool|module|library|dependency|sdk|runtime|plugin|extension)\b"))
+            cmdScore += 60;
+
+        if (Regex.IsMatch(lower, @"\b(rename|move)\b.{1,60}(\.\w+|[\\/]).{0,60}\bto\b"))
+            cmdScore += 65;
+
+        if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
+            cmdScore += 60;
+
+        if (Regex.IsMatch(lower, @"\b(what\s+version|is\s+installed|which\s+(port|process|version|branch)|disk\s+(usage|space)|how\s+much\s+(memory|disk)|running\s+process|environment\s+variable|current\s+(directory|path|time|date)|whoami|uptime)\b"))
+            cmdScore += 55;
+
+        if (Regex.IsMatch(lower, @"\b(computers?\s+on\s+network|network\s+(scan|devices)|scan\s+(network|ports)|find\s+(devices|computers|hosts)|connected\s+devices)\b"))
+            cmdScore += 55;
+
         if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the))\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
-            return PipelineType.CommandExecution;
+            cmdScore += 50;
 
-        // Email — read emails, inbox, unread, etc., not code editing
-        if (Regex.IsMatch(lower, @"\b(email|inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email)\b"))
-            return PipelineType.CommandExecution;
+        // ── CodeEdit signals ─────────────────────────────────────────────────
+        // Strong edit verbs — word-boundary to avoid "add" inside "address"
+        if (Regex.IsMatch(lower, @"\b(augment|implement|refactor|rewrite|redesign)\b"))
+            editScore += 65;
 
-        // Default: needs the full planning pipeline
-        return PipelineType.CodeEdit;
+        if (Regex.IsMatch(lower, @"\b(fix|update|change|modify|edit|patch|tweak|adjust)\b"))
+            editScore += 55;
+
+        if (Regex.IsMatch(lower, @"\b(add|remove|delete|insert)\b"))
+            editScore += 45;
+
+        if (Regex.IsMatch(lower, @"\b(toggle|enable|disable|configure|wire|connect|hook|expose)\b"))
+            editScore += 40;
+
+        // UI/component keywords — user wants to modify a UI element
+        if (Regex.IsMatch(lower, @"\b(div|button|input|form|dropdown|checkbox|radio|modal|popup|panel|section|tab|sidebar|navbar|header|footer)\b"))
+            editScore += 35;
+
+        if (Regex.IsMatch(lower, @"\b(component|template|view|page|layout|widget|element)\b"))
+            editScore += 30;
+
+        // Style/design keywords
+        if (Regex.IsMatch(lower, @"\b(style|css|class|theme|color|font|margin|padding|border|shadow|layout|spacing)\b"))
+            editScore += 30;
+
+        // File path mentioned — likely editing a specific file
+        if (Regex.IsMatch(lower, @"\b[\w./\\-]+\.\w{2,4}\b"))
+            editScore += 20;
+
+        // ── Hybrid signal: "email" in editing context vs reading context ─────
+        bool emailForReading = Regex.IsMatch(lower,
+            @"\b(read|check|fetch|inbox|unread|send|compose)\b.{0,40}\b(email|mail)\b");
+        bool emailForConfig = Regex.IsMatch(lower, @"\bemail\b") && !emailForReading;
+
+        if (emailForReading) cmdScore += 80;
+        if (emailForConfig) editScore += 25; // configuring email settings = edit
+
+        // ── Penalties for conflicting signals ────────────────────────────────
+        // If prompt is clearly about editing (strong edit verbs + UI keywords),
+        // suppress command signals from generic keywords
+        if (editScore >= 80) cmdScore -= 30;
+
+        // If prompt is purely a read/query with no edit intent, suppress edit
+        if (cmdScore >= 50 && editScore == 0) editScore -= 40;
+
+        // ── Decision ─────────────────────────────────────────────────────────
+        const double tieThreshold = 15;
+        double diff = editScore - cmdScore;
+
+        if (diff > tieThreshold) return (PipelineType.CodeEdit, cmdScore, editScore);
+        if (diff < -tieThreshold) return (PipelineType.CommandExecution, cmdScore, editScore);
+
+        // Close call — lean toward CodeEdit (it can discover + plan + edit)
+        return (PipelineType.CodeEdit, cmdScore, editScore);
     }
 
 
@@ -303,7 +342,7 @@ public static class AgentUtilities
 
     public static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
 
-    public static string Truncate(string s, int max) => s.Length <= max ? s : s.Substring(0, max) + "\n…(truncated)";
+    public static string Truncate(string s, int max) => s.Length <= max ? s : s.Substring(0, max) + "\n[Preview ended; omitted remainder is not code.]";
 
     public static string NormalizeUiStatus(string? status) => status switch
     {
@@ -322,7 +361,8 @@ public static class AgentUtilities
             "build","install","configure","hook","wire","connect","show","hide","display",
             "save","persist","store","expose","include"
         };
-        return verbs.Any(v => lower.Contains(v, StringComparison.Ordinal));
+        // Word-boundary match to avoid "add" matching inside "address"
+        return verbs.Any(v => Regex.IsMatch(lower, $@"\b{Regex.Escape(v)}\b"));
     }
 
     public static bool BatchWasExplorationOnly(IReadOnlyList<AgentStep> batch) =>
@@ -1053,7 +1093,7 @@ public static class AgentUtilities
         // Candidate 1 — as-is
         yield return json;
 
-        // Candidate 2 — quote unquoted keys  {thinking: → {"thinking":
+        // Candidate 2 — quote unquoted keys
         var quoted = Regex.Replace(json,
             @"(?<=[{,])\s*([a-zA-Z_$][\w$]*)\s*(?=:)",
             m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
@@ -1071,8 +1111,21 @@ public static class AgentUtilities
                 m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
             if (both != repaired) yield return both;
         }
-    }
 
+        // ── NEW: Candidate 5 — full repair (handles raw newlines AND unescaped quotes)
+        var fullyRepaired = RepairJsonString(json);
+        if (fullyRepaired != null) yield return fullyRepaired;
+
+        // ── NEW: Candidate 6 — full repair + quote unquoted keys
+        if (fullyRepaired != null)
+        {
+            var quotedFull = Regex.Replace(fullyRepaired,
+                @"(?<=[{,])\s*([a-zA-Z_$][\w$]*)\s*(?=:)",
+                m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
+            if (quotedFull != fullyRepaired) yield return quotedFull;
+        }
+    }
+    
     public static int EstimateTokens(string text) =>
         string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
 

@@ -633,6 +633,7 @@ vm.changeProject = function () {
         if (c) {
           if (cmd.params.text) c.text = cmd.params.text;
           if (cmd.params.priority) c.priority = cmd.params.priority;
+          if (cmd.params.attached !== undefined) c.attached = cmd.params.attached;
           vm.saveCards();
         }
       } else if (cmd.command === 'archiveCard' && cmd.params) {
@@ -649,6 +650,15 @@ vm.changeProject = function () {
         console.log('Stopping agent from remote command:', cmd);
         var activeCard = findCardById(vm.activeCardId);
         vm.stopAgent && vm.stopAgent(activeCard);
+      } else if (cmd.command === 'deleteCard' && cmd.params && cmd.params.cardId) {
+        console.log('Deleting card from remote command:', cmd);
+        var col = findCardColumn(cmd.params.cardId);
+        if (col) {
+          var cards = vm.state[col] || [];
+          var idx = cards.findIndex(function(c) { return c.id === cmd.params.cardId; });
+          if (idx !== -1) cards.splice(idx, 1);
+          vm.saveCards();
+        }
       } else if (cmd.command === 'changeCardText' && cmd.params && cmd.params.cardId) {
         console.log('Changing card text from remote command:', cmd);
         var card = findCardById(cmd.params.cardId);
