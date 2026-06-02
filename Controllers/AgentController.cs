@@ -1154,10 +1154,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - To run a command: {\"cmd\": \"the full command\"}");
         conversation.AppendLine("  - To search the web: {\"web_search\": \"query\"}");
         conversation.AppendLine("  - To fetch a URL: {\"web_fetch\": \"url\"}");
-        conversation.AppendLine("  - EMAIL ACTION (not a terminal command): {\"email\": \"inbox\"} — this calls the built-in email reader. It checks ALL configured accounts and returns formatted email data directly. Do NOT try to run \"email\" as a terminal command, it will fail.");
+        conversation.AppendLine("  - EMAIL ACTION (not a terminal command): {\"email\": \"inbox\"} — calls the built-in email reader. Checks ALL configured accounts. Do NOT try to run \"email\" as a terminal command.");
+        conversation.AppendLine("  - EMAIL + FILE: {\"email\": \"inbox\", \"file\": \"C:\\\\path\\\\to\\\\file.txt\"} — fetches emails AND writes them directly to the file. The system handles the writing; you don't need a separate cmd.");
         conversation.AppendLine("  - To read a specific account: {\"email\": \"inbox\", \"account\": \"0\"} (use index or label)");
         conversation.AppendLine("  - To validate email: {\"email\": \"validate\"}");
-        conversation.AppendLine("  - After email data is returned in the conversation, write it to a file using a cmd action. Example flow: first {\"email\": \"inbox\"} gets the data, then {\"cmd\": \"Set-Content -Path \\\"path\\\" -Value @\\\"\\n\" + data + \"\\n\\\"@\"} writes it.");
         conversation.AppendLine("  - To show a result to the user: {\"message\": \"your answer here\"}");
         conversation.AppendLine("  - When done: {\"done\": true, \"summary\": \"what was accomplished\"}");
         conversation.AppendLine($"  - Desktop path: {desktopPath}");
@@ -1331,7 +1331,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     var fullOutput = _terminal.ReadAll();
                     var freshOutput = beforeLen < fullOutput.Length
                         ? fullOutput[beforeLen..] : "";
-
+                    beforeLen = fullOutput.Length;
+                    
                     // Detect errors in output
                     var isError = false;
                     if (!string.IsNullOrWhiteSpace(freshOutput))
@@ -1472,9 +1473,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         else
                             accountSpec = acctEl.GetString();
                     }
+                    // Optional file path: if set, write email data directly to this file
+                    string? emailFilePath = null;
+                    if (root.TryGetProperty("file", out var fileEl))
+                        emailFilePath = fileEl.GetString();
 
                     await EmitLog(emitSse, "step", $"▶ email[{i + 1}]: {action}" +
-                        (accountSpec != null ? $" (account: {accountSpec})" : " (all accounts)"), new { emailEl, accountSpec }, ct: ct);
+                        (accountSpec != null ? $" (account: {accountSpec})" : " (all accounts)") +
+                        (emailFilePath != null ? $" → {emailFilePath}" : ""), new { emailEl, accountSpec, emailFilePath }, ct: ct);
 
                     // Try to auto-configure before proceeding
                     var cfgCheck = await _emailService.CheckAndAutoConfigureAsync();
@@ -1684,13 +1690,13 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                         }
                         else
                         {
-                            var grouped = emails.GroupBy(e => e.AccountLabel ?? "Email").ToList();
+                            var groupedEmails = emails.GroupBy(e => e.AccountLabel ?? "Email").ToList();
                             emailOutput.AppendLine($"Found {emails.Count} email(s)" +
-                                (grouped.Count > 1 ? $" across {grouped.Count} account(s):" : ":"));
+                                (groupedEmails.Count > 1 ? $" across {groupedEmails.Count} account(s):" : ":"));
                             emailOutput.AppendLine();
-                            foreach (var group in grouped)
+                            foreach (var group in groupedEmails)
                             {
-                                if (grouped.Count > 1)
+                                if (groupedEmails.Count > 1)
                                     emailOutput.AppendLine($"--- {group.Key} ---");
                                 foreach (var e in group)
                                 {
@@ -1708,6 +1714,24 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             }
                         }
                         var emailStr = emailOutput.ToString();
+
+                        // If file path specified, write email data directly to file (no LLM round-trip)
+                        if (!string.IsNullOrWhiteSpace(emailFilePath))
+                        {
+                            try
+                            {
+                                var dir = Path.GetDirectoryName(emailFilePath);
+                                if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
+                                    Directory.CreateDirectory(dir);
+                                await System.IO.File.WriteAllTextAsync(emailFilePath, emailStr, Encoding.UTF8, ct);
+                                await EmitLog(emitSse, "success", $"Email data written to {emailFilePath} ({emailStr.Length} chars)", ct: ct);
+                            }
+                            catch (Exception ex)
+                            {
+                                await EmitLog(emitSse, "error", $"Failed to write email file {emailFilePath}: {ex.Message}", ct: ct);
+                            }
+                        }
+
                         var emailResult = new Dictionary<string, object?>
                         {
                             ["index"] = stepIndex++,
@@ -1715,15 +1739,39 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                             ["action"] = action,
                             ["status"] = "done",
                             ["command"] = $"fetched {emails.Count} email(s)" + (resolvedIndex.HasValue ? $" from account [{resolvedIndex}]" : " from all accounts"),
-                            ["output"] = emailStr
+                            ["output"] = emailFilePath != null ? $"Written to {emailFilePath}" : emailStr
                         };
                         steps.Add(emailResult);
                         if (emitSse) await SendSse(Response, "step", emailResult, ct);
-                        conversation.AppendLine($"Email [{i + 1}]: fetched {emails.Count} email(s)" +
-                            (resolvedIndex.HasValue ? $" (account: {accountSpec})" : " (all accounts)"));
-                        conversation.AppendLine(emailStr);
-                        conversation.AppendLine("Email data is shown above. Now write it to the target file using a cmd action with Set-Content. Do NOT run email again — you already have the data.");
-                        conversation.AppendLine();
+
+                        // Truncate email data in conversation to avoid overwhelming the LLM.
+                        // Full data is in the step result (and file if file path was given).
+                        var emailSummary = new StringBuilder();
+                        emailSummary.AppendLine(emailFilePath != null
+                            ? $"Written {emails.Count} email(s) to {emailFilePath}"
+                            : $"Fetched {emails.Count} email(s)");
+                        emailSummary.AppendLine();
+                        var grouped = emails.GroupBy(e => e.AccountLabel ?? "Email").ToList();
+                        foreach (var g in grouped)
+                        {
+                            if (grouped.Count > 1)
+                                emailSummary.AppendLine($"--- {g.Key} ---");
+                            foreach (var e in g)
+                            {
+                                emailSummary.AppendLine($"From: {e.From} | Subject: {e.Subject} | Date: {e.Date:yyyy-MM-dd HH:mm}");
+                            }
+                            emailSummary.AppendLine();
+                        }
+                        var fileWritten = emailFilePath != null;
+                        if (fileWritten)
+                        {
+                            summary = $"Fetched {emails.Count} email(s) and wrote to {emailFilePath}";
+                            await EmitLog(emitSse, "success", $"✓ Task complete: {summary}", ct: ct);
+                            // Auto-complete: email+file action fulfilled the task, no need to go back to LLM
+                            break;
+                        }
+                        conversation.AppendLine($"Email [{i + 1}]: fetched {emails.Count} email(s)");
+                        conversation.Append(emailSummary.ToString());
                     }
                     catch (Exception ex)
                     {

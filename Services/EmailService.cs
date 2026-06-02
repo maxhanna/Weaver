@@ -65,16 +65,11 @@ public class EmailService
                 else if (username.EndsWith("@outlook.com") || username.EndsWith("@hotmail.com") ||
                          username.EndsWith("@live.com") || username.EndsWith("@msn.com"))
                 {
-                    // Only auto-set if server is missing or not already a valid Outlook IMAP server
-                    if (acct.imapServer == null ||
-                        (!acct.imapServer.Contains("office365.com", StringComparison.OrdinalIgnoreCase) &&
-                         !acct.imapServer.Contains("outlook.com", StringComparison.OrdinalIgnoreCase) &&
-                         !acct.imapServer.Contains("hotmail.com", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        acct.imapServer = "outlook.office365.com";
-                        acct.imapPort = 993;
-                        acct.useSsl = true;
-                    }
+                    // outlook.office365.com is the modern endpoint for all Microsoft accounts.
+                    // Always override — older endpoints like imap-mail.outlook.com are unreliable.
+                    acct.imapServer = "outlook.office365.com";
+                    acct.imapPort = 993;
+                    acct.useSsl = true;
                 }
             }
         }
@@ -154,20 +149,79 @@ public class EmailService
     }
 
     /// <summary>
-    /// Connect to IMAP server and authenticate with password-based SASL.
-    /// Removes OAuth2 mechanisms and explicitly uses PLAIN to work around
-    /// servers (Outlook/Office 365) that advertise XOAUTH2 but reject
-    /// password-based attempts through it.
+    /// Connect to IMAP server and authenticate using the best available
+    /// password-based SASL mechanism for the server.
+    ///
+    /// Microsoft consumer accounts (Hotmail/Outlook/Live) dropped plain-password
+    /// IMAP auth in 2022 for most accounts, but still work when the account has
+    /// IMAP enabled and "Less secure app access" or an App Password is configured.
+    /// For these servers we try: NTLM → LOGIN → PLAIN (in that order) by removing
+    /// the OAuth2 mechanisms and letting MailKit pick the strongest remaining one.
+    ///
+    /// Gmail uses an App Password and accepts PLAIN directly.
     /// </summary>
     private static async Task ConnectAndAuthenticateAsync(ImapClient client, string host, int port, bool ssl, string username, string password)
     {
-        await client.ConnectAsync(host, port, ssl);
-        // Some servers (Outlook/Office 365) only advertise XOAUTH2 which
-        // requires an OAuth2 token. Remove it so MailKit uses a password-
-        // based SASL mechanism instead.
+        var sslOptions = ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTlsWhenAvailable;
+        await client.ConnectAsync(host, port, sslOptions);
+
+        // Log what the server advertises so auth failures are diagnosable
+        var advertised = string.Join(", ", client.AuthenticationMechanisms);
+        Console.WriteLine($"[EmailService] {host} advertises mechanisms: [{advertised}]");
+
+        // Remove OAuth2 — we are doing password-based auth only
         client.AuthenticationMechanisms.Remove("XOAUTH2");
         client.AuthenticationMechanisms.Remove("OAUTHBEARER");
-        await client.AuthenticateAsync(new SaslMechanismPlain(username, password ?? ""));
+
+        var hostLower = host.ToLowerInvariant();
+        var isMicrosoft = hostLower.Contains("outlook.com") ||
+                          hostLower.Contains("office365.com") ||
+                          hostLower.Contains("hotmail.com") ||
+                          hostLower.Contains("live.com");
+
+        if (isMicrosoft)
+        {
+            // imap-mail.outlook.com advertises [PLAIN, XOAUTH2].
+            // App passwords work with PLAIN on this server when IMAP is enabled on the account.
+            // Try PLAIN explicitly first via SaslMechanismPlain, then LOGIN via SaslMechanismLogin,
+            // then let MailKit pick freely as a last resort.
+            var attempts = new List<(string name, Func<Task> auth)>
+            {
+                ("PLAIN",    () => client.AuthenticateAsync(new SaslMechanismPlain(username, password ?? ""))),
+                ("LOGIN",    () => client.AuthenticateAsync(new SaslMechanismLogin(username, password ?? ""))),
+                ("DEFAULT",  () => client.AuthenticateAsync(username, password ?? "")),
+            };
+
+            Exception? lastEx = null;
+            foreach (var (name, auth) in attempts)
+            {
+                try
+                {
+                    Console.WriteLine($"[EmailService] {host} — trying {name}");
+                    await auth();
+                    Console.WriteLine($"[EmailService] {host} — ✓ authenticated via {name}");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[EmailService] {host} — ✗ {name}: {ex.Message}");
+                    lastEx = ex;
+                }
+            }
+
+            throw new Exception(
+                $"Authentication failed for {username} on {host} (advertised: [{advertised}]). " +
+                $"Tried PLAIN, LOGIN, DEFAULT — all rejected. " +
+                $"Check: (1) IMAP is enabled at https://outlook.live.com/mail/options/mail/pop-imap, " +
+                $"(2) the app password is current (regenerate at https://account.microsoft.com/security → App passwords), " +
+                $"(3) no conditional access policy is blocking IMAP for this account. " +
+                $"Last error: {lastEx?.Message}");
+        }
+        else
+        {
+            // Gmail and other providers: PLAIN with App Password
+            await client.AuthenticateAsync(new SaslMechanismPlain(username, password ?? ""));
+        }
     }
 
     private async Task<List<EmailMessage>> FetchFromAccountAsync(EmailAccountConfig acct, int maxEmails, bool unreadOnly)

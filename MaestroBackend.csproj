@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.17.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.8" />
   </ItemGroup>
 
   <!-- Automatically Runs the standalone C# Script script before compiling your backend -->

@@ -623,7 +623,6 @@ vm.changeProject = function () {
             terminalApprovalMode: vm.terminalApprovalMode,
             approvedTerminalRoots: vm.approvedTerminalRoots,
             disallowedTerminalRoots: vm.disallowedTerminalRoots,
-            emailAccounts: vm.emailAccounts,
             defaultProject: vm.defaultProject || vm.selectedProject,
             showTerminal: vm.showTerminal,
             showAI: vm.showAI,
@@ -773,7 +772,6 @@ vm.changeProject = function () {
           vm.disallowedTerminalRoots = cmd.params.disallowedTerminalRoots;
           vm.disallowedTerminalRootsText = (cmd.params.disallowedTerminalRoots || []).join(', ');
         }
-        if (cmd.params.emailAccounts !== undefined) vm.emailAccounts = cmd.params.emailAccounts;
         if (cmd.params.defaultProject !== undefined) vm.settingsDefaultProject = cmd.params.defaultProject;
         if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
         if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
