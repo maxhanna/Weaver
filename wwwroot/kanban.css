@@ -616,7 +616,7 @@ body.dragging-active .card:hover {
     border-radius: 4px;
     cursor: pointer;
     background: rgba(124, 58, 237, 0.1);
-    color: var(--accent-2);
+    color: var(--accent);
     border: 1px solid rgba(124, 58, 237, 0.2);
     user-select: none;
 }
@@ -625,7 +625,7 @@ body.dragging-active .card:hover {
     margin: 0;
     width: 12px;
     height: 12px;
-    accent-color: var(--accent-2);
+    accent-color: var(--accent);
 }
 
 .pr-toggle:hover {
@@ -634,7 +634,7 @@ body.dragging-active .card:hover {
 
 .tag-pr {
     background: rgba(124, 58, 237, 0.15) !important;
-    color: var(--accent-2) !important;
+    color: var(--accent) !important;
     border: 1px solid rgba(124, 58, 237, 0.25);
     font-family: monospace;
     font-size: 9px;
@@ -643,7 +643,7 @@ body.dragging-active .card:hover {
 }
 
 .tag-pr-url a {
-    color: var(--accent-2);
+    color: var(--accent);
     text-decoration: none;
     font-size: 10px;
 }
