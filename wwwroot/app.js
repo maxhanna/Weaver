@@ -19,6 +19,7 @@
     vm.autoQueue = true;
     vm.showTerminal = true;
     vm.showAI = true;
+    vm.showIDE = false;
     vm.llamaUrl = "";
     vm.buildCommands = "";
     vm.terminalApprovalMode = 'approveAll';
@@ -256,6 +257,7 @@
         cfg.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
+        cfg.showIDE = vm.showIDE !== false;
         cfg.showKanban = vm.showKanban !== false;
         cfg.showCalendar = vm.showCalendar !== false;
         cfg.prByDefault = vm.prByDefault !== false;
@@ -399,6 +401,8 @@
         if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
+        if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
+        if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
         if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
@@ -498,6 +502,7 @@ vm.changeProject = function () {
         cfg.defaultProject = vm.settingsDefaultProject || cfg.defaultProject || vm.defaultProject;
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
+        cfg.showIDE = vm.showIDE !== false;
         cfg.showKanban = vm.showKanban !== false;
         cfg.showCalendar = vm.showCalendar !== false;
         cfg.prByDefault = vm.prByDefault !== false;
@@ -633,6 +638,7 @@ vm.changeProject = function () {
             defaultProject: vm.defaultProject || vm.selectedProject,
             showTerminal: vm.showTerminal,
             showAI: vm.showAI,
+            showIDE: vm.showIDE,
             showKanban: vm.showKanban,
             showCalendar: vm.showCalendar,
             bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
@@ -948,6 +954,7 @@ vm.changeProject = function () {
         if (cmd.params.defaultProject !== undefined) vm.settingsDefaultProject = cmd.params.defaultProject;
         if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
         if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
+        if (cmd.params.showIDE !== undefined) vm.showIDE = cmd.params.showIDE;
         if (cmd.params.showKanban !== undefined) vm.showKanban = cmd.params.showKanban;
         if (cmd.params.showCalendar !== undefined) vm.showCalendar = cmd.params.showCalendar;
         if (cmd.params.prByDefault !== undefined) vm.prByDefault = cmd.params.prByDefault;

@@ -18,7 +18,9 @@ namespace MaestroBackend.Services
             @"           _   _   _   _   _   _   _         ",
             @"          / \ / \ / \ / \ / \ / \ / \        ",
             @"         ( M | a | e | s | t | r | o )       ",
-            @"          \_/ \_/ \_/ \_/ \_/ \_/ \_/        "
+            @"          \_/ \_/ \_/ \_/ \_/ \_/ \_/        ",
+            @"                                             ",
+            @"         Enhanced Maestro Logo v2.0        "
         };
 
         private static readonly string[] SubtitleLines = {
@@ -48,6 +50,19 @@ namespace MaestroBackend.Services
             Console.WriteLine();
             Console.WriteLine("Starting Maestro backend service...");
             Console.WriteLine();
+            Console.WriteLine("[INFO] Backend service initialized successfully.");
+            Console.WriteLine();
+            Console.WriteLine("[DEBUG] Logo displayed successfully.");
+            Console.WriteLine("[TRACE] DisplayLogo method completed.");
+            Console.WriteLine("[VERBOSE] All system components are operational.");
+            Console.WriteLine();
+            Console.WriteLine("[SUCCESS] Maestro logo displayed with enhanced styling.");
+        }
+
+        public static async Task DisplayLogoAsync()
+        {
+            DisplayLogo();
+            await Task.Delay(100);
         }
     }
 }

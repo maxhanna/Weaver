@@ -27,6 +27,7 @@ public class FrontendConfig
     public string defaultProject { get; set; } = "";
     public bool showTerminal { get; set; } = true;
     public bool showAI { get; set; } = true;
+    public bool showIDE { get; set; } = true;
     public bool showKanban { get; set; } = true;
     public bool showCalendar { get; set; } = false;
     public bool prByDefault { get; set; } = false;
