@@ -606,3 +606,46 @@ body.dragging-active .card:hover {
         display: none;
     }
 }
+
+.pr-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    background: rgba(124, 58, 237, 0.1);
+    color: var(--accent-2);
+    border: 1px solid rgba(124, 58, 237, 0.2);
+    user-select: none;
+}
+
+.pr-toggle input[type="checkbox"] {
+    margin: 0;
+    width: 12px;
+    height: 12px;
+    accent-color: var(--accent-2);
+}
+
+.pr-toggle:hover {
+    background: rgba(124, 58, 237, 0.2);
+}
+
+.tag-pr {
+    background: rgba(124, 58, 237, 0.15) !important;
+    color: var(--accent-2) !important;
+    border: 1px solid rgba(124, 58, 237, 0.25);
+    font-family: monospace;
+    font-size: 9px;
+}
+
+.tag-pr-url a {
+    color: var(--accent-2);
+    text-decoration: none;
+    font-size: 10px;
+}
+
+.tag-pr-url a:hover {
+    text-decoration: underline;
+}

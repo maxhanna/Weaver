@@ -7,6 +7,7 @@
   <title>Maestro — Agentic Kanban</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/kanban.css" />
+  <link rel="stylesheet" href="/calendar.css" />
   <link rel="stylesheet" href="/wireframe.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
@@ -58,10 +59,11 @@
   <main>
     <div class="wireframe-bg"></div>
     <div ng-include="'kanban.html'" ng-if="vm.showKanban"></div>
+    <div ng-include="'calendar.html'" ng-if="vm.showCalendar"></div>
 
 
     <!-- RIGHT PANEL: Agent + Terminal -->
-    <div class="right-panel" ng-class="{'full-width': !vm.showKanban}">
+    <div class="right-panel" ng-class="{'full-width': !vm.showKanban && !vm.showCalendar}">
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI <span class="mode-toggle" ng-click="vm.toggleChatMode()"
@@ -515,6 +517,16 @@
               <input type="checkbox" ng-model="vm.showKanban" /> Show Kanban board
             </label>
           </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.showCalendar" /> Show Calendar view
+            </label>
+          </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" ng-model="vm.prByDefault" /> PR enabled by default
+            </label>
+          </div>
         </details> 
         <details>
           <summary class="settings-header">Llama.cpp / Ollama URL</summary>
@@ -750,6 +762,7 @@
 
   <script src="/app.js"></script>
   <script src="/kanban.js"></script>
+  <script src="/calendar.js"></script>
   <script src="/voice-input.js"></script>
 </body>
 

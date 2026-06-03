@@ -88,7 +88,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           filePath: vm.selectedProject,
           createdAt: new Date().toISOString(),
           priority: 'medium',
-          attached: []
+          attached: [],
+          autoPr: vm.prByDefault !== false
         });
         vm.saveCards();
         $timeout(function () {

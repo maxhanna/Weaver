@@ -1,5 +1,5 @@
 ﻿angular.module('kanbanApp', [])
-  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin) {
+  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin) {
     const vm = this;
     const SETTINGS_KEY = 'maestroconfig.settings';
 
@@ -167,6 +167,7 @@
     vm.newProjectDescription = '';
     vm.llamaUrl = 'http://localhost:8080';
     vm.showKanban = true;
+    vm.showCalendar = false;
 
     // File picker
     vm.pickerCardId = null;
@@ -182,6 +183,7 @@
     vm.bughostedUsername = '';
     vm.bughostedPassword = '';
     vm.bughostedHeartbeatEnabled = false;
+    vm.prByDefault = false;
     vm.bughostedClientId = '';
     vm.bughostedStatus = 'disconnected';
     vm.bughostedTesting = false;
@@ -258,6 +260,8 @@
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
         cfg.showKanban = vm.showKanban !== false;
+        cfg.showCalendar = vm.showCalendar !== false;
+        cfg.prByDefault = vm.prByDefault !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
         cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
@@ -397,6 +401,8 @@
         if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
         if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
+        if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
+        if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
         vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
@@ -495,6 +501,8 @@ vm.changeProject = function () {
         cfg.showTerminal = vm.showTerminal !== false;
         cfg.showAI = vm.showAI !== false;
         cfg.showKanban = vm.showKanban !== false;
+        cfg.showCalendar = vm.showCalendar !== false;
+        cfg.prByDefault = vm.prByDefault !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
         cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
@@ -627,6 +635,7 @@ vm.changeProject = function () {
             showTerminal: vm.showTerminal,
             showAI: vm.showAI,
             showKanban: vm.showKanban,
+            showCalendar: vm.showCalendar,
             bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
             bughostedUsername: vm.bughostedUsername,
             bughostedPassword: vm.bughostedPassword
@@ -776,6 +785,8 @@ vm.changeProject = function () {
         if (cmd.params.showTerminal !== undefined) vm.showTerminal = cmd.params.showTerminal;
         if (cmd.params.showAI !== undefined) vm.showAI = cmd.params.showAI;
         if (cmd.params.showKanban !== undefined) vm.showKanban = cmd.params.showKanban;
+        if (cmd.params.showCalendar !== undefined) vm.showCalendar = cmd.params.showCalendar;
+        if (cmd.params.prByDefault !== undefined) vm.prByDefault = cmd.params.prByDefault;
         if (cmd.params.bughostedHeartbeatEnabled !== undefined) vm.bughostedHeartbeatEnabled = cmd.params.bughostedHeartbeatEnabled;
         if (cmd.params.bughostedUsername !== undefined) vm.bughostedUsername = cmd.params.bughostedUsername;
         if (cmd.params.bughostedPassword !== undefined) vm.bughostedPassword = cmd.params.bughostedPassword;
@@ -892,6 +903,9 @@ vm.changeProject = function () {
     // === Cards (managed by KanbanMixin) ===
     KanbanMixin.init(vm, $scope);
     vm.countArchivedCards();
+
+    // === Calendar (managed by CalendarMixin) ===
+    CalendarMixin.init(vm, $scope);
 
 
 
@@ -1237,299 +1251,331 @@ vm.changeProject = function () {
         delete card.confirmedContextFiles;
       }
 
-      // Reset
-      vm.agentResult = null;
-      vm.aiResponse = '';
-      vm.streamingThinking = '';
-      vm.streamingSummary = '';
-      vm.streamingPhase = '';
-      vm.streamingContextSize = 0;
-      vm.streamingSteps = [];
-      vm.streamingFilesEdited = [];
-      vm.planItems = [];
-      vm.agentActivityLog = [];
-      vm.activeStepIndex = null;
-      vm.lastPhaseLogged = '';
-      _lastLogKey = '';
-      vm.streamingActive = true;
-      pauseTerminalPolling();
-      pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
-      vm.activeCardText = card.text;
-      card._lastRunText = card.text;
+      function startAgent() {
+        // Reset
+        vm.agentResult = null;
+        vm.aiResponse = '';
+        vm.streamingThinking = '';
+        vm.streamingSummary = '';
+        vm.streamingPhase = '';
+        vm.streamingContextSize = 0;
+        vm.streamingSteps = [];
+        vm.streamingFilesEdited = [];
+        vm.planItems = [];
+        vm.agentActivityLog = [];
+        vm.activeStepIndex = null;
+        vm.lastPhaseLogged = '';
+        _lastLogKey = '';
+        vm.streamingActive = true;
+        pauseTerminalPolling();
+        pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
+        vm.activeCardText = card.text;
+        card._lastRunText = card.text;
 
-      var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-      var payload = {
-        prompt: card.text,
-        project: proj,
-        files: files,
-        maxIterations: 5,
-        maxStepsPerBatch: 8,
-        steeringContext: vm.steeringContext || ''
-      };
+        var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
+        var payload = {
+          prompt: card.text,
+          project: proj,
+          files: files,
+          maxIterations: 5,
+          maxStepsPerBatch: 8,
+          steeringContext: vm.steeringContext || ''
+        };
 
-      // Move to Doing
-      vm.moveCardToDoing(card.id);
+        // Move to Doing
+        vm.moveCardToDoing(card.id);
 
-      vm.activeCardId = card.id;
-      if (!vm.activeCardIds) {
-        vm.activeCardIds = new Set();
-      }
-      vm.activeCardIds.add(card.id);
-
-      vm.abortController = new AbortController();
-
-      fetch('/api/agent/execute-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: vm.abortController.signal
-      }).then(function (response) {
-        if (!response.ok) {
-          vm.streamingActive = false;
-          resumeTerminalPolling();
-          vm.agentResult = { error: 'Server error: ' + response.status };
-          $scope.$applyAsync();
-          return;
+        vm.activeCardId = card.id;
+        if (!vm.activeCardIds) {
+          vm.activeCardIds = new Set();
         }
-        var reader = response.body.getReader();
-        var decoder = new TextDecoder();
-        var buffer = '';
+        vm.activeCardIds.add(card.id);
 
-        function readNext() {
-          reader.read().then(function (result) {
-            if (result.done) {
-              vm.streamingActive = false;
-              resumeTerminalPolling();
-              try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
-              return;
-            }
-            buffer += decoder.decode(result.value, { stream: true });
-            var parts = buffer.split('\n\n');
-            buffer = parts.pop();
+        vm.abortController = new AbortController();
 
-            for (var p = 0; p < parts.length; p++) {
-              var block = parts[p];
-              var lines = block.split('\n');
-              var eventName = '';
-              var data = '';
+        fetch('/api/agent/execute-stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: vm.abortController.signal
+        }).then(function (response) {
+          if (!response.ok) {
+            vm.streamingActive = false;
+            resumeTerminalPolling();
+            vm.agentResult = { error: 'Server error: ' + response.status };
+            $scope.$applyAsync();
+            return;
+          }
+          var reader = response.body.getReader();
+          var decoder = new TextDecoder();
+          var buffer = '';
 
-              // IMPROVED: only the FIRST "event:" line wins; multiple "data:" lines are
-              // joined with \n as the SSE spec requires (RFC 8895 §9.2.6).
-              var eventLineFound = false;
-              for (var l = 0; l < lines.length; l++) {
-                var line = lines[l];
-                if (!eventLineFound && line.startsWith('event: ')) {
-                  eventName = line.substring(7).trim();
-                  eventLineFound = true;
-                } else if (line.startsWith('data: ')) {
-                  data = data ? data + '\n' + line.substring(6) : line.substring(6);
-                }
+          function readNext() {
+            reader.read().then(function (result) {
+              if (result.done) {
+                vm.streamingActive = false;
+                resumeTerminalPolling();
+                try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
+                return;
               }
-              // Trim trailing whitespace that creeps in from CRLF-terminated streams.
-              data = data.trimEnd ? data.trimEnd() : data.replace(/\s+$/, '');
+              buffer += decoder.decode(result.value, { stream: true });
+              var parts = buffer.split('\n\n');
+              buffer = parts.pop();
 
-              if (eventName) {
-                var parsed = null;
-                try { parsed = JSON.parse(data); } catch (e) {
-                  // Only log unparseable data for non-trivial payloads
-                  if (data && data.length > 2) {
-                    console.warn('[SSE] Failed to parse data for event "' + eventName + '":', data.slice(0, 120));
+              for (var p = 0; p < parts.length; p++) {
+                var block = parts[p];
+                var lines = block.split('\n');
+                var eventName = '';
+                var data = '';
+
+                var eventLineFound = false;
+                for (var l = 0; l < lines.length; l++) {
+                  var line = lines[l];
+                  if (!eventLineFound && line.startsWith('event: ')) {
+                    eventName = line.slice(7).trim();
+                    eventLineFound = true;
+                  } else if (line.startsWith('data: ')) {
+                    if (data) data += '\n';
+                    data += line.slice(6);
                   }
                 }
 
-                switch (eventName) {
-                  case 'log':
-                    if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
-                    break;
-                  case 'phase':
-                    if (parsed && parsed.message) {
-                      vm.streamingPhase = parsed.message;
-                      if (parsed.message !== vm.lastPhaseLogged) {
-                        vm.lastPhaseLogged = parsed.message;
-                        pushAgentLog('phase', parsed.message);
-                      }
-                    } else if (parsed && parsed.phase) {
-                      vm.streamingPhase = parsed.phase;
-                    }
-                    if (parsed && parsed.contextSize) {vm.streamingContextSize = parsed.contextSize;}
-                    break;
-                  case 'status':
-                    if (parsed && parsed.message) vm.streamingPhase = parsed.message;
-                    break;
-                  case 'thinking':
-                    if (parsed && parsed.text) {
-                      vm.streamingThinking = parsed.text;
-                      pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
-                    }
-                    break;
-                  case 'summary':
-                    if (parsed && parsed.text) {
-                      vm.streamingSummary = parsed.text;
-                      pushAgentLog('summary', parsed.text);
-                    }
-                    break;
+                data = data.trimEnd ? data.trimEnd() : data.replace(/\s+$/, '');
 
-                  case 'plan':
-                    if (parsed && parsed.items && parsed.items.length) {
-                      vm.planItems = parsed.items.map(function (item, i) {
-                        return {
-                          index: i,
-                          file: item.File || item.file || '?',
-                          change: item.Change || item.change || '',
-                          priority: item.Priority || item.priority || i + 1,
-                          done: false
-                        };
-                      });
-                      // Show the plan summary immediately if available
-                      if (parsed.summary) {
-                        pushAgentLog('info', '📋 Plan: ' + parsed.summary,
-                          { itemCount: parsed.items.length, score: parsed.score });
+                if (eventName) {
+                  var parsed = null;
+                  try { parsed = JSON.parse(data); } catch (e) {
+                    if (data && data.length > 2) {
+                      console.warn('[SSE] Failed to parse data for event "' + eventName + '":', data.slice(0, 120));
+                    }
+                  }
+
+                  switch (eventName) {
+                    case 'log':
+                      if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
+                      break;
+                    case 'phase':
+                      if (parsed && parsed.message) {
+                        vm.streamingPhase = parsed.message;
+                        if (parsed.message !== vm.lastPhaseLogged) {
+                          vm.lastPhaseLogged = parsed.message;
+                          pushAgentLog('phase', parsed.message);
+                        }
+                      } else if (parsed && parsed.phase) {
+                        vm.streamingPhase = parsed.phase;
                       }
-                    } else if (parsed && parsed.score !== undefined) {
-                      // Plan object arrived but with no items — likely a failed parse on the backend
-                      pushAgentLog('warn',
-                        'Plan returned score ' + parsed.score + '/100 but has no items — check logs',
-                        parsed);
-                    }
-                    break; 
-                  case 'show':
-                    if (parsed && parsed.text) {
-                      vm.aiResponse = parsed.text;
-                      pushAgentLog('info', '📄 ' + parsed.text);
-                    }
-                    break;
-                  case 'clarification':
-                    if (parsed && parsed.question) {
-                      vm.aiResponse = parsed.question;
-                      pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
-                    }
-                    break;
-                  case 'step':
-                    if (parsed) {
-                      upsertStreamingStep(parsed);
-                      reconcilePlanItems();
-                      if (parsed.status === 'running') {
-                        pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
-                      } else if (parsed.status === 'error') {
-                        pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
+                      if (parsed && parsed.contextSize) {vm.streamingContextSize = parsed.contextSize;}
+                      break;
+                    case 'status':
+                      if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                      break;
+                    case 'thinking':
+                      if (parsed && parsed.text) {
+                        vm.streamingThinking = parsed.text;
+                        pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
                       }
-                    }
-                    break;
-                  case 'context-review':
-                    try {
-                      if (parsed && parsed.id && parsed.files) {
-                        const ctx = parsed;
-                        ctx.files.forEach(function (f) { f.keep = true; });
-                        vm.pendingContextReview = ctx;
-                        vm._contextReviewSubmitted = false;
-                        vm.contextReviewCountdown = 5;
-                        pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
-                        if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
-                        if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); }
-                        // Countdown display only
-                        vm.contextReviewTimer = $interval(function () {
-                          vm.contextReviewCountdown--;
-                          if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
-                        }, 1000, 5, false);
-                        // Auto-confirm once after 5s (doesn't get stuck on HTTP failure)
-                        vm.contextReviewAutoConfirm = $timeout(function () {
-                          if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
-                            vm.confirmContextReview();
+                      break;
+                    case 'summary':
+                      if (parsed && parsed.text) {
+                        vm.streamingSummary = parsed.text;
+                        pushAgentLog('summary', parsed.text);
+                      }
+                      break;
+                    case 'plan':
+                      if (parsed && parsed.items && parsed.items.length) {
+                        vm.planItems = parsed.items.map(function (item, i) {
+                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false };
+                        });
+                        if (parsed.summary) {
+                          pushAgentLog('info', '📋 Plan: ' + parsed.summary, { itemCount: parsed.items.length, score: parsed.score });
+                        }
+                      } else if (parsed && parsed.score !== undefined) {
+                        pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);
+                      }
+                      break;
+                    case 'show':
+                      if (parsed && parsed.text) {
+                        vm.aiResponse = parsed.text;
+                        pushAgentLog('info', '📄 ' + parsed.text);
+                      }
+                      break;
+                    case 'clarification':
+                      if (parsed && parsed.question) {
+                        vm.aiResponse = parsed.question;
+                        pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
+                      }
+                      break;
+                    case 'step':
+                      if (parsed) {
+                        upsertStreamingStep(parsed);
+                        reconcilePlanItems();
+                        if (parsed.status === 'running') {
+                          pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
+                        } else if (parsed.status === 'error') {
+                          pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
+                        }
+                      }
+                      break;
+                    case 'context-review':
+                      try {
+                        if (parsed && parsed.id && parsed.files) {
+                          const ctx = parsed;
+                          ctx.files.forEach(function (f) { f.keep = true; });
+                          vm.pendingContextReview = ctx;
+                          vm._contextReviewSubmitted = false;
+                          vm.contextReviewCountdown = 5;
+                          pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
+                          if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
+                          if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); }
+                          vm.contextReviewTimer = $interval(function () {
+                            vm.contextReviewCountdown--;
+                            if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
+                          }, 1000, 5, false);
+                          vm.contextReviewAutoConfirm = $timeout(function () {
+                            if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
+                              vm.confirmContextReview();
+                            }
+                          }, 5000);
+                        }
+                      } catch (e) {
+                        pushAgentLog('error', 'Context review error: ' + (e.message || e));
+                      }
+                      break;
+                    case 'done':
+                      vm.streamingActive = false;
+                      resumeTerminalPolling();
+                      vm.steeringContext = '';
+                      var editsApplied = parsed && parsed.editsApplied;
+                      var incomplete = parsed && parsed.incomplete;
+                      if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
+                      pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
+                        { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
+                      var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
+                      var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
+                      var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                      if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
+                        vm.streamingFilesEdited = parsed.filesEdited;
+                      } else {
+                        refreshFilesEditedFromSteps();
+                      }
+                      vm.agentResult = {
+                        summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited,
+                        steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning,
+                        incomplete: incomplete, needsClarification: parsed && parsed.needsClarification,
+                        question: parsed && (parsed.question || parsed.warning || finalSummary)
+                      };
+                      vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
+                      var analysis = {
+                        summary: finalSummary, thinking: finalThinking, steps: finalSteps,
+                        filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems),
+                        warning: parsed && parsed.warning, incomplete: incomplete,
+                        needsClarification: parsed && parsed.needsClarification,
+                        question: parsed && (parsed.question || parsed.warning || finalSummary)
+                      };
+                      var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
+                      if (doIdx !== -1) {
+                        vm.state.doing[doIdx].agentAnalysis = analysis;
+                        vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
+                      }
+
+                      function finishCard() {
+                        if (!incomplete) {
+                          vm.moveCardToDone(card.id);
+                        }
+                        if (vm.autoQueue) {
+                          $timeout(function () { vm.processQueue(); }, 500);
+                        }
+                      }
+
+                      if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
+                        card.prStatus.status = 'creating-pr';
+                        pushAgentLog('info', 'Creating PR for branch ' + card.prStatus.branch + '...');
+                        $http.post('/api/pr/finish', {
+                          projectPath: proj,
+                          cardId: card.id,
+                          cardText: card.text,
+                          branchName: card.prStatus.branch,
+                          summary: finalSummary,
+                          originalBranch: card.prStatus.originalBranch
+                        }).then(function (prResp) {
+                          var prData = prResp.data;
+                          if (prData && prData.success) {
+                            card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prData.prUrl };
+                            pushAgentLog('info', 'PR created: ' + (prData.prUrl || 'Check your repository'));
+                          } else {
+                            card.prStatus = { status: 'error', error: (prData && prData.error) || 'PR creation failed', branch: card.prStatus.branch };
+                            pushAgentLog('warn', 'PR creation: ' + card.prStatus.error);
                           }
-                        }, 5000);
+                          finishCard();
+                        }, function (err) {
+                          card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch };
+                          pushAgentLog('warn', 'PR creation failed: ' + card.prStatus.error);
+                          finishCard();
+                        });
+                      } else {
+                        if (incomplete) {
+                          pushAgentLog('warn', 'Card kept in Doing — no files were modified');
+                        }
+                        finishCard();
                       }
-                    } catch (e) {
-                      pushAgentLog('error', 'Context review error: ' + (e.message || e));
-                    }
-                    break;
-                  case 'done':
-                    vm.streamingActive = false;
-                    resumeTerminalPolling();
-                    vm.steeringContext = '';
-                    var editsApplied = parsed && parsed.editsApplied;
-                    var incomplete = parsed && parsed.incomplete;
-                    if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
-                    pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
-                      { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
-                    var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
-                    var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
-                    var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                    if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
-                      vm.streamingFilesEdited = parsed.filesEdited;
-                    } else {
-                      refreshFilesEditedFromSteps();
-                    }
-                    vm.agentResult = {
-                      summary: finalSummary,
-                      thinking: finalThinking,
-                      filesEdited: vm.streamingFilesEdited,
-                      steps: finalSteps,
-                      planItems: angular.copy(vm.planItems),
-                      warning: parsed && parsed.warning,
-                      incomplete: incomplete,
-                      needsClarification: parsed && parsed.needsClarification,
-                      question: parsed && (parsed.question || parsed.warning || finalSummary)
-                    };
-                    vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
-                    var analysis = {
-                      summary: finalSummary,
-                      thinking: finalThinking,
-                      steps: finalSteps,
-                      filesEdited: vm.streamingFilesEdited,
-                      planItems: angular.copy(vm.planItems),
-                      warning: parsed && parsed.warning,
-                      incomplete: incomplete,
-                      needsClarification: parsed && parsed.needsClarification,
-                      question: parsed && (parsed.question || parsed.warning || finalSummary)
-                    };
-                    var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
-                    if (doIdx !== -1) {
-                      vm.state.doing[doIdx].agentAnalysis = analysis;
-                      vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
-                    }
-                    if (incomplete) {
-                      pushAgentLog('warn', 'Card kept in Doing — no files were modified');
-                    } else {
-                      vm.moveCardToDone(card.id);
-                    }
-                    // Auto-queue next
-                    if (vm.autoQueue) {
-                      $timeout(function () { vm.processQueue(); }, 500);
-                    }
-                    break;
-                  case 'error':
-                    vm.streamingActive = false;
-                    resumeTerminalPolling();
-                    pushAgentLog('error', parsed ? parsed.message : data);
-                    vm.agentResult = { error: parsed ? parsed.message : data };
-                    vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
-                    break;
+                      break;
+                    case 'error':
+                      vm.streamingActive = false;
+                      resumeTerminalPolling();
+                      pushAgentLog('error', parsed ? parsed.message : data);
+                      vm.agentResult = { error: parsed ? parsed.message : data };
+                      vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
+                      break;
+                  }
                 }
               }
-            }
-            try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
-            readNext();
-            }).catch(function (readErr) {
-            if (readErr && readErr.name === 'AbortError') return;
-            vm.streamingActive = false;
-            resumeTerminalPolling();
-            vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
-            try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
-          });
-        }
-        readNext();
+              try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
+              readNext();
+              }).catch(function (readErr) {
+              if (readErr && readErr.name === 'AbortError') return;
+              vm.streamingActive = false;
+              resumeTerminalPolling();
+              vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
+              try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
+            });
+          }
+          readNext();
 
-      }).catch(function (err) {
-        vm.streamingActive = false;
-        resumeTerminalPolling();
-        vm.abortController = null;
-        if (err.name === 'AbortError') {
-          vm.agentResult = { warning: 'Agent stopped by user.' };
-        } else {
-          vm.agentResult = { error: 'Connection failed: ' + err.message };
-        }
-        $scope.$applyAsync();
-      });
+        }).catch(function (err) {
+          vm.streamingActive = false;
+          resumeTerminalPolling();
+          vm.abortController = null;
+          if (err.name === 'AbortError') {
+            vm.agentResult = { warning: 'Agent stopped by user.' };
+          } else {
+            vm.agentResult = { error: 'Connection failed: ' + err.message };
+          }
+          $scope.$applyAsync();
+        });
+      }
+
+      // PR: create branch before starting agent
+      if (card.autoPr && proj) {
+        pushAgentLog('info', 'Creating PR branch...');
+        $http.post('/api/pr/start', { projectPath: proj, cardId: card.id, cardText: card.text })
+          .then(function (resp) {
+            var d = resp.data;
+            if (d && d.success) {
+              card.prStatus = { status: 'branch-created', branch: d.branchName, originalBranch: d.originalBranch };
+              pushAgentLog('info', 'PR branch: ' + card.prStatus.branch);
+            } else {
+              card.prStatus = { status: 'error', error: (d && d.error) || 'Branch creation failed' };
+              pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
+            }
+            startAgent();
+          }, function (err) {
+            card.prStatus = { status: 'error', error: err.statusText || 'Network error' };
+            pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
+            startAgent();
+          });
+      } else {
+        startAgent();
+      }
     };
 
     // === AI Chat ===

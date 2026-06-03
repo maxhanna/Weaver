@@ -9,6 +9,8 @@ builder.Services.AddSingleton<EmailService>();
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
 builder.Services.AddSingleton(new MaestroBackend.Services.BoardDataService(basePath));
+builder.Services.AddSingleton(new CalendarService(basePath));
+builder.Services.AddSingleton<GitService>();
 
 builder.Services.AddHttpClient("llama", client =>
 {
