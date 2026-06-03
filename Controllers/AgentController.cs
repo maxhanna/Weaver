@@ -1255,8 +1255,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - NEVER use mkdir, curl, wget, jq, python, Set-Location, cd, or bash syntax — they do NOT work here");
         conversation.AppendLine("  - If a command shows ⚠ Error:, read it and try a DIFFERENT command");
         conversation.AppendLine("  - web_search uses DuckDuckGo — if it returns empty, try web_fetch with a direct API URL");
-        conversation.AppendLine("  - PLAN before you act. Decide which commands to run and in what order before outputting JSON.");
-        conversation.AppendLine("  - HUMAN-READABLE FIRST: When fetching data from an API or scraping, FIRST create a compact HTML summary with a table/list of all results, THEN save individual files if needed. The HTML file is the priority — it should be created early so the user can see data even if later steps fail.");
         conversation.AppendLine("  - AVOID LARGE LOOPS: Never loop over more than 30 items in a single command. If you need to process more, batch them: do 30, report progress, then continue. Large loops will timeout.");
         conversation.AppendLine("  - Write all files directly to the target path. Never create folders or extra files unless the user explicitly asks for them.");
         conversation.AppendLine("  - Complete the task as fast as possible — stop as soon as the user's request is fulfilled.");

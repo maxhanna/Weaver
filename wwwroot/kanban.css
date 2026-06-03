@@ -638,6 +638,8 @@ body.dragging-active .card:hover {
     border: 1px solid rgba(124, 58, 237, 0.25);
     font-family: monospace;
     font-size: 9px;
+    /* Improve contrast on blue card backgrounds */
+    text-shadow: 0 0 1px rgba(0, 0, 0, 0.5);
 }
 
 .tag-pr-url a {
