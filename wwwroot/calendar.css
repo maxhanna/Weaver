@@ -159,6 +159,19 @@
   min-width: 0;
 }
 
+.cal-card-project {
+  font-size: 8px;
+  opacity: 0.5;
+  flex-shrink: 0;
+  padding: 0 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  max-width: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cal-card-time {
   font-size: 9px;
   opacity: 0.6;

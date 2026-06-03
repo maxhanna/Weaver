@@ -69,6 +69,9 @@ public class ConfigFileService
         if (string.IsNullOrEmpty(plaintext)) return plaintext;
         // Don't double-encrypt
         if (plaintext.StartsWith(EncryptedPrefix, StringComparison.Ordinal)) return plaintext;
+        if (!OperatingSystem.IsWindows())
+            return plaintext;
+
         try
         {
             var plainBytes = Encoding.UTF8.GetBytes(plaintext);
@@ -77,19 +80,18 @@ public class ConfigFileService
         }
         catch
         {
-            // If DPAPI fails (e.g. not on Windows), store as plaintext fallback
+            // If DPAPI fails, store as plaintext fallback
             return plaintext;
         }
     }
 
-    /// <summary>
-    /// Decrypts a password string that was encrypted with EncryptPassword.
-    /// If the value doesn't have the expected prefix, returns it as-is (plaintext fallback).
-    /// </summary>
     private static string? DecryptPassword(string? encrypted)
     {
         if (string.IsNullOrEmpty(encrypted)) return encrypted;
         if (!encrypted.StartsWith(EncryptedPrefix, StringComparison.Ordinal)) return encrypted;
+        if (!OperatingSystem.IsWindows())
+            return encrypted;
+
         try
         {
             var b64 = encrypted[EncryptedPrefix.Length..];
@@ -133,8 +135,7 @@ public class ConfigFileService
         try
         {
             var text = await System.IO.File.ReadAllTextAsync(_configPath);
-            cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            cfg ??= new FrontendConfig();
+            cfg = JsonSerializer.Deserialize<FrontendConfig>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new FrontendConfig();
 
             // Migration: populate emailAccounts from legacy single-account fields
             if (cfg.emailAccounts.Count == 0 &&

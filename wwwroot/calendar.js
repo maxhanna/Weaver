@@ -33,22 +33,33 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
           if (c.date && typeof c.date === 'object' && typeof c.date.getFullYear === 'function') {
             c.date = localDateStr(c.date);
           } else {
-            c.date = c.date ? String(c.date).slice(0, 10) : '';
+            c.date = c.date ? localDateStr(new Date(c.date)) : '';
           }
         }
         if (typeof c.time !== 'string' || c.time.length > 5) {
           if (c.time && typeof c.time === 'object' && typeof c.time.getHours === 'function') {
-            var h = String(c.time.getHours()).padStart(2, '0');
-            var m = String(c.time.getMinutes()).padStart(2, '0');
-            c.time = h + ':' + m;
+            c.time = pad2(c.time.getHours()) + ':' + pad2(c.time.getMinutes());
           } else if (c.time && String(c.time).length > 10) {
-            c.time = String(c.time).slice(11, 16);
+            var t = new Date(c.time);
+            c.time = pad2(t.getHours()) + ':' + pad2(t.getMinutes());
           } else {
             c.time = '';
           }
         }
         return c;
       }
+      function pad2(n) { return String(n).padStart(2, '0'); }
+
+      vm.projectName = function (path) {
+        if (!path) return '';
+        if (vm.projects) {
+          for (var pi = 0; pi < vm.projects.length; pi++) {
+            var p = vm.projects[pi];
+            if ((p.Path || p.path) === path) return p.Name || p.name || path;
+          }
+        }
+        return path.split(/[\/\\]/).pop() || path;
+      };
 
       vm.loadCalendarCards = function () {
         $http.get('/api/calendar/load').then(function (resp) {

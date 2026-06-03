@@ -25,6 +25,7 @@
              ng-click="vm.calEditCard(card, $event)"
              ng-class="'cal-card-' + (card.priority || 'default')">
           <div class="cal-card-text">{{card.text | limitTo:40}}</div>
+          <span class="cal-card-project" ng-if="card.project" title="{{card.project}}">{{vm.projectName(card.project)}}</span>
           <span class="cal-card-time" ng-if="card.time">@{{card.time}}</span>
           <span class="cal-card-cron" ng-if="card.cronExpression" title="Cron: {{card.cronExpression}}">&#9201;</span>
           <span class="cal-card-del" ng-click="vm.calDeleteCard(card, $event)">&times;</span>
@@ -52,6 +53,13 @@
         <div class="form-row">
           <label>Task</label>
           <textarea ng-model="vm.calEditCardData.text" rows="3" placeholder="Describe the task..."></textarea>
+        </div>
+        <div class="form-row">
+          <label>Project</label>
+          <select ng-model="vm.calEditCardData.project">
+            <option value="">— No project —</option>
+            <option ng-repeat="p in vm.projects" value="{{p.Path || p.path}}">{{p.Name || p.name}}</option>
+          </select>
         </div>
         <div class="form-row">
           <label>Priority</label>

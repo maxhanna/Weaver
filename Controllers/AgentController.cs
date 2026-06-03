@@ -2438,7 +2438,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     {
                         // Replace the rest of the plan with freshly anchored steps
                         planItems = planItems.Take(itemIdx + 1).Concat(newSteps).ToList();
-                        discoveryContext = discoveryContext; // already enriched inside CheckpointReplan
                         await EmitLog(emitSse, "info",
                             $"Checkpoint replan: {newSteps.Count} new step(s)", ct: ct);
                         if (emitSse)
