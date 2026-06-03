@@ -59,7 +59,6 @@
   <main>
     <div class="wireframe-bg"></div>
     <div ng-include="'kanban.html'" ng-if="vm.showKanban"></div>
-    <div ng-include="'calendar.html'" ng-if="vm.showCalendar"></div>
 
 
     <!-- RIGHT PANEL: Agent + Terminal -->
@@ -169,10 +168,10 @@
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
-                  <details ng-if="e.detail" class="log-detail">
+                  <details ng-if="e.detail" class="log-detail" ng-style="{'font-size': vm.logFontSize + 'px'}">
                     <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
                         style="font-weight:600;color:var(--error);">!</span></summary>
-                    <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
+                    <pre class="log-detail-raw" ng-style="{'font-size': vm.logFontSize + 'px'}">{{vm.formatLogDetail(e.detail)}}</pre>
                     <div ng-if="e.detail.diagnosis" class="log-diagnosis">
                       <div ng-if="e.detail.diagnosis.hasUnquotedKeyNewString" class="log-diag-hint error">Missing
                         opening quote on "newString" key</div>
@@ -346,6 +345,8 @@
           </div>
         </div>
       </div>
+
+      <div ng-include="'calendar.html'" ng-if="vm.showCalendar"></div>
     </div>
   </main>
 
@@ -365,7 +366,7 @@
           <span>{{vm.isSearchResult ? '🔍 Search results' : (vm.pickerPath || '/')}}</span>
           <button class="small" ng-click="vm.clearSearch()" ng-if="vm.searchFilter" style="margin-left:auto;">✕ Clear</button>
         </div>
-        <input type="text" ng-model="vm.searchFilter" placeholder="Search files..." class="search-input" ng-change="vm.onSearchChange()" />
+        <input type="text" ng-model="vm.searchFilter" id="attachFilePickerSearchInput" placeholder="Search files..." class="search-input" ng-change="vm.onSearchChange()" />
         <div class="file-picker-list">
           <div class="entry dir" ng-repeat="e in vm.pickerEntries" ng-if="e.isDirectory"
             ng-click="vm.pickerEnterDir(e.path)">

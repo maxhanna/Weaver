@@ -36,8 +36,8 @@
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create PR on completion">
-              <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> PR
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create A Branch then PR on completion">
+              <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
           </div>
             <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">

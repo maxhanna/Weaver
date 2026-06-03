@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $timeout) {
   function uid() { return Math.random().toString(36).slice(2, 9); }
@@ -162,9 +162,10 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
       };
 
       vm.calAddCard = function () {
+        var now = new Date();
         vm.calEditCardData = {
           id: null,
-          date: localDateStr(new Date()),
+          date: localDateStr(now),
           time: '',
           text: '',
           priority: 'medium',

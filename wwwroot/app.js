@@ -157,7 +157,7 @@
     };
 
     // Project UI
-    vm.showProjectOptions = false;
+    vm.showProjectOptions = false; 
     vm.showEditProjectsPanel = false;
     vm.showSettingsPanel = false;
     vm.showDiscordPanel = false;
@@ -167,16 +167,12 @@
     vm.newProjectDescription = '';
     vm.llamaUrl = 'http://localhost:8080';
     vm.showKanban = true;
-    vm.showCalendar = false;
-
-    // File picker
+    vm.showCalendar = false;    
     vm.pickerCardId = null;
     vm.pickerPath = '';
     vm.pickerEntries = [];
     vm.pickerSelected = [];
-    vm.isSearchResult = false;
-
-    // Settings
+    vm.isSearchResult = false;  
     vm.settingsDefaultProject = '';
     vm.fileHintsData = [];
     vm.emailAccounts = [];
@@ -1140,24 +1136,12 @@ vm.changeProject = function () {
     vm.attachFile = function (cardId) {
       vm.pickerCardId = cardId;
       vm.pickerPath = '';
-      vm.pickerSelected = [];
-      // Check if the card already has attached files and pre-select them
-      ['todo', 'doing', 'done'].forEach(function (col) {
-        var cards = vm.state[col];
-        for (var i = 0; i < cards.length; i++) {
-          if (cards[i].id === cardId) {
-            var attached = cards[i].attached;
-            if (attached && Array.isArray(attached)) {
-              vm.pickerSelected = attached.slice(); // Create a copy to avoid reference issues
-            } else if (attached) {
-              vm.pickerSelected = [attached]; // Convert single string to array
-            }
-            break;
-          }
-        }
-      });
-      vm.showFilePicker = true;
-      vm.loadPickerEntries();
+      vm.pickerSelected = []; 
+      vm.openFilePicker(cardId, '');
+      
+      $timeout(function () {
+        vm.loadPickerEntries(cardId);  
+      }, 30);
     };
 
     vm.closeFilePicker = function () {
@@ -1170,7 +1154,23 @@ vm.changeProject = function () {
       vm.searchFilter = '';
     };
 
-    vm.loadPickerEntries = function () {
+    vm.openFilePicker = function (cardId, path) {
+      vm.showFilePicker = true;
+      vm.pickerCardId = cardId;
+      vm.pickerPath = path;
+      vm.pickerEntries = [];
+      vm.pickerSelected = [];
+      vm.isSearchResult = false;
+      vm.searchFilter = '';
+      $timeout(function () {
+        var searchInput = document.getElementById('attachFilePickerSearchInput');
+        if (searchInput) {
+          searchInput.focus();
+        }
+      }, 10);
+    };
+
+    vm.loadPickerEntries = function (cardId) {
       var params = { project: vm.selectedProject };
       if (vm.searchFilter && vm.searchFilter.trim()) {
         params.search = vm.searchFilter.trim();

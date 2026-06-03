@@ -150,25 +150,34 @@ public class AgentController : ControllerBase
 11.SELF - STOP — If the existing code already satisfies the requirement, emit a single
    _done step. Never fabricate phantom edits.
 12. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases
-    with _checkpoint between them. Each phase must produce a verifiable partial result.
+    with _checkpoint between them. Each phase must produce a verifiable partial result."
 
-### FILE EDIT RULES ###
-  -For each file, specify EXACT changes with line numbers or function/class names.
-  - 'oldString': the EXACT existing code to replace (1-5 lines, must literally appear in the file)
-  - 'newString': the replacement code
-  - Prefer MANY small edits over one large edit.
-  - Preserve exact indentation in both oldString and newString. The end result must fit seamlessly into the existing code with no indentation changes needed beyond what you provide.
-  - Escape newlines as \\n, but do not change indentation or spacing in oldString or newString.
-  - Double-check spelling and whitespace in oldString. It has to match exactly whats in the file.
-  - oldString must be MAXIMUM 50 characters of existing code copied verbatim from the file.
-  - newString must be MAXIMUM 50 characters of the replacement code, exactly as it should appear in the file after the edit. We need to create many small edits rather then 1 large edit.
-  - oldString must never be blank for an existing file edit. For insertions, use an existing anchor as oldString and include that same anchor plus inserted code in newString.
-  - For brand-new files, use _create_file instead of a relative/path.ext edit.
-  - oldString must never contain new code.
-  - CRITICAL: oldString and newString MUST NOT MATCH. If you need to add code that was not there previously, you can use oldString as an anchor point and add new code above, below, or inline, but oldString itself must be unchanged from the file. This allows the system to find the exact location to apply the edit.
-  - CRITICAL: Prefer MANY small targeted atomic edits over one large edit. Add more edits if needed to cover the change. Make code edits as small as possible 1-5 lines MAX.
++ @"### FILE EDIT RULES ###
+EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
+  - oldString targets ONLY the line(s) that change. Hard limit: 5 lines OR 250 chars.
+  - If a 30-line function has one line changing, oldString = that one line only.
+  - newString is the replacement. Same 5-line / 250-char limit.
+  - Never reproduce unchanged surrounding code in oldString.
 
-### EXAMPLE OUTPUT — respond with ONLY this type of JSON structure, no markdown, no extra text ###
+CORRECT (small unique anchor):
+  { ""file"": ""path.cs"", ""oldString"": ""return total;"", ""newString"": ""return total * taxRate;"" }
+
+WRONG (large block where only one value changes — will be REJECTED):
+  { ""oldString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total;"",
+    ""newString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total * taxRate;"" }
+
+SPLIT RULE: one file change = one step. Two separate change sites in the same file = two steps.
+  Never expand oldString to cover multiple change sites — emit multiple steps instead.
+
+For insertions: use an existing adjacent line as oldString anchor and include it unchanged in newString:
+  { ""oldString"": ""var config = Load();"", ""newString"": ""var config = Load();\nValidate(config);"" }
+
+- oldString must appear verbatim in the file (exact whitespace, exact indentation)
+- oldString must never be blank for an existing file edit
+- oldString and newString must NOT be identical
+- For brand-new files use _create_file, not a file edit"
+
++ @"### EXAMPLE OUTPUT — respond with ONLY this type of JSON structure, no markdown, no extra text ###
 {
   ""thinking"": ""<analyze the task; name files; state if commands or web searches are needed first>"",
   ""summary"":  ""<one sentence: what the completed plan will accomplish>"",
@@ -278,6 +287,17 @@ public class AgentController : ControllerBase
             await EmitLog(emitSse, "error", "Failed to parse plan.", cleanedRaw, ct: ct);
             return (null, "Failed to parse as valid JSON. Raw output contained no parseable plan block.");
         }
+        var sizeViolations = GetPlanSizeViolations(parsedPlan);
+        if (sizeViolations.Count > 0)
+        {
+            var penalty = Math.Min(sizeViolations.Count * 15, 45);
+            parsedPlan.Score = Math.Max(0, parsedPlan.Score - penalty);
+            // Embed violations in summary so BuildScoreRetryPrompt can surface them
+            parsedPlan.Summary += "\n⚠ SIZE_VIOLATIONS:\n" +
+                string.Join("\n", sizeViolations.Select(v => "  • " + v));
+            await EmitLog(emitSse, "warn",
+                $"Plan has {sizeViolations.Count} oversized edit(s) — score reduced to {parsedPlan.Score}", ct: ct);
+        }
         return (parsedPlan, null);
     }
 
@@ -288,12 +308,37 @@ public class AgentController : ControllerBase
         sb.AppendLine("## ORIGINAL TASK");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
+        
         if (!string.IsNullOrWhiteSpace(steeringContext))
         {
             sb.AppendLine("## USER STEERING INSTRUCTION");
             sb.AppendLine(steeringContext);
             sb.AppendLine();
         }
+
+        var allViolations = history
+            .SelectMany((h, i) => h.summary.Split('\n')
+                .Where(l => l.TrimStart().StartsWith("• "))
+                .Select(v => $"Attempt {i + 1}: {v.Trim()}"))
+            .ToList();
+
+        if (allViolations.Count > 0)
+        {
+            sb.AppendLine("### ⚠ EDIT SIZE FAILURES — fix these before anything else");
+            sb.AppendLine();
+            sb.AppendLine("WRONG — large anchor wrapping an unchanged block:");
+            sb.AppendLine("  oldString: \"void Render() {\\n  Setup();\\n  Draw();\\n  return;\\n}\"");
+            sb.AppendLine("  newString: \"void Render() {\\n  Setup();\\n  Draw();\\n  Flush();\\n  return;\\n}\"");
+            sb.AppendLine();
+            sb.AppendLine("CORRECT — anchor is only the line(s) that change:");
+            sb.AppendLine("  oldString: \"  return;\"");
+            sb.AppendLine("  newString: \"  Flush();\\n  return;\"");
+            sb.AppendLine();
+            sb.AppendLine("Specific violations to fix:");
+            foreach (var v in allViolations) sb.AppendLine("  " + v);
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## PREVIOUS PLAN ATTEMPTS AND FEEDBACK");
         sb.AppendLine("Your previous plan(s) did not score 100/100. Below is each attempt and what went wrong.");
         sb.AppendLine("Analyze the failures, then produce a NEW plan that fixes ALL issues.");
@@ -1210,6 +1255,9 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         conversation.AppendLine("  - NEVER use mkdir, curl, wget, jq, python, Set-Location, cd, or bash syntax — they do NOT work here");
         conversation.AppendLine("  - If a command shows ⚠ Error:, read it and try a DIFFERENT command");
         conversation.AppendLine("  - web_search uses DuckDuckGo — if it returns empty, try web_fetch with a direct API URL");
+        conversation.AppendLine("  - PLAN before you act. Decide which commands to run and in what order before outputting JSON.");
+        conversation.AppendLine("  - HUMAN-READABLE FIRST: When fetching data from an API or scraping, FIRST create a compact HTML summary with a table/list of all results, THEN save individual files if needed. The HTML file is the priority — it should be created early so the user can see data even if later steps fail.");
+        conversation.AppendLine("  - AVOID LARGE LOOPS: Never loop over more than 30 items in a single command. If you need to process more, batch them: do 30, report progress, then continue. Large loops will timeout.");
         conversation.AppendLine("  - Write all files directly to the target path. Never create folders or extra files unless the user explicitly asks for them.");
         conversation.AppendLine("  - Complete the task as fast as possible — stop as soon as the user's request is fulfilled.");
         conversation.AppendLine();
@@ -2018,7 +2066,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             if (plan == null) { throw new InvalidOperationException("Re-plan after exploration returned empty."); }
         }
 
-        plan = await RepairPlanEditAnchors(prompt, plan, projectRoot, emitSse, ct);
+        plan = await SplitOversizedEdits(plan, projectRoot, emitSse, ct);  // split first
+        plan = await RepairPlanEditAnchors(prompt, plan, projectRoot, emitSse, ct);  // then validate anchors
 
 
         // ── Compact discovery context in background (don't block LLM) ──
@@ -2250,6 +2299,98 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         }
 
         return discoveryContext;
+    }
+
+    private async Task<AgentPlan> SplitOversizedEdits(
+        AgentPlan plan, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var oversized = plan.Plan
+            .Where(s => AgentUtilities.IsRelativePath(s.File ?? "") &&
+                        ((s.OldString ?? "").Split('\n').Length > 5 || (s.OldString ?? "").Length > 250))
+            .ToList();
+
+        if (oversized.Count == 0) return plan;
+
+        await EmitLog(emitSse, "info",
+            $"Split pass: {oversized.Count} oversized edit(s) found — atomizing…", ct: ct);
+
+        var resultSteps = new List<PlanStep>();
+        foreach (var step in plan.Plan)
+        {
+            var old = step.OldString ?? "";
+            if (!AgentUtilities.IsRelativePath(step.File ?? "") ||
+                (old.Split('\n').Length <= 5 && old.Length <= 250))
+            {
+                resultSteps.Add(step);
+                continue;
+            }
+
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot,
+                step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) { resultSteps.Add(step); continue; }
+
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            const string sys =
+                "Split one oversized code edit into multiple small atomic edits (1-3 lines each). " +
+                "Output ONLY valid JSON: {\"steps\":[{\"oldString\":\"...\",\"newString\":\"...\"}]} " +
+                "Each step must have a unique oldString that exists verbatim in the file. No markdown.";
+
+            var user = new StringBuilder();
+            user.AppendLine($"File: {step.File}");
+            user.AppendLine($"Intended change: {step.Change}");
+            user.AppendLine($"\nOversize oldString ({old.Length} chars):\n{old}");
+            user.AppendLine($"\nnewString:\n{step.NewString ?? ""}");
+            user.AppendLine("\nFile content:");
+            user.AppendLine("```");
+            user.AppendLine(content.Length > 6000 ? content[..6000] + "\n…(truncated)" : content);
+            user.AppendLine("```");
+            user.AppendLine("\nSplit into 2-5 atomic steps targeting only what changes.");
+
+            var (raw, _, _) = await CallLlmRaw(sys, user.ToString(), ct,
+                TimeSpan.FromSeconds(25), maxTokens: 1024);
+
+            if (string.IsNullOrWhiteSpace(raw)) { resultSteps.Add(step); continue; }
+
+            try
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                }
+                using var doc = JsonDocument.Parse(cleaned);
+                if (doc.RootElement.TryGetProperty("steps", out var stepsEl) &&
+                    stepsEl.ValueKind == JsonValueKind.Array)
+                {
+                    var newSteps = stepsEl.EnumerateArray()
+                        .Select(el => new PlanStep
+                        {
+                            File = step.File,
+                            Change = step.Change,
+                            Priority = step.Priority,
+                            OldString = el.TryGetProperty("oldString", out var os) ? os.GetString() ?? "" : "",
+                            NewString = el.TryGetProperty("newString", out var ns) ? ns.GetString() ?? "" : ""
+                        })
+                        .Where(s => !string.IsNullOrWhiteSpace(s.OldString))
+                        .ToList();
+
+                    if (newSteps.Count > 0)
+                    {
+                        resultSteps.AddRange(newSteps);
+                        await EmitLog(emitSse, "info",
+                            $"Split {step.File}: 1 oversized edit → {newSteps.Count} atomic step(s)", ct: ct);
+                        continue;
+                    }
+                }
+            }
+            catch { /* fall through */ }
+
+            resultSteps.Add(step); // keep original if split fails
+        }
+
+        plan.Plan = resultSteps;
+        return plan;
     }
 
     private async Task<AgentPlan> RepairPlanEditAnchors(
@@ -3861,6 +4002,44 @@ Rules:
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
+    }
+    
+    private static List<string> GetPlanSizeViolations(AgentPlan plan)
+    {
+        var violations = new List<string>();
+        for (var i = 0; i < plan.Plan.Count; i++)
+        {
+            var step = plan.Plan[i];
+            if (!AgentUtilities.IsRelativePath(step.File ?? "")) continue;
+
+            var old = step.OldString ?? "";
+            var lines = old.Split('\n').Length;
+            var chars = old.Length;
+
+            if (lines > 5 || chars > 250)
+                violations.Add(
+                    $"Step {i + 1} ({step.File}): oldString is {lines} lines / {chars} chars — max is 5 lines / 250 chars. " +
+                    "Split into multiple steps, each targeting only the lines that actually change.");
+
+            // Detect bloated identity anchor: large block where only a tiny region differs
+            if (chars > 120)
+            {
+                var newStr = step.NewString ?? "";
+                var minLen = Math.Min(old.Length, newStr.Length);
+                var prefix = 0;
+                while (prefix < minLen && old[prefix] == newStr[prefix]) prefix++;
+                var suffix = 0;
+                while (suffix < minLen - prefix
+                       && old[old.Length - 1 - suffix] == newStr[newStr.Length - 1 - suffix]) suffix++;
+                var changedChars = chars - prefix - suffix;
+                if (changedChars > 0 && changedChars < chars * 0.25)
+                    violations.Add(
+                        $"Step {i + 1} ({step.File}): only ~{changedChars} chars actually differ " +
+                        $"but oldString wraps {chars} chars of surrounding context. " +
+                        "Shrink oldString to just the changed region.");
+            }
+        }
+        return violations;
     }
 
     /// <summary>

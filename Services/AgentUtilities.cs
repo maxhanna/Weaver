@@ -83,8 +83,12 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(div|button|input|form|dropdown|checkbox|radio|modal|popup|panel|section|tab|sidebar|navbar|header|footer)\b"))
             editScore += 35;
 
-        if (Regex.IsMatch(lower, @"\b(component|template|view|page|layout|widget|element)\b"))
+        if (Regex.IsMatch(lower, @"\b(component|template|view|page|layout|widget|element|calendar)\b"))
             editScore += 30;
+
+        // Programmatic assignment — "set X to Y" is a code-edit pattern
+        if (Regex.IsMatch(lower, @"\bset\b.{0,40}\bto\b"))
+            editScore += 40;
 
         // Style/design keywords
         if (Regex.IsMatch(lower, @"\b(style|css|class|theme|color|font|margin|padding|border|shadow|layout|spacing)\b"))
