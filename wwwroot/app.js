@@ -624,7 +624,8 @@ vm.changeProject = function () {
             agentThinking: vm.streamingThinking || '',
             agentSummary: vm.streamingSummary || '',
             activeCardId: vm.activeCardId || null,
-            activeCardText: vm.activeCardText || ''
+            activeCardText: vm.activeCardText || '',
+            calendarCards: vm.calCards || []
           }),
           settings: JSON.stringify({
             llamaUrl: vm.llamaUrl,
@@ -957,6 +958,46 @@ vm.changeProject = function () {
         if (cmd.params.bughostedUsername !== undefined) vm.bughostedUsername = cmd.params.bughostedUsername;
         if (cmd.params.bughostedPassword !== undefined) vm.bughostedPassword = cmd.params.bughostedPassword;
         vm.saveSettings();
+      } else if (cmd.command === 'addCalendarCard' && cmd.params) {
+        console.log('Adding calendar card from remote command:', cmd);
+        if (!Array.isArray(vm.calCards)) vm.calCards = [];
+        var calCard = {
+          id: uid(),
+          date: cmd.params.date || '',
+          time: cmd.params.time || '',
+          text: cmd.params.text || '',
+          priority: cmd.params.priority || 'medium',
+          cronExpression: cmd.params.cronExpression || '',
+          project: cmd.params.project || vm.selectedProject,
+          createdAt: new Date().toISOString()
+        };
+        vm.calCards.push(calCard);
+        $http.post('/api/calendar/save', vm.calCards);
+      } else if (cmd.command === 'updateCalendarCard' && cmd.params && cmd.params.id) {
+        console.log('Updating calendar card from remote command:', cmd);
+        if (!Array.isArray(vm.calCards)) return;
+        var idx = -1;
+        for (var ci = 0; ci < vm.calCards.length; ci++) {
+          if (vm.calCards[ci].id === cmd.params.id) { idx = ci; break; }
+        }
+        if (idx !== -1) {
+          if (cmd.params.date !== undefined) vm.calCards[idx].date = cmd.params.date;
+          if (cmd.params.time !== undefined) vm.calCards[idx].time = cmd.params.time;
+          if (cmd.params.text !== undefined) vm.calCards[idx].text = cmd.params.text;
+          if (cmd.params.priority !== undefined) vm.calCards[idx].priority = cmd.params.priority;
+          if (cmd.params.cronExpression !== undefined) vm.calCards[idx].cronExpression = cmd.params.cronExpression;
+          if (cmd.params.project !== undefined) vm.calCards[idx].project = cmd.params.project;
+          $http.post('/api/calendar/save', vm.calCards);
+        }
+      } else if (cmd.command === 'deleteCalendarCard' && cmd.params && cmd.params.id) {
+        console.log('Deleting calendar card from remote command:', cmd);
+        if (!Array.isArray(vm.calCards)) return;
+        var filtered = [];
+        for (var ci = 0; ci < vm.calCards.length; ci++) {
+          if (vm.calCards[ci].id !== cmd.params.id) filtered.push(vm.calCards[ci]);
+        }
+        vm.calCards = filtered;
+        $http.post('/api/calendar/save', vm.calCards);
       }
       // Acknowledge execution
       $http.post('/api/bughosted/commands/ack', {
