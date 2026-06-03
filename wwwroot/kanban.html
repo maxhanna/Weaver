@@ -122,6 +122,7 @@
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
            
           <div class="card-tags">
+            <span class="card-tag" ng-if="vm.activeCardId === card.id">ACTIVE</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
             <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
