@@ -202,10 +202,13 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         analysisPromptBuilder.AppendLine("### PROJECT ROOT ###");
         analysisPromptBuilder.AppendLine(projectRoot);
         analysisPromptBuilder.AppendLine("### PROJECT DISCOVERY (ONLY use paths listed here) ###");
-        analysisPromptBuilder.AppendLine(discoveryContext);
+        // Strip file bodies to signatures for the planner — keeps prompt small and
+        // prevents the LLM from copying entire methods into oldString.
+        var discoveryForPlanner = BuildPlannerDiscoveryContext(discoveryContext);
+        analysisPromptBuilder.AppendLine(discoveryForPlanner);
         var analysisPrompt = analysisPromptBuilder.ToString();
 
-        var (raw, _, llmError) = await CallLlmRaw(planningPrompt, analysisPrompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 8192);
+        var (raw, _, llmError) = await CallLlmRaw(planningPrompt, analysisPrompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 1500);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -213,32 +216,45 @@ For insertions: use an existing adjacent line as oldString anchor and include it
             return null;
         }
 
-        // Log non-trivial errors as warnings but keep going — we have content to parse.
         if (llmError != null && llmError != "JSON parse failed")
-        {
             await EmitLog(emitSse, "warn", $"LLM warning during planning (proceeding anyway): {llmError}", raw, ct: ct);
-        }
 
         var (bestPlan, parseError) = await ParseAndScore(raw, emitSse, ct);
-        if (bestPlan == null)
+
+        // ── Web search enforcement ─────────────────────────────────────────────
+        string? webSearchViolation = null;
+        if (bestPlan != null)
         {
-            await EmitLog(emitSse, "error", $"Failed to parse plan: {parseError ?? "unknown"}", raw, ct: ct);
-            return null;
+            webSearchViolation = DetectMissingWebSearch(prompt, bestPlan);
+            if (webSearchViolation != null)
+            {
+                await EmitLog(emitSse, "warn", $"Plan is missing required _web_search: {webSearchViolation}", ct: ct);
+                bestPlan.Score = Math.Min(bestPlan.Score, 40);
+            }
         }
 
-        // ── Self-scoring retry loop: improve plan until score=100, max 3 replans ──
+        // ── Self-scoring retry loop ────────────────────────────────────────────
+        // Runs even on a parse failure — seed history with the error so the LLM
+        // sees exactly what went wrong and can produce a smaller plan next attempt.
         var history = new List<(int score, string summary, string raw, string error)>();
-        if (bestPlan.Score > 0)
-            history.Add((bestPlan.Score, bestPlan.Summary, raw, ""));
+        if (bestPlan == null)
+            history.Add((0, "", raw,
+                parseError ?? "Response was truncated/unparseable. Your plan was too large. " +
+                "Use MAX 3 steps. Keep oldString to 1-5 lines only — never copy entire methods."));
+        else if (bestPlan.Score > 0)
+            history.Add((bestPlan.Score, bestPlan.Summary, raw, webSearchViolation ?? ""));
 
-        for (var attempt = 0; attempt < 3 && bestPlan.Score < 100; attempt++)
+        for (var attempt = 0; attempt < 3 && (bestPlan == null || bestPlan.Score < 100); attempt++)
         {
-            await EmitLog(emitSse, "info",
-                $"Plan confidence score: {bestPlan.Score}/100 — attempt {attempt + 1}/3 to improve…", bestPlan, ct: ct);
+            if (bestPlan == null)
+                await EmitLog(emitSse, "info", $"Parse failed — retry {attempt + 1}/3 with corrected instructions…", ct: ct);
+            else
+                await EmitLog(emitSse, "info",
+                    $"Plan confidence score: {bestPlan.Score}/100 — attempt {attempt + 1}/3 to improve…", bestPlan, ct: ct);
 
-            var retryPrompt = BuildScoreRetryPrompt(prompt, discoveryContext, projectRoot, history, steeringContext);
+            var retryPrompt = BuildScoreRetryPrompt(prompt, discoveryContext, projectRoot, history, steeringContext, webSearchViolation);
             var (retryRaw, _, _) = await CallLlmRaw(planningPrompt, retryPrompt, ct,
-                requestTimeout: _infiniteTimeout, maxTokens: 8192);
+                requestTimeout: _infiniteTimeout, maxTokens: 1500);
             if (string.IsNullOrWhiteSpace(retryRaw))
             {
                 history.Add((0, "", "[empty response]", "LLM returned empty response"));
@@ -248,19 +264,38 @@ For insertions: use an existing adjacent line as oldString anchor and include it
             var (candidate, parseErr) = await ParseAndScore(retryRaw, emitSse, ct);
             if (candidate == null)
             {
-                history.Add((0, "", retryRaw, parseErr ?? "Failed to parse as valid JSON"));
+                history.Add((0, "", retryRaw,
+                    parseErr ?? "Response was truncated/unparseable again. " +
+                    "Produce MAX 2 steps. oldString must be 1-5 lines only."));
                 continue;
             }
 
-            history.Add((candidate.Score, candidate.Summary, retryRaw, ""));
+            var candidateViolation = DetectMissingWebSearch(prompt, candidate);
+            if (candidateViolation != null)
+            {
+                candidate.Score = Math.Min(candidate.Score, 40);
+                webSearchViolation = candidateViolation;
+            }
+            else
+            {
+                webSearchViolation = null;
+            }
 
-            if (candidate.Score > bestPlan.Score)
+            history.Add((candidate.Score, candidate.Summary, retryRaw, candidateViolation ?? ""));
+
+            if (bestPlan == null || candidate.Score > bestPlan.Score)
             {
                 bestPlan = candidate;
                 await EmitLog(emitSse, "info", $"Improved to score {bestPlan.Score}/100", ct: ct);
             }
 
             if (bestPlan.Score >= 100) break;
+        }
+
+        if (bestPlan == null)
+        {
+            await EmitLog(emitSse, "error", "All retry attempts failed to produce a parseable plan.", ct: ct);
+            return null;
         }
 
         if (bestPlan.Score < 100)
@@ -302,17 +337,27 @@ For insertions: use an existing adjacent line as oldString anchor and include it
     }
 
     private static string BuildScoreRetryPrompt(string originalPrompt, string discoveryContext, string projectRoot,
-        List<(int score, string summary, string raw, string error)> history, string? steeringContext = null)
+        List<(int score, string summary, string raw, string error)> history, string? steeringContext = null,
+        string? webSearchViolation = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("## ORIGINAL TASK");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
-        
+
         if (!string.IsNullOrWhiteSpace(steeringContext))
         {
             sb.AppendLine("## USER STEERING INSTRUCTION");
             sb.AppendLine(steeringContext);
+            sb.AppendLine();
+        }
+
+        if (!string.IsNullOrWhiteSpace(webSearchViolation))
+        {
+            sb.AppendLine("## ⚠ CRITICAL VIOLATION — MISSING _web_search STEP");
+            sb.AppendLine(webSearchViolation);
+            sb.AppendLine("You MUST add a _web_search step as the FIRST step in your plan.");
+            sb.AppendLine("Do NOT answer from your training data. The task explicitly requires a live web search.");
             sb.AppendLine();
         }
 
@@ -364,15 +409,16 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         sb.AppendLine("### PROJECT ROOT ###");
         sb.AppendLine(projectRoot);
         sb.AppendLine("### PROJECT DISCOVERY (ONLY use paths listed here) ###");
-        sb.AppendLine(discoveryContext);
+        // Truncate for the retry prompt too — same reason as the initial plan
+        sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
         sb.AppendLine();
         sb.AppendLine("### RULES REMINDER ###");
         sb.AppendLine("1. Return ONLY valid JSON — no markdown fences, no extra text before/after");
         sb.AppendLine("2. Include a \"score\" field (0-100) that honestly reflects how confident you are this plan will fully solve the task");
         sb.AppendLine("3. Score must be 100 if you are confident the plan is correct and complete");
-        sb.AppendLine("4. If previous attempts had parse errors, ensure your JSON is valid (no trailing commas, strings properly escaped)");
+        sb.AppendLine("4. If previous attempts had parse errors or were truncated — your response was TOO LONG. Output MAX 2-3 steps. Keep oldString to 1-5 SHORT lines.");
         sb.AppendLine("5. If previous attempts had low scores, identify the gaps and fix them");
-        sb.AppendLine("6. oldString must be 1-5 lines of EXISTING code copied verbatim from the file — it must literally be in the file");
+        sb.AppendLine("6. oldString must be 1-5 lines of EXISTING code copied verbatim from the file — never copy entire methods");
         sb.AppendLine("7. oldString and newString must NOT be identical");
         sb.AppendLine();
         sb.AppendLine("BEFORE writing the plan, think step by step: what was wrong with each previous attempt?");
@@ -381,6 +427,68 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         return sb.ToString();
     }
 
+    private static string? DetectMissingWebSearch(string prompt, AgentPlan plan)
+    {
+        var lower = prompt.ToLowerInvariant();
+        var liveDataTriggers = new[]
+        {
+            "latest ", "newest ", "most recent ", "current ", "today's ", "right now",
+            "search for", "look up", "find out", "what is the", "what's the",
+            "live ", "real-time", "up to date", "up-to-date",
+            "this year", "this month", "this week",
+        };
+        var triggered = liveDataTriggers.FirstOrDefault(t => lower.Contains(t));
+        if (triggered == null) return null;
+        var hasWebStep = plan.Plan?.Any(s =>
+            s.File.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
+            s.File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase)) ?? false;
+        if (hasWebStep) return null;
+        return $"The prompt contains \"{triggered.Trim()}\" which requires live data, " +
+               $"but the plan has no _web_search step. Add a _web_search step first.";
+    }
+
+    /// <summary>
+    /// Reduces full file bodies in the discovery context to ~60 lines each,
+    /// so the planning prompt stays small and the LLM cannot copy entire methods
+    /// into oldString values.
+    /// </summary>
+    private static string BuildPlannerDiscoveryContext(string fullDiscovery)
+    {
+        if (string.IsNullOrWhiteSpace(fullDiscovery)) return fullDiscovery;
+        const int MaxLinesPerFile = 60;
+        const int MaxFiles = 4;
+        var result = new StringBuilder();
+        var sections = Regex.Split(fullDiscovery, @"(?=### \S)");
+        var fileCount = 0;
+        foreach (var section in sections)
+        {
+            if (string.IsNullOrWhiteSpace(section)) continue;
+            var trimmed = section.TrimStart();
+            if (!trimmed.StartsWith("### read") && !trimmed.StartsWith("### list"))
+            {
+                result.AppendLine(section.TrimEnd());
+                continue;
+            }
+            if (fileCount >= MaxFiles)
+            {
+                result.AppendLine("...(additional files omitted from planner context)");
+                break;
+            }
+            var lines = section.Split('\n');
+            result.AppendLine(lines[0]);
+            var body = lines.Skip(1).ToArray();
+            if (body.Length <= MaxLinesPerFile)
+                result.AppendLine(string.Join('\n', body));
+            else
+            {
+                result.AppendLine(string.Join('\n', body.Take(MaxLinesPerFile)));
+                result.AppendLine($"...(truncated at {MaxLinesPerFile} lines — full content used during edit execution)");
+            }
+            result.AppendLine();
+            fileCount++;
+        }
+        return result.ToString();
+    }
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
      string prompt, string projectRoot, bool emitSse, List<string>? attachedFiles = null,
      CancellationToken ct = default)
