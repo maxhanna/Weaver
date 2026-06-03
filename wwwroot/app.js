@@ -6,6 +6,7 @@
     // === State ===
     vm.selectedProject = '';
     vm.archiveCardCount = 0;
+    vm.selfImprovingCardCount = 0;
     vm.projects = [];
     vm.defaultProject = '';
     vm.aiPrompt = '';
@@ -1653,6 +1654,11 @@ vm.changeProject = function () {
                       resumeTerminalPolling();
                       vm.steeringContext = '';
                       var editsApplied = parsed && parsed.editsApplied;
+                      // Check if agent finished with no file edits and no more cards to process
+                      if (!editsApplied && !vm.activeCardId) {
+                        // Stop the agent properly
+                        vm.stopAgent();
+                      }
                       var incomplete = parsed && parsed.incomplete;
                       if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
                       pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',

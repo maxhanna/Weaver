@@ -1128,6 +1128,17 @@ public static class AgentUtilities
                 m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
             if (quotedFull != fullyRepaired) yield return quotedFull;
         }
+        // Candidate 7 — truncation repair (closes missing brackets/strings)
+        var truncFixed = TryRepairTruncatedPlanJson(json);
+        if (truncFixed != null && truncFixed != json) yield return truncFixed;
+
+        // Candidate 8 — truncation repair + full string repair combined
+        if (truncFixed != null)
+        {
+            var truncAndRepaired = RepairJsonString(truncFixed);
+            if (truncAndRepaired != null && truncAndRepaired != truncFixed)
+                yield return truncAndRepaired;
+        }
     }
     
     public static int EstimateTokens(string text) =>
@@ -1215,5 +1226,90 @@ public static class AgentUtilities
 
         conversation.Clear();
         conversation.Append(sb.ToString());
+    }
+    /// <summary>
+    /// Repairs JSON that was cut off mid-stream by closing unclosed strings and brackets.
+    /// Strategy A: close from current position and re-parse.
+    /// Strategy B: cut back to the last complete plan step and close with ]}.
+    /// Returns the repaired string if it parses as a plan, null if unrecoverable.
+    /// </summary>
+    public static string? TryRepairTruncatedPlanJson(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var stack = new Stack<char>();
+        var inString = false;
+        var lastPlanItemEnd = -1; // char index after the last complete plan-step closing }
+
+        for (var i = 0; i < raw.Length; i++)
+        {
+            var c = raw[i];
+            if (inString)
+            {
+                if (c == '\\') { i++; continue; } // skip escaped char
+                if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') { inString = true; continue; }
+            if (c is '{' or '[') { stack.Push(c); continue; }
+            if (c == '}' && stack.Count > 0 && stack.Peek() == '{')
+            {
+                stack.Pop();
+                // depth 2 = inside outer-object → plan-array → just closed a step object
+                if (stack.Count == 2) lastPlanItemEnd = i + 1;
+                continue;
+            }
+            if (c == ']' && stack.Count > 0 && stack.Peek() == '[') stack.Pop();
+        }
+
+        // Already balanced
+        if (stack.Count == 0 && !inString) return null;
+
+        var parseOpts = new JsonDocumentOptions { AllowTrailingCommas = true };
+
+        bool IsPlan(string s)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(s, parseOpts);
+                return doc.RootElement.TryGetProperty("plan", out var arr)
+                       && arr.ValueKind == JsonValueKind.Array
+                       && arr.GetArrayLength() > 0;
+            }
+            catch { return false; }
+        }
+
+        // ── Strategy A: close from current position ──────────────────────────────
+        {
+            var sb = new StringBuilder(raw.TrimEnd());
+            if (inString) sb.Append('"');                          // close open string
+            while (sb.Length > 0 && sb[^1] is ',' or ':')         // trim trailing noise
+                sb.Remove(sb.Length - 1, 1);
+            foreach (var ch in stack)                              // close brackets
+                sb.Append(ch == '{' ? '}' : ']');
+
+            var candidate = sb.ToString();
+            if (IsPlan(candidate)) return candidate;
+
+            // Also try with string-value escaping on top
+            var escaped = RepairJsonStringValues(candidate);
+            if (escaped != null && IsPlan(escaped)) return escaped;
+
+            // And full repair (handles unescaped inner quotes from C# code)
+            var fullyRepaired = RepairJsonString(candidate);
+            if (fullyRepaired != null && IsPlan(fullyRepaired)) return fullyRepaired;
+        }
+
+        // ── Strategy B: cut to last complete plan item, close with ]} ────────────
+        if (lastPlanItemEnd > 0)
+        {
+            var cut = raw[..lastPlanItemEnd].TrimEnd(',', ' ', '\t', '\r', '\n') + "]}";
+            if (IsPlan(cut)) return cut;
+
+            var cutRepaired = RepairJsonString(cut);
+            if (cutRepaired != null && IsPlan(cutRepaired)) return cutRepaired;
+        }
+
+        return null;
     }
 }

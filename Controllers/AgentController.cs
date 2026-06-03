@@ -125,12 +125,8 @@ public class AgentController : ControllerBase
   _delete_file          — Delete a file: ""path.ext""
   _show                 — Display text to the user (Used for showing findings (usually terminal output); Must be used last if used at all.)
   _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
-  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step
-                          when the codebase already satisfies the requirement. Put the reason in ""change"".
-  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified
-                          so far and replans the remaining work with fresh file content. Insert between
-                          independent phases when later steps depend on the result of earlier ones,
-                          or when the plan spans >4 files and >8 steps total.
+  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step when the codebase already satisfies the requirement. Put the reason in ""change"".
+  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified so far and replans the remaining work with fresh file content. Insert between independent phases when later steps depend on the result of earlier ones, or when the plan spans >4 files and >8 steps total.
 ### GENERAL RULES ###
 1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
 2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
@@ -147,10 +143,8 @@ public class AgentController : ControllerBase
     - 80-99 = minor concerns (edge cases, untested areas)
     - 50-79 = moderate concerns (missing steps, uncertain edits)
     - 0-49 = major gaps (insufficient context, unclear requirements)
-11.SELF - STOP — If the existing code already satisfies the requirement, emit a single
-   _done step. Never fabricate phantom edits.
-12. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases
-    with _checkpoint between them. Each phase must produce a verifiable partial result."
+11.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
+12. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result."
 
 + @"### FILE EDIT RULES ###
 EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
@@ -208,7 +202,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         analysisPromptBuilder.AppendLine(discoveryForPlanner);
         var analysisPrompt = analysisPromptBuilder.ToString();
 
-        var (raw, _, llmError) = await CallLlmRaw(planningPrompt, analysisPrompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 1500);
+        var (raw, _, llmError) = await CallLlmRawStreaming(planningPrompt, analysisPrompt, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 1500);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -253,7 +247,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
                     $"Plan confidence score: {bestPlan.Score}/100 — attempt {attempt + 1}/3 to improve…", bestPlan, ct: ct);
 
             var retryPrompt = BuildScoreRetryPrompt(prompt, discoveryContext, projectRoot, history, steeringContext, webSearchViolation);
-            var (retryRaw, _, _) = await CallLlmRaw(planningPrompt, retryPrompt, ct,
+            var (retryRaw, _, _) = await CallLlmRawStreaming(planningPrompt, retryPrompt, emitSse, ct,
                 requestTimeout: _infiniteTimeout, maxTokens: 1500);
             if (string.IsNullOrWhiteSpace(retryRaw))
             {
@@ -306,7 +300,17 @@ For insertions: use an existing adjacent line as oldString anchor and include it
 
         return bestPlan;
     }
-
+    private static bool LooksLikeTruncated(string raw)
+    {
+        // Open brackets outnumber close brackets — structural truncation
+        var opens = raw.Count(c => c is '{' or '[');
+        var closes = raw.Count(c => c is '}' or ']');
+        if (opens > closes + 1) return true;
+        // Ends mid-string (odd number of unescaped quotes after last newline)
+        var lastLine = raw.Split('\n')[^1];
+        var unescapedQuotes = Regex.Matches(lastLine, @"(?<!\\)""").Count;
+        return unescapedQuotes % 2 != 0;
+    }
     private async Task<(AgentPlan? plan, string? error)> ParseAndScore(string raw, bool emitSse, CancellationToken ct)
     {
         // Strip markdown fences the LLM sometimes wraps its JSON in
@@ -319,8 +323,15 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         var parsedPlan = ParsePlan(cleanedRaw);
         if (parsedPlan == null)
         {
+            var truncationHint = LooksLikeTruncated(cleanedRaw)
+                ? "Your response was TRUNCATED (ran out of tokens mid-JSON). " +
+                  "Produce a MUCH shorter plan: MAX 2 steps, 1-3 lines per oldString. " +
+                  "Do not start a step you cannot finish." +
+                    "If the task is complex, use a _checkpoint step to divide it into phases."
+
+                : "Failed to parse as valid JSON. Raw output contained no parseable plan block.";
             await EmitLog(emitSse, "error", "Failed to parse plan.", cleanedRaw, ct: ct);
-            return (null, "Failed to parse as valid JSON. Raw output contained no parseable plan block.");
+            return (null, truncationHint);
         }
         var sizeViolations = GetPlanSizeViolations(parsedPlan);
         if (sizeViolations.Count > 0)
@@ -871,6 +882,32 @@ For insertions: use an existing adjacent line as oldString anchor and include it
             ReadCommentHandling = JsonCommentHandling.Skip,
             AllowTrailingCommas = true
         };
+
+        // ── Fast path: truncation repair ──────────────────────────────────────────
+        // Handles responses cut off mid-token-stream (missing closing brackets/strings).
+        // Runs before ExtractJsonBlocks because truncated JSON has no balanced blocks.
+        var truncRepaired = AgentUtilities.TryRepairTruncatedPlanJson(cleaned);
+        if (truncRepaired != null)
+        {
+            var truncOpts = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                AllowTrailingCommas = true
+            };
+            foreach (var candidate in AgentUtilities.GeneratePlanJsonCandidates(truncRepaired))
+            {
+                try
+                {
+                    var r = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts);
+                    if (r?.Plan?.Count > 0)
+                    {
+                        Console.Error.WriteLine($"[ParsePlan] Recovered truncated response: {r.Plan.Count} step(s)");
+                        return r;
+                    }
+                }
+                catch { }
+            }
+        }
 
         // Step 2: locate complete JSON objects that contain a plan. Try the
         // outermost blocks first so we do not accidentally parse an inner step.
@@ -3712,6 +3749,30 @@ Rules:
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
     }
+
+    /// <summary>
+    /// Low-level LLM call that supports streaming of tokens
+    /// </summary>
+    private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRawStreaming(
+        string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
+        TimeSpan? requestTimeout = null, int? maxTokens = null)
+    {
+        var baseUrl = await GetLlamaBaseUrl();
+        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = _infiniteTimeout;
+
+        var messages = new object[]
+        {
+            new { role = "system",  content = systemPrompt },
+            new { role = "user",    content = userMessage  }
+        };
+
+        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        return await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
+    }
  
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
         HttpClient client, string target, string model, object messages, CancellationToken ct = default,
@@ -3733,6 +3794,115 @@ Rules:
 
             var parsed = ParseAgentResponse(llmContent);
             return (llmContent, parsed, parsed == null ? "JSON parse failed" : null);
+        }
+        catch (TaskCanceledException)
+        {
+            return ("", null, "LLM request timed out");
+        }
+        catch (Exception ex)
+        {
+            return ("", null, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Streaming LLM call that emits tokens as they arrive
+    /// </summary>
+    private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmStreaming(
+        HttpClient client, string target, string model, object messages, CancellationToken ct = default,
+        int? maxTokens = null, bool emitSse = false)
+    {
+        var mt = maxTokens ?? 2048;
+        var requestBody = new { model, messages, stream = true, temperature = 0.05, max_tokens = mt };
+        var contentJson = JsonSerializer.Serialize(requestBody);
+        var httpContent = new StringContent(contentJson, Encoding.UTF8, "application/json");
+
+        try
+        {
+            var resp = await client.PostAsync(target, httpContent, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var respText = await resp.Content.ReadAsStringAsync(ct);
+                return (respText, null, $"HTTP {resp.StatusCode}: {respText}");
+            }
+
+            var stream = await resp.Content.ReadAsStreamAsync(ct);
+            var reader = new StreamReader(stream);
+            var sb = new StringBuilder();
+            string? lastToken = null;
+
+            // Read streaming response
+            while (!reader.EndOfStream)
+            {
+                var line = await reader.ReadLineAsync();
+                if (line == null) continue;
+                
+                // Skip empty lines
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                
+                // Skip data: [DONE] lines
+                if (line.Contains("[DONE]")) break;
+
+                // Parse data: line
+                if (line.StartsWith("data: "))
+                {
+                    var data = line.Substring(6).Trim();
+                    if (string.IsNullOrWhiteSpace(data)) continue;
+                    
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(data);
+                        if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+                        {
+                            var choice = choices[0];
+                            if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var content))
+                            {
+                                var token = content.GetString();
+                                if (!string.IsNullOrWhiteSpace(token))
+                                {
+                                    // Send SSE token if requested
+                                    if (emitSse)
+                                    {
+                                        await SendSse(Response, "token", new { token = token }, ct);
+                                    }
+                                    sb.Append(token);
+                                    lastToken = token;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // If parsing fails, try to extract content from raw data
+                        if (data.Contains("\"delta\":{\"content\":\"") && data.Contains("\"content\":\""))
+                        {
+                            var contentMatch = Regex.Match(data, "\"content\":\"([^\"]*)\"");
+                            if (contentMatch.Success)
+                            {
+                                var token = contentMatch.Groups[1].Value;
+                                if (!string.IsNullOrWhiteSpace(token))
+                                {
+                                    // Send SSE token if requested
+                                    if (emitSse)
+                                    {
+                                        await SendSse(Response, "token", new { token = token }, ct);
+                                    }
+                                    sb.Append(token);
+                                    lastToken = token;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            var raw = sb.ToString();
+            if (string.IsNullOrWhiteSpace(raw))
+                return ("", null, "Empty LLM response");
+
+            // Parse the final result as JSON
+            var parsed = ParseAgentResponse(raw);
+            return (raw, parsed, parsed == null ? "JSON parse failed" : null);
         }
         catch (TaskCanceledException)
         {

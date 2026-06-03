@@ -3,8 +3,12 @@
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
     <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
     <button ng-click="vm.exportKanbanData()" class="search-button">Export</button>
-    <button ng-click="vm.showArchived = !vm.showArchived" class="search-button" style="margin-left:4px;">🗄 Archived
-      ({{vm.archiveCardCount}})</button>
+    <button ng-click="vm.showArchived = !vm.showArchived" class="search-button" style="margin-left:4px;">
+      🗄 Archived ({{vm.archiveCardCount}})
+    </button>
+    <button ng-click="vm.showSelfImproving = !vm.showSelfImproving" class="search-button" style="margin-left:4px;">
+      📈 Self-Improving ({{vm.selfImprovingCardCount}})
+    </button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
@@ -31,21 +35,22 @@
               ng-class="{'recording': vm.isRecording}"
               title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"
               ng-show="vm.voiceSupported">🎤</button>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button> 
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create A Branch then PR on completion">
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
+              title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
           </div>
-            <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
-              <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-                <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-                <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'todo'); $event.stopPropagation()">✕</span>
-              </div>
+          <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+            <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+              <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'todo'); $event.stopPropagation()">✕</span>
             </div>
+          </div>
           <div class="card-actions">
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
@@ -120,12 +125,13 @@
             {{card.text}}
           </div>
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
-           
+
           <div class="card-tags">
             <span class="card-tag" ng-if="vm.activeCardId === card.id">ACTIVE</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
-            <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
+            <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
+              title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
@@ -262,10 +268,12 @@
                 <details>
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
-                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                  <div class="plan-items-list"
+                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -275,13 +283,16 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'doing','done')" 
-              class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small" 
+            <button ng-click="vm.moveCard(card.id,'doing','done')"
+              class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small"
               title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
-            <button ng-click="vm.stopAgent(card)" class="small" ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
+            <button ng-click="vm.stopAgent(card)" class="small"
+              ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost" title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}" ng-disabled="vm.activeCardId === card.id">✕
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
+              title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
+              ng-disabled="vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -310,9 +321,11 @@
           </div>
           <div class="card-tags">
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch" title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
+            <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
+              title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
-              <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗 PR</a>
+              <a ng-href="{{card.prStatus.prUrl}}" target="_blank" rel="noopener" ng-click="$event.stopPropagation()">🔗
+                PR</a>
             </span>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
@@ -407,10 +420,12 @@
                 <details>
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
-                  <div class="plan-items-list" ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                  <div class="plan-items-list"
+                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -422,7 +437,41 @@
           <div class="card-actions">
             <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕ Delete</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
+              Delete</button>
+          </div>
+        </div>
+      </div>
+    </div><!-- SELF IMPROVING column -->
+    <div class="column" data-col="archived" ng-if="vm.showSelfImproving">
+      <h3>
+        <span class="col-header">📈 Self-Improving <span
+            class="col-badge">{{vm.cardsForProject('selfImproving').length}}</span></span>
+        <button class="small ghost" ng-click="vm.showSelfImproving = false" title="Close archived view">✕</button>
+      </h3>
+      <div class="cards" id="col-archived" ng-class="{empty: vm.cardsForProject('selfImproving').length===0}">
+        <div class="card" ng-repeat="card in vm.cardsForProject('selfImproving') track by card.id"
+          ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
+          ng-click="vm.selectCard(card)" data-card-id="{{card.id}}">
+          <div class="card-meta">
+            <span class="card-id">#{{card.id | limitTo:6}}</span>
+            <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+          </div>
+          <div class="card-text">{{card.text}}</div>
+          <div class="card-tags" ng-if="card.priority">
+            <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+          </div>
+          <div class="card-analysis" ng-if="card.agentAnalysis">
+            <details>
+              <summary>🤖 AI Analysis</summary>
+              <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
+                <strong>Summary:</strong> {{card.agentAnalysis.summary}}
+              </div>
+            </details>
+          </div>
+          <div class="card-actions">
+            <button ng-click="vm.unarchiveCard(card.id)" class="small">↩ Unarchive</button>
+            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
           </div>
         </div>
       </div>

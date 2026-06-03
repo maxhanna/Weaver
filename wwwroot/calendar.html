@@ -1,4 +1,4 @@
-<div class="calendar-view">
+﻿<div class="calendar-view">
   <div class="calendar-header">
     <button class="small" ng-click="vm.calPrevMonth()">&larr; Prev</button>
     <h3 class="calendar-month-label">{{vm.calMonthName}} {{vm.calYear}}</h3>
@@ -12,20 +12,18 @@
   </div>
 
   <div class="calendar-grid">
-    <div class="cal-day"
-         ng-repeat="day in vm.calDays track by day.date"
-         ng-class="{'cal-day-empty': !day.inMonth, 'cal-day-today': day.isToday, 'cal-day-weekend': day.isWeekend}">
+    <div class="cal-day" ng-repeat="day in vm.calDays track by day.date"
+      ng-class="{'cal-day-empty': !day.inMonth, 'cal-day-today': day.isToday, 'cal-day-weekend': day.isWeekend}">
       <div class="cal-day-header">
         <span class="cal-day-num">{{day.num}}</span>
         <span class="cal-day-card-count" ng-if="day.cards.length">{{day.cards.length}}</span>
       </div>
       <div class="cal-day-cards">
-        <div class="cal-card"
-             ng-repeat="card in day.cards track by card.id"
-             ng-click="vm.calEditCard(card, $event)"
-             ng-class="'cal-card-' + (card.priority || 'default')">
+        <div class="cal-card" ng-repeat="card in day.cards track by card.id" ng-click="vm.calEditCard(card, $event)"
+          ng-class="'cal-card-' + (card.priority || 'default')">
           <div class="cal-card-text">{{card.text | limitTo:40}}</div>
-          <span class="cal-card-project" ng-if="card.project" title="{{card.project}}">{{vm.projectName(card.project)}}</span>
+          <span class="cal-card-project" ng-if="card.project"
+            title="{{card.project}}">{{vm.projectName(card.project)}}</span>
           <span class="cal-card-time" ng-if="card.time">@{{card.time}}</span>
           <span class="cal-card-cron" ng-if="card.cronExpression" title="Cron: {{card.cronExpression}}">&#9201;</span>
           <span class="cal-card-del" ng-click="vm.calDeleteCard(card, $event)">&times;</span>
@@ -44,7 +42,7 @@
       <div class="popup-body">
         <div class="form-row">
           <label>Date</label>
-          <input type="date" ng-model="vm.calEditCardData.date" />
+          <input type="date" ng-model="vm.calEditCardData.date ?? localDateStr(now)" />
         </div>
         <div class="form-row">
           <label>Time (optional)</label>
@@ -56,9 +54,11 @@
         </div>
         <div class="form-row">
           <label>Project</label>
-          <select ng-model="vm.calEditCardData.project">
+          <select ng-model="vm.calEditCardData.filePath">
             <option value="">— No project —</option>
-            <option ng-repeat="p in vm.projects" value="{{p.Path || p.path}}">{{p.Name || p.name}}</option>
+            <option ng-repeat="p in vm.projects" ng-value="p.Path || p.path">
+              {{ p.Name || p.name }}
+            </option>
           </select>
         </div>
         <div class="form-row">
@@ -73,10 +73,17 @@
           <label>Cron Schedule (optional)</label>
           <input ng-model="vm.calEditCardData.cronExpression" placeholder="e.g. 0 9 * * 1-5 (weekdays at 9am)" />
           <span class="settings-help">Runs the card automatically on schedule. Standard 5-field cron syntax.</span>
+          <div class="cron-helpers">
+            <span class="cron-helper" ng-click="vm.setCronExpression('09 * *1-5')">Weekdays at9am</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('018 * *1-5')">Weekdays at6pm</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('00 * *0')">Every Sunday</span>
+            <span class="cron-helper" ng-click="vm.setCronExpression('001 * *')">First day of month</span>
+          </div>
         </div>
       </div>
       <div class="popup-footer">
-        <button ng-if="vm.calEditCardData.id" class="danger" ng-click="vm.calDeleteCard(vm.calEditCardData)">Delete</button>
+        <button ng-if="vm.calEditCardData.id" class="danger"
+          ng-click="vm.calDeleteCard(vm.calEditCardData)">Delete</button>
         <button ng-click="vm.calCloseEdit()">Cancel</button>
         <button class="primary" ng-click="vm.calSaveCard()">Save</button>
       </div>

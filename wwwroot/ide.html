@@ -1,0 +1,38 @@
+﻿wwwroot/ide.html
+<div class="panel" data-panel-type="ide" data-panel-id="ide-panel" style="display: none;">
+  <h3>💻 IDE</h3>
+  <div class="panel-body">
+    <div class="ide-container">
+      <div class="ide-toolbar">
+        <button class="small" ng-click="vm.openFileBrowser()">📁 Open File</button>
+        <button class="small" ng-click="vm.saveFile()">💾 Save</button>
+        <button class="small" ng-click="vm.closeFile()">✕ Close</button>
+      </div>
+      <div class="ide-file-browser" ng-if="vm.showFileBrowser">
+        <div class="file-browser-header">
+          <span>{{vm.currentPath || 'Root'}}</span>
+          <button class="small" ng-click="vm.closeFileBrowser()">✕</button>
+        </div>
+        <div class="file-browser-content">
+          <div class="file-entry dir" ng-repeat="entry in vm.fileBrowserEntries" ng-if="entry.isDirectory" ng-click="vm.navigateToDirectory(entry.path)">
+            <span>📁</span> {{entry.name}}
+          </div>
+          <div class="file-entry file" ng-repeat="entry in vm.fileBrowserEntries" ng-if="!entry.isDirectory" ng-click="vm.openFile(entry.path)">
+            <span>📄</span> {{entry.name}}
+          </div>
+        </div>
+      </div>
+      <div class="ide-editor-container" ng-if="vm.currentFile">
+        <div class="ide-file-header">
+          <span>{{vm.currentFile}}</span>
+          <span class="file-size">{{vm.fileContent.length}} chars</span>
+        </div>
+        <textarea class="ide-editor" ng-model="vm.fileContent" ng-if="vm.currentFile" ng-change="vm.onFileContentChange()"></textarea>
+      </div>
+      <div class="ide-placeholder" ng-if="!vm.currentFile && !vm.showFileBrowser">
+        <p>Open a file to start editing</p>
+        <button class="small" ng-click="vm.openFileBrowser()">Browse Files</button>
+      </div>
+    </div>
+  </div>
+</div>

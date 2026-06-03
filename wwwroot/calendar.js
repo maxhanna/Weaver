@@ -163,16 +163,30 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
 
       vm.calAddCard = function () {
         var now = new Date();
+        var d = new Date();
+        d.setMinutes(d.getMinutes() + 5);
         vm.calEditCardData = {
           id: null,
-          date: localDateStr(now),
-          time: '',
+          date: now,
+          time: d,
           text: '',
           priority: 'medium',
           cronExpression: '',
-          project: vm.selectedProject || ''
+          filePath: vm.selectedProject.split('/').pop() || ''
         };
+        console.log('Adding calendar card', vm.calEditCardData);
         scheduleUpdate();
+      };
+
+      vm.cronHelp = function() {
+        return [
+          { label: 'Every minute', cron: '* * * * *' },
+          { label: 'Every hour', cron: '0 * * * *' },
+          { label: 'Every day', cron: '0 0 * * *' },
+          { label: 'Every week', cron: '0 0 * * 0' },
+          { label: 'Every month', cron: '0 0 1 * *' },
+          { label: 'Every year', cron: '0 0 1 1 *' }
+        ];
       };
 
       vm.calEditCard = function (card, $event) {

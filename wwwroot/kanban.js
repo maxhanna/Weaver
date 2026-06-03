@@ -134,6 +134,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.showArchived = false;
+      vm.showSelfImproving = false;
       vm.isInFileSearch = false;
       vm.voiceSupported = VoiceInput.isSupported();
       vm.isRecording = false;
