@@ -124,8 +124,13 @@ public class AgentController : ControllerBase
   _move_file            — Move a file: ""old → new""
   _delete_file          — Delete a file: ""path.ext""
   _show                 — Display text to the user (Used for showing findings (usually terminal output); Must be used last if used at all.)
-   _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
-  
+  _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
+  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step
+                          when the codebase already satisfies the requirement. Put the reason in ""change"".
+  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified
+                          so far and replans the remaining work with fresh file content. Insert between
+                          independent phases when later steps depend on the result of earlier ones,
+                          or when the plan spans >4 files and >8 steps total.
 ### GENERAL RULES ###
 1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
 2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
@@ -142,9 +147,13 @@ public class AgentController : ControllerBase
     - 80-99 = minor concerns (edge cases, untested areas)
     - 50-79 = moderate concerns (missing steps, uncertain edits)
     - 0-49 = major gaps (insufficient context, unclear requirements)
- 
+11.SELF - STOP — If the existing code already satisfies the requirement, emit a single
+   _done step. Never fabricate phantom edits.
+12. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases
+    with _checkpoint between them. Each phase must produce a verifiable partial result.
+
 ### FILE EDIT RULES ###
-  - For each file, specify EXACT changes with line numbers or function/class names.
+  -For each file, specify EXACT changes with line numbers or function/class names.
   - 'oldString': the EXACT existing code to replace (1-5 lines, must literally appear in the file)
   - 'newString': the replacement code
   - Prefer MANY small edits over one large edit.
@@ -946,21 +955,54 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     .OfType<Dictionary<string, object?>>()
                     .Where(step => step.TryGetValue("type", out var t) && t?.ToString() == "edit")
                     .ToList();
-            for (int i = 0; i < editSteps.Count; i++)
+
+            // If the LLM self-terminated with _done, the task is definitionally complete.
+            var hasDoneSignal = allSteps
+                .OfType<Dictionary<string, object?>>()
+                .Any(step => step.TryGetValue("type", out var t) && t?.ToString() == "done_signal");
+
+            if (!hasDoneSignal)
             {
-                var step = editSteps[i];
-
-                var hasStatus = step.TryGetValue("status", out var statusValue);
-                var isDone = statusValue?.ToString() == "done";
-
-                if (!hasStatus || !isDone)
+                for (int i = 0; i < editSteps.Count; i++)
                 {
-                    requiresReplan = true;
-                    await EmitLog(emitSse, "warn",  $"Edit step {i} has non-done status: {statusValue}", step, ct: ct);
-                    break;
-                } 
-            }
+                    var step = editSteps[i];
+                    var hasStatus = step.TryGetValue("status", out var statusValue);
+                    var status = statusValue?.ToString();
 
+                    // "skipped" (oldString == newString) is a successful terminal state,
+                    // not a failure. Only "error" or missing status warrants a replan.
+                    var isTerminal = status is "done" or "skipped";
+                    if (!hasStatus || !isTerminal)
+                    {
+                        requiresReplan = true;
+                        await EmitLog(emitSse, "warn",
+                            $"Edit step {i} has non-terminal status: {status}", step, ct: ct);
+                        break;
+                    }
+                }
+            }
+ 
+            if (requiresReplan)
+            {
+                await EmitLog(emitSse, "info",
+                    "Verifying task completion before replan…", ct: ct);
+
+                var (alreadyDone, doneReason) =
+                    await AssessCompletion(prompt, allSteps, projectRoot, ct);
+
+                if (alreadyDone)
+                {
+                    await EmitLog(emitSse, "success",
+                        $"Task verified complete — replan suppressed: {doneReason}", ct: ct);
+                    requiresReplan = false;
+                    complete = true;
+                }
+                else
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Completion assessment: incomplete — {doneReason}", ct: ct);
+                }
+            }
             if (requiresReplan)
             {
                 await EmitLog(emitSse, "warn", "One or more edit steps are not marked as done. This may indicate a failure in executing the plan. Consider triggering a replan or debug session.", allSteps, ct: ct);
@@ -2002,7 +2044,8 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             }
         }, ct);
 
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps);
+        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
+            steeringContext: steeringContext);
         return (allSteps, plan);
     }
 
@@ -2330,18 +2373,81 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             ? (true, verifyReason, score, newContent)
             : (false, verifyReason, score, null);
     }
-  
-    private async Task ExecutePlan(string prompt, string projectRoot, bool emitSse, string discoveryContext, AgentPlan plan, CancellationToken ct, List<object> allResults)
+
+    private async Task ExecutePlan(string prompt, string projectRoot, bool emitSse, string discoveryContext, AgentPlan plan, CancellationToken ct, List<object> allResults, string? steeringContext = null)
     {
         //  string File, string ChangeDescription, int Priority
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
         var webCtx = new StringBuilder();
+        var checkpointCount = 0;          // ← ADD
+        const int MaxCheckpoints = 3;     // ← ADD
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
             var item = planItems[itemIdx];
             var planFile = item.File;
             var changeDesc = item.Change;
+
+            // ── _done: LLM signals task is already complete ───────────────────────────
+            if (planFile.Equals("_done", StringComparison.OrdinalIgnoreCase))
+            {
+                await EmitLog(emitSse, "success",
+                    $"Task self-reported complete: {changeDesc}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "done_signal", new { message = changeDesc }, ct);
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "done_signal",
+                    ["status"] = "done",
+                    ["output"] = changeDesc
+                });
+                return; // Short-circuit — no further steps needed
+            }
+
+            // ── _checkpoint: refresh context and replan remaining steps ───────────────
+            if (planFile.Equals("_checkpoint", StringComparison.OrdinalIgnoreCase))
+            {
+                if (++checkpointCount > MaxCheckpoints)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Max checkpoints ({MaxCheckpoints}) reached — continuing without replan", ct: ct);
+                    continue;
+                }
+
+                await EmitLog(emitSse, "info",
+                    $"Checkpoint {checkpointCount}/{MaxCheckpoints}: {changeDesc}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "phase",
+                        new { phase = "checkpoint", message = $"Checkpoint {checkpointCount}: refreshing context…" }, ct);
+
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "checkpoint",
+                    ["status"] = "done",
+                    ["output"] = changeDesc
+                });
+
+                var remaining = planItems.Skip(itemIdx + 1).ToList();
+                if (remaining.Count > 0)
+                {
+                    var newSteps = await CheckpointReplan(
+                        prompt, discoveryContext, remaining, allResults,
+                        projectRoot, emitSse, ct, steeringContext);
+
+                    if (newSteps?.Count > 0)
+                    {
+                        // Replace the rest of the plan with freshly anchored steps
+                        planItems = planItems.Take(itemIdx + 1).Concat(newSteps).ToList();
+                        discoveryContext = discoveryContext; // already enriched inside CheckpointReplan
+                        await EmitLog(emitSse, "info",
+                            $"Checkpoint replan: {newSteps.Count} new step(s)", ct: ct);
+                        if (emitSse)
+                            await SendSse(Response, "plan",
+                                new { summary = $"Phase {checkpointCount + 1} plan", items = newSteps }, ct);
+                    }
+                }
+                continue;
+            }
             // ── _rename marker ────────────────────────────────────────────────────
             if (planFile.Equals("_rename", StringComparison.OrdinalIgnoreCase))
             {
@@ -3756,6 +3862,168 @@ Rules:
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
+    }
+
+    /// <summary>
+    /// Before triggering a replan, verify the task isn't already done.
+    /// Reads the current state of modified files and asks the LLM for a binary verdict.
+    /// This is the primary guard against hallucinated replan spirals.
+    /// </summary>
+    private async Task<(bool isComplete, string reason)> AssessCompletion(
+        string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct)
+    {
+        var editSteps = executedSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit")
+            .ToList();
+
+        if (editSteps.Count == 0)
+            return (true, "No edit steps — command-only task");
+
+        var failed = editSteps
+            .Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped"))
+            .ToList();
+
+        // All steps succeeded — no need for an LLM call
+        if (failed.Count == 0)
+            return (true, $"All {editSteps.Count} edit step(s) succeeded or were intentionally skipped");
+
+        // Build context: task + step results + current file content for up to 2 modified files
+        var sb = new StringBuilder();
+        sb.AppendLine("## Task");
+        sb.AppendLine(prompt);
+        sb.AppendLine();
+        sb.AppendLine("## Edit step results");
+        foreach (var s in editSteps.Take(12))
+        {
+            var path = s.GetValueOrDefault("path")?.ToString() ?? "?";
+            var status = s.TryGetValue("status", out var st) ? st?.ToString() : "?";
+            var error = s.TryGetValue("error", out var e) ? e?.ToString() : null;
+            sb.AppendLine($"- {path}: {status}{(error != null ? $" → {error}" : "")}");
+        }
+        sb.AppendLine();
+
+        var modifiedPaths = editSteps
+            .Where(s => s.TryGetValue("status", out var st) && st?.ToString() == "done")
+            .Select(s => s.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .ToList();
+
+        foreach (var relPath in modifiedPaths)
+        {
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, relPath!.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
+
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var preview = content.Length > 700 ? content[..700] + "\n…(truncated for preview)" : content;
+            sb.AppendLine($"## Current content of {relPath}");
+            sb.AppendLine("```");
+            sb.AppendLine(preview);
+            sb.AppendLine("```");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Is the task complete? A task is complete when the files now contain the");
+        sb.AppendLine("required changes, even if some edit steps were skipped because the code");
+        sb.AppendLine("was already in the correct state.");
+
+        const string sys =
+            "You are a task completion verifier. Output ONLY valid JSON with no markdown: " +
+            "{\"complete\": true|false, \"reason\": \"one sentence\"}";
+
+        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(20));
+        if (string.IsNullOrWhiteSpace(raw))
+            return (false, "Assessment timed out — assuming incomplete");
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var s2 = cleaned.IndexOf('{');
+            var e2 = cleaned.LastIndexOf('}');
+            if (s2 >= 0 && e2 > s2) cleaned = cleaned[s2..(e2 + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            var root = doc.RootElement;
+            var isComplete = root.TryGetProperty("complete", out var c) && c.ValueKind == JsonValueKind.True;
+            var reason = root.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
+            return (isComplete, reason);
+        }
+        catch
+        {
+            return (false, "Could not parse completion assessment");
+        }
+    }
+    /// <summary>
+    /// Called when a _checkpoint step is encountered mid-plan.
+    /// Re-reads all files modified so far, builds an enriched discovery context,
+    /// then runs a full planning cycle for the remaining steps.
+    /// Returns a fresh list of plan steps, or null if no replan was possible.
+    /// </summary>
+    private async Task<List<PlanStep>?> CheckpointReplan(
+        string originalPrompt,
+        string currentDiscoveryContext,
+        List<PlanStep> remainingSteps,
+        List<object> completedResults,
+        string projectRoot,
+        bool emitSse,
+        CancellationToken ct,
+        string? steeringContext = null)
+    {
+        // Collect paths of every file successfully modified in the completed phase
+        var modifiedPaths = completedResults
+            .OfType<Dictionary<string, object?>>()
+            .Where(r =>
+                r.TryGetValue("type", out var t) && t?.ToString() is "edit" or "create" &&
+                r.TryGetValue("status", out var s) && s?.ToString() == "done")
+            .Select(r => r.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        await EmitLog(emitSse, "info",
+            $"Checkpoint: refreshing context from {modifiedPaths.Count} modified file(s)…", ct: ct);
+
+        // Build enriched context: original discovery + current file states
+        var enriched = new StringBuilder(currentDiscoveryContext);
+        enriched.AppendLine();
+        enriched.AppendLine("## CHECKPOINT — current file states after completed phase");
+        enriched.AppendLine("These versions supersede any earlier content shown above.");
+
+        foreach (var relPath in modifiedPaths)
+        {
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, relPath!.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
+
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            enriched.AppendLine($"\n### {relPath} (post-phase)\n```\n{content}\n```");
+        }
+
+        if (remainingSteps.Count == 0) return null;
+
+        // Describe remaining intended work so the LLM can revise or confirm it
+        var remainingDesc = new StringBuilder();
+        remainingDesc.AppendLine("Intended remaining work (revise based on current file states above):");
+        foreach (var step in remainingSteps)
+            remainingDesc.AppendLine($"- {step.File}: {step.Change}");
+
+        var replanPrompt =
+            $"## Original task\n{originalPrompt}\n\n" +
+            remainingDesc +
+            (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n## Steering\n{steeringContext}\n");
+
+        var newPlan = await AnalyzePromptAndPlanCodeChanges(
+            replanPrompt, enriched.ToString(), projectRoot, emitSse, ct, steeringContext);
+
+        return newPlan?.Plan;
     }
 
     private async Task ExecuteRenameStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
