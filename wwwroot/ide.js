@@ -1,7 +1,6 @@
-﻿wwwroot/ide.js
-'use strict';
+﻿'use strict';
 
-angular.module('kanbanApp').factory('IDEComponent', function($http, $timeout) {
+angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
   return {
     init: function(vm, $scope) {
       // IDE component state
@@ -101,7 +100,7 @@ angular.module('kanbanApp').factory('IDEComponent', function($http, $timeout) {
       };
 
       // Open file picker
-      vm.openFilePicker = function() {
+      vm.openFileBrowser = function() {
         vm.ide.filePickerOpen = true;
         vm.loadFilePickerEntries();
       };
@@ -237,10 +236,3 @@ angular.module('kanbanApp').factory('IDEComponent', function($http, $timeout) {
     }
   };
 });
-
-// Initialize IDE component when app starts
-angular.module('kanbanApp').run(['IDEComponent', '$rootScope', function(IDEComponent, $rootScope) {
-  $rootScope.$on('$viewContentLoaded', function() {
-    // IDE initialization happens in the controller
-  });
-}]);

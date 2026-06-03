@@ -31,32 +31,40 @@ namespace MaestroBackend.Services
 
         public static void DisplayLogo()
         {
-            Console.Clear();
-            
-            // Display the main logo
-            foreach (string line in LogoLines)
+            try
             {
-                Console.WriteLine(line);
+                Console.Clear();
+                
+                // Display the main logo
+                foreach (string line in LogoLines)
+                {
+                    Console.WriteLine(line);
+                }
+                
+                Console.WriteLine();
+                
+                // Display the subtitle
+                foreach (string line in SubtitleLines)
+                {
+                    Console.WriteLine(line);
+                }
+                
+                Console.WriteLine();
+                Console.WriteLine("Starting Maestro backend service...");
+                Console.WriteLine();
+                Console.WriteLine("[INFO] Backend service initialized successfully.");
+                Console.WriteLine();
+                Console.WriteLine("[DEBUG] Logo displayed successfully.");
+                Console.WriteLine("[TRACE] DisplayLogo method completed.");
+                Console.WriteLine("[VERBOSE] All system components are operational.");
+                Console.WriteLine();
+                Console.WriteLine("[SUCCESS] Maestro logo displayed with enhanced styling.");
             }
-            
-            Console.WriteLine();
-            
-            // Display the subtitle
-            foreach (string line in SubtitleLines)
+            catch (IOException)
             {
-                Console.WriteLine(line);
+                // Console is not available (e.g., when running as a service or when output is redirected)
+                // Just skip the logo display in such cases
             }
-            
-            Console.WriteLine();
-            Console.WriteLine("Starting Maestro backend service...");
-            Console.WriteLine();
-            Console.WriteLine("[INFO] Backend service initialized successfully.");
-            Console.WriteLine();
-            Console.WriteLine("[DEBUG] Logo displayed successfully.");
-            Console.WriteLine("[TRACE] DisplayLogo method completed.");
-            Console.WriteLine("[VERBOSE] All system components are operational.");
-            Console.WriteLine();
-            Console.WriteLine("[SUCCESS] Maestro logo displayed with enhanced styling.");
         }
 
         public static async Task DisplayLogoAsync()

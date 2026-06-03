@@ -201,4 +201,101 @@ public class FileEditController : ControllerBase
             return StatusCode(500, ex.Message);
         }
     }
+
+    [HttpGet("content")]
+    public IActionResult GetContent([FromQuery] string project = "", [FromQuery] string path = "")
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return BadRequest("Path is required");
+        }
+
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relativePath = path.Trim();
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
+
+        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest("Path outside workspace root is not allowed.");
+        }
+
+        if (!System.IO.File.Exists(targetFull))
+        {
+            return NotFound("File not found.");
+        }
+
+        try
+        {
+            var content = System.IO.File.ReadAllText(targetFull);
+            return Ok(new { content });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
+
+    [HttpPost("save")]
+    public async Task<IActionResult> Save([FromBody] EditRequest req)
+    {
+        if (req == null) return BadRequest("Missing request");
+
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+
+        var projectSegment = string.IsNullOrWhiteSpace(req.Project) ? "" : req.Project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relativePath = req.Path?.Trim() ?? "";
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
+
+        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest("Path outside workspace root is not allowed.");
+        }
+
+        if (!req.Apply)
+        {
+            return Ok(new { path = targetFull, exists = System.IO.File.Exists(targetFull) });
+        }
+
+        var dir = Path.GetDirectoryName(targetFull);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+        if (!System.IO.File.Exists(targetFull) && !req.CreateIfMissing)
+        {
+            return NotFound("File does not exist.");
+        }
+
+        try
+        {
+            await System.IO.File.WriteAllTextAsync(targetFull, req.Content ?? string.Empty, Encoding.UTF8);
+            return Ok(new { path = targetFull, written = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ex.Message);
+        }
+    }
 }

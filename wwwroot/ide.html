@@ -1,38 +1,46 @@
-﻿wwwroot/ide.html
-<div class="panel" data-panel-type="ide" data-panel-id="ide-panel" style="display: none;">
-  <h3>💻 IDE</h3>
+﻿<div class="panel" data-panel-type="ide" data-panel-id="ide-panel">
+  <h3>📝 IDE</h3>
   <div class="panel-body">
-    <div class="ide-container">
-      <div class="ide-toolbar">
-        <button class="small" ng-click="vm.openFileBrowser()">📁 Open File</button>
-        <button class="small" ng-click="vm.saveFile()">💾 Save</button>
-        <button class="small" ng-click="vm.closeFile()">✕ Close</button>
+    <div class="ide-toolbar">
+      <button class="small" ng-click="vm.openFilePicker()" title="Open File">📂 Open</button>
+      <button class="small" ng-click="vm.saveFile()" ng-disabled="!vm.ide.isEditing" title="Save File">💾 Save</button>
+      <button class="small" ng-click="vm.newFile()" title="New File">➕ New</button>
+      <button class="small" ng-click="vm.closeIDE()" title="Close IDE">✕ Close</button>
+    </div>
+    <div class="ide-file-explorer" ng-if="vm.ide.filePickerOpen">
+      <div class="file-picker-header">
+        <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.ide.filePickerPath">⬆ Up</button>
+        <span>{{vm.ide.filePickerPath || '/'}}</span>
+        <button class="small" ng-click="vm.clearSearch()" ng-if="vm.ide.searchFilter" style="margin-left:auto;">✕ Clear</button>
       </div>
-      <div class="ide-file-browser" ng-if="vm.showFileBrowser">
-        <div class="file-browser-header">
-          <span>{{vm.currentPath || 'Root'}}</span>
-          <button class="small" ng-click="vm.closeFileBrowser()">✕</button>
+      <input type="text" ng-model="vm.ide.searchFilter" placeholder="Search files..." class="search-input" />
+      <div class="file-picker-list">
+        <div class="entry dir" ng-repeat="e in vm.ide.filePickerEntries" ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">
+          <div class="entryTypeAndName"><span>📁</span><span>{{e.name + '/'}}</span></div>
         </div>
-        <div class="file-browser-content">
-          <div class="file-entry dir" ng-repeat="entry in vm.fileBrowserEntries" ng-if="entry.isDirectory" ng-click="vm.navigateToDirectory(entry.path)">
-            <span>📁</span> {{entry.name}}
-          </div>
-          <div class="file-entry file" ng-repeat="entry in vm.fileBrowserEntries" ng-if="!entry.isDirectory" ng-click="vm.openFile(entry.path)">
-            <span>📄</span> {{entry.name}}
-          </div>
+        <div class="entry" ng-repeat="e in vm.ide.filePickerEntries" ng-if="!e.isDirectory" ng-click="vm.selectFile(e.path)">
+          <div class="entryTypeAndName"><span>📄</span><span>{{e.name}}</span></div>
         </div>
       </div>
-      <div class="ide-editor-container" ng-if="vm.currentFile">
-        <div class="ide-file-header">
-          <span>{{vm.currentFile}}</span>
-          <span class="file-size">{{vm.fileContent.length}} chars</span>
-        </div>
-        <textarea class="ide-editor" ng-model="vm.fileContent" ng-if="vm.currentFile" ng-change="vm.onFileContentChange()"></textarea>
+    </div>
+    <div class="ide-editor" ng-if="vm.ide.currentFile && !vm.ide.filePickerOpen">
+      <div class="editor-header">
+        <span class="file-name">{{vm.ide.currentFile}}</span>
+        <button class="small" ng-click="vm.closeFile()" title="Close File">✕</button>
       </div>
-      <div class="ide-placeholder" ng-if="!vm.currentFile && !vm.showFileBrowser">
-        <p>Open a file to start editing</p>
-        <button class="small" ng-click="vm.openFileBrowser()">Browse Files</button>
+      <textarea 
+        class="editor-textarea" 
+        ng-model="vm.ide.content" 
+        ng-if="vm.ide.isEditing"
+        placeholder="Start editing {{vm.ide.currentFile}}..."
+        ng-blur="vm.saveFile()">
+      </textarea>
+      <div class="editor-view" ng-if="!vm.ide.isEditing">
+        <pre>{{vm.ide.content}}</pre>
       </div>
+    </div>
+    <div class="ide-placeholder" ng-if="!vm.ide.currentFile && !vm.ide.filePickerOpen">
+      <p>Click "Open File" to browse and edit files</p>
     </div>
   </div>
 </div>
