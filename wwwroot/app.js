@@ -465,6 +465,7 @@
       vm.addEmailAccount();
     }
     vm.loadConfig();
+    startCalendarProcessing();
 
     vm.getSelectedProjectDescription = function () {
       if (!vm.selectedProject) return '';
@@ -682,6 +683,118 @@ vm.changeProject = function () {
       if (_bhCommandTimer) { $interval.cancel(_bhCommandTimer); _bhCommandTimer = null; }
     }
 
+    // === Calendar Event Processing ===
+    var _calTimer = null;
+
+    function cronMatches(expr, date) {
+      try {
+        var parts = expr.trim().split(/\s+/);
+        if (parts.length !== 5) return false;
+        function matchField(field, val) {
+          if (field === '*') return true;
+          if (field.indexOf('*/') === 0) {
+            var interval = parseInt(field.slice(2), 10);
+            return interval > 0 && val % interval === 0;
+          }
+          var vals = field.split(',');
+          for (var i = 0; i < vals.length; i++) {
+            if (parseInt(vals[i], 10) === val) return true;
+          }
+          return false;
+        }
+        return matchField(parts[0], date.getMinutes()) &&
+               matchField(parts[1], date.getHours()) &&
+               matchField(parts[2], date.getDate()) &&
+               matchField(parts[3], date.getMonth() + 1) &&
+               matchField(parts[4], date.getDay());
+      } catch (e) { return false; }
+    }
+
+    function processCalendarEvents() {
+      $http.get('/api/calendar/load').then(function (resp) {
+        try {
+          var data = resp.data;
+          if (typeof data === 'string') data = JSON.parse(data);
+          if (!Array.isArray(data)) return;
+        } catch (e) { return; }
+
+        var now = new Date();
+        var todayStr = now.getFullYear() + '-' +
+          String(now.getMonth() + 1).padStart(2, '0') + '-' +
+          String(now.getDate()).padStart(2, '0');
+        var currentMinutes = now.getHours() * 60 + now.getMinutes();
+        var changed = false;
+
+        for (var ci = 0; ci < data.length; ci++) {
+          var cal = data[ci];
+          if (!cal.date || !cal.text) continue;
+
+          var shouldFire = false;
+
+          if (cal.cronExpression) {
+            // cron recurring entry
+            if (cronMatches(cal.cronExpression, now)) {
+              var lastFired = cal.lastFired ? new Date(cal.lastFired).getTime() : 0;
+              // prevent double-firing within the same minute
+              if (now.getTime() - lastFired > 60000) {
+                shouldFire = true;
+              }
+            }
+          } else {
+            // one-shot entry
+            if (cal.processed) continue;
+            var calMinute = 0;
+            if (cal.time) {
+              var tp = cal.time.split(':');
+              calMinute = parseInt(tp[0], 10) * 60 + parseInt(tp[1], 10);
+            }
+            if (cal.date < todayStr || (cal.date === todayStr && calMinute <= currentMinutes)) {
+              shouldFire = true;
+            }
+          }
+
+          if (shouldFire) {
+            var newCard = {
+              id: uid(),
+              text: cal.text,
+              filePath: cal.project || vm.selectedProject,
+              createdAt: now.toISOString(),
+              priority: cal.priority || 'medium',
+              ready: true,
+              attached: []
+            };
+            vm.state.todo.push(newCard);
+            vm.saveCards();
+            changed = true;
+
+            if (cal.cronExpression) {
+              cal.lastFired = now.toISOString();
+            } else {
+              cal.processed = true;
+            }
+
+            if (!vm.streamingActive) {
+              vm.executeAgent(newCard);
+            }
+          }
+        }
+
+        if (changed) {
+          $http.post('/api/calendar/save', data).catch(function () {});
+        }
+      }, function () {});
+    }
+
+    function startCalendarProcessing() {
+      stopCalendarProcessing();
+      _calTimer = $interval(processCalendarEvents, 60000, 0, false);
+      processCalendarEvents();
+    }
+
+    function stopCalendarProcessing() {
+      if (_calTimer) { $interval.cancel(_calTimer); _calTimer = null; }
+    }
+
     function findCardColumn(cardId) {
       if (!cardId || !vm.state) return null;
       var cols = ['todo', 'doing', 'done', 'archived'];
@@ -736,6 +849,7 @@ vm.changeProject = function () {
           if (cmd.params.text) c.text = cmd.params.text;
           if (cmd.params.priority) c.priority = cmd.params.priority;
           if (cmd.params.attached !== undefined) c.attached = cmd.params.attached;
+          if (cmd.params.autoPr !== undefined) c.autoPr = cmd.params.autoPr;
           vm.saveCards();
         }
       } else if (cmd.command === 'archiveCard' && cmd.params) {
@@ -752,6 +866,58 @@ vm.changeProject = function () {
         console.log('Stopping agent from remote command:', cmd);
         var activeCard = findCardById(vm.activeCardId);
         vm.stopAgent && vm.stopAgent(activeCard);
+      } else if (cmd.command === 'startPr' && cmd.params && cmd.params.cardId) {
+        console.log('Starting PR from remote command:', cmd);
+        var project = cmd.params.project || vm.selectedProject;
+        if (project) {
+          $http.post('/api/pr/start', {
+            projectPath: project,
+            cardId: cmd.params.cardId,
+            cardText: cmd.params.text || ''
+          }).then(function (resp) {
+            var d = resp.data;
+            var c = findCardById(cmd.params.cardId);
+            if (c) {
+              if (d && d.success) {
+                c.prStatus = { status: 'branch-created', branch: d.branchName, originalBranch: d.originalBranch };
+                c.autoPr = true;
+              } else {
+                c.prStatus = { status: 'error', error: (d && d.error) || 'Branch creation failed' };
+              }
+              vm.saveCards();
+            }
+          }, function (err) {
+            var c = findCardById(cmd.params.cardId);
+            if (c) { c.prStatus = { status: 'error', error: err.statusText || 'Network error' }; vm.saveCards(); }
+          });
+        }
+      } else if (cmd.command === 'finishPr' && cmd.params && cmd.params.cardId) {
+        console.log('Finishing PR from remote command:', cmd);
+        var project = cmd.params.project || vm.selectedProject;
+        if (project) {
+          $http.post('/api/pr/finish', {
+            projectPath: project,
+            cardId: cmd.params.cardId,
+            cardText: cmd.params.text || '',
+            branchName: cmd.params.branchName || '',
+            summary: cmd.params.summary || '',
+            originalBranch: cmd.params.originalBranch || ''
+          }).then(function (resp) {
+            var d = resp.data;
+            var c = findCardById(cmd.params.cardId);
+            if (c) {
+              if (d && d.success) {
+                c.prStatus = { status: 'pr-created', branch: d.branchName || cmd.params.branchName, prUrl: d.prUrl || '' };
+              } else {
+                c.prStatus = { status: 'error', error: (d && d.error) || 'PR creation failed', branch: cmd.params.branchName };
+              }
+              vm.saveCards();
+            }
+          }, function (err) {
+            var c = findCardById(cmd.params.cardId);
+            if (c) { c.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: cmd.params.branchName }; vm.saveCards(); }
+          });
+        }
       } else if (cmd.command === 'deleteCard' && cmd.params && cmd.params.cardId) {
         console.log('Deleting card from remote command:', cmd);
         var col = findCardColumn(cmd.params.cardId);
