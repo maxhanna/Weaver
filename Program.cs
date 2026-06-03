@@ -1,4 +1,7 @@
 ﻿using MaestroBackend.Services;
+using MaestroBackend;
+
+MaestroLogo.DisplayLogo();
 
 var builder = WebApplication.CreateBuilder(args);
 
