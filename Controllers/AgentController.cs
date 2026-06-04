@@ -106,81 +106,107 @@ public class AgentController : ControllerBase
         }
         return (sb.ToString(), steps);
     }
- 
 
+
+    private const string PlanningSystemPrompt =
+    @"You are a software-engineering agent. Output a plan using EXACTLY the marker format below.
+Do NOT use JSON. Do NOT use markdown fences. Use ONLY the ##MARKERS## shown.
+ 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━ FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+##PLAN##
+THINKING: <reason through the task: which files change, where, and how>
+SUMMARY: <one sentence: what the completed plan accomplishes>
+SCORE: <0-100 honestly — 100 only when fully certain>
+ 
+For each change, add a ##STEP## block:
+ 
+##STEP##
+file: <relative/path.ext  OR  special marker>
+change: <what this step does / the command / the query>
+##OLD##
+<1-3 lines copied VERBATIM from the file — the unique insertion/change anchor>
+##NEW##
+<replacement — include the anchor line(s) if keeping them, plus your changes>
+##END##
+ 
+For non-file steps (commands, done, web, etc.) — skip ##OLD##/##NEW##/##END##:
+##STEP##
+file: _command
+change: dotnet build
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 
+STEP TYPE REFERENCE (the ""file"" field):
+  relative/path.ext  — Edit an existing file (must appear in discovery context)
+  _command           — Run a terminal/shell command
+  _create_file       — Create new file; put ""path.ext: description"" in change
+  _web_search        — Web search; put query in change
+  _web_fetch         — Fetch URL; put full URL in change
+  _git               — Git operation: commit / pull / push / revert / branch
+  _rename_file       — Rename: change = ""old → new""
+  _move_file         — Move:   change = ""old → new""
+  _delete_file       — Delete: change = ""path.ext""
+  _show              — Display text to the user
+  _explore           — Read more files; put path or glob in change
+  _done              — Task ALREADY complete — only step; put reason in change
+  _checkpoint        — Phase boundary for large refactors (>4 files / >8 steps)
+ 
+##OLD## / ##NEW## / ##END## appear ONLY for relative-path file edits.
+ 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━ ANCHOR RULES ━━━━━━━━━━━━━━━━━━━━━
+HARD LIMIT: ##OLD## must be 1-3 lines, each line under 120 chars.
+If a 50-line method has one line changing, ##OLD## = that ONE line.
+ 
+INSERTIONS — adding new code without removing any:
+  ##OLD##  = one existing adjacent line (the anchor)
+  ##NEW##  = that same anchor line + your inserted code
+ 
+  CORRECT insertion (adding a log line after the opening brace):
+  ##OLD##
+      public async Task ProcessOrder(Order order)
+      {
+  ##NEW##
+      public async Task ProcessOrder(Order order)
+      {
+          _logger.LogInformation(""Processing {Id}"", order.Id);
+  ##END##
+ 
+REPLACEMENTS — changing an existing line:
+  ##OLD##  = the line(s) that actually change (≤ 3 lines)
+  ##NEW##  = the replacement
+ 
+  CORRECT replacement (changing one return value):
+  ##OLD##
+          return total;
+  ##NEW##
+          return total * taxRate;
+  ##END##
+ 
+  WRONG — wrapping unchanged surrounding code in ##OLD##:
+  ##OLD##
+      int Calculate() {
+          var x = 1;
+          return total;    ← only this line changes
+      }
+  ##NEW## ... ##END##      ← DON'T do this
+ 
+SPLIT RULE: two change sites in the same file = two ##STEP## blocks.
+##OLD## must appear VERBATIM in the file (exact whitespace, exact indentation).
+If the anchor appears more than once, extend to 2-3 lines to make it unique (still ≤ 3).
+Never put omission markers (…, ..., truncated) in ##OLD## or ##NEW##.
+ 
+GENERAL RULES:
+1. SELF-STOP — if the codebase already satisfies the requirement, emit only
+   one ##STEP## with file: _done and the reason in change.
+2. PHASE CHECKPOINTS — for refactors touching >4 files or >8 steps, insert
+   a _checkpoint step between independent phases.
+3. If you need more file context, emit only _explore steps — no mixed steps.
+4. If the task requires live web data, emit a _web_search step FIRST.
+";
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default,
         string? steeringContext = null)
-    {
-        string planningPrompt = "You are a software-engineering agent. This is a task with instructions on how to solve the task. Your goal is to produce a JSON plan of specific code changes to accomplish the task, with file paths and exact code edits or commands."
-+ @"### AVAILABLE STEP TYPES (the ""file"" field) ###
-  relative/path.ext     — Edit an existing file (must appear in discovery context below)
-  _command              — Run any terminal command (PowerShell syntax)
-  _create_file          — Create a new file: ""path.ext: describe what to generate""
-  _web_search           — Search the web; put the query in ""change""
-  _web_fetch            — Fetch a URL; put the full URL in ""change""
-  _git                  — Git operation (commit, pull, push, revert, branch)
-  _rename_file          — Rename a file: ""old → new""
-  _move_file            — Move a file: ""old → new""
-  _delete_file          — Delete a file: ""path.ext""
-  _show                 — Display text to the user (Used for showing findings (usually terminal output); Must be used last if used at all.)
-  _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
-  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step when the codebase already satisfies the requirement. Put the reason in ""change"".
-  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified so far and replans the remaining work with fresh file content. Insert between independent phases when later steps depend on the result of earlier ones, or when the plan spans >4 files and >8 steps total.
-### GENERAL RULES ###
-1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
-2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
-3. EXACT LOCATIONS — for file edits, include exact line numbers or function/class names in ""change""
-4. REAL PATHS ONLY — only reference files that exist in the discovery context below
-5. DO NOT RETURN ANYTHING ELSE BUT VALID JSON - no markdown fences, no explanation. No preambles. Do not return anything else besides the JSON object containing the plan. The JSON must be parseable by standard parsers without modification. If you cannot produce valid JSON, return an empty plan: { ""plan"": [] }
-6. If the task cannot be fully completed yet with the given context information, output only 1 step type: _explore. 
-7. Ignore oldString and newString in output for steps that are not relative/path.ext edits.
-8. Always include oldString and newString for relative/path.ext edits (these are file editing steps).
-9. CRITICAL — Include a ""score"" field (0-100) that represents how confident you are
-    that this plan will accomplish 100% of the task. Be honest:
-    - 100 = the plan will fully and correctly solve the task
-    - 80-99 = minor concerns (edge cases, untested areas)
-    - 50-79 = moderate concerns (missing steps, uncertain edits)
-    - 0-49 = major gaps (insufficient context, unclear requirements)
-10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
-11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result."
-
-+ @"### FILE EDIT RULES ###
-EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
-  - oldString targets ONLY the line(s) that change. Hard limit: 5 lines OR 250 chars.
-  - If a 30-line function has one line changing, oldString = that one line only.
-  - newString is the replacement. Same 5-line / 250-char limit.
-  - Never reproduce unchanged surrounding code in oldString.
-
-CORRECT (small unique anchor):
-  { ""file"": ""path.cs"", ""oldString"": ""return total;"", ""newString"": ""return total * taxRate;"" }
-
-WRONG (large block where only one value changes — will be REJECTED):
-  { ""oldString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total;"",
-    ""newString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total * taxRate;"" }
-
-SPLIT RULE: one file change = one step. Two separate change sites in the same file = two steps.
-  Never expand oldString to cover multiple change sites — emit multiple steps instead.
-
-For insertions: use an existing adjacent line as oldString anchor and include it unchanged in newString:
-  { ""oldString"": ""var config = Load();"", ""newString"": ""var config = Load();\nValidate(config);"" }
-
-- oldString must appear verbatim in the file (exact whitespace, exact indentation)
-- oldString must never be blank for an existing file edit
-- oldString and newString must NOT be identical
-- For brand-new files use _create_file, not a file edit"
-
-+ @"### EXAMPLE OUTPUT — respond with ONLY this type of JSON structure, no markdown, no extra text ###
-{
-  ""thinking"": ""<analyze the task; name files; state if commands or web searches are needed first>"",
-  ""summary"":  ""<one sentence: what the completed plan will accomplish>"",
-  ""score"": <0-100>,
-  ""plan"": [
-    { ""file"": ""_command"", ""change"": ""mkdir -p src/components/Button"", ""oldString"": """", ""newString"": """", ""priority"": 1 },
-    { ""file"": ""relative/path"", ""change"": ""Line 5: add import ..."", ""oldString"": ""using System.Text;"", ""newString"": ""using System.Text;\nusing System.Text.Json;"", ""priority"": 2 }
-  ]
-}";
-
+    { 
+        string planningPrompt = PlanningSystemPrompt;
         var analysisPromptBuilder = new StringBuilder();
         analysisPromptBuilder.AppendLine("### TASK ###");
         analysisPromptBuilder.AppendLine(prompt);
@@ -310,45 +336,70 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         var unescapedQuotes = Regex.Matches(lastLine, @"(?<!\\)""").Count;
         return unescapedQuotes % 2 != 0;
     }
-    private async Task<(AgentPlan? plan, string? error)> ParseAndScore(string raw, bool emitSse, CancellationToken ct)
+
+    private async Task<(AgentPlan? plan, string? error)> ParseAndScore(
+        string raw, bool emitSse, CancellationToken ct)
     {
-        // Strip markdown fences the LLM sometimes wraps its JSON in
+        // ── Primary: delimiter format ─────────────────────────────────────────────
+        var delimited = ParsePlanDelimited(raw);
+        if (delimited != null)
+        {
+            var violations = GetPlanSizeViolations(delimited);
+            if (violations.Count > 0)
+            {
+                var penalty = Math.Min(violations.Count * 15, 45);
+                delimited.Score = Math.Max(0, delimited.Score - penalty);
+                delimited.Summary += "\n⚠ SIZE_VIOLATIONS:\n" +
+                    string.Join("\n", violations.Select(v => "  • " + v));
+                await EmitLog(emitSse, "warn",
+                    $"Plan has {violations.Count} oversized anchor(s) — score reduced to {delimited.Score}",
+                    ct: ct);
+            }
+            return (delimited, null);
+        }
+
+        // ── Fallback: JSON format (backward compat / model quirk) ────────────────
         var cleanedRaw = raw.Trim();
         if (cleanedRaw.StartsWith("```"))
         {
-            var fenceMatch = Regex.Match(cleanedRaw, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-            cleanedRaw = fenceMatch.Success ? fenceMatch.Groups[1].Value.Trim() : cleanedRaw.TrimStart('`');
+            var fenceMatch = Regex.Match(cleanedRaw,
+                @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            cleanedRaw = fenceMatch.Success
+                ? fenceMatch.Groups[1].Value.Trim()
+                : cleanedRaw.TrimStart('`');
         }
+
         var parsedPlan = ParsePlan(cleanedRaw);
         if (parsedPlan == null)
         {
-            var truncationHint = LooksLikeTruncated(cleanedRaw)
-                ? "Your response was TRUNCATED (ran out of tokens mid-JSON). " +
-                  "Produce a MUCH shorter plan: MAX 2 steps, 1-3 lines per oldString. " +
-                  "Do not start a step you cannot finish." +
-                    "If the task is complex, use a _checkpoint step to divide it into phases."
-
-                : "Failed to parse as valid JSON. Raw output contained no parseable plan block.";
+            var truncHint = LooksLikeTruncated(cleanedRaw)
+                ? "Response was TRUNCATED. Switch to the ##PLAN## / ##STEP## / ##OLD## / ##NEW## / ##END## " +
+                  "format — no JSON. Keep ##OLD## to 1-3 lines. Do not start a step you cannot finish."
+                : "Could not parse the plan. Use the ##PLAN## / ##STEP## / ##OLD## / ##NEW## / ##END## " +
+                  "format — no JSON, no markdown fences.";
             await EmitLog(emitSse, "error", "Failed to parse plan.", cleanedRaw, ct: ct);
-            return (null, truncationHint);
+            return (null, truncHint);
         }
-        var sizeViolations = GetPlanSizeViolations(parsedPlan);
-        if (sizeViolations.Count > 0)
+
+        var jsonViolations = GetPlanSizeViolations(parsedPlan);
+        if (jsonViolations.Count > 0)
         {
-            var penalty = Math.Min(sizeViolations.Count * 15, 45);
+            var penalty = Math.Min(jsonViolations.Count * 15, 45);
             parsedPlan.Score = Math.Max(0, parsedPlan.Score - penalty);
-            // Embed violations in summary so BuildScoreRetryPrompt can surface them
             parsedPlan.Summary += "\n⚠ SIZE_VIOLATIONS:\n" +
-                string.Join("\n", sizeViolations.Select(v => "  • " + v));
+                string.Join("\n", jsonViolations.Select(v => "  • " + v));
             await EmitLog(emitSse, "warn",
-                $"Plan has {sizeViolations.Count} oversized edit(s) — score reduced to {parsedPlan.Score}", ct: ct);
+                $"Plan has {jsonViolations.Count} oversized edit(s) — score reduced to {parsedPlan.Score}",
+                ct: ct);
         }
         return (parsedPlan, null);
     }
 
-    private static string BuildScoreRetryPrompt(string originalPrompt, string discoveryContext, string projectRoot,
-        List<(int score, string summary, string raw, string error)> history, string? steeringContext = null,
-        string? webSearchViolation = null)
+
+    private static string BuildScoreRetryPrompt(
+        string originalPrompt, string discoveryContext, string projectRoot,
+        List<(int score, string summary, string raw, string error)> history,
+        string? steeringContext = null, string? webSearchViolation = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("## ORIGINAL TASK");
@@ -364,13 +415,13 @@ For insertions: use an existing adjacent line as oldString anchor and include it
 
         if (!string.IsNullOrWhiteSpace(webSearchViolation))
         {
-            sb.AppendLine("## ⚠ CRITICAL VIOLATION — MISSING _web_search STEP");
+            sb.AppendLine("## ⚠ CRITICAL — MISSING _web_search STEP");
             sb.AppendLine(webSearchViolation);
-            sb.AppendLine("You MUST add a _web_search step as the FIRST step in your plan.");
-            sb.AppendLine("Do NOT answer from your training data. The task explicitly requires a live web search.");
+            sb.AppendLine("Add a ##STEP## with file: _web_search as the FIRST step in your plan.");
             sb.AppendLine();
         }
 
+        // Collect anchor size violations from all previous attempts
         var allViolations = history
             .SelectMany((h, i) => h.summary.Split('\n')
                 .Where(l => l.TrimStart().StartsWith("• "))
@@ -379,63 +430,65 @@ For insertions: use an existing adjacent line as oldString anchor and include it
 
         if (allViolations.Count > 0)
         {
-            sb.AppendLine("### ⚠ EDIT SIZE FAILURES — fix these before anything else");
+            sb.AppendLine("## ⚠ ANCHOR SIZE FAILURES — fix these before anything else");
             sb.AppendLine();
-            sb.AppendLine("WRONG — large anchor wrapping an unchanged block:");
-            sb.AppendLine("  oldString: \"void Render() {\\n  Setup();\\n  Draw();\\n  return;\\n}\"");
-            sb.AppendLine("  newString: \"void Render() {\\n  Setup();\\n  Draw();\\n  Flush();\\n  return;\\n}\"");
+            sb.AppendLine("WRONG — ##OLD## wraps unchanged surrounding code:");
+            sb.AppendLine("  ##OLD##");
+            sb.AppendLine("  void Render() {");
+            sb.AppendLine("    Setup();");
+            sb.AppendLine("    Draw();");
+            sb.AppendLine("    return result;   ← only this line changes");
+            sb.AppendLine("  }");
+            sb.AppendLine("  ##NEW## ... ##END##");
             sb.AppendLine();
-            sb.AppendLine("CORRECT — anchor is only the line(s) that change:");
-            sb.AppendLine("  oldString: \"  return;\"");
-            sb.AppendLine("  newString: \"  Flush();\\n  return;\"");
+            sb.AppendLine("CORRECT — ##OLD## is only the changing line:");
+            sb.AppendLine("  ##OLD##");
+            sb.AppendLine("    return result;");
+            sb.AppendLine("  ##NEW##");
+            sb.AppendLine("    return transform(result);");
+            sb.AppendLine("  ##END##");
             sb.AppendLine();
-            sb.AppendLine("Specific violations to fix:");
+            sb.AppendLine("Violations to fix:");
             foreach (var v in allViolations) sb.AppendLine("  " + v);
             sb.AppendLine();
         }
 
-        sb.AppendLine("## PREVIOUS PLAN ATTEMPTS AND FEEDBACK");
-        sb.AppendLine("Your previous plan(s) did not score 100/100. Below is each attempt and what went wrong.");
-        sb.AppendLine("Analyze the failures, then produce a NEW plan that fixes ALL issues.");
+        sb.AppendLine("## PREVIOUS PLAN ATTEMPTS");
+        sb.AppendLine("Each attempt failed or scored below 100. Fix every issue listed and produce");
+        sb.AppendLine("a new plan using the ##PLAN## / ##STEP## / ##OLD## / ##NEW## / ##END## format.");
         sb.AppendLine();
+
         for (var i = 0; i < history.Count; i++)
         {
             var h = history[i];
             sb.AppendLine($"### Attempt {i + 1} — Score {h.score}/100");
             if (!string.IsNullOrEmpty(h.error))
-            {
                 sb.AppendLine($"⚠ ERROR: {h.error}");
-            }
             if (!string.IsNullOrEmpty(h.summary))
-            {
                 sb.AppendLine($"Summary: {h.summary}");
-            }
-            sb.AppendLine(h.raw.Length > 3000
-                ? "Raw output preview (first 3000 characters only; omitted remainder is not part of the output):"
-                : "Raw output:");
-            sb.AppendLine(h.raw.Length > 3000 ? h.raw[..3000] : h.raw);
+            // Cap preview to avoid blowing the context on failed output
+            var preview = h.raw.Length > 1200 ? h.raw[..1200] + "\n...(truncated)" : h.raw;
+            sb.AppendLine("Previous output (for reference only — do not copy verbatim):");
+            sb.AppendLine("```");
+            sb.AppendLine(preview);
+            sb.AppendLine("```");
             sb.AppendLine();
         }
-        sb.AppendLine("### PROJECT ROOT ###");
+
+        sb.AppendLine("### PROJECT ROOT");
         sb.AppendLine(projectRoot);
-        sb.AppendLine("### PROJECT DISCOVERY (ONLY use paths listed here) ###");
-        // Truncate for the retry prompt too — same reason as the initial plan
+        sb.AppendLine("### DISCOVERY CONTEXT (use ONLY paths listed here)");
         sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
         sb.AppendLine();
-        sb.AppendLine("### RULES REMINDER ###");
-        sb.AppendLine("1. Return ONLY valid JSON — no markdown fences, no extra text before/after");
-        sb.AppendLine("2. Include a \"score\" field (0-100) that honestly reflects how confident you are this plan will fully solve the task");
-        sb.AppendLine("3. Score must be 100 if you are confident the plan is correct and complete");
-        sb.AppendLine("4. If previous attempts had parse errors or were truncated — your response was TOO LONG. Output MAX 2-3 steps. Keep oldString to 1-5 SHORT lines.");
-        sb.AppendLine("5. If previous attempts had low scores, identify the gaps and fix them");
-        sb.AppendLine("6. oldString must be 1-5 lines of EXISTING code copied verbatim from the file — never copy entire methods");
-        sb.AppendLine("7. oldString and newString must NOT be identical");
-        sb.AppendLine();
-        sb.AppendLine("BEFORE writing the plan, think step by step: what was wrong with each previous attempt?");
-        sb.AppendLine("Then produce a corrected plan that addresses every issue.");
-        sb.AppendLine("If the plan is now complete and correct, set score to 100.");
+        sb.AppendLine("### RULES REMINDER");
+        sb.AppendLine("1. Use the ##PLAN## / ##STEP## / ##OLD## / ##NEW## / ##END## format — NO JSON");
+        sb.AppendLine("2. ##OLD## must be 1-3 lines of EXISTING code, copied verbatim (exact indentation)");
+        sb.AppendLine("3. SCORE: 100 only when you are certain the plan is fully correct and complete");
+        sb.AppendLine("4. If previous output was truncated — produce FEWER steps; ##OLD## 1-2 lines only");
+        sb.AppendLine("5. Fix every anchor size violation listed above before producing the new plan");
         return sb.ToString();
     }
+
 
     private static string? DetectMissingWebSearch(string prompt, AgentPlan plan)
     {
@@ -2445,6 +2498,14 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
         return discoveryContext;
     }
 
+
+    private const string SplitEditSystemPrompt =
+        "Split one oversized code anchor into multiple small atomic edits (1-3 lines each).\n" +
+        "Output ONLY in this format — no JSON, no markdown:\n\n" +
+        "##STEP##\n##OLD##\n<1-3 line anchor — copied verbatim from the file>\n##NEW##\n<replacement>\n##END##\n\n" +
+        "Repeat ##STEP## for each atomic edit site. Each ##OLD## must appear verbatim in the file shown.";
+
+
     private async Task<AgentPlan> SplitOversizedEdits(
         AgentPlan plan, string projectRoot, bool emitSse, CancellationToken ct)
     {
@@ -2474,10 +2535,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             if (!System.IO.File.Exists(fullPath)) { resultSteps.Add(step); continue; }
 
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            const string sys =
-                "Split one oversized code edit into multiple small atomic edits (1-3 lines each). " +
-                "Output ONLY valid JSON: {\"steps\":[{\"oldString\":\"...\",\"newString\":\"...\"}]} " +
-                "Each step must have a unique oldString that exists verbatim in the file. No markdown.";
+            const string sys = SplitEditSystemPrompt;
 
             var user = new StringBuilder();
             user.AppendLine($"File: {step.File}");
@@ -2495,42 +2553,30 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
 
             if (string.IsNullOrWhiteSpace(raw)) { resultSteps.Add(step); continue; }
 
-            try
+            var splitPlan = ParsePlanDelimited(raw);
+            if (splitPlan?.Plan?.Count > 0)
             {
-                var cleaned = raw.Trim();
-                if (cleaned.StartsWith("```"))
-                {
-                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
-                }
-                using var doc = JsonDocument.Parse(cleaned);
-                if (doc.RootElement.TryGetProperty("steps", out var stepsEl) &&
-                    stepsEl.ValueKind == JsonValueKind.Array)
-                {
-                    var newSteps = stepsEl.EnumerateArray()
-                        .Select(el => new PlanStep
-                        {
-                            File = step.File,
-                            Change = step.Change,
-                            Priority = step.Priority,
-                            OldString = el.TryGetProperty("oldString", out var os) ? os.GetString() ?? "" : "",
-                            NewString = el.TryGetProperty("newString", out var ns) ? ns.GetString() ?? "" : ""
-                        })
-                        .Where(s => !string.IsNullOrWhiteSpace(s.OldString))
-                        .ToList();
-
-                    if (newSteps.Count > 0)
+                var newSteps = splitPlan.Plan
+                    .Where(s => !string.IsNullOrWhiteSpace(s.OldString))
+                    .Select(s => new PlanStep
                     {
-                        resultSteps.AddRange(newSteps);
-                        await EmitLog(emitSse, "info",
-                            $"Split {step.File}: 1 oversized edit → {newSteps.Count} atomic step(s)", ct: ct);
-                        continue;
-                    }
+                        File      = step.File,
+                        Change    = step.Change,
+                        Priority  = step.Priority,
+                        OldString = s.OldString,
+                        NewString = s.NewString
+                    })
+                    .ToList();
+            
+                if (newSteps.Count > 0)
+                {
+                    resultSteps.AddRange(newSteps);
+                    await EmitLog(emitSse, "info",
+                        $"Split {step.File}: 1 oversized anchor → {newSteps.Count} atomic step(s)", ct: ct);
+                    continue;
                 }
             }
-            catch { /* fall through */ }
-
-            resultSteps.Add(step); // keep original if split fails
+            resultSteps.Add(step); // keep original if split fails 
         }
 
         plan.Plan = resultSteps;
@@ -4293,9 +4339,13 @@ Rules:
         if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
     }
-    
+
+
     private static List<string> GetPlanSizeViolations(AgentPlan plan)
     {
+        const int MaxAnchorLines = 3;
+        const int MaxAnchorChars = 120; // per line
+
         var violations = new List<string>();
         for (var i = 0; i < plan.Plan.Count; i++)
         {
@@ -4303,34 +4353,45 @@ Rules:
             if (!AgentUtilities.IsRelativePath(step.File ?? "")) continue;
 
             var old = step.OldString ?? "";
-            var lines = old.Split('\n').Length;
-            var chars = old.Length;
+            var lines = old.Split('\n');
 
-            if (lines > 5 || chars > 250)
+            // Violation A — too many lines
+            if (lines.Length > MaxAnchorLines)
                 violations.Add(
-                    $"Step {i + 1} ({step.File}): oldString is {lines} lines / {chars} chars — max is 5 lines / 250 chars. " +
-                    "Split into multiple steps, each targeting only the lines that actually change.");
+                    $"Step {i + 1} ({step.File}): ##OLD## is {lines.Length} lines — " +
+                    $"max is {MaxAnchorLines}. Use only the line(s) that actually change.");
 
-            // Detect bloated identity anchor: large block where only a tiny region differs
-            if (chars > 120)
+            // Violation B — individual line too long
+            var longLine = lines.FirstOrDefault(l => l.Length > MaxAnchorChars);
+            if (longLine != null)
+                violations.Add(
+                    $"Step {i + 1} ({step.File}): ##OLD## has a line of {longLine.Length} chars — " +
+                    $"max is {MaxAnchorChars}. Trim to the minimum unique portion.");
+
+            // Violation C — identity anchor bloat (big block, tiny diff)
+            // Catches patterns like: OLD = 80-char method signature that only changes
+            // one word vs NEW = same signature with one word different.
+            var oldNorm = old;
+            var newStr = step.NewString ?? "";
+            if (old.Length > 60 && newStr.Length > 0)
             {
-                var newStr = step.NewString ?? "";
                 var minLen = Math.Min(old.Length, newStr.Length);
                 var prefix = 0;
                 while (prefix < minLen && old[prefix] == newStr[prefix]) prefix++;
                 var suffix = 0;
                 while (suffix < minLen - prefix
                        && old[old.Length - 1 - suffix] == newStr[newStr.Length - 1 - suffix]) suffix++;
-                var changedChars = chars - prefix - suffix;
-                if (changedChars > 0 && changedChars < chars * 0.25)
+                var changedChars = old.Length - prefix - suffix;
+                if (changedChars > 0 && changedChars < old.Length * 0.2)
                     violations.Add(
-                        $"Step {i + 1} ({step.File}): only ~{changedChars} chars actually differ " +
-                        $"but oldString wraps {chars} chars of surrounding context. " +
-                        "Shrink oldString to just the changed region.");
+                        $"Step {i + 1} ({step.File}): only ~{changedChars} char(s) change but " +
+                        $"##OLD## wraps {old.Length} chars of surrounding context. " +
+                        "Shrink ##OLD## to just the changing line.");
             }
         }
         return violations;
     }
+
 
     /// <summary>
     /// Before triggering a replan, verify the task isn't already done.
@@ -4904,24 +4965,56 @@ Rules:
             return ($"HTTP {(int)resp.StatusCode} ({contentType})\n{body.Trim()}", null);
         }
         catch (Exception ex) { return ("", ex.Message); }
-    } 
+    }
+
 
     private async Task ExecuteReadStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
     {
         var relPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
         var targetPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
         if (!AgentUtilities.IsPathUnderRoot(targetPath, projectRoot))
-        { result["status"] = "error"; result["error"] = "Path outside project root"; return; }
+        {
+            result["status"] = "error";
+            result["error"] = "Path outside project root";
+            return;
+        }
         if (!System.IO.File.Exists(targetPath))
-        { result["status"] = "error"; result["error"] = "File not found"; return; }
+        {
+            result["status"] = "error";
+            result["error"] = "File not found";
+            return;
+        }
 
         result["path"] = step.Path;
- 
-        var content = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
-        result["output"] = content;
-       
+
+        var lines = await System.IO.File.ReadAllLinesAsync(targetPath, Encoding.UTF8);
+
+        // Emit line numbers so the LLM can orient itself for anchor selection.
+        // Format: "  247 │ <code>" — the │ separator makes stripping unambiguous.
+        // ##OLD## blocks should still contain RAW code (no number prefix);
+        // TrimDelimitedBlock + StripLineNumberPrefix handle accidental inclusion.
+        var numbered = new StringBuilder(lines.Length * 60);
+        for (var i = 0; i < lines.Length; i++)
+            numbered.AppendLine($"{i + 1,5} │ {lines[i]}");
+
+        result["output"] = numbered.ToString();
         result["status"] = "done";
     }
+
+    /// <summary>
+    /// Strips leading " NNN │ " prefixes that the LLM may accidentally copy
+    /// from the numbered discovery output into an ##OLD## block.
+    /// Called in TrimDelimitedBlock or at anchor application time.
+    /// </summary>
+    private static string StripLineNumberPrefix(string block)
+    {
+        // Matches optional leading spaces, digits, a space, │, a space
+        return Regex.Replace(block,
+            @"^[ \t]*\d+[ \t]*│[ \t]?",
+            "",
+            RegexOptions.Multiline);
+    }
+
 
     private Task ExecuteListStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
     {
@@ -5357,7 +5450,151 @@ Rules:
         }
     }
 
-     
+
+
+    /// <summary>
+    /// Parses the delimiter-based plan format:
+    ///   ##PLAN## / ##STEP## / ##OLD## / ##NEW## / ##END##
+    ///
+    /// Primary format — no JSON, no escaping, robust to LLM whitespace quirks.
+    /// Returns null when no ##STEP## markers are present (triggers JSON fallback).
+    /// </summary>
+    private static AgentPlan? ParsePlanDelimited(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        if (!raw.Contains("##STEP##", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var plan = new AgentPlan { Plan = new List<PlanStep>() };
+
+        // ── Header (##PLAN## section before the first ##STEP##) ──────────────────
+        var firstStepIdx = raw.IndexOf("##STEP##", StringComparison.OrdinalIgnoreCase);
+        var headerText = firstStepIdx > 0 ? raw[..firstStepIdx] : "";
+
+        plan.Thinking = ExtractLineField(headerText, "THINKING") ?? "";
+        plan.Summary = ExtractLineField(headerText, "SUMMARY") ?? "";
+        if (int.TryParse(ExtractLineField(headerText, "SCORE"), out var sc))
+            plan.Score = Math.Clamp(sc, 0, 100);
+
+        // ── Step blocks ───────────────────────────────────────────────────────────
+        var stepBodies = SplitOnCaseInsensitiveMarker(raw, "##STEP##");
+        var priority = 1;
+
+        foreach (var body in stepBodies)
+        {
+            if (string.IsNullOrWhiteSpace(body)) continue;
+
+            // Extract the key: value header fields (file, change) that appear
+            // before the first ##OLD## or ##END## marker.
+            var controlEnd = FindEarliestMarker(body,
+                new[] { "##OLD##", "##NEW##", "##END##" });
+            var controlText = controlEnd > 0 ? body[..controlEnd] : body;
+
+            var file = ExtractLineField(controlText, "file")?.Trim();
+            var change = ExtractLineField(controlText, "change")?.Trim() ?? "";
+
+            if (string.IsNullOrWhiteSpace(file)) continue;
+
+            var step = new PlanStep
+            {
+                File = file,
+                Change = change,
+                Priority = priority++
+            };
+
+            // ##OLD## / ##NEW## / ##END## — only expected for relative-path edits
+            var oldIdx = body.IndexOf("##OLD##", StringComparison.OrdinalIgnoreCase);
+            var newIdx = body.IndexOf("##NEW##", StringComparison.OrdinalIgnoreCase);
+            var endIdx = body.IndexOf("##END##", StringComparison.OrdinalIgnoreCase);
+
+            if (oldIdx >= 0 && newIdx > oldIdx)
+            {
+                var oldContent = body[(oldIdx + 7)..(newIdx)];
+                var newEnd = endIdx > newIdx ? endIdx : body.Length;
+                var newContent = body[(newIdx + 7)..newEnd];
+
+                step.OldString = TrimDelimitedBlock(oldContent);
+                step.NewString = TrimDelimitedBlock(newContent);
+            }
+
+            plan.Plan.Add(step);
+        }
+
+        return plan.Plan.Count > 0 ? plan : null;
+    }
+
+    /// <summary>
+    /// Extracts the value of a "KEY: value" line from a text block.
+    /// Reads to end-of-line; key matching is case-insensitive.
+    /// </summary>
+    private static string? ExtractLineField(string text, string key)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        var pattern = key + ":";
+        // Walk line by line so we don't accidentally match mid-value content
+        foreach (var line in text.Split('\n'))
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith(pattern, StringComparison.OrdinalIgnoreCase))
+                return trimmed[pattern.Length..].Trim();
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Splits text on a case-insensitive marker, returning the bodies of each
+    /// section that follows a marker (skips everything before the first hit).
+    /// </summary>
+    private static List<string> SplitOnCaseInsensitiveMarker(string text, string marker)
+    {
+        var result = new List<string>();
+        var search = marker.ToLowerInvariant();
+        var lower = text.ToLowerInvariant();
+        var pos = 0;
+
+        while (true)
+        {
+            var idx = lower.IndexOf(search, pos, StringComparison.Ordinal);
+            if (idx < 0) break;
+            var bodyStart = idx + marker.Length;
+            var next = lower.IndexOf(search, bodyStart, StringComparison.Ordinal);
+            var bodyEnd = next >= 0 ? next : text.Length;
+            result.Add(text[bodyStart..bodyEnd]);
+            pos = bodyStart;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Returns the index of the earliest occurrence of any of the given markers
+    /// in text (case-insensitive), or -1 if none are found.
+    /// </summary>
+    private static int FindEarliestMarker(string text, string[] markers)
+    {
+        var earliest = -1;
+        foreach (var m in markers)
+        {
+            var idx = text.IndexOf(m, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0 && (earliest < 0 || idx < earliest))
+                earliest = idx;
+        }
+        return earliest;
+    }
+
+    /// <summary>
+    /// Trims leading and trailing blank lines from a delimited block while
+    /// preserving internal indentation exactly as written by the LLM.
+    /// </summary>
+    private static string TrimDelimitedBlock(string block)
+    {
+        if (string.IsNullOrEmpty(block)) return "";
+        var lines = block.Split('\n');
+        var first = 0; var last = lines.Length - 1;
+        while (first <= last && string.IsNullOrWhiteSpace(lines[first])) first++;
+        while (last  >= first && string.IsNullOrWhiteSpace(lines[last]))  last--;
+        var trimmed = first > last ? "" : string.Join('\n', lines[first..(last + 1)]);
+        // Strip any accidental " 247 │ " prefixes the LLM copied from numbered context
+        return Regex.Replace(trimmed, @"^[ \t]*\d+[ \t]*│[ \t]?", "", RegexOptions.Multiline);
+    }
 
     private async Task RunSmartBuildCheck(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
     {
