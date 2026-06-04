@@ -131,20 +131,19 @@ public class AgentController : ControllerBase
 1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
 2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
 3. EXACT LOCATIONS — for file edits, include exact line numbers or function/class names in ""change""
-4. ATOMIC STEPS — one logical change per step, one step per file
-5. REAL PATHS ONLY — only reference files that exist in the discovery context below
-6. DO NOT RETURN ANYTHING ELSE BUT VALID JSON - no markdown fences, no explanation. No preambles. Do not return anything else besides the JSON object containing the plan. The JSON must be parseable by standard parsers without modification. If you cannot produce valid JSON, return an empty plan: { ""plan"": [] }
-7. If the task cannot be fully completed yet with the given context information, output only 1 step type: _explore. 
-8. Ignore oldString and newString in output for steps that are not relative/path.ext edits.
-9. Always include oldString and newString for relative/path.ext edits (these are file editing steps).
-10. CRITICAL — Include a ""score"" field (0-100) that represents how confident you are
+4. REAL PATHS ONLY — only reference files that exist in the discovery context below
+5. DO NOT RETURN ANYTHING ELSE BUT VALID JSON - no markdown fences, no explanation. No preambles. Do not return anything else besides the JSON object containing the plan. The JSON must be parseable by standard parsers without modification. If you cannot produce valid JSON, return an empty plan: { ""plan"": [] }
+6. If the task cannot be fully completed yet with the given context information, output only 1 step type: _explore. 
+7. Ignore oldString and newString in output for steps that are not relative/path.ext edits.
+8. Always include oldString and newString for relative/path.ext edits (these are file editing steps).
+9. CRITICAL — Include a ""score"" field (0-100) that represents how confident you are
     that this plan will accomplish 100% of the task. Be honest:
     - 100 = the plan will fully and correctly solve the task
     - 80-99 = minor concerns (edge cases, untested areas)
     - 50-79 = moderate concerns (missing steps, uncertain edits)
     - 0-49 = major gaps (insufficient context, unclear requirements)
-11.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
-12. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result."
+10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
+11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result."
 
 + @"### FILE EDIT RULES ###
 EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
@@ -1548,24 +1547,29 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     await EmitLog(emitSse, "step", $"▶ cmd[{i + 1}]: {cmd}", new { conversation }, ct: ct);
                     var beforeLen = _terminal.ReadAll().Length;
                     await _terminal.SendCommandAsync(cmd, projectRoot);
+                    // Write a unique completion marker so we detect when the command actually finishes,
+                    // even if it produces no stdout output (e.g., Set-Content inside a large loop).
+                    var marker = $"__MAESTRO_DONE_{Guid.NewGuid():N}__";
+                    await _terminal.WriteStdinAsync($"echo '{marker}'");
 
-                    // Adaptive wait: poll terminal output every 500ms.
-                    // Stops when output is stable for 3s (network commands take time to produce output).
-                    // Max 40 iterations = 20s total wait.
-                    var prevLen = beforeLen;
-                    var stableMs = 0;
-                    for (var w = 0; w < 40; w++)
+                    // Wait for the marker to appear in terminal output.
+                    // Poll every 500ms, timeout after 10 minutes.
+                    var markerTimeout = DateTime.UtcNow.AddMinutes(10);
+                    while (!ct.IsCancellationRequested && DateTime.UtcNow < markerTimeout)
                     {
                         await Task.Delay(500);
-                        var curLen = _terminal.ReadAll().Length;
-                        if (curLen == prevLen) { stableMs += 500; if (stableMs >= 3000) break; }
-                        else { stableMs = 0; prevLen = curLen; }
+                        if (_terminal.ReadAll().Contains(marker)) break;
                     }
 
                     var fullOutput = _terminal.ReadAll();
                     var freshOutput = beforeLen < fullOutput.Length
                         ? fullOutput[beforeLen..] : "";
                     beforeLen = fullOutput.Length;
+                    // Strip internal completion marker from output before LLM sees it
+                    var cleanOutput = string.Join("\n",
+                        (freshOutput ?? "").Split('\n')
+                            .Where(l => !l.Contains("__MAESTRO_DONE_")));
+                    freshOutput = cleanOutput;
                     
                     // Detect errors in output
                     var isError = false;

@@ -223,6 +223,36 @@ public class BughostedController : ControllerBase
         }
     }
 
+    [HttpPost("fileEdit")]
+    public async Task<IActionResult> FileEdit([FromBody] BughostedFileEditRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.ClientId) || !_sessions.TryGetValue(req.ClientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var payload = JsonSerializer.Serialize(new
+            {
+                token = session.Token,
+                clientId = session.ClientId,
+                path = req.Path,
+                content = req.Content
+            });
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/fileEdit")
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+            return Ok(new { remoteStatus = (int)httpRes.StatusCode, remoteBody = body });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
     [HttpPost("logout")]
     public IActionResult Logout([FromBody] BughostedLogoutRequest req)
     {
@@ -262,6 +292,13 @@ public class BughostedSettingsRequest
 {
     public string ClientId { get; set; } = "";
     public string? SettingsData { get; set; }
+}
+
+public class BughostedFileEditRequest
+{
+    public string ClientId { get; set; } = "";
+    public string Path { get; set; } = "";
+    public string Content { get; set; } = "";
 }
 
 public class BughostedSession

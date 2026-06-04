@@ -1,46 +1,73 @@
-﻿<div class="panel" data-panel-type="ide" data-panel-id="ide-panel">
-  <h3>📝 IDE</h3>
-  <div class="panel-body">
-    <div class="ide-toolbar">
-      <button class="small" ng-click="vm.openFilePicker()" title="Open File">📂 Open</button>
-      <button class="small" ng-click="vm.saveFile()" ng-disabled="!vm.ide.isEditing" title="Save File">💾 Save</button>
-      <button class="small" ng-click="vm.newFile()" title="New File">➕ New</button>
-      <button class="small" ng-click="vm.closeIDE()" title="Close IDE">✕ Close</button>
-    </div>
-    <div class="ide-file-explorer" ng-if="vm.ide.filePickerOpen">
-      <div class="file-picker-header">
-        <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.ide.filePickerPath">⬆ Up</button>
-        <span>{{vm.ide.filePickerPath || '/'}}</span>
-        <button class="small" ng-click="vm.clearSearch()" ng-if="vm.ide.searchFilter" style="margin-left:auto;">✕ Clear</button>
-      </div>
-      <input type="text" ng-model="vm.ide.searchFilter" placeholder="Search files..." class="search-input" />
-      <div class="file-picker-list">
-        <div class="entry dir" ng-repeat="e in vm.ide.filePickerEntries" ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">
-          <div class="entryTypeAndName"><span>📁</span><span>{{e.name + '/'}}</span></div>
-        </div>
-        <div class="entry" ng-repeat="e in vm.ide.filePickerEntries" ng-if="!e.isDirectory" ng-click="vm.selectFile(e.path)">
-          <div class="entryTypeAndName"><span>📄</span><span>{{e.name}}</span></div>
-        </div>
-      </div>
-    </div>
-    <div class="ide-editor" ng-if="vm.ide.currentFile && !vm.ide.filePickerOpen">
-      <div class="editor-header">
-        <span class="file-name">{{vm.ide.currentFile}}</span>
-        <button class="small" ng-click="vm.closeFile()" title="Close File">✕</button>
-      </div>
-      <textarea 
-        class="editor-textarea" 
-        ng-model="vm.ide.content" 
-        ng-if="vm.ide.isEditing"
-        placeholder="Start editing {{vm.ide.currentFile}}..."
-        ng-blur="vm.saveFile()">
-      </textarea>
-      <div class="editor-view" ng-if="!vm.ide.isEditing">
-        <pre>{{vm.ide.content}}</pre>
-      </div>
-    </div>
-    <div class="ide-placeholder" ng-if="!vm.ide.currentFile && !vm.ide.filePickerOpen">
-      <p>Click "Open File" to browse and edit files</p>
+﻿<div class="ide-panel">
+  <div class="ide-panel-header">
+    <span class="ide-panel-title">📝 IDE</span>
+    <div class="ide-panel-controls">
+      <button class="ide-panel-btn" ng-click="vm.openFileBrowser()" title="Open File">📂</button>
+      <button class="ide-panel-btn" ng-click="vm.saveFile()" ng-disabled="!vm.ide.dirty" title="Save File">💾</button>
+      <button class="ide-panel-btn" ng-click="vm.newFile()" title="New File">➕</button>
+      <button class="ide-panel-btn" ng-click="vm.closeIDE()" title="Close IDE">✕</button>
     </div>
   </div>
+  <div class="ide-panel-body">
+    <div class="ide-sidebar" ng-if="vm.ide.showSidebar">
+      <div class="ide-file-tree">
+        <div class="ide-file-tree-header">
+          <span>Files</span>
+          <button class="ide-panel-btn small" ng-click="vm.toggleSidebar()">◀</button>
+        </div>
+        <div class="ide-file-filter">
+          <input type="text" ng-model="vm.ide.searchFilter" placeholder="Filter files..." class="ide-filter-input" ng-change="vm.onSearchChange()" />
+        </div>
+        <div class="ide-file-tree-items">
+          <div ng-repeat="e in vm.ide.filePickerEntries track by e.path"
+               class="ide-file-item"
+               ng-class="{'ide-file-item--dir': e.isDirectory, 'ide-file-item--selected': vm.ide.currentFile === e.path}">
+            <div ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)" class="ide-file-item-label">
+              <span>📁</span><span>{{e.name}}/</span>
+            </div>
+            <div ng-if="!e.isDirectory" ng-click="vm.openFile(e.path)" class="ide-file-item-label">
+              <span>📄</span><span>{{e.name}}</span>
+            </div>
+          </div>
+        </div>
+        <div class="ide-file-tree-nav" ng-if="vm.ide.filePickerPath">
+          <button class="ide-panel-btn" ng-click="vm.pickerUpDir()" title="Go up">⬆ Up</button>
+          <span class="ide-file-tree-path">{{vm.ide.filePickerPath}}</span>
+        </div>
+      </div>
+    </div>
+    <div class="ide-editor-container" ng-class="{'ide-editor-container--full': !vm.ide.showSidebar}">
+      <div class="ide-editor-header" ng-if="vm.ide.openTabs.length > 0">
+        <div class="ide-tabs">
+          <div ng-repeat="tab in vm.ide.openTabs track by tab.path"
+               class="ide-tab"
+               ng-class="{'ide-tab--active': tab.path === vm.ide.currentFile, 'ide-tab--dirty': tab.dirty}"
+               ng-click="vm.switchTab(tab.path)">
+            <span class="ide-tab-name">{{tab.displayName}}</span>
+            <span class="ide-tab-close" ng-click="vm.closeTab(tab.path, $event)" title="Close">✕</span>
+          </div>
+        </div>
+        <div class="ide-editor-actions">
+          <button class="ide-panel-btn" ng-click="vm.toggleSidebar()" title="Toggle sidebar">▶</button>
+        </div>
+      </div>
+      <div class="ide-editor-content" ng-if="vm.ide.currentFile && vm.ide.currentTab">
+        <textarea class="ide-textarea"
+                  ng-model="vm.ide.currentTab.content"
+                  ng-change="vm.onContentChange()"
+                  ng-model-options="{debounce: 200}"
+                  placeholder="Editing {{vm.ide.currentFile}}..."></textarea>
+        <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
+          <span>Lines: {{vm.ide.currentTab.lineCount}}</span>
+          <span class="ide-dirty-indicator" ng-if="vm.ide.dirty">● unsaved</span>
+          <span class="ide-syncing-indicator" ng-if="vm.ide.syncing">⟳ syncing...</span>
+        </div>
+      </div>
+      <div class="ide-placeholder" ng-if="vm.ide.openTabs.length === 0">
+        <p>Open a file from the sidebar to start editing</p>
+        <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active</p>
+      </div>
+    </div>
+  </div>
+  <div class="ide-panel-resizer" ng-mousedown="vm.startResize($event)"></div>
 </div>

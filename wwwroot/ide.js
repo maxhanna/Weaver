@@ -3,119 +3,34 @@
 angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
   return {
     init: function(vm, $scope) {
-      // IDE component state
       vm.ide = {
-        show: false,
-        files: [],
+        showSidebar: true,
+        openTabs: [],
         currentFile: null,
-        content: '',
-        path: '',
-        isEditing: false,
-        filePickerOpen: false,
+        currentTab: null,
+        dirty: false,
+        syncing: false,
         filePickerPath: '',
         filePickerEntries: [],
         searchFilter: '',
-        selectedFiles: [],
-        pickerCardId: null
+        lastSavedContent: null,
+        pendingFileListing: null,
+        pendingFileContent: null
       };
 
-      // Initialize IDE panel
-      vm.initIDE = function() {
-        // Create IDE panel element
-        const idePanel = document.createElement('div');
-        idePanel.className = 'panel ide-panel';
-        idePanel.setAttribute('data-panel-type', 'ide');
-        idePanel.setAttribute('data-panel-id', 'ide-panel');
-        idePanel.innerHTML = `
-          <h3>📝 IDE</h3>
-          <div class="panel-body">
-            <div class="ide-toolbar">
-              <button class="small" ng-click="vm.openFilePicker()" title="Open File">📂 Open</button>
-              <button class="small" ng-click="vm.saveFile()" ng-disabled="!vm.ide.isEditing" title="Save File">💾 Save</button>
-              <button class="small" ng-click="vm.newFile()" title="New File">➕ New</button>
-              <button class="small" ng-click="vm.closeIDE()" title="Close IDE">✕ Close</button>
-            </div>
-            <div class="ide-file-explorer" ng-if="vm.ide.filePickerOpen">
-              <div class="file-picker-header">
-                <button class="small" ng-click="vm.pickerUpDir()" ng-disabled="!vm.ide.filePickerPath">⬆ Up</button>
-                <span>{{vm.ide.filePickerPath || '/'}}</span>
-                <button class="small" ng-click="vm.clearSearch()" ng-if="vm.ide.searchFilter" style="margin-left:auto;">✕ Clear</button>
-              </div>
-              <input type="text" ng-model="vm.ide.searchFilter" placeholder="Search files..." class="search-input" />
-              <div class="file-picker-list">
-                <div class="entry dir" ng-repeat="e in vm.ide.filePickerEntries" ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)">
-                  <div class="entryTypeAndName"><span>📁</span><span>{{e.name + '/'}}</span></div>
-                </div>
-                <div class="entry" ng-repeat="e in vm.ide.filePickerEntries" ng-if="!e.isDirectory" ng-click="vm.selectFile(e.path)">
-                  <div class="entryTypeAndName"><span>📄</span><span>{{e.name}}</span></div>
-                </div>
-              </div>
-            </div>
-            <div class="ide-editor" ng-if="vm.ide.currentFile && !vm.ide.filePickerOpen">
-              <div class="editor-header">
-                <span class="file-name">{{vm.ide.currentFile}}</span>
-                <button class="small" ng-click="vm.closeFile()" title="Close File">✕</button>
-              </div>
-              <textarea 
-                class="editor-textarea" 
-                ng-model="vm.ide.content" 
-                ng-if="vm.ide.isEditing"
-                placeholder="Start editing {{vm.ide.currentFile}}..."
-                ng-blur="vm.saveFile()">
-              </textarea>
-              <div class="editor-view" ng-if="!vm.ide.isEditing">
-                <pre>{{vm.ide.content}}</pre>
-              </div>
-            </div>
-            <div class="ide-placeholder" ng-if="!vm.ide.currentFile && !vm.ide.filePickerOpen">
-              <p>Click "Open File" to browse and edit files</p>
-            </div>
-          </div>
-        `;
-        
-        // Insert IDE panel into the right panel
-        const rightPanel = document.querySelector('.right-panel');
-        if (rightPanel) {
-          rightPanel.appendChild(idePanel);
+      vm.toggleSidebar = function() {
+        vm.ide.showSidebar = !vm.ide.showSidebar;
+      };
+
+      vm.openFileBrowser = function() {
+        vm.ide.showSidebar = true;
+        if (vm.ide.filePickerEntries.length === 0) {
+          vm.loadFilePickerEntries();
         }
       };
 
-      // Open IDE panel
-      vm.openIDE = function() {
-        vm.ide.show = true;
-        vm.initIDE();
-        vm.loadFilePickerEntries();
-      };
-
-      // Close IDE panel
-      vm.closeIDE = function() {
-        vm.ide.show = false;
-        vm.ide.currentFile = null;
-        vm.ide.content = '';
-        vm.ide.isEditing = false;
-        vm.ide.filePickerOpen = false;
-        vm.ide.filePickerPath = '';
-        vm.ide.filePickerEntries = [];
-        vm.ide.searchFilter = '';
-      };
-
-      // Open file picker
-      vm.openFileBrowser = function() {
-        vm.ide.filePickerOpen = true;
-        vm.loadFilePickerEntries();
-      };
-
-      // Close file picker
-      vm.closeFilePicker = function() {
-        vm.ide.filePickerOpen = false;
-        vm.ide.filePickerPath = '';
-        vm.ide.filePickerEntries = [];
-        vm.ide.searchFilter = '';
-      };
-
-      // Load file picker entries
       vm.loadFilePickerEntries = function() {
-        const params = { project: vm.selectedProject };
+        var params = { project: vm.selectedProject };
         if (vm.ide.searchFilter && vm.ide.searchFilter.trim()) {
           params.search = vm.ide.searchFilter.trim();
           if (vm.ide.filePickerPath) {
@@ -124,115 +39,245 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         } else if (vm.ide.filePickerPath) {
           params.path = vm.ide.filePickerPath;
         }
-        
-        $http.get('/api/editor/list', { params: params }).then(function (resp) {
+        $http.get('/api/editor/list', { params: params }).then(function(resp) {
           vm.ide.filePickerEntries = (resp.data && resp.data.entries) || [];
-        }, function () {
+        }, function() {
           vm.ide.filePickerEntries = [];
         });
       };
 
-      // Enter directory in file picker
       vm.pickerEnterDir = function(path) {
         vm.ide.filePickerPath = path;
+        vm.ide.searchFilter = '';
         vm.loadFilePickerEntries();
       };
 
-      // Go up directory in file picker
       vm.pickerUpDir = function() {
         if (!vm.ide.filePickerPath) return;
-        const segs = vm.ide.filePickerPath.split('/').filter(function (s) { return s && s.length; });
+        var segs = vm.ide.filePickerPath.split('/').filter(function(s) { return s && s.length; });
         segs.pop();
         vm.ide.filePickerPath = segs.join('/');
         vm.loadFilePickerEntries();
       };
 
-      // Select file for editing
-      vm.selectFile = function(path) {
+      vm.openFile = function(path) {
+        var existing = vm.findTab(path);
+        if (existing) {
+          vm.switchTab(path);
+          return;
+        }
+        var displayName = path.split('/').pop() || path;
+        var tab = {
+          path: path,
+          displayName: displayName,
+          content: '',
+          savedContent: '',
+          dirty: false,
+          lineCount: 1
+        };
+        vm.ide.openTabs.push(tab);
         vm.ide.currentFile = path;
-        vm.ide.filePickerOpen = false;
-        vm.loadFileContent(path);
+        vm.ide.currentTab = tab;
+        vm.loadFileContent(path, tab);
       };
 
-      // Load file content
-      vm.loadFileContent = function(path) {
-        $http.get('/api/editor/content', { params: { path: path } }).then(function (resp) {
-          vm.ide.content = resp.data || '';
-          vm.ide.isEditing = true;
-        }, function () {
-          vm.ide.content = '';
-          vm.ide.isEditing = true;
+      vm.findTab = function(path) {
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].path === path) return vm.ide.openTabs[i];
+        }
+        return null;
+      };
+
+      vm.switchTab = function(path) {
+        var tab = vm.findTab(path);
+        if (tab) {
+          vm.ide.currentFile = path;
+          vm.ide.currentTab = tab;
+          vm.ide.dirty = tab.dirty;
+        }
+      };
+
+      vm.closeTab = function(path, $event) {
+        if ($event) $event.stopPropagation();
+        var idx = -1;
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].path === path) { idx = i; break; }
+        }
+        if (idx === -1) return;
+        if (vm.ide.openTabs[idx].dirty) {
+          if (!confirm('Unsaved changes to ' + vm.ide.openTabs[idx].displayName + '. Discard?')) return;
+        }
+        vm.ide.openTabs.splice(idx, 1);
+        if (vm.ide.currentFile === path) {
+          if (vm.ide.openTabs.length > 0) {
+            var newIdx = Math.min(idx, vm.ide.openTabs.length - 1);
+            vm.switchTab(vm.ide.openTabs[newIdx].path);
+          } else {
+            vm.ide.currentFile = null;
+            vm.ide.currentTab = null;
+            vm.ide.dirty = false;
+          }
+        }
+      };
+
+      vm.loadFileContent = function(path, tab) {
+        $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: path } }).then(function(resp) {
+          var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
+          tab.content = content;
+          tab.savedContent = content;
+          tab.dirty = false;
+          tab.lineCount = (content.match(/\n/g) || []).length + 1;
+          vm.ide.dirty = false;
+          vm.ide.lastSavedContent = content;
+          vm.broadcastFileOpen(path, content);
+        }, function(err) {
+          tab.content = '// Error loading file: ' + (err.statusText || 'Unknown error');
+          tab.savedContent = '';
+          tab.dirty = false;
+          tab.lineCount = 1;
+          vm.ide.dirty = false;
         });
       };
 
-      // Save file
+      vm.onContentChange = function() {
+        if (!vm.ide.currentTab) return;
+        var isDirty = vm.ide.currentTab.content !== vm.ide.currentTab.savedContent;
+        vm.ide.currentTab.dirty = isDirty;
+        vm.ide.currentTab.lineCount = (vm.ide.currentTab.content.match(/\n/g) || []).length + 1;
+        vm.ide.dirty = isDirty;
+      };
+
       vm.saveFile = function() {
-        if (!vm.ide.currentFile || !vm.ide.isEditing) return;
-        
-        const payload = {
+        if (!vm.ide.currentFile || !vm.ide.currentTab) return;
+        var content = vm.ide.currentTab.content;
+        var payload = {
+          project: vm.selectedProject,
           path: vm.ide.currentFile,
-          content: vm.ide.content
+          content: content
         };
-        
-        $http.post('/api/editor/save', payload).then(function () {
-          // File saved successfully
-        }, function (err) {
+        $http.post('/api/editor/save', payload).then(function() {
+          vm.ide.currentTab.savedContent = content;
+          vm.ide.currentTab.dirty = false;
+          vm.ide.dirty = false;
+          vm.ide.lastSavedContent = content;
+          vm.broadcastFileSave(vm.ide.currentFile, content);
+        }, function(err) {
           console.error('Failed to save file:', err);
         });
       };
 
-      // Create new file
       vm.newFile = function() {
-        const fileName = prompt('Enter new file name:');
-        if (fileName) {
-          const fullPath = vm.ide.filePickerPath ? vm.ide.filePickerPath + '/' + fileName : fileName;
-          vm.ide.currentFile = fullPath;
-          vm.ide.content = '';
-          vm.ide.isEditing = true;
-          vm.ide.filePickerOpen = false;
+        var fileName = prompt('Enter new file name (relative to project root):');
+        if (!fileName) return;
+        var fullPath = vm.ide.filePickerPath ? vm.ide.filePickerPath + '/' + fileName : fileName;
+        var existing = vm.findTab(fullPath);
+        if (existing) {
+          vm.switchTab(fullPath);
+          return;
         }
+        var displayName = fileName.split('/').pop() || fileName;
+        var tab = {
+          path: fullPath,
+          displayName: displayName,
+          content: '',
+          savedContent: '',
+          dirty: true,
+          lineCount: 1
+        };
+        vm.ide.openTabs.push(tab);
+        vm.ide.currentFile = fullPath;
+        vm.ide.currentTab = tab;
+        vm.ide.dirty = true;
       };
 
-      // Close current file
       vm.closeFile = function() {
-        vm.ide.currentFile = null;
-        vm.ide.content = '';
-        vm.ide.isEditing = false;
+        if (vm.ide.currentTab && vm.ide.currentTab.dirty) {
+          if (!confirm('Unsaved changes to ' + vm.ide.currentTab.displayName + '. Discard?')) return;
+        }
+        vm.closeTab(vm.ide.currentFile);
       };
 
-      // Clear search
       vm.clearSearch = function() {
         vm.ide.searchFilter = '';
         vm.loadFilePickerEntries();
       };
 
-      // Debounce function for search
-      function debounce(func, wait) {
-        let timeout;
-        return function executedFunction(...args) {
-          const later = () => {
-            clearTimeout(timeout);
-            func(...args);
-          };
-          clearTimeout(timeout);
-          timeout = setTimeout(later, wait);
-        };
-      }
-
-      // Debounced search
-      vm.debouncedSearch = debounce(function() {
-        vm.loadFilePickerEntries();
-      }, 300);
-
-      // Watch search filter changes
-      $scope.$watch('vm.ide.searchFilter', function(newVal, oldVal) {
-        if (newVal !== oldVal) {
-          vm.debouncedSearch();
+      vm.onSearchChange = function() {
+        if (vm.ide.searchFilter && vm.ide.searchFilter.trim()) {
+          vm.loadFilePickerEntries();
+        } else {
+          vm.loadFilePickerEntries();
         }
-      });
+      };
 
-      // Initialize IDE when app loads
-      vm.initIDE();
+      vm.closeIDE = function() {
+        var hasDirty = false;
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].dirty) { hasDirty = true; break; }
+        }
+        if (hasDirty && !confirm('You have unsaved changes. Close anyway?')) return;
+        vm.ide.openTabs = [];
+        vm.ide.currentFile = null;
+        vm.ide.currentTab = null;
+        vm.ide.dirty = false;
+        vm.ide.filePickerPath = '';
+        vm.ide.filePickerEntries = [];
+        vm.ide.searchFilter = '';
+      };
+
+      // Shared editing via BugHosted
+      vm.broadcastFileOpen = function(path, content) {
+        if (vm.bughostedStatus !== 'connected' || !vm.bughostedClientId) return;
+        vm.ide.lastSharedFile = path;
+        vm.ide.syncing = true;
+      };
+
+      vm.broadcastFileSave = function(path, content) {
+        if (vm.bughostedStatus !== 'connected' || !vm.bughostedClientId) return;
+        vm.ide.syncing = true;
+        $http.post('/api/bughosted/fileEdit', {
+          clientId: vm.bughostedClientId,
+          path: path,
+          content: content
+        }).then(function() {
+          vm.ide.syncing = false;
+        }, function() {
+          vm.ide.syncing = false;
+        });
+      };
+
+      vm.handleRemoteFileEdit = function(params) {
+        if (!params || !params.path || params.content === undefined) return;
+        var tab = vm.findTab(params.path);
+        if (tab) {
+          tab.content = params.content;
+          tab.savedContent = params.content;
+          tab.dirty = false;
+          tab.lineCount = (params.content.match(/\n/g) || []).length + 1;
+          if (vm.ide.currentFile === params.path) {
+            vm.ide.dirty = false;
+          }
+        }
+        vm.ide.syncing = false;
+      };
+
+      vm.startResize = function($event) {
+        $event.preventDefault();
+        var panel = $event.target.closest('.panel');
+        if (!panel) return;
+        var startX = $event.clientX;
+        var startWidth = panel.offsetWidth;
+        function onMouseMove(e) {
+          var w = startWidth + (e.clientX - startX);
+          if (w > 300) panel.style.width = w + 'px';
+        }
+        function onMouseUp() {
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+        }
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      };
     }
   };
 });

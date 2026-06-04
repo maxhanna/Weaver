@@ -33,7 +33,7 @@
   </div>
 
   <!-- Card Edit Modal -->
-  <div class="popup-overlay" ng-if="vm.calEditCardData" ng-click="vm.calCloseEdit()">
+  <div class="popup-overlay" ng-if="vm.calEditCardData" ng-click="vm.calCloseEdit($event)">
     <div class="popup-panel cal-edit-panel" ng-click="$event.stopPropagation()">
       <div class="popup-header">
         <strong>{{vm.calEditCardData.id ? 'Edit' : 'Add'}} Calendar Card</strong>

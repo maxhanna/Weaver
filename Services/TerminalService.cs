@@ -51,6 +51,24 @@ public class TerminalService : IDisposable
     {
         if (!IsRunning) Start();
         await RequireApprovalAsync(command, workingDirectory);
+        await WriteStdinAsync(command, workingDirectory);
+    }
+
+    /// <summary>
+    /// Write text directly to stdin without approval checks. Used for completion markers, etc.
+    /// </summary>
+    public async Task WriteStdinAsync(string text)
+    {
+        if (!IsRunning) return;
+        if (_process?.StandardInput != null)
+        {
+            await _process.StandardInput.WriteLineAsync(text);
+            await _process.StandardInput.FlushAsync();
+        }
+    }
+
+    private async Task WriteStdinAsync(string command, string? workingDirectory)
+    {
         if (!string.IsNullOrWhiteSpace(workingDirectory))
         {
             var dir = Path.GetFullPath(workingDirectory);

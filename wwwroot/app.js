@@ -1,5 +1,11 @@
 ﻿angular.module('kanbanApp', [])
-  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin) {
+ .filter('formatNumber', function() {
+ return function(input) {
+ if (input === null || input === undefined) return '';
+ return input.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+ };
+ })
+   .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', 'IDEMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin, IDEMixin) {
     const vm = this;
     const SETTINGS_KEY = 'maestroconfig.settings';
 
@@ -159,7 +165,7 @@
     };
 
     // Project UI
-    vm.showProjectOptions = false; 
+    vm.showProjectOptions = false;
     vm.showEditProjectsPanel = false;
     vm.showSettingsPanel = false;
     vm.showDiscordPanel = false;
@@ -169,12 +175,12 @@
     vm.newProjectDescription = '';
     vm.llamaUrl = 'http://localhost:8080';
     vm.showKanban = true;
-    vm.showCalendar = false;    
+    vm.showCalendar = false;
     vm.pickerCardId = null;
     vm.pickerPath = '';
     vm.pickerEntries = [];
     vm.pickerSelected = [];
-    vm.isSearchResult = false;  
+    vm.isSearchResult = false;
     vm.settingsDefaultProject = '';
     vm.fileHintsData = [];
     vm.emailAccounts = [];
@@ -271,7 +277,7 @@
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';
-        cfg.emailAccounts = vm.emailAccounts.map(function(a) {
+        cfg.emailAccounts = vm.emailAccounts.map(function (a) {
           return {
             imapServer: a.imapServer || '',
             imapPort: a.imapPort || 993,
@@ -299,7 +305,7 @@
       });
     };
 
-    vm.addEmailAccount = function() {
+    vm.addEmailAccount = function () {
       vm.emailAccounts.push({
         imapServer: '',
         imapPort: 993,
@@ -313,11 +319,11 @@
       });
     };
 
-    vm.removeEmailAccount = function(index) {
+    vm.removeEmailAccount = function (index) {
       vm.emailAccounts.splice(index, 1);
     };
 
-    vm.checkEmailServer = function(index) {
+    vm.checkEmailServer = function (index) {
       var acct = vm.emailAccounts[index];
       if (!acct) return;
       if (acct.imapServer) {
@@ -334,7 +340,7 @@
       }
     };
 
-    vm.testEmailConnection = function(index) {
+    vm.testEmailConnection = function (index) {
       var acct = vm.emailAccounts[index];
       if (!acct) return;
       if (!acct.imapServer || !acct.username || !acct.password) {
@@ -349,10 +355,10 @@
         useSsl: acct.useSsl,
         username: acct.username,
         password: acct.password
-      }).then(function(response) {
+      }).then(function (response) {
         acct.testing = false;
         acct.testResult = response.data;
-      }).catch(function(error) {
+      }).catch(function (error) {
         acct.testing = false;
         acct.testResult = { success: false, message: 'Connection test failed: ' + (error.data || error.statusText || 'Unknown error') };
       });
@@ -381,8 +387,8 @@
       } else {
         vm.archiveCardCount = 0;
       }
-    }; 
-    
+    };
+
     // === Project config ===
     function normalizeProjects(raw) {
       return raw.map(function (p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
@@ -412,7 +418,7 @@
         vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
         vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
         vm.fileHintsData = [];
-        vm.emailAccounts = (cfg.emailAccounts || []).map(function(a) {
+        vm.emailAccounts = (cfg.emailAccounts || []).map(function (a) {
           return {
             imapServer: a.imapServer || '',
             imapPort: a.imapPort || 993,
@@ -474,17 +480,24 @@
       return p ? (p.Description || '') : '';
     };
 
-    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; }; 
+    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
+    // Close options menu when it loses focus
+    vm.closeOptionsOnBlur = function (event) {
+      const optionsElement = document.getElementById('project-options');
+      if (optionsElement && !optionsElement.contains(event.relatedTarget)) {
+        vm.showProjectOptions = false;
+      }
+    };
 
-vm.changeProject = function () { 
-  console.log(vm.selectedProject); 
-  vm.loadConfig(vm.selectedProject).then(function() {
-    // Ensure cards are loaded before counting archived cards
-    $timeout(function() {
-      vm.countArchivedCards();
-    }, 100);
-  });  
-};
+    vm.changeProject = function () {
+      console.log(vm.selectedProject);
+      vm.loadConfig(vm.selectedProject).then(function () {
+        // Ensure cards are loaded before counting archived cards
+        $timeout(function () {
+          vm.countArchivedCards();
+        }, 100);
+      });
+    };
 
     vm.openEditProjectsPanel = function () {
       vm.newProjectName = '';
@@ -516,7 +529,7 @@ vm.changeProject = function () {
           return r.trim().toLowerCase();
         }).filter(Boolean);
         cfg.fileHints = '';
-        cfg.emailAccounts = vm.emailAccounts.map(function(a) {
+        cfg.emailAccounts = vm.emailAccounts.map(function (a) {
           return {
             imapServer: a.imapServer || '',
             imapPort: a.imapPort || 993,
@@ -627,7 +640,17 @@ vm.changeProject = function () {
             agentSummary: vm.streamingSummary || '',
             activeCardId: vm.activeCardId || null,
             activeCardText: vm.activeCardText || '',
-            calendarCards: vm.calCards || []
+            calendarCards: vm.calCards || [],
+            fileListing: vm.ide && vm.ide.pendingFileListing ? (function() {
+              var fl = vm.ide.pendingFileListing;
+              vm.ide.pendingFileListing = null;
+              return fl;
+            })() : null,
+            fileContent: vm.ide && vm.ide.pendingFileContent ? (function() {
+              var fc = vm.ide.pendingFileContent;
+              vm.ide.pendingFileContent = null;
+              return fc;
+            })() : null
           }),
           settings: JSON.stringify({
             llamaUrl: vm.llamaUrl,
@@ -639,6 +662,12 @@ vm.changeProject = function () {
             showTerminal: vm.showTerminal,
             showAI: vm.showAI,
             showIDE: vm.showIDE,
+            editorState: vm.ide && vm.ide.currentFile ? JSON.stringify({
+              currentFile: vm.ide.currentFile,
+              openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
+              content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
+              dirty: vm.ide.dirty || false
+            }) : null,
             showKanban: vm.showKanban,
             showCalendar: vm.showCalendar,
             bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
@@ -707,10 +736,10 @@ vm.changeProject = function () {
           return false;
         }
         return matchField(parts[0], date.getMinutes()) &&
-               matchField(parts[1], date.getHours()) &&
-               matchField(parts[2], date.getDate()) &&
-               matchField(parts[3], date.getMonth() + 1) &&
-               matchField(parts[4], date.getDay());
+          matchField(parts[1], date.getHours()) &&
+          matchField(parts[2], date.getDate()) &&
+          matchField(parts[3], date.getMonth() + 1) &&
+          matchField(parts[4], date.getDay());
       } catch (e) { return false; }
     }
 
@@ -784,9 +813,9 @@ vm.changeProject = function () {
         }
 
         if (changed) {
-          $http.post('/api/calendar/save', data).catch(function () {});
+          $http.post('/api/calendar/save', data).catch(function () { });
         }
-      }, function () {});
+      }, function () { });
     }
 
     function startCalendarProcessing() {
@@ -812,7 +841,7 @@ vm.changeProject = function () {
     }
 
     function uid() { return Math.random().toString(36).slice(2, 9); }
-    
+
     vm.executeRemoteCommand = function (cmd) {
       console.log('Executing remote command:', cmd);
       if (cmd.command === 'executeTask' && cmd.params && cmd.params.text) {
@@ -927,7 +956,7 @@ vm.changeProject = function () {
         var col = findCardColumn(cmd.params.cardId);
         if (col) {
           var cards = vm.state[col] || [];
-          var idx = cards.findIndex(function(c) { return c.id === cmd.params.cardId; });
+          var idx = cards.findIndex(function (c) { return c.id === cmd.params.cardId; });
           if (idx !== -1) cards.splice(idx, 1);
           vm.saveCards();
         }
@@ -962,6 +991,38 @@ vm.changeProject = function () {
         if (cmd.params.bughostedUsername !== undefined) vm.bughostedUsername = cmd.params.bughostedUsername;
         if (cmd.params.bughostedPassword !== undefined) vm.bughostedPassword = cmd.params.bughostedPassword;
         vm.saveSettings();
+      } else if (cmd.command === 'requestFileListing' && cmd.params) {
+        console.log('Remote file listing request:', cmd.params.path || '/');
+        var listParams = { project: vm.selectedProject };
+        if (cmd.params.path) listParams.path = cmd.params.path;
+        $http.get('/api/editor/list', { params: listParams }).then(function(resp) {
+          vm.ide.pendingFileListing = {
+            path: cmd.params.path || '',
+            entries: (resp.data && resp.data.entries) || []
+          };
+        }, function() {
+          vm.ide.pendingFileListing = { path: cmd.params.path || '', entries: [], error: 'Failed to list' };
+        });
+      } else if (cmd.command === 'requestFileContent' && cmd.params && cmd.params.path) {
+        console.log('Remote file content request:', cmd.params.path);
+        $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: cmd.params.path } }).then(function(resp) {
+          var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
+          vm.ide.pendingFileContent = { path: cmd.params.path, content: content };
+        }, function(err) {
+          vm.ide.pendingFileContent = { path: cmd.params.path, content: '', error: 'Failed to load: ' + (err.statusText || 'Unknown') };
+        });
+      } else if (cmd.command === 'fileEdit' && cmd.params && cmd.params.path && cmd.params.content !== undefined) {
+        console.log('Remote file edit received:', cmd.params.path);
+        $http.post('/api/editor/save', {
+          path: cmd.params.path,
+          content: cmd.params.content
+        }).then(function() {
+          if (vm.handleRemoteFileEdit) {
+            vm.handleRemoteFileEdit(cmd.params);
+          }
+        }, function(err) {
+          console.error('Failed to apply remote file edit:', err);
+        });
       } else if (cmd.command === 'addCalendarCard' && cmd.params) {
         console.log('Adding calendar card from remote command:', cmd);
         if (!Array.isArray(vm.calCards)) vm.calCards = [];
@@ -1118,7 +1179,8 @@ vm.changeProject = function () {
     // === Calendar (managed by CalendarMixin) ===
     CalendarMixin.init(vm, $scope);
 
-
+    // === IDE (managed by IDEMixin) ===
+    IDEMixin.init(vm, $scope);
 
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape' && vm.deleteCardConfirm && vm.deleteCardConfirm.show) {
@@ -1144,11 +1206,11 @@ vm.changeProject = function () {
     vm.attachFile = function (cardId) {
       vm.pickerCardId = cardId;
       vm.pickerPath = '';
-      vm.pickerSelected = []; 
+      vm.pickerSelected = [];
       vm.openFilePicker(cardId, '');
-      
+
       $timeout(function () {
-        vm.loadPickerEntries(cardId);  
+        vm.loadPickerEntries(cardId);
       }, 30);
     };
 
@@ -1224,7 +1286,7 @@ vm.changeProject = function () {
     }
 
     // Debounced version of onSearchChange
-    vm.debouncedOnSearchChange = debounce(function() {
+    vm.debouncedOnSearchChange = debounce(function () {
       vm.loadPickerEntries();
     }, 300); // 300ms delay
 
@@ -1446,7 +1508,7 @@ vm.changeProject = function () {
       vm.clarificationReply = '';
       vm.agentResult = null;
       vm.executeAgent(card);
-    }; 
+    };
 
     vm.executeAgent = function (card) {
       if (!card) return;
@@ -1579,7 +1641,7 @@ vm.changeProject = function () {
                       } else if (parsed && parsed.phase) {
                         vm.streamingPhase = parsed.phase;
                       }
-                      if (parsed && parsed.contextSize) {vm.streamingContextSize = parsed.contextSize;}
+                      if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
                       break;
                     case 'status':
                       if (parsed && parsed.message) vm.streamingPhase = parsed.message;
@@ -1751,7 +1813,7 @@ vm.changeProject = function () {
               }
               try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
               readNext();
-              }).catch(function (readErr) {
+            }).catch(function (readErr) {
               if (readErr && readErr.name === 'AbortError') return;
               vm.streamingActive = false;
               resumeTerminalPolling();

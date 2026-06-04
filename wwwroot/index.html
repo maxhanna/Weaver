@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/kanban.css" />
   <link rel="stylesheet" href="/calendar.css" />
   <link rel="stylesheet" href="/wireframe.css" />
+  <link rel="stylesheet" href="/ide.css" />
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -45,9 +46,9 @@
       <div class="project-desc" ng-if="vm.selectedProject && vm.getSelectedProjectDescription()">—
         {{vm.getSelectedProjectDescription()}}</div>
       <div class="project-options">
-        <button class="options-btn small brand-link brand-enhanced" ng-click="vm.toggleProjectOptions()"
+        <button class="options-btn small brand-link brand-enhanced" ng-click="vm.toggleProjectOptions()" ng-blur="vm.closeOptionsOnBlur($event)"
           ng-class="{active: vm.showProjectOptions}">Options ▾</button>
-        <div class="options-menu" ng-if="vm.showProjectOptions">
+        <div class="options-menu" ng-if="vm.showProjectOptions" ng-blur="vm.closeOptionsOnBlur($event)" tabindex="0">
           <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit
             Projects</button>
           <button class="brand-link" ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
@@ -145,7 +146,7 @@
             <span class="status-text" title="{{vm.activeCardText | limitTo:4000}}">
               Agent: "{{vm.activeCardText | limitTo:40}}"
               <span ng-if="vm.streamingPhase" class="phase-tag">{{vm.streamingPhase}}</span>
-              <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize}} tokens</span>
+              <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}} tokens</span>
             </span>
           </div>
 
@@ -798,6 +799,7 @@
   <script src="/kanban.js"></script>
   <script src="/calendar.js"></script>
   <script src="/voice-input.js"></script>
+  <script src="/ide.js"></script>
 </body>
 
 </html>

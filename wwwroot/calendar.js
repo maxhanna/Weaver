@@ -199,7 +199,8 @@ angular.module('kanbanApp').factory('CalendarMixin', function ($http, $window, $
         scheduleUpdate();
       };
 
-      vm.calCloseEdit = function () {
+      vm.calCloseEdit = function (event) {
+        if (event) event.stopPropagation();
         vm.calEditCardData = null;
         scheduleUpdate();
       };
