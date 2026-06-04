@@ -290,6 +290,20 @@ public class BughostedController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    } 
+
+    [HttpGet("version")]
+    public async Task<IActionResult> GetVersion()
+    { 
+        try
+        { 
+            var ver = await GetRemoteVersionAsync() ?? "0";
+            return Content(ver, "application/json");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
     }
 
     [HttpGet("commands")]
@@ -412,6 +426,39 @@ public class BughostedController : ControllerBase
         if (!string.IsNullOrWhiteSpace(req.ClientId))
             _sessions.Remove(req.ClientId);
         return Ok(new { status = "logged_out" });
+    } 
+
+    static async Task<string> GetLocalVersionAsync()
+    {
+        string versionFile = Path.Combine(AppContext.BaseDirectory, ".weaver-version");
+
+        if (!System.IO.File.Exists(versionFile))
+        {
+            await System.IO.File.WriteAllTextAsync(versionFile, "0");
+            return "0";
+        }
+
+        return (await System.IO.File.ReadAllTextAsync(versionFile)).Trim();
+    }
+
+    static async Task SetLocalVersionAsync(string version)
+    {
+        string versionFile = Path.Combine(AppContext.BaseDirectory, ".weaver-version");
+        await System.IO.File.WriteAllTextAsync(versionFile, version);
+    }
+
+    static async Task<string?> GetRemoteVersionAsync()
+    {
+        try
+        {
+            using var client = new HttpClient();
+            var json = await client.GetStringAsync("https://bughosted.com/weaver/version");
+            return json.Trim();
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
 

@@ -8,7 +8,11 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationIcon>WeaverIcon.ico</ApplicationIcon>
-  </PropertyGroup>
+  </PropertyGroup> 
+
+  <ItemGroup>
+    <EmbeddedResource Include="wwwroot\**\*.*" />
+  </ItemGroup> 
 
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.17.0" />

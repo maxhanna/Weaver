@@ -16,7 +16,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
     init: function(vm, $scope) {
       // Start with an immediate default state, then replace with persisted
       // state loaded from the server when available.
-      vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [], showArchived: true, showSelfImproving: true };
+      vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
       $http.get('/api/boarddata/load').then(function (resp) {
         try {
           var data = resp.data;

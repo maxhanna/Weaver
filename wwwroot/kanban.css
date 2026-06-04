@@ -582,6 +582,26 @@ body.dragging-active .card:hover {
     gap: 8px;
     margin-bottom: 12px;
 }
+.search-container .ghost {
+    border: 1px dashed rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+}
+
+.search-container .ghost:hover {
+    border-color: var(--accent);
+    background: rgba(6, 182, 212, 0.1);
+    color: var(--accent);
+    transform: translateY(-1px);
+
+}
+
+.search-container .active {
+    border: 1px solid var(--accent); 
+}
+
+.search-container .active:hover {
+    border-color: var(--accent2); 
+}
 
 .search-input {
     flex: 1;
