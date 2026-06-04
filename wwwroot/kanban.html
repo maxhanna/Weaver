@@ -313,7 +313,7 @@
     </div>
 
     <!-- DONE column -->
-    <div class="column" data-col="done" ng-if="!vm.showDone">
+    <div class="column" data-col="done" ng-if="vm.showDone">
       <h3>
         <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
         <button class="small ghost" ng-click="vm.archiveAllDone()" title="Archive all done tasks">Archive All</button>
