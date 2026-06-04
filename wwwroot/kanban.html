@@ -9,11 +9,20 @@
     <button ng-click="vm.showSelfImproving = !vm.showSelfImproving" class="search-button" style="margin-left:4px;">
       📈 Self-Improving ({{vm.selfImprovingCardCount}})
     </button>
+    <button ng-click="vm.showTodo = !vm.showTodo" class="search-button" style="margin-left:4px;">
+      📋 To Do ({{vm.cardsForProject('todo').length}}) 
+    </button>
+    <button ng-click="vm.showDoing = !vm.showDoing" class="search-button" style="margin-left:4px;">
+      🔄 Doing ({{vm.cardsForProject('doing').length}}) 
+    </button>
+    <button ng-click="vm.showDone = !vm.showDone" class="search-button" style="margin-left:4px;">
+      ✅ Done ({{vm.cardsForProject('done').length}}) 
+    </button>
   </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
     <!-- TODO column -->
-    <div class="column" data-col="todo">
+    <div class="column" data-col="todo" ng-if="vm.showTodo">
       <h3>
         <span class="col-header">📋 To Do <span class="col-badge">{{vm.cardsForProject('todo').length}}</span></span>
         <button class="small ghost" ng-click="vm.addCard('todo')" title="Add card">＋</button>
@@ -112,7 +121,7 @@
     </div>
 
     <!-- DOING column -->
-    <div class="column" data-col="doing">
+    <div class="column" data-col="doing" ng-if="vm.showDoing">
       <h3>
         <span class="col-header">⚡ Doing <span class="col-badge">{{vm.cardsForProject('doing').length}}</span></span>
       </h3>
@@ -304,7 +313,7 @@
     </div>
 
     <!-- DONE column -->
-    <div class="column" data-col="done">
+    <div class="column" data-col="done" ng-if="!vm.showDone">
       <h3>
         <span class="col-header">✅ Done <span class="col-badge">{{vm.cardsForProject('done').length}}</span></span>
         <button class="small ghost" ng-click="vm.archiveAllDone()" title="Archive all done tasks">Archive All</button>

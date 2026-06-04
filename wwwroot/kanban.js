@@ -16,7 +16,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
     init: function(vm, $scope) {
       // Start with an immediate default state, then replace with persisted
       // state loaded from the server when available.
-      vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
+      vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [], showArchived: true, showSelfImproving: true };
       $http.get('/api/boarddata/load').then(function (resp) {
         try {
           var data = resp.data;
@@ -143,8 +143,6 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.saveCards();
       };
 
-      vm.showArchived = false;
-      vm.showSelfImproving = false;
       vm.isInFileSearch = false;
       vm.voiceSupported = VoiceInput.isSupported();
       vm.isRecording = false;

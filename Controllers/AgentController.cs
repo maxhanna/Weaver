@@ -5533,9 +5533,7 @@ Analyze the build output. Is the environment healthy? What should we do next?";
 
         var improvementEntry = new Dictionary<string, object?>
         {
-            ["description"] = editsApplied
-                ? $"Applied {filesEdited.Count} file edit(s): {string.Join(", ", filePaths)}"
-                : "Agent completed but no file edits were applied",
+            ["description"] = plan?.Summary ?? "No summary provided",
             ["complete"] = complete && editsApplied,
             ["date"] = now
         };

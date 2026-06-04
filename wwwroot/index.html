@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="/calendar.css" />
   <link rel="stylesheet" href="/wireframe.css" />
   <link rel="stylesheet" href="/ide.css" />
-  <link rel="icon" type="image/x-icon" href="/weaveicon.png" /> 
+<link rel="icon" href="/weavericon.png">
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -18,25 +18,15 @@
   <header>
     <div class="brand-logo-container brand-logo-enhanced" ng-click="vm.openDiscordPanel()">
       <svg class="brand-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <!-- Brain for AI -->
-        <path d="M12 2C13.1 2 14 2.9 14 4C14 5.1 13.1 6 12 6C10.9 6 10 5.1 10 4C10 2.9 10.9 2 12 2Z"
-          fill="var(--brand-secondary)" />
-        <path d="M12 8C13.1 8 14 8.9 14 10C14 11.1 13.1 12 12 12C10.9 12 10 11.1 10 10C10 8.9 10.9 8 12 8Z"
-          fill="var(--brand-secondary)" />
-        <path d="M12 14C13.1 14 14 14.9 14 16C14 17.1 13.1 18 12 18C10.9 18 10 17.1 10 16C10 14.9 10.9 14 12 14Z"
-          fill="var(--brand-secondary)" />
-        <!-- Kanban grid for tasks -->
-        <rect x="2" y="2" width="20" height="20" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" />
-        <rect x="6" y="6" width="12" height="12" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" />
-        <line x1="6" y1="10" x2="18" y2="10" stroke="var(--brand-secondary)" stroke-width="0.5" />
-        <line x1="6" y1="14" x2="18" y2="14" stroke="var(--brand-secondary)" stroke-width="0.5" />
-        <!-- Circuit pattern for agents -->
-        <circle cx="5" cy="5" r="0.5" fill="var(--brand-secondary)" />
-        <circle cx="19" cy="5" r="0.5" fill="var(--brand-secondary)" />
-        <circle cx="5" cy="19" r="0.5" fill="var(--brand-secondary)" />
-        <circle cx="19" cy="19" r="0.5" fill="var(--brand-secondary)" />
-        <line x1="5" y1="5" x2="19" y2="5" stroke="var(--brand-secondary)" stroke-width="0.5" />
-        <line x1="5" y1="19" x2="19" y2="19" stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <!-- Spider web pattern -->
+        <circle cx="12" cy="12" r="10" fill="none" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="12" y1="2" x2="12" y2="22" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="2" y1="12" x2="22" y2="12" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="12" y1="2" x2="22" y2="12" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="2" y1="12" x2="12" y2="22" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="12" y1="2" x2="2" y2="12" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <line x1="22" y1="12" x2="12" y2="22" stroke="var(--brand-secondary)" stroke-width="0.8" />
+        <circle cx="12" cy="12" r="3" fill="none" stroke="var(--brand-secondary)" stroke-width="0.8" />
       </svg>
       <span class="brand-text">Weaver</span>
     </div>

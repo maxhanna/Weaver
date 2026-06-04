@@ -1,11 +1,11 @@
 ﻿angular.module('kanbanApp', [])
- .filter('formatNumber', function() {
- return function(input) {
- if (input === null || input === undefined) return '';
- return input.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
- };
- })
-   .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', 'IDEMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin, IDEMixin) {
+  .filter('formatNumber', function () {
+    return function (input) {
+      if (input === null || input === undefined) return '';
+      return input.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    };
+  })
+  .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', 'IDEMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin, IDEMixin) {
     const vm = this;
     const SETTINGS_KEY = 'weaverconfig.settings';
 
@@ -171,6 +171,11 @@
     vm.showSettingsPanel = false;
     vm.showDiscordPanel = false;
     vm.showFilePicker = false;
+    vm.showTodo = true;
+    vm.showDoing = true;
+    vm.showDone = true;
+    vm.showArchived = false;
+    vm.showSelfImproving = false;
     vm.newProjectName = '';
     vm.newProjectPath = '';
     vm.newProjectDescription = '';
@@ -644,12 +649,12 @@
           activeCardId: vm.activeCardId || null,
           activeCardText: vm.activeCardText || '',
           calendarCards: vm.calCards || [],
-          fileListing: vm.ide && vm.ide.pendingFileListing ? (function() {
+          fileListing: vm.ide && vm.ide.pendingFileListing ? (function () {
             var fl = vm.ide.pendingFileListing;
             vm.ide.pendingFileListing = null;
             return fl;
           })() : null,
-          fileContent: vm.ide && vm.ide.pendingFileContent ? (function() {
+          fileContent: vm.ide && vm.ide.pendingFileContent ? (function () {
             var fc = vm.ide.pendingFileContent;
             vm.ide.pendingFileContent = null;
             return fc;
@@ -667,7 +672,7 @@
           showIDE: vm.showIDE,
           editorState: vm.ide && vm.ide.currentFile ? JSON.stringify({
             currentFile: vm.ide.currentFile,
-            openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
+            openFiles: (vm.ide.openTabs || []).map(function (t) { return t.path; }),
             content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
             dirty: vm.ide.dirty || false
           }) : null,
@@ -680,11 +685,11 @@
       };
     }
 
-    vm.syncEditorState = function() {
+    vm.syncEditorState = function () {
       if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
       var curState = vm.ide && vm.ide.currentFile ? {
         currentFile: vm.ide.currentFile,
-        openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
+        openFiles: (vm.ide.openTabs || []).map(function (t) { return t.path; }),
         content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
         dirty: vm.ide.dirty || false
       } : null;
@@ -1039,7 +1044,7 @@
         console.log('Remote file listing request:', cmd.params.path || '/');
         var listParams = { project: vm.selectedProject };
         if (cmd.params.path) listParams.path = cmd.params.path;
-        $http.get('/api/editor/list', { params: listParams }).then(function(resp) {
+        $http.get('/api/editor/list', { params: listParams }).then(function (resp) {
           var result = JSON.stringify({ path: cmd.params.path || '', entries: (resp.data && resp.data.entries) || [] });
           $http.post('/api/bughosted/commands/ack', {
             clientId: vm.bughostedClientId,
@@ -1047,7 +1052,7 @@
             status: 'executed',
             result: result
           });
-        }, function() {
+        }, function () {
           $http.post('/api/bughosted/commands/ack', {
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
@@ -1057,7 +1062,7 @@
         });
       } else if (cmd.command === 'requestFileContent' && cmd.params && cmd.params.path) {
         console.log('Remote file content request:', cmd.params.path);
-        $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: cmd.params.path } }).then(function(resp) {
+        $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: cmd.params.path } }).then(function (resp) {
           var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
           var result = JSON.stringify({ path: cmd.params.path, content: content });
           $http.post('/api/bughosted/commands/ack', {
@@ -1066,7 +1071,7 @@
             status: 'executed',
             result: result
           });
-        }, function(err) {
+        }, function (err) {
           $http.post('/api/bughosted/commands/ack', {
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
@@ -1079,14 +1084,14 @@
         $http.post('/api/editor/save', {
           path: cmd.params.path,
           content: cmd.params.content
-        }).then(function() {
+        }).then(function () {
           if (vm.handleRemoteFileEdit) {
             vm.handleRemoteFileEdit(cmd.params);
           }
           if (vm.syncEditorState) {
-            $timeout(function() { vm.syncEditorState(); }, 100);
+            $timeout(function () { vm.syncEditorState(); }, 100);
           }
-        }, function(err) {
+        }, function (err) {
           console.error('Failed to apply remote file edit:', err);
         });
       } else if (cmd.command === 'addCalendarCard' && cmd.params) {
@@ -2224,4 +2229,4 @@
       if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
       if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
     }
-  }]);    
+  }]);
