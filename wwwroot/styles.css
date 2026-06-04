@@ -64,7 +64,7 @@ button {
 	filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
 	box-shadow: var(--brand-glow);
 	transform: scale(1);
-}	transition: all .12s ease;
+ 	transition: all .12s ease;
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
