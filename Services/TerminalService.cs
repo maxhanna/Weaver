@@ -173,7 +173,7 @@ public class TerminalService : IDisposable
             CreatedUtc = DateTime.UtcNow
         };
         _pendingApprovals[pending.Id] = pending;
-        Append($"[Maestro approval required] {command}");
+        Append($"[Weaver approval required] {command}");
 
         var approved = await pending.Decision.Task;
         if (!approved)

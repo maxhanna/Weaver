@@ -59,7 +59,7 @@ public class ConfigFileService
 
     public ConfigFileService(IWebHostEnvironment env)
     {
-        _configPath = Path.Combine(env.ContentRootPath, "maestroconfig.json");
+        _configPath = Path.Combine(env.ContentRootPath, "weaverconfig.json");
     }
 
     /// <summary>

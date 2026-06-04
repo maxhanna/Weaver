@@ -1,6 +1,6 @@
-﻿# Maestro Backend
+﻿# Weaver Backend
 
-Maestro is an advanced agentic backend system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It serves as a powerful foundation for building AI-powered workflows that can execute complex tasks autonomously.
+Weaver is an advanced agentic backend system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It serves as a powerful foundation for building AI-powered workflows that can execute complex tasks autonomously.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ Maestro is an advanced agentic backend system that enables AI-driven automation 
 
 ## Run
 
-From the `Maestro` folder:
+From the `Weaver` folder:
 
 ```bash
 dotnet restore
@@ -20,7 +20,7 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 ## Configuration
 
-`maestroconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
+`weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
 
 ## Agentic Orchestration Router
 ```

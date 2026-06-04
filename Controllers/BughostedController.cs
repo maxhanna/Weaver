@@ -183,7 +183,7 @@ public class BughostedController : ControllerBase
         {
             var client = _clientFactory.CreateClient();
             var payload = JsonSerializer.Serialize(new { username = req.Username, password = req.Password });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/maestro/login")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/weaver/login")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -226,7 +226,7 @@ public class BughostedController : ControllerBase
                 kanbanData = req.KanbanData,
                 settings = req.Settings
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/heartbeat")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/heartbeat")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -254,7 +254,7 @@ public class BughostedController : ControllerBase
                 token = session.Token,
                 settingsData = req.SettingsData
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/settings")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/settings")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -279,7 +279,7 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/maestro/settings?token={session.Token}");
+            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/weaver/settings?token={session.Token}");
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
             if (!httpRes.IsSuccessStatusCode)
@@ -301,7 +301,7 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/maestro/commands?token={session.Token}");
+            var httpReq = new HttpRequestMessage(HttpMethod.Get, session.Url + $"/weaver/commands?token={session.Token}");
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
             if (!httpRes.IsSuccessStatusCode)
@@ -330,7 +330,7 @@ public class BughostedController : ControllerBase
                 status = req.Status,
                 result = req.Result
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/commands/ack")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/commands/ack")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -356,7 +356,7 @@ public class BughostedController : ControllerBase
             var client = _clientFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(10);
             var payload = JsonSerializer.Serialize(new { username = req.Username, password = req.Password });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/maestro/login")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/weaver/login")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -392,7 +392,7 @@ public class BughostedController : ControllerBase
                 path = req.Path,
                 content = req.Content
             });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/maestro/fileEdit")
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/fileEdit")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };

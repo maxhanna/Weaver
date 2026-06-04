@@ -1,7 +1,7 @@
 ﻿**/bin/
 **/bin/
 **/obj/
-maestroconfig.json
+weaverconfig.json
 filehints.json
 .boarddata
 .calendardata

@@ -20,11 +20,11 @@ namespace MaestroBackend.Services
             @"         ( M | a | e | s | t | r | o )       ",
             @"          \_/ \_/ \_/ \_/ \_/ \_/ \_/        ",
             @"                                             ",
-            @"         Enhanced Maestro Logo v2.0        "
+            @"         Enhanced Weaver Logo v2.0        "
         };
 
         private static readonly string[] SubtitleLines = {
-            @"           Maestro - The Ultimate Backend Solution",
+            @"           Weaver - The Ultimate Backend Solution",
             @"           ===================================",
             @"           A powerful backend framework for modern applications"
         };
@@ -50,7 +50,7 @@ namespace MaestroBackend.Services
                 }
                 
                 Console.WriteLine();
-                Console.WriteLine("Starting Maestro backend service...");
+                Console.WriteLine("Starting Weaver backend service...");
                 Console.WriteLine();
                 Console.WriteLine("[INFO] Backend service initialized successfully.");
                 Console.WriteLine();
@@ -58,7 +58,7 @@ namespace MaestroBackend.Services
                 Console.WriteLine("[TRACE] DisplayLogo method completed.");
                 Console.WriteLine("[VERBOSE] All system components are operational.");
                 Console.WriteLine();
-                Console.WriteLine("[SUCCESS] Maestro logo displayed with enhanced styling.");
+                Console.WriteLine("[SUCCESS] Weaver logo displayed with enhanced styling.");
             }
             catch (IOException)
             {

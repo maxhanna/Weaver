@@ -7,7 +7,7 @@ namespace MaestroBackend.Hubs
     /// SignalR hub for real-time co-editing of files.
     ///
     /// Flow:
-    ///   1. A client (local Maestro UI or remote BugHosted IDE) calls JoinFile(path).
+    ///   1. A client (local Weaver UI or remote BugHosted IDE) calls JoinFile(path).
     ///   2. The hub places that connection in a group keyed by the canonical file path.
     ///   3. When any participant calls PushContent(path, content, version), all others in
     ///      the same group receive OnContentChanged.

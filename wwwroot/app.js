@@ -7,7 +7,7 @@
  })
    .controller('MainCtrl', ['$http', '$interval', '$window', '$scope', '$timeout', 'KanbanMixin', 'CalendarMixin', 'IDEMixin', function ($http, $interval, $window, $scope, $timeout, KanbanMixin, CalendarMixin, IDEMixin) {
     const vm = this;
-    const SETTINGS_KEY = 'maestroconfig.settings';
+    const SETTINGS_KEY = 'weaverconfig.settings';
 
     // === State ===
     vm.selectedProject = '';

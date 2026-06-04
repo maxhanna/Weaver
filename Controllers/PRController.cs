@@ -31,20 +31,20 @@ namespace MaestroBackend.Controllers
                 var originalBranch = await _git.GetCurrentBranchAsync(req.ProjectPath);
 
                 var sanitized = Regex.Replace(req.CardId ?? "task", @"[^a-zA-Z0-9_-]", "");
-                var branchName = $"maestro/{sanitized}";
+                var branchName = $"weaver/{sanitized}";
 
                 var hasChanges = await _git.HasUncommittedChangesAsync(req.ProjectPath);
                 if (hasChanges)
                 {
                     // Stash any existing uncommitted changes so they don't leak into the PR branch
-                    await _git.RunGitAsync(req.ProjectPath, "stash push -m \"maestro-auto-stash\"");
+                    await _git.RunGitAsync(req.ProjectPath, "stash push -m \"weaver-auto-stash\"");
                 }
 
                 var branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
                 if (!branchResult.Success)
                 {
                     // Branch may already exist — try with timestamp suffix
-                    branchName = $"maestro/{sanitized}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+                    branchName = $"weaver/{sanitized}-{DateTime.UtcNow:yyyyMMddHHmmss}";
                     branchResult = await _git.CreateBranchAsync(req.ProjectPath, branchName);
                 }
 
@@ -72,10 +72,10 @@ namespace MaestroBackend.Controllers
                 if (string.IsNullOrWhiteSpace(req.ProjectPath))
                     return BadRequest(new { success = false, error = "ProjectPath required" });
 
-                var branchName = req.BranchName ?? "maestro/" + Regex.Replace(req.CardId ?? "task", @"[^a-zA-Z0-9_-]", "");
+                var branchName = req.BranchName ?? "weaver/" + Regex.Replace(req.CardId ?? "task", @"[^a-zA-Z0-9_-]", "");
 
                 // Commit all changes
-                var commitResult = await _git.CommitAllAsync(req.ProjectPath, req.CardText ?? "Maestro agent changes");
+                var commitResult = await _git.CommitAllAsync(req.ProjectPath, req.CardText ?? "Weaver agent changes");
                 if (!commitResult.Success && !commitResult.Output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) && !commitResult.Error.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning("Commit warning: {Output} {Error}", commitResult.Output, commitResult.Error);
@@ -89,8 +89,8 @@ namespace MaestroBackend.Controllers
                 }
 
                 // Create PR via gh CLI
-                var prBody = $"Automated PR by Maestro agent.\n\n{req.Summary ?? req.CardText ?? ""}";
-                var prResult = await _git.CreatePullRequestAsync(req.ProjectPath, req.CardText ?? "Maestro agent changes", prBody, branchName);
+                var prBody = $"Automated PR by Weaver agent.\n\n{req.Summary ?? req.CardText ?? ""}";
+                var prResult = await _git.CreatePullRequestAsync(req.ProjectPath, req.CardText ?? "Weaver agent changes", prBody, branchName);
 
                 string? prUrl = null;
                 if (prResult.Success)

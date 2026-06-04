@@ -218,7 +218,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           vm.saveCards();
         }
         if (vm.deleteCardConfirm.dontShowAgain) {
-          try { $window.localStorage.setItem('maestroconfig.deleteCardConfirm', 'false'); } catch (e) { }
+          try { $window.localStorage.setItem('weaverconfig.deleteCardConfirm', 'false'); } catch (e) { }
         }
         vm.confirmDeleteCardId = null;
         vm.deleteCardConfirm = null;
@@ -272,7 +272,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
         if (idx === -1) return;
         var card = vm.state[from][idx];
-        if (card != selfImproving && to === 'selfImproving') {
+        if (!card.selfImproving && to === 'selfImproving') {
           card.selfImproving = true;
           card.ready = false;
         }
