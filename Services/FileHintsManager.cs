@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace MaestroBackend.Services;
+namespace WeaverBackend.Services;
 
 
 public class FileHintsManager

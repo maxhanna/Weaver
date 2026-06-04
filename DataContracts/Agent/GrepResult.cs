@@ -1,4 +1,4 @@
-namespace MaestroBackend;
+namespace WeaverBackend;
 
 public class GrepResult
 {

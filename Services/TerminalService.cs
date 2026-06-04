@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
 
-namespace MaestroBackend.Services;
+namespace WeaverBackend.Services;
 
 public class TerminalService : IDisposable
 {

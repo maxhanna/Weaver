@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using MaestroBackend.Services;
-using MaestroBackend;
+using WeaverBackend.Services;
+using WeaverBackend;
 
 [ApiController]
 [Route("api/agent")]
@@ -2469,8 +2469,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 continue;
             }
 
-            var fullPath = Path.GetFullPath(Path.Combine(projectRoot,
-                step.File.Replace('/', Path.DirectorySeparatorChar)));
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, (step.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
             if (!System.IO.File.Exists(fullPath)) { resultSteps.Add(step); continue; }
 
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
@@ -3129,9 +3128,68 @@ Be concise — 2-4 sentences max.";
                         await SendSse(Response, "step", editResult, ct);
                     stepIndex++;
                     allResults.Add(editResult);
-                } 
+                }
                 else
                 {
+                    // ── Incremental execution: before recording the failure, eagerly apply
+                    // any remaining edit steps in this plan whose anchors are valid right now.
+                    // This preserves partial progress instead of discarding all remaining steps.
+                    var remainingEdits = planItems
+                        .Skip(itemIdx + 1)
+                        .Where(s => AgentUtilities.IsRelativePath(s.File ?? "") &&
+                                    !string.IsNullOrWhiteSpace(s.OldString) &&
+                                    (s.OldString ?? "").Trim() != (s.NewString ?? "").Trim())
+                        .ToList();
+
+                    if (remainingEdits.Count > 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Edit failed for {planFile} — pre-applying {remainingEdits.Count} remaining valid step(s) before replan…", ct: ct);
+
+                        var appliedIndices = new HashSet<int>();
+                        foreach (var pending in remainingEdits)
+                        {
+                            var pendingFullPath = Path.GetFullPath(Path.Combine(projectRoot,
+                                pending.File.Replace('/', Path.DirectorySeparatorChar)));
+                            if (!System.IO.File.Exists(pendingFullPath)) continue;
+
+                            var fileContent = await System.IO.File.ReadAllTextAsync(pendingFullPath, Encoding.UTF8);
+                            var validation = ValidatePlannedEdit(fileContent, pending);
+                            if (!validation.ok) continue;
+
+                            // Anchor is valid — apply it now
+                            if (await ApplyEditWithRetry(pending, projectRoot, emitSse, ct))
+                            {
+                                stepIndex++;
+                                var preResult = new Dictionary<string, object?>
+                                {
+                                    ["index"] = stepIndex,
+                                    ["type"] = "edit",
+                                    ["path"] = pending.File.Replace('\\', '/'),
+                                    ["oldString"] = pending.OldString,
+                                    ["newString"] = pending.NewString
+                                };
+                                PopulateEditResult(preResult, "modified", pending.File.Replace('\\', '/'), pending.OldString, pending.NewString ?? "", "");
+                                if (emitSse)
+                                    await SendSse(Response, "step", preResult, ct);
+                                allResults.Add(preResult);
+                                appliedIndices.Add(planItems.IndexOf(pending));
+                                await EmitLog(emitSse, "success",
+                                    $"Pre-applied valid step: {pending.File}", ct: ct);
+                            }
+                        }
+
+                        // Remove pre-applied steps from the remaining plan so they aren't re-attempted
+                        if (appliedIndices.Count > 0)
+                        {
+                            planItems = planItems
+                                .Select((s, idx) => (s, idx))
+                                .Where(x => !appliedIndices.Contains(x.idx))
+                                .Select(x => x.s)
+                                .ToList();
+                        }
+                    }
+
                     var errorResult = new Dictionary<string, object?>
                     {
                         ["index"] = stepIndex,
@@ -5532,7 +5590,8 @@ Analyze the build output. Is the environment healthy? What should we do next?";
         {
             ["description"] = plan?.Summary ?? "No summary provided",
             ["complete"] = complete && editsApplied,
-            ["date"] = now
+            ["date"] = now,
+            ["suggestedNextFeature"] = await GetBestNextFeature(prompt, projectRoot, allSteps)
         };
 
         // Find existing feature entry or create new one
@@ -5607,6 +5666,74 @@ Analyze the build output. Is the environment healthy? What should we do next?";
             Directory.CreateDirectory(dir);
         await System.IO.File.WriteAllTextAsync(improvementFilePath, json);
         await EmitLog(true, "info", $"Self-improving data written for: {prompt}", new { improvements = improvements.Count, filePath = improvementFilePath });
+    }
+
+    /// <summary>
+    /// Asks the LLM what the best next feature would be to expand on the current task.
+    /// Reads existing improvement data to avoid suggesting already-tracked features.
+    /// Called before writing a new self-improvement entry so the suggestion is stored alongside it.
+    /// </summary>
+    private async Task<string> GetBestNextFeature(string prompt, string projectRoot, List<object> allSteps)
+    {
+        // Gather files that were edited so the LLM has concrete context
+        var filesEdited = ExtractFilesEdited(allSteps);
+        var filePaths = filesEdited.Select(f =>
+        {
+            if (f is Dictionary<string, object?> dict && dict.TryGetValue("path", out var p) && p is string ps)
+                return ps;
+            if (f is JsonElement je && je.TryGetProperty("path", out var pp))
+                return pp.GetString() ?? "";
+            return "";
+        }).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
+
+        // Load existing features so the LLM avoids repeating them
+        var existingFeatures = new List<string>();
+        var improvementFilePath = Path.Combine(projectRoot, "improvementdata.json");
+        if (System.IO.File.Exists(improvementFilePath))
+        {
+            try
+            {
+                var existing = await System.IO.File.ReadAllTextAsync(improvementFilePath);
+                var root = JsonSerializer.Deserialize<JsonElement>(existing);
+                if (root.TryGetProperty("features", out var feats) && feats.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var feat in feats.EnumerateArray())
+                    {
+                        if (feat.TryGetProperty("feature", out var featText))
+                            existingFeatures.Add(featText.GetString() ?? "");
+                    }
+                }
+            }
+            catch { /* ignore — start fresh */ }
+        }
+
+        var existingList = existingFeatures.Count > 0
+            ? string.Join("\n", existingFeatures.Select((f, i) => $"  {i + 1}. {f}"))
+            : "  (none yet)";
+
+        var fileList = filePaths.Count > 0
+            ? string.Join(", ", filePaths)
+            : "(no specific files)";
+
+        const string systemPrompt =
+            "You are a software feature planning assistant. " +
+            "Given a completed task and the files it touched, suggest ONE concise next feature " +
+            "that would meaningfully expand the existing functionality. " +
+            "Respond with only the feature description — one sentence, no bullet points, no preamble.";
+
+        var userPrompt =
+            $"Completed task: {prompt}\n\n" +
+            $"Files modified: {fileList}\n\n" +
+            $"Already tracked features (do NOT repeat these):\n{existingList}\n\n" +
+            "What is the single best next feature to add that would expand on this task?";
+
+        var (raw, _, error) = await CallLlmRaw(systemPrompt, userPrompt,
+            requestTimeout: TimeSpan.FromSeconds(30));
+
+        if (string.IsNullOrWhiteSpace(raw) || !string.IsNullOrEmpty(error))
+            return "No suggestion available.";
+
+        return raw.Trim();
     }
 
     private static BuildCheckDecision? ParseBuildCheckResponse(string raw)

@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using MaestroBackend.Services;
+using WeaverBackend.Services;
 
 [ApiController]
 [Route("api/email")]

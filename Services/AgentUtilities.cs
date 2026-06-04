@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace MaestroBackend.Services;
+namespace WeaverBackend.Services;
 
 public static class AgentUtilities
 { 

@@ -1,8 +1,7 @@
-﻿using MaestroBackend.Services;
-using MaestroBackend;
-using MaestroBackend.Hubs;
-
-MaestroLogo.DisplayLogo();
+﻿using WeaverBackend.Services;
+using WeaverBackend.Hubs;
+ 
+WeaverLogo.DisplayLogo();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,7 +11,7 @@ builder.Services.AddSingleton<EmailService>();
 
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
-builder.Services.AddSingleton(new MaestroBackend.Services.BoardDataService(basePath));
+builder.Services.AddSingleton(new WeaverBackend.Services.BoardDataService(basePath));
 builder.Services.AddSingleton(new CalendarService(basePath));
 builder.Services.AddSingleton<GitService>();
 

@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace MaestroBackend.Services
+namespace WeaverBackend.Services
 {
     public class GitResult
     {

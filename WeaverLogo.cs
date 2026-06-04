@@ -3,24 +3,21 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace MaestroBackend.Services
+namespace WeaverBackend.Services
 {
-    public class MaestroLogo
+    public class WeaverLogo
     {
         private static readonly string[] LogoLines = {
-            @"  __  __           _      _     _           ",
-            @" |  \/  |         | |    (_)   | |          ",
-            @" | \  / | ___  ___| |     _ ___| |_ ___ _ __ ",
-            @" | |\/| |/ _ \/ __| |    | / __| __/ _ \ '__|",
-            @" | |  | |  __/\__ \ |____| \__ \ ||  __/ |   ",
-            @" |_|  |_|\___||___/______|_|___/\__\___|_|   ",
+            @"    ___  _   _   _   _   _   _   _   _   _   _",
+            @"   /   \/ \ / \ / \ / \ / \ / \ / \ / \ / \ / \ ",
+            @"  ( W | E | A | V | E | R | _ | _ | _ | _ | _ )",
+            @"   \___/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ ",
             @"                                             ",
             @"           _   _   _   _   _   _   _         ",
             @"          / \ / \ / \ / \ / \ / \ / \        ",
-            @"         ( M | a | e | s | t | r | o )       ",
-            @"          \_/ \_/ \_/ \_/ \_/ \_/ \_/        ",
+            @"         ( S | p | i | d | e | r | W | e | a | v | e | r )       ",
+            @"          \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/        ",
             @"                                             ",
-            @"         Enhanced Weaver Logo v2.0        "
         };
 
         private static readonly string[] SubtitleLines = {

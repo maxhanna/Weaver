@@ -1,11 +1,11 @@
-using MaestroBackend.Services;
+using WeaverBackend.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace MaestroBackend.Controllers
+namespace WeaverBackend.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
