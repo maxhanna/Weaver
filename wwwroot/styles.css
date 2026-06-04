@@ -1712,6 +1712,7 @@ h3 .small.ghost:hover {
 	padding: 8px;
 	border-radius: 8px;
 	background: linear-gradient(90deg, #06203a, #041827);
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
 }
 
 .agent-status.idle {
