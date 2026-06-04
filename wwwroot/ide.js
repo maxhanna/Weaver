@@ -52,6 +52,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       };
 
       vm.pickerEnterDir = function(path) {
+        console.log(path);
         vm.ide.filePickerPath = path;
         vm.ide.searchFilter = '';
         vm.loadFilePickerEntries();

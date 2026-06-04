@@ -491,6 +491,7 @@
     vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
     // Close options menu when it loses focus
     vm.closeOptionsOnBlur = function (event) {
+      console.log("closeOptionsOnBlur!");
       const optionsElement = document.getElementById('project-options');
       if (optionsElement && !optionsElement.contains(event.relatedTarget)) {
         vm.showProjectOptions = false;

@@ -25,7 +25,7 @@
                class="ide-file-item"
                ng-class="{'ide-file-item--dir': e.isDirectory, 'ide-file-item--selected': vm.ide.currentFile === e.path}">
             <div ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)" class="ide-file-item-label">
-              <span>📁</span><span>{{e.name}}/</span>
+              <span ng-click="vm.pickerEnterDir(e.path)">📁</span><span ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</span>
             </div>
             <div ng-if="!e.isDirectory" ng-click="vm.openFile(e.path)" class="ide-file-item-label">
               <span>📄</span><span>{{e.name}}</span>
