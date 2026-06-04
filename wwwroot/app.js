@@ -79,6 +79,7 @@
     vm.streamingContextSize = 0;
     vm.streamingSteps = [];
     vm.streamingFilesEdited = [];
+    vm.streamingTokenBuffer = '';
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
     vm.logFontSize = 10;
@@ -364,6 +365,8 @@
       });
     };
 
+
+
     vm.countArchivedCards = function () {
       if (!vm.state || !vm.state.archived) {
         vm.archiveCardCount = 0;
@@ -623,58 +626,90 @@
 
     var _bhHeartbeatFailCount = 0;
     var _bhHeartbeatTimer = null;
+    var _bhEditorSyncTimer = null;
+    var _lastSyncedEditorState = null;
+
+    function buildHeartbeatPayload() {
+      return {
+        clientId: vm.bughostedClientId,
+        kanbanData: JSON.stringify({
+          projects: (vm.projects || []).map(function (p) {
+            return { Name: p.Name, Path: p.Path, Description: p.Description };
+          }),
+          state: vm.state,
+          agentActive: vm.streamingActive || false,
+          agentPhase: vm.streamingPhase || '',
+          agentThinking: vm.streamingThinking || '',
+          agentSummary: vm.streamingSummary || '',
+          activeCardId: vm.activeCardId || null,
+          activeCardText: vm.activeCardText || '',
+          calendarCards: vm.calCards || [],
+          fileListing: vm.ide && vm.ide.pendingFileListing ? (function() {
+            var fl = vm.ide.pendingFileListing;
+            vm.ide.pendingFileListing = null;
+            return fl;
+          })() : null,
+          fileContent: vm.ide && vm.ide.pendingFileContent ? (function() {
+            var fc = vm.ide.pendingFileContent;
+            vm.ide.pendingFileContent = null;
+            return fc;
+          })() : null
+        }),
+        settings: JSON.stringify({
+          llamaUrl: vm.llamaUrl,
+          buildCommands: vm.buildCommands,
+          terminalApprovalMode: vm.terminalApprovalMode,
+          approvedTerminalRoots: vm.approvedTerminalRoots,
+          disallowedTerminalRoots: vm.disallowedTerminalRoots,
+          defaultProject: vm.defaultProject || vm.selectedProject,
+          showTerminal: vm.showTerminal,
+          showAI: vm.showAI,
+          showIDE: vm.showIDE,
+          editorState: vm.ide && vm.ide.currentFile ? JSON.stringify({
+            currentFile: vm.ide.currentFile,
+            openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
+            content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
+            dirty: vm.ide.dirty || false
+          }) : null,
+          showKanban: vm.showKanban,
+          showCalendar: vm.showCalendar,
+          bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
+          bughostedUsername: vm.bughostedUsername,
+          bughostedPassword: vm.bughostedPassword
+        })
+      };
+    }
+
+    vm.syncEditorState = function() {
+      if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+      var curState = vm.ide && vm.ide.currentFile ? {
+        currentFile: vm.ide.currentFile,
+        openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
+        content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
+        dirty: vm.ide.dirty || false
+      } : null;
+      var curStateStr = curState ? JSON.stringify(curState) : null;
+      if (_lastSyncedEditorState === curStateStr) return;
+      _lastSyncedEditorState = curStateStr;
+      var data = buildHeartbeatPayload();
+      $http.post('/api/bughosted/heartbeat', data).then(function () {
+        _bhHeartbeatFailCount = 0;
+        vm.bughostedStatus = 'connected';
+      }, function () {
+        _bhHeartbeatFailCount++;
+        if (_bhHeartbeatFailCount >= 3) {
+          vm.bughostedStatus = 'error';
+        }
+      });
+    };
+
     function startBughostedHeartbeat() {
       stopBughostedHeartbeat();
+      // Full state sync every 30 seconds (kanban, agent, etc.)
       _bhHeartbeatTimer = $interval(function () {
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-        var data = {
-          clientId: vm.bughostedClientId,
-          kanbanData: JSON.stringify({
-            projects: (vm.projects || []).map(function (p) {
-              return { Name: p.Name, Path: p.Path, Description: p.Description };
-            }),
-            state: vm.state,
-            agentActive: vm.streamingActive || false,
-            agentPhase: vm.streamingPhase || '',
-            agentThinking: vm.streamingThinking || '',
-            agentSummary: vm.streamingSummary || '',
-            activeCardId: vm.activeCardId || null,
-            activeCardText: vm.activeCardText || '',
-            calendarCards: vm.calCards || [],
-            fileListing: vm.ide && vm.ide.pendingFileListing ? (function() {
-              var fl = vm.ide.pendingFileListing;
-              vm.ide.pendingFileListing = null;
-              return fl;
-            })() : null,
-            fileContent: vm.ide && vm.ide.pendingFileContent ? (function() {
-              var fc = vm.ide.pendingFileContent;
-              vm.ide.pendingFileContent = null;
-              return fc;
-            })() : null
-          }),
-          settings: JSON.stringify({
-            llamaUrl: vm.llamaUrl,
-            buildCommands: vm.buildCommands,
-            terminalApprovalMode: vm.terminalApprovalMode,
-            approvedTerminalRoots: vm.approvedTerminalRoots,
-            disallowedTerminalRoots: vm.disallowedTerminalRoots,
-            defaultProject: vm.defaultProject || vm.selectedProject,
-            showTerminal: vm.showTerminal,
-            showAI: vm.showAI,
-            showIDE: vm.showIDE,
-            editorState: vm.ide && vm.ide.currentFile ? JSON.stringify({
-              currentFile: vm.ide.currentFile,
-              openFiles: (vm.ide.openTabs || []).map(function(t) { return t.path; }),
-              content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
-              dirty: vm.ide.dirty || false
-            }) : null,
-            showKanban: vm.showKanban,
-            showCalendar: vm.showCalendar,
-            bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled,
-            bughostedUsername: vm.bughostedUsername,
-            bughostedPassword: vm.bughostedPassword
-          })
-        };
+        _lastSyncedEditorState = null;
+        var data = buildHeartbeatPayload();
         $http.post('/api/bughosted/heartbeat', data).then(function () {
           _bhHeartbeatFailCount = 0;
           vm.bughostedStatus = 'connected';
@@ -685,9 +720,15 @@
           }
         });
       }, 30000, 0, false);
+      // Rapid editor state sync every 3 seconds
+      _bhEditorSyncTimer = $interval(function () {
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        vm.syncEditorState();
+      }, 3000, 0, false);
     }
     function stopBughostedHeartbeat() {
       if (_bhHeartbeatTimer) { $interval.cancel(_bhHeartbeatTimer); _bhHeartbeatTimer = null; }
+      if (_bhEditorSyncTimer) { $interval.cancel(_bhEditorSyncTimer); _bhEditorSyncTimer = null; }
     }
 
     var _bhCommandTimer = null;
@@ -794,7 +835,8 @@
               createdAt: now.toISOString(),
               priority: cal.priority || 'medium',
               ready: true,
-              attached: []
+              attached: [],
+              selfImproving: false
             };
             vm.state.todo.push(newCard);
             vm.saveCards();
@@ -830,7 +872,7 @@
 
     function findCardColumn(cardId) {
       if (!cardId || !vm.state) return null;
-      var cols = ['todo', 'doing', 'done', 'archived'];
+      var cols = ['todo', 'doing', 'done', 'archived', 'selfImproving'];
       for (var i = 0; i < cols.length; i++) {
         var cards = vm.state[cols[i]] || [];
         for (var j = 0; j < cards.length; j++) {
@@ -852,7 +894,8 @@
           filePath: cmd.params.project || vm.selectedProject,
           createdAt: new Date().toISOString(),
           priority: cmd.params.priority || 'medium',
-          attached: []
+          attached: [],
+          selfImproving: false
         };
         vm.state.todo.push(card);
         vm.saveCards();
@@ -864,7 +907,8 @@
           filePath: cmd.params.project || vm.selectedProject,
           createdAt: new Date().toISOString(),
           priority: cmd.params.priority || 'medium',
-          attached: []
+          attached: [],
+          selfImproving: false
         };
         vm.state.todo.push(card);
         console.log('Added card from remote command:', card);
@@ -996,20 +1040,39 @@
         var listParams = { project: vm.selectedProject };
         if (cmd.params.path) listParams.path = cmd.params.path;
         $http.get('/api/editor/list', { params: listParams }).then(function(resp) {
-          vm.ide.pendingFileListing = {
-            path: cmd.params.path || '',
-            entries: (resp.data && resp.data.entries) || []
-          };
+          var result = JSON.stringify({ path: cmd.params.path || '', entries: (resp.data && resp.data.entries) || [] });
+          $http.post('/api/bughosted/commands/ack', {
+            clientId: vm.bughostedClientId,
+            commandId: cmd.id,
+            status: 'executed',
+            result: result
+          });
         }, function() {
-          vm.ide.pendingFileListing = { path: cmd.params.path || '', entries: [], error: 'Failed to list' };
+          $http.post('/api/bughosted/commands/ack', {
+            clientId: vm.bughostedClientId,
+            commandId: cmd.id,
+            status: 'error',
+            result: JSON.stringify({ path: cmd.params.path || '', entries: [], error: 'Failed to list' })
+          });
         });
       } else if (cmd.command === 'requestFileContent' && cmd.params && cmd.params.path) {
         console.log('Remote file content request:', cmd.params.path);
         $http.get('/api/editor/content', { params: { project: vm.selectedProject, path: cmd.params.path } }).then(function(resp) {
           var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
-          vm.ide.pendingFileContent = { path: cmd.params.path, content: content };
+          var result = JSON.stringify({ path: cmd.params.path, content: content });
+          $http.post('/api/bughosted/commands/ack', {
+            clientId: vm.bughostedClientId,
+            commandId: cmd.id,
+            status: 'executed',
+            result: result
+          });
         }, function(err) {
-          vm.ide.pendingFileContent = { path: cmd.params.path, content: '', error: 'Failed to load: ' + (err.statusText || 'Unknown') };
+          $http.post('/api/bughosted/commands/ack', {
+            clientId: vm.bughostedClientId,
+            commandId: cmd.id,
+            status: 'error',
+            result: JSON.stringify({ path: cmd.params.path, content: '', error: 'Failed to load: ' + (err.statusText || 'Unknown') })
+          });
         });
       } else if (cmd.command === 'fileEdit' && cmd.params && cmd.params.path && cmd.params.content !== undefined) {
         console.log('Remote file edit received:', cmd.params.path);
@@ -1019,6 +1082,9 @@
         }).then(function() {
           if (vm.handleRemoteFileEdit) {
             vm.handleRemoteFileEdit(cmd.params);
+          }
+          if (vm.syncEditorState) {
+            $timeout(function() { vm.syncEditorState(); }, 100);
           }
         }, function(err) {
           console.error('Failed to apply remote file edit:', err);
@@ -1481,7 +1547,7 @@
 
     function findCardById(cardId) {
       if (!cardId || !vm.state) return null;
-      var cols = ['todo', 'doing', 'done'];
+      var cols = ['todo', 'doing', 'done', 'selfImproving'];
       for (var c = 0; c < cols.length; c++) {
         var cards = vm.state[cols[c]] || [];
         for (var i = 0; i < cards.length; i++) {
@@ -1538,6 +1604,7 @@
         vm.streamingContextSize = 0;
         vm.streamingSteps = [];
         vm.streamingFilesEdited = [];
+        vm.streamingTokenBuffer = '';
         vm.planItems = [];
         vm.agentActivityLog = [];
         vm.activeStepIndex = null;
@@ -1556,7 +1623,8 @@
           files: files,
           maxIterations: 5,
           maxStepsPerBatch: 8,
-          steeringContext: vm.steeringContext || ''
+          steeringContext: vm.steeringContext || '',
+          selfImproving: card.selfImproving || false
         };
 
         // Move to Doing
@@ -1645,6 +1713,11 @@
                       break;
                     case 'status':
                       if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                      break;
+                    case 'token':
+                      if (parsed && parsed.token) {
+                        vm.streamingTokenBuffer += parsed.token;
+                      }
                       break;
                     case 'thinking':
                       if (parsed && parsed.text) {
@@ -1765,7 +1838,13 @@
                           vm.moveCardToDone(card.id);
                         }
                         if (vm.autoQueue) {
-                          $timeout(function () { vm.processQueue(); }, 500);
+                          $timeout(function () {
+                            if (card.selfImproving) {
+                              vm.processSelfImprovingQueue();
+                            } else {
+                              vm.processQueue();
+                            }
+                          }, 500);
                         }
                       }
 
@@ -1917,7 +1996,7 @@
         // Build / default — route to agent pipeline
         vm.aiChatLoading = false;
         // Create a temporary card and run the agent
-        var tempCard = { id: 'chat-' + Date.now(), text: userMsg, project: vm.selectedProject, attached: [], ready: true };
+        var tempCard = { id: 'chat-' + Date.now(), text: userMsg, project: vm.selectedProject, attached: [], ready: true, selfImproving: false };
         if (!tempCard.project) { vm.aiChatMessages.push({ role: 'assistant', content: '⚠️ No project selected. Select a project first.' }); return; }
         vm.streamingSummary = '';
         vm.streamingPhase = '';

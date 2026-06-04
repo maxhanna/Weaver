@@ -4,12 +4,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Maestro — Agentic Kanban</title>
+  <title>Weaver</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/kanban.css" />
   <link rel="stylesheet" href="/calendar.css" />
   <link rel="stylesheet" href="/wireframe.css" />
   <link rel="stylesheet" href="/ide.css" />
+  <link rel="icon" type="image/x-icon" href="/weaveicon.png" /> 
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -223,6 +224,13 @@
                   </details>
                 </div>
               </div>
+            </details>
+          </div>
+
+          <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer && vm.streamingPhase === 'Planning...'">
+            <details open>
+              <summary>💬 LLM Streaming{{ vm.streamingTokenBuffer ? ' (' + vm.streamingTokenBuffer.length + ' chars)' : '' }}</summary>
+              <pre class="streaming-text streaming-tokens">{{vm.streamingTokenBuffer}}</pre>
             </details>
           </div>
 

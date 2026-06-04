@@ -15,8 +15,13 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         searchFilter: '',
         lastSavedContent: null,
         pendingFileListing: null,
-        pendingFileContent: null
+        pendingFileContent: null,
+        sharedEditorActive: false,
+        sharedFiles: [],
+        conflictFiles: {}
       };
+
+      var _contentSyncDebounce = null;
 
       vm.toggleSidebar = function() {
         vm.ide.showSidebar = !vm.ide.showSidebar;
@@ -61,6 +66,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       };
 
       vm.openFile = function(path) {
+        vm.ide.sharedEditorActive = false;
         var existing = vm.findTab(path);
         if (existing) {
           vm.switchTab(path);
@@ -73,7 +79,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           content: '',
           savedContent: '',
           dirty: false,
-          lineCount: 1
+          lineCount: 1,
+          remoteEditing: false,
+          remoteContent: null,
+          fileVersion: 0,
+          conflict: false,
+          conflictContent: null
         };
         vm.ide.openTabs.push(tab);
         vm.ide.currentFile = path;
@@ -94,6 +105,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           vm.ide.currentFile = path;
           vm.ide.currentTab = tab;
           vm.ide.dirty = tab.dirty;
+          vm.ide.sharedEditorActive = tab.remoteEditing;
+          if (vm.bughostedStatus === 'connected') {
+            vm.syncEditorState();
+          }
         }
       };
 
@@ -116,6 +131,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
             vm.ide.currentFile = null;
             vm.ide.currentTab = null;
             vm.ide.dirty = false;
+            vm.ide.sharedEditorActive = false;
           }
         }
       };
@@ -127,9 +143,15 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           tab.savedContent = content;
           tab.dirty = false;
           tab.lineCount = (content.match(/\n/g) || []).length + 1;
+          tab.fileVersion = 0;
+          tab.conflict = false;
+          tab.conflictContent = null;
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
+          if (vm.bughostedStatus === 'connected') {
+            $timeout(function() { vm.syncEditorState(); }, 50);
+          }
         }, function(err) {
           tab.content = '// Error loading file: ' + (err.statusText || 'Unknown error');
           tab.savedContent = '';
@@ -145,19 +167,34 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.currentTab.dirty = isDirty;
         vm.ide.currentTab.lineCount = (vm.ide.currentTab.content.match(/\n/g) || []).length + 1;
         vm.ide.dirty = isDirty;
+        if (_contentSyncDebounce) { $timeout.cancel(_contentSyncDebounce); }
+        _contentSyncDebounce = $timeout(function() {
+          if (vm.bughostedStatus === 'connected' && vm.bughostedClientId) {
+            vm.syncEditorState();
+          }
+        }, 500, false);
       };
 
       vm.saveFile = function() {
         if (!vm.ide.currentFile || !vm.ide.currentTab) return;
-        var content = vm.ide.currentTab.content;
+        var tab = vm.ide.currentTab;
+        var content = tab.content;
+
+        if (tab.conflict) {
+          if (!confirm('This file has been edited remotely while you had unsaved changes. Saving will overwrite the remote version. Continue?')) return;
+        }
+
         var payload = {
           project: vm.selectedProject,
           path: vm.ide.currentFile,
           content: content
         };
         $http.post('/api/editor/save', payload).then(function() {
-          vm.ide.currentTab.savedContent = content;
-          vm.ide.currentTab.dirty = false;
+          tab.fileVersion = (tab.fileVersion || 0) + 1;
+          tab.savedContent = content;
+          tab.dirty = false;
+          tab.conflict = false;
+          tab.conflictContent = null;
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileSave(vm.ide.currentFile, content);
@@ -182,7 +219,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           content: '',
           savedContent: '',
           dirty: true,
-          lineCount: 1
+          lineCount: 1,
+          remoteEditing: false,
+          remoteContent: null,
+          fileVersion: 0,
+          conflict: false,
+          conflictContent: null
         };
         vm.ide.openTabs.push(tab);
         vm.ide.currentFile = fullPath;
@@ -223,9 +265,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.filePickerPath = '';
         vm.ide.filePickerEntries = [];
         vm.ide.searchFilter = '';
+        vm.ide.sharedEditorActive = false;
+        vm.ide.sharedFiles = [];
       };
 
-      // Shared editing via BugHosted
+      // ===== Shared editing via BugHosted =====
       vm.broadcastFileOpen = function(path, content) {
         if (vm.bughostedStatus !== 'connected' || !vm.bughostedClientId) return;
         vm.ide.lastSharedFile = path;
@@ -249,16 +293,75 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       vm.handleRemoteFileEdit = function(params) {
         if (!params || !params.path || params.content === undefined) return;
         var tab = vm.findTab(params.path);
-        if (tab) {
-          tab.content = params.content;
-          tab.savedContent = params.content;
+        if (!tab) return;
+        if (tab.dirty && tab.content !== params.content) {
+          tab.conflict = true;
+          tab.conflictContent = params.content;
+          vm.ide.dirty = true;
+          if (vm.ide.currentFile === tab.path) {
+            vm.ide.sharedEditorActive = true;
+          }
+          return;
+        }
+        tab.content = params.content;
+        tab.savedContent = params.content;
+        tab.dirty = false;
+        tab.fileVersion = (tab.fileVersion || 0) + 1;
+        tab.conflict = false;
+        tab.conflictContent = null;
+        tab.remoteEditing = true;
+        tab.lineCount = (params.content.match(/\n/g) || []).length + 1;
+        if (vm.ide.currentFile === params.path) {
+          vm.ide.dirty = false;
+          vm.ide.sharedEditorActive = true;
+        }
+        vm.ide.syncing = false;
+      };
+
+      vm.applyRemoteContent = function(path, content) {
+        var tab = vm.findTab(path);
+        if (!tab) return;
+        if (tab.dirty) {
+          tab.conflict = true;
+          tab.conflictContent = content;
+          return;
+        }
+        tab.content = content;
+        tab.savedContent = content;
+        tab.dirty = false;
+        tab.fileVersion = (tab.fileVersion || 0) + 1;
+        tab.lineCount = (content.match(/\n/g) || []).length + 1;
+        if (vm.ide.currentFile === path) {
+          vm.ide.dirty = false;
+        }
+      };
+
+      vm.resolveConflict = function(path) {
+        var tab = vm.findTab(path);
+        if (!tab || !tab.conflict) return;
+        var choice = confirm('Use local version? Click Cancel to use remote version.');
+        if (choice) {
+          tab.conflict = false;
+          tab.conflictContent = null;
+        } else {
+          tab.content = tab.conflictContent;
+          tab.savedContent = tab.conflictContent;
           tab.dirty = false;
-          tab.lineCount = (params.content.match(/\n/g) || []).length + 1;
-          if (vm.ide.currentFile === params.path) {
+          tab.conflict = false;
+          tab.conflictContent = null;
+          tab.fileVersion = (tab.fileVersion || 0) + 1;
+          if (vm.ide.currentFile === path) {
             vm.ide.dirty = false;
           }
         }
-        vm.ide.syncing = false;
+      };
+
+      vm.resolveAllConflicts = function() {
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].conflict) {
+            vm.resolveConflict(vm.ide.openTabs[i].path);
+          }
+        }
       };
 
       vm.startResize = function($event) {

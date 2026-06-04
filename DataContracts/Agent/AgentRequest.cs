@@ -7,4 +7,5 @@ public class AgentRequest
     public int? MaxIterations { get; set; }
     public int? MaxStepsPerBatch { get; set; }
     public string? SteeringContext { get; set; }
+    public bool SelfImproving { get; set; }
 }

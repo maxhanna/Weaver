@@ -44,6 +44,10 @@
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
+            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
+              title="Self-improving card — queued when agent is idle">
+              <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
+            </label>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
@@ -442,36 +446,55 @@
           </div>
         </div>
       </div>
-    </div><!-- SELF IMPROVING column -->
-    <div class="column" data-col="archived" ng-if="vm.showSelfImproving">
+    </div>
+
+    <!-- SELF IMPROVING column -->
+    <div class="column" data-col="selfImproving" ng-if="vm.showSelfImproving">
       <h3>
         <span class="col-header">📈 Self-Improving <span
             class="col-badge">{{vm.cardsForProject('selfImproving').length}}</span></span>
-        <button class="small ghost" ng-click="vm.showSelfImproving = false" title="Close archived view">✕</button>
+        <button class="small ghost" ng-click="vm.showSelfImproving = false" title="Close self-improving view">✕</button>
       </h3>
-      <div class="cards" id="col-archived" ng-class="{empty: vm.cardsForProject('selfImproving').length===0}">
+      <div class="cards" id="col-selfImproving" dropzone="move"
+        ng-class="{empty: vm.cardsForProject('selfImproving').length===0}" ondragover="event.preventDefault()">
         <div class="card" ng-repeat="card in vm.cardsForProject('selfImproving') track by card.id"
           ng-class="{selected: card.id===vm.selectedCardId}" ng-attr-id="card-{{card.id}}"
-          ng-click="vm.selectCard(card)" data-card-id="{{card.id}}">
+          ng-click="vm.selectCard(card)" draggable="true" data-card-id="{{card.id}}">
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-          <div class="card-text">{{card.text}}</div>
-          <div class="card-tags" ng-if="card.priority">
-            <span class="card-tag" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+          <div class="card-text">
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
+              placeholder="Self-improving task..."></textarea>
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
-          <div class="card-analysis" ng-if="card.agentAnalysis">
+          <div class="card-tags">
+            <span class="card-tag tag-self-improving">🔄 SELF-IMPROVING</span>
+            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+          </div>
+          <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
+            <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
+              <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
+              <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
+            </div>
+          </div>
+          <div class="card-actions">
+            <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
+              title="Attach file">📎</button>
+            <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run Self-Improving'}}</button>
+            <button ng-click="vm.moveCard(card.id,'selfImproving','todo')" class="small ghost">← To Todo</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'selfImproving')" class="small ghost" title="Delete card">✕ Delete</button>
+          </div>
+          <!-- Previous analysis on returned self-improving cards -->
+          <div class="card-analysis previous-analysis" ng-if="card.agentAnalysis">
             <details>
-              <summary>🤖 AI Analysis</summary>
+              <summary>📜 Previous Analysis</summary>
               <div class="analysis-summary" ng-if="card.agentAnalysis.summary">
                 <strong>Summary:</strong> {{card.agentAnalysis.summary}}
               </div>
             </details>
-          </div>
-          <div class="card-actions">
-            <button ng-click="vm.unarchiveCard(card.id)" class="small">↩ Unarchive</button>
-            <button ng-click="vm.copyCardText(card)" class="small" title="Copy card text">📋 Copy</button>
           </div>
         </div>
       </div>

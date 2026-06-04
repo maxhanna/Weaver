@@ -1,5 +1,6 @@
 ﻿using MaestroBackend.Services;
 using MaestroBackend;
+using MaestroBackend.Hubs;
 
 MaestroLogo.DisplayLogo();
 
@@ -20,6 +21,7 @@ builder.Services.AddHttpClient("llama", client =>
     client.Timeout = TimeSpan.FromMinutes(30);
 });
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 {
     policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
@@ -33,6 +35,7 @@ app.UseRouting();
 app.UseCors();
 
 app.MapControllers();
+app.MapHub<CoEditHub>("/hubs/coEdit");
 app.MapFallbackToFile("index.html");
 
 app.Run();

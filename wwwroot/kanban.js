@@ -6,7 +6,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
   function loadCards() {
     // Return a default state immediately; actual persisted state will be
     // loaded asynchronously after the controller initializes.
-    return { todo: [], doing: [], done: [], archived: [] };
+    return { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
   }
 
   var _cardsCache = {};
@@ -16,14 +16,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
     init: function(vm, $scope) {
       // Start with an immediate default state, then replace with persisted
       // state loaded from the server when available.
-      vm.state = { todo: [], doing: [], done: [], archived: [] };
+      vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
       $http.get('/api/boarddata/load').then(function (resp) {
         try {
           var data = resp.data;
           if (typeof data === 'string') {
             data = JSON.parse(data);
           }
-          if (data && (data.todo || data.doing || data.done || data.archived)) {
+          if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
             vm.state = data;
           }
         } catch (e) {
@@ -40,6 +40,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           console.error('Failed to save to .boarddata file:', err);
         });
         _cardsVersion++;
+        if (vm.countSelfImprovingCards) {
+          vm.selfImprovingCardCount = vm.countSelfImprovingCards();
+        }
+      };
+
+      vm.updateSelfImprovingCount = function () {
+        if (vm.countSelfImprovingCards) {
+          vm.selfImprovingCardCount = vm.countSelfImprovingCards();
+        }
       };
 
       vm.handleFileSearchChange = function() {
@@ -89,7 +98,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           createdAt: new Date().toISOString(),
           priority: 'medium',
           attached: [],
-          autoPr: vm.prByDefault !== false
+          autoPr: vm.prByDefault !== false,
+          selfImproving: false
         });
         vm.saveCards();
         $timeout(function () {
@@ -226,6 +236,31 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.deleteCardConfirm = null;
       };
 
+      vm.onSelfImprovingToggle = function (card) {
+        if (card.selfImproving) {
+          var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
+          if (idx !== -1) {
+            var c = vm.state.todo.splice(idx, 1)[0];
+            c.selfImproving = true;
+            c.ready = false;
+            if (!vm.state.selfImproving) vm.state.selfImproving = [];
+            vm.state.selfImproving.push(c);
+            vm.saveCards();
+            console.log('Moved card to Self-Improving column:', c);
+          }
+        } else {
+          var idx = vm.state.selfImproving.findIndex(function (c) { return c.id === card.id; });
+          if (idx !== -1) {
+            if (!vm.state.selfImproving) vm.state.selfImproving = [];
+            var c = vm.state.selfImproving.splice(idx, 1)[0];
+            c.selfImproving = false;
+            vm.state.todo.push(c);
+            vm.saveCards();
+            console.log('Moved card to To Do column:', c);
+          }
+        }
+      };
+
       vm.toggleCardReady = function (card) {
         card.ready = !card.ready;
         if (card.ready && vm.activeCardIds.size === 0) {
@@ -237,9 +272,17 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
         if (idx === -1) return;
         var card = vm.state[from][idx];
+        if (card != selfImproving && to === 'selfImproving') {
+          card.selfImproving = true;
+          card.ready = false;
+        }
+        if (card.selfImproving && to !== 'selfImproving' && to !== 'doing') {
+          to = 'selfImproving';
+        }
         if (from === 'todo' && to === 'doing' && !card.ready) {
           return $window.alert('Mark the card as Ready first (press Start)');
         }
+         
         vm.state[from].splice(idx, 1);
         if (from === 'doing' && to === 'todo') {
           card.ready = false;
@@ -261,6 +304,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           if (card.filePath !== vm.selectedProject) {
             vm.activeCardId = null;
           }
+        }
+        if (from === 'doing' && to === 'selfImproving') {
+          card.selfImproving = true;
+          card.ready = false;
+        }
+        if (from === 'selfImproving' && to === 'doing' && !card.ready) {
+          vm.state.selfImproving.push(card);
+          vm.saveCards();
+          return $window.alert('Mark the card as Ready first (press Start)');
         }
         if (from === 'done' && to === 'todo') {
           card.ready = false;
@@ -293,6 +345,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           delete card.agentLog;
           vm.executeAgent(card);
         }
+        if (from === 'selfImproving' && to === 'doing' && card.ready) {
+          delete card.agentAnalysis;
+          delete card.agentLog;
+          vm.executeAgent(card);
+        }
         vm.saveCards();
       };
 
@@ -320,7 +377,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.removeAttachment = function (cardId, attachmentName, col) {
-        var cards = vm.state[col]; // col : 'todo', 'doing', or 'done'
+        var cards = vm.state[col]; // col : 'todo', 'doing', 'done', or 'selfImproving'
         for (var i = 0; i < cards.length; i++) {
           if (cards[i].id === cardId) {
             var attached = cards[i].attached;
@@ -374,7 +431,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
             filePath: card.filePath || vm.selectedProject,
             createdAt: new Date().toISOString(),
             priority: card.priority || 'medium',
-            attached: i === 0 ? angular.copy(card.attached || []) : []
+            attached: i === 0 ? angular.copy(card.attached || []) : [],
+            selfImproving: false
           });
         });
         vm.saveCards();
@@ -405,17 +463,25 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
       vm.moveCardToDoing = function (cardId) {
         var idx = vm.state.todo.findIndex(function (c) { return c.id === cardId; });
-        if (idx === -1) return;
+        if (idx === -1) {
+          idx = vm.state.selfImproving.findIndex(function (c) { return c.id === cardId; });
+          if (idx === -1) return;
+          var card = vm.state.selfImproving.splice(idx, 1)[0];
+          vm.state.doing.push(card);
+          vm.saveCards();
+          return;
+        }
         var card = vm.state.todo.splice(idx, 1)[0];
         vm.state.doing.push(card);
         vm.saveCards();
       };
 
-      vm.moveCardToDone = function (cardId) {
+      vm.moveCardToDone = function (cardId, targetCol) {
+        targetCol = targetCol || 'done';
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
         if (idx === -1) return;
         var card = vm.state.doing.splice(idx, 1)[0];
-        vm.state.done.push(card);
+        vm.state[targetCol].push(card);
         vm.activeCardId = null;
         if (!vm.activeCardIds) vm.activeCardIds = new Set();
         vm.activeCardIds.delete(cardId);
@@ -433,13 +499,29 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         }
       };
 
+
+
       vm.processQueue = function () {
         if (vm.streamingActive) return;
-        var readyCards = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready; });
+        var readyCards = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
         if (!readyCards.length) return;
         var next = readyCards[readyCards.length - 1];
         vm.moveCardToDoing(next.id);
         vm.executeAgent(next);
+      };
+
+      vm.processSelfImprovingQueue = function () {
+        if (vm.streamingActive) return;
+        var readyCards = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
+        if (!readyCards.length) return;
+        var next = readyCards[readyCards.length - 1];
+        vm.moveCardToDoing(next.id);
+        vm.executeAgent(next);
+      };
+
+      vm.countSelfImprovingCards = function () {
+        if (!vm.state || !vm.state.selfImproving) return 0;
+        return vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject; }).length;
       };
 
       vm.focusCardTextarea = function (card) {
@@ -576,7 +658,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
               var targetCol = col.closest('.column') ? col.closest('.column').getAttribute('data-col') : null;
               if (!cardId || !targetCol) return;
               var fromCol = null;
-              ['todo', 'doing', 'done', 'archived'].forEach(function (cn) {
+              ['todo', 'doing', 'done', 'archived', 'selfImproving'].forEach(function (cn) {
                 var idx = vm.state[cn].findIndex(function (c) { return c.id === cardId; });
                 if (idx !== -1) fromCol = cn;
               });

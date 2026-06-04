@@ -2,9 +2,11 @@
   <div class="ide-panel-header">
     <span class="ide-panel-title">📝 IDE</span>
     <div class="ide-panel-controls">
+      <span class="ide-shared-badge" ng-if="vm.bughostedStatus === 'connected'" title="Shared editing active">🌐</span>
       <button class="ide-panel-btn" ng-click="vm.openFileBrowser()" title="Open File">📂</button>
       <button class="ide-panel-btn" ng-click="vm.saveFile()" ng-disabled="!vm.ide.dirty" title="Save File">💾</button>
       <button class="ide-panel-btn" ng-click="vm.newFile()" title="New File">➕</button>
+      <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()" ng-if="vm.ide.conflictFiles && Object.keys(vm.ide.conflictFiles).length" title="Resolve all conflicts">⚠ Resolve</button>
       <button class="ide-panel-btn" ng-click="vm.closeIDE()" title="Close IDE">✕</button>
     </div>
   </div>
@@ -27,6 +29,8 @@
             </div>
             <div ng-if="!e.isDirectory" ng-click="vm.openFile(e.path)" class="ide-file-item-label">
               <span>📄</span><span>{{e.name}}</span>
+              <span class="ide-remote-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).remoteEditing" title="Remote user also has this file open">👥</span>
+              <span class="ide-conflict-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).conflict" title="Edit conflict">⚠</span>
             </div>
           </div>
         </div>
@@ -41,8 +45,9 @@
         <div class="ide-tabs">
           <div ng-repeat="tab in vm.ide.openTabs track by tab.path"
                class="ide-tab"
-               ng-class="{'ide-tab--active': tab.path === vm.ide.currentFile, 'ide-tab--dirty': tab.dirty}"
+               ng-class="{'ide-tab--active': tab.path === vm.ide.currentFile, 'ide-tab--dirty': tab.dirty, 'ide-tab--shared': tab.remoteEditing, 'ide-tab--conflict': tab.conflict}"
                ng-click="vm.switchTab(tab.path)">
+            <span class="ide-remote-eye" ng-if="tab.remoteEditing" title="Remote user is viewing this file">👁</span>
             <span class="ide-tab-name">{{tab.displayName}}</span>
             <span class="ide-tab-close" ng-click="vm.closeTab(tab.path, $event)" title="Close">✕</span>
           </div>
@@ -52,20 +57,28 @@
         </div>
       </div>
       <div class="ide-editor-content" ng-if="vm.ide.currentFile && vm.ide.currentTab">
+        <div class="ide-conflict-banner" ng-if="vm.ide.currentTab.conflict">
+          <strong>⚠ Edit Conflict</strong>
+          <span>Remote user edited this file while you had unsaved changes.</span>
+          <button ng-click="vm.resolveConflict(vm.ide.currentFile)" class="ide-panel-btn">Resolve</button>
+        </div>
         <textarea class="ide-textarea"
                   ng-model="vm.ide.currentTab.content"
                   ng-change="vm.onContentChange()"
                   ng-model-options="{debounce: 200}"
+                  ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"
                   placeholder="Editing {{vm.ide.currentFile}}..."></textarea>
         <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
           <span>Lines: {{vm.ide.currentTab.lineCount}}</span>
           <span class="ide-dirty-indicator" ng-if="vm.ide.dirty">● unsaved</span>
           <span class="ide-syncing-indicator" ng-if="vm.ide.syncing">⟳ syncing...</span>
+          <span class="ide-shared-editing-indicator" ng-if="vm.ide.currentTab.remoteEditing" title="Remote user has this file open and is editing it">👥 shared editing</span>
+          <span class="ide-conflict-badge" ng-if="vm.ide.currentTab.conflict">⚠ conflict</span>
         </div>
       </div>
       <div class="ide-placeholder" ng-if="vm.ide.openTabs.length === 0">
         <p>Open a file from the sidebar to start editing</p>
-        <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active</p>
+        <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active — remote user can browse and edit files</p>
       </div>
     </div>
   </div>

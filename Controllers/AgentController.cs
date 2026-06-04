@@ -3590,6 +3590,19 @@ Rules:
                 steps = allSteps,
                 filesEdited
             });
+
+            // ── Self-improving pipeline ─────────────────────────────────
+            if (req.SelfImproving)
+            {
+                try
+                {
+                    await RunSelfImprovingPipeline(req.Prompt, projectRoot, allSteps, plan, complete, editsApplied);
+                }
+                catch (Exception siEx)
+                {
+                    await EmitLog(true, "warn", $"Self-improving pipeline error: {siEx.Message}");
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -5485,6 +5498,121 @@ Analyze the build output. Is the environment healthy? What should we do next?";
             $"Build check reached max iterations ({maxIterations}) — results may be inconclusive", ct: ct);
     }
 
+
+    private async Task RunSelfImprovingPipeline(
+        string prompt, string projectRoot, List<object> allSteps,
+        AgentPlan? plan, bool complete, bool editsApplied)
+    {
+        var improvementFilePath = Path.Combine(projectRoot, "improvementdata.json");
+        JsonElement root;
+        List<JsonElement> features = new();
+
+        if (System.IO.File.Exists(improvementFilePath))
+        {
+            try
+            {
+                var existing = await System.IO.File.ReadAllTextAsync(improvementFilePath);
+                root = JsonSerializer.Deserialize<JsonElement>(existing);
+                if (root.TryGetProperty("features", out var feats) && feats.ValueKind == JsonValueKind.Array)
+                {
+                    features = feats.EnumerateArray().ToList();
+                }
+            }
+            catch { /* start fresh */ }
+        }
+
+        var now = DateTime.UtcNow.ToString("o");
+        var filesEdited = ExtractFilesEdited(allSteps);
+        var filePaths = filesEdited.Select(f => {
+            if (f is Dictionary<string, object?> dict && dict.TryGetValue("path", out var p) && p is string ps)
+                return ps;
+            if (f is JsonElement je && je.TryGetProperty("path", out var pp))
+                return pp.GetString() ?? "";
+            return "";
+        }).Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
+
+        var improvementEntry = new Dictionary<string, object?>
+        {
+            ["description"] = editsApplied
+                ? $"Applied {filesEdited.Count} file edit(s): {string.Join(", ", filePaths)}"
+                : "Agent completed but no file edits were applied",
+            ["complete"] = complete && editsApplied,
+            ["date"] = now
+        };
+
+        // Find existing feature entry or create new one
+        var existingFeatureIndex = -1;
+        for (int i = 0; i < features.Count; i++)
+        {
+            var f = features[i];
+            if (f.TryGetProperty("feature", out var featText) &&
+                featText.GetString() == prompt)
+            {
+                existingFeatureIndex = i;
+                break;
+            }
+        }
+
+        Dictionary<string, object?> featureEntry;
+        List<object> improvements;
+
+        if (existingFeatureIndex >= 0)
+        {
+            var existingFeat = features[existingFeatureIndex];
+            featureEntry = JsonSerializer.Deserialize<Dictionary<string, object?>>(existingFeat.GetRawText()) ?? new();
+            improvements = new List<object>();
+            if (featureEntry.TryGetValue("improvements", out var existingImplist) && existingImplist is List<object> existingList)
+                improvements = existingList;
+            featureEntry["lastUpdated"] = now;
+        }
+        else
+        {
+            featureEntry = new Dictionary<string, object?>
+            {
+                ["feature"] = prompt,
+                ["files"] = filePaths,
+                ["improvements"] = new List<object>(),
+                ["lastUpdated"] = now
+            };
+            improvements = new List<object>();
+        }
+
+        improvements.Add(improvementEntry);
+        featureEntry["improvements"] = improvements;
+
+        if (featureEntry.TryGetValue("files", out var filesObj) && filesObj is List<object> existingFilesList)
+        {
+            foreach (var fp in filePaths)
+            {
+                if (!existingFilesList.Contains(fp))
+                    existingFilesList.Add(fp);
+            }
+        }
+        else
+        {
+            featureEntry["files"] = filePaths;
+        }
+
+        if (existingFeatureIndex >= 0)
+            features[existingFeatureIndex] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(featureEntry));
+        else
+            features.Add(JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(featureEntry)));
+
+        var output = new Dictionary<string, object?>
+        {
+            ["features"] = features.Select(f => {
+                var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(f.GetRawText());
+                return dict;
+            }).ToList()
+        };
+
+        var json = JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true });
+        var dir = Path.GetDirectoryName(improvementFilePath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+        await System.IO.File.WriteAllTextAsync(improvementFilePath, json);
+        await EmitLog(true, "info", $"Self-improving data written for: {prompt}", new { improvements = improvements.Count, filePath = improvementFilePath });
+    }
 
     private static BuildCheckDecision? ParseBuildCheckResponse(string raw)
     {

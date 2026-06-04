@@ -1756,6 +1756,14 @@ h3 .small.ghost:hover {
 	white-space: break-spaces;
 }
 
+.streaming-tokens {
+	font-family: ui-monospace, monospace;
+	font-size: 11px;
+	color: #ce93d8;
+	max-height: 300px;
+	overflow-y: auto;
+}
+
 .agent-steps {
 	margin-top: 8px;
 }

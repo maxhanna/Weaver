@@ -10,14 +10,167 @@ public class BughostedController : ControllerBase
     private readonly ConfigFileService _configFile;
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
+    private readonly IWebHostEnvironment _env;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
 
-    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config)
+    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env)
     {
         _configFile = configFile;
         _clientFactory = clientFactory;
         _config = config;
+        _env = env;
+    }
+
+    // ─── Filesystem proxy (for BugHosted IDE remote file access) ─────────────
+
+    /// <summary>
+    /// Resolves the workspace root the same way FileEditController does.
+    /// </summary>
+    private string ResolveWorkspaceRoot()
+    {
+        var configured = _config.GetValue<string>("Editor:WorkspaceRoot");
+        if (!string.IsNullOrWhiteSpace(configured))
+            return Path.IsPathRooted(configured)
+                ? configured
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configured));
+        return Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+    }
+
+    /// <summary>
+    /// Validates that a fully-resolved path stays inside the workspace root.
+    /// </summary>
+    private bool IsInsideWorkspace(string fullPath, string workspaceRoot)
+        => fullPath.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// List directory contents (folders + files) at the given relative path.
+    /// Query params: clientId, path (relative to workspace root, default = root)
+    /// </summary>
+    [HttpGet("fs/list")]
+    public IActionResult FsList([FromQuery] string clientId, [FromQuery] string path = "")
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.ContainsKey(clientId))
+            return Unauthorized(new { error = "Not logged in" });
+
+        var workspaceRoot = ResolveWorkspaceRoot();
+        var relativePath = (path ?? "").Trim().TrimStart('/', '\\');
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, relativePath));
+
+        if (!IsInsideWorkspace(targetFull, workspaceRoot))
+            return BadRequest(new { error = "Path outside workspace root" });
+
+        if (!Directory.Exists(targetFull))
+            return NotFound(new { error = "Directory not found" });
+
+        try
+        {
+            var dirs = Directory.GetDirectories(targetFull)
+                .Select(d => new
+                {
+                    name = Path.GetFileName(d),
+                    path = Path.GetRelativePath(workspaceRoot, d).Replace('\\', '/'),
+                    isDirectory = true
+                });
+
+            var files = Directory.GetFiles(targetFull)
+                .Select(f => new
+                {
+                    name = Path.GetFileName(f),
+                    path = Path.GetRelativePath(workspaceRoot, f).Replace('\\', '/'),
+                    isDirectory = false
+                });
+
+            var entries = dirs.Concat(files)
+                .OrderByDescending(x => x.isDirectory)
+                .ThenBy(x => x.name);
+
+            return Ok(new
+            {
+                path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                entries
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Read the content of a single file.
+    /// Query params: clientId, path (relative to workspace root)
+    /// </summary>
+    [HttpGet("fs/content")]
+    public IActionResult FsContent([FromQuery] string clientId, [FromQuery] string path)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.ContainsKey(clientId))
+            return Unauthorized(new { error = "Not logged in" });
+
+        if (string.IsNullOrWhiteSpace(path))
+            return BadRequest(new { error = "path is required" });
+
+        var workspaceRoot = ResolveWorkspaceRoot();
+        var relativePath = path.Trim().TrimStart('/', '\\');
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, relativePath));
+
+        if (!IsInsideWorkspace(targetFull, workspaceRoot))
+            return BadRequest(new { error = "Path outside workspace root" });
+
+        if (!System.IO.File.Exists(targetFull))
+            return NotFound(new { error = "File not found" });
+
+        try
+        {
+            var content = System.IO.File.ReadAllText(targetFull, Encoding.UTF8);
+            return Ok(new
+            {
+                path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                content
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Save (overwrite) the content of a file.
+    /// Body: { clientId, path, content, createIfMissing? }
+    /// </summary>
+    [HttpPost("fs/save")]
+    public async Task<IActionResult> FsSave([FromBody] BughostedFsSaveRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.ClientId) || !_sessions.ContainsKey(req.ClientId))
+            return Unauthorized(new { error = "Not logged in" });
+
+        if (string.IsNullOrWhiteSpace(req.Path))
+            return BadRequest(new { error = "path is required" });
+
+        var workspaceRoot = ResolveWorkspaceRoot();
+        var relativePath = req.Path.Trim().TrimStart('/', '\\');
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, relativePath));
+
+        if (!IsInsideWorkspace(targetFull, workspaceRoot))
+            return BadRequest(new { error = "Path outside workspace root" });
+
+        if (!System.IO.File.Exists(targetFull) && !req.CreateIfMissing)
+            return NotFound(new { error = "File not found" });
+
+        try
+        {
+            var dir = Path.GetDirectoryName(targetFull);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            await System.IO.File.WriteAllTextAsync(targetFull, req.Content ?? string.Empty, Encoding.UTF8);
+            return Ok(new { path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'), written = true });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
     }
 
     [HttpPost("login")]
@@ -307,4 +460,12 @@ public class BughostedSession
     public string? ClientId { get; set; }
     public string? Url { get; set; }
     public System.Text.Json.JsonElement? User { get; set; }
+}
+
+public class BughostedFsSaveRequest
+{
+    public string ClientId { get; set; } = "";
+    public string Path { get; set; } = "";
+    public string Content { get; set; } = "";
+    public bool CreateIfMissing { get; set; } = true;
 }
