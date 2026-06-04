@@ -442,10 +442,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         var lower = prompt.ToLowerInvariant();
         var liveDataTriggers = new[]
         {
-            "latest ", "newest ", "most recent ", "current ", "today's ", "right now",
-            "search for", "look up", "find out", "what is the", "what's the",
-            "live ", "real-time", "up to date", "up-to-date",
-            "this year", "this month", "this week",
+            "search for", "look up", "find out", "up to date", "up-to-date",
         };
         var triggered = liveDataTriggers.FirstOrDefault(t => lower.Contains(t));
         if (triggered == null) return null;
