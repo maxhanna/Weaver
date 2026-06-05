@@ -1,4 +1,4 @@
-namespace WeaverBackend;
+namespace Weaver;
 
 public class GrepResult
 {

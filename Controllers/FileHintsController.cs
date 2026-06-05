@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using System.IO;
 
-namespace WeaverBackend.Controllers
+namespace Weaver.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]

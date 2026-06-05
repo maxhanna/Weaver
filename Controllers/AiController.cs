@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using System.Text;
 using System.Text.Json;
-using WeaverBackend.Services;
+using Weaver.Services;
 
 [ApiController]
 [Route("api/ai")]

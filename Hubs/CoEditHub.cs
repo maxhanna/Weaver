@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.SignalR;
 using System.Collections.Concurrent;
 
-namespace WeaverBackend.Hubs
+namespace Weaver.Hubs
 {
     /// <summary>
     /// SignalR hub for real-time co-editing of files.

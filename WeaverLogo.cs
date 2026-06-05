@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace WeaverBackend.Services
+namespace Weaver.Services
 {
     public class WeaverLogo
     {
@@ -16,15 +16,6 @@ namespace WeaverBackend.Services
             @" / \ / \ / \ / \ / \ / \ / \ / \ ",
             @" | | | | | | | | | | | | | ",
             @" \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ ",
-            @" | | | | | | | | | | | | ",
-            @" / \ / \ / \ / \ / \ / \ / \ / \ ",
-            @" | | | | | | | | | | | | | ",
-            @" \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ ",
-            @" | | | | | | | | | | | | ",
-            @" / \ / \ / \ / \ / \ / \ / \ / \ ",
-            @" | | | | | | | | | | | | | ",
-            @" \_/ \_/ \_/ \_/ \_/ \_/ \_/ \_/ ",
-            @"",
         };
 
         private static readonly string[] SubtitleLines = {

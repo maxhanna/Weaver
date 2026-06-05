@@ -177,7 +177,7 @@
           </div>
 
           <!-- Steering input (always visible) -->
-          <div class="steering-section">
+          <div class="steering-section" ng-if="vm.agentActivityLogLength > 0">
             <input type="text" class="steering-input" ng-model="vm.steeringContext" placeholder="Steer the agent (optional)..." />
             <button class="steering-clear-btn" ng-click="vm.steeringContext = ''" title="Clear steering">&times;</button>
           </div>
@@ -482,6 +482,24 @@
           Join Discord Server
         </a>
         <p style="margin-top:16px; color:#888; font-size:0.9em;">Get help, share feedback, and stay updated.</p>
+      </div>
+      <div class="popup-header">
+        <strong>Version</strong>
+        <div class="popup-body" style="padding:8px 16px; font-size:0.9em;">
+          <div ng-if="vm.appVersion">
+            <span>Current: <strong>{{vm.appVersion.local}}</strong></span>
+            <span ng-if="vm.appVersion.updateAvailable" style="color:#e06c75; margin-left:8px;">
+              (Update <a href="https://bughosted.com/assets/Weaver.exe" target="_blank" style="color:#61afef;">v{{vm.appVersion.remote}}</a> available)
+            </span>
+            <span ng-if="!vm.appVersion.updateAvailable && vm.appVersion.remote" style="color:#98c379; margin-left:8px;">Up to date</span>
+            <button ng-if="vm.appVersion.updateAvailable" ng-click="vm.triggerUpdate()"
+              style="display:block; margin-top:8px; padding:6px 16px; background:#e06c75; color:#fff; border:none; border-radius:4px; cursor:pointer;">
+              Download Update
+            </button>
+            <div ng-if="vm.updating" style="margin-top:8px; color:#e5c07b;">Updating... app will restart.</div>
+          </div>
+          <div ng-if="!vm.appVersion" style="color:#888;">Loading version...</div>
+        </div>
       </div>
       <div class="popup-header">
         <strong>GitHub</strong>

@@ -1,6 +1,7 @@
 ﻿**/bin/
 **/bin/
 **/obj/
+**/publish/
 weaverconfig.json
 filehints.json
 .boarddata

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 
-namespace WeaverBackend.Controllers
+namespace Weaver.Controllers
 {
     [ApiController]
     [Route("api/improvementdata")]

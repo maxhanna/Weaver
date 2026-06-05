@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using WeaverBackend.Services;
-using WeaverBackend;
+using Weaver.Services;
+using Weaver;
 
 [ApiController]
 [Route("api/agent")]
@@ -2509,7 +2509,7 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                     var newSteps = stepsEl.EnumerateArray()
                         .Select(el => new PlanStep
                         {
-                            File = step.File,
+                            File = step.File ?? "",
                             Change = step.Change,
                             Priority = step.Priority,
                             OldString = el.TryGetProperty("oldString", out var os) ? os.GetString() ?? "" : "",

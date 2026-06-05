@@ -197,6 +197,8 @@
     vm.bughostedClientId = '';
     vm.bughostedStatus = 'disconnected';
     vm.bughostedTesting = false;
+    vm.appVersion = null;
+    vm.updating = false;
     vm.bughostedTestResult = '';
     vm.bughostedTestError = '';
     vm.remoteCommands = [];
@@ -1191,10 +1193,29 @@
 
     vm.openDiscordPanel = function () {
       vm.showDiscordPanel = true;
+      vm.loadVersion();
     };
 
     vm.closeDiscordPanel = function () {
       vm.showDiscordPanel = false;
+    };
+
+    vm.loadVersion = function () {
+      $http.get('/api/bughosted/version').then(function (resp) {
+        vm.appVersion = resp.data;
+      }, function () {
+        vm.appVersion = { local: '?', remote: null, updateAvailable: false };
+      });
+    };
+
+    vm.triggerUpdate = function () {
+      vm.updating = true;
+      $http.post('/api/bughosted/update').then(function () {
+        // app will restart
+      }, function () {
+        vm.updating = false;
+        alert('Update failed. Please download manually from https://bughosted.com/assets/Weaver.exe');
+      });
     };
 
     vm.openSettingsPanel = function () {

@@ -1,11 +1,11 @@
-using WeaverBackend.Services;
+using Weaver.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace WeaverBackend.Controllers
+namespace Weaver.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]

@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace WeaverBackend.Services;
+namespace Weaver.Services;
 
 public class ProjectDto
 {

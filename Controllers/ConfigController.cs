@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
-using WeaverBackend.Services;
+using Weaver.Services;
 
 [ApiController]
 [Route("api/config")]

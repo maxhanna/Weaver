@@ -4,7 +4,7 @@ using MailKit.Search;
 using MailKit.Security;
 using MimeKit;
 
-namespace WeaverBackend.Services;
+namespace Weaver.Services;
 
 public class EmailConfigStatus
 {

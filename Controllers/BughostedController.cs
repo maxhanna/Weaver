@@ -1,7 +1,8 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using System.Text;
-using WeaverBackend.Services;
+using Weaver.Services;
 
 [ApiController]
 [Route("api/bughosted")]
@@ -298,16 +299,49 @@ public class BughostedController : ControllerBase
 
     [HttpGet("version")]
     public async Task<IActionResult> GetVersion()
-    { 
+    {
         try
-        { 
-            var ver = await GetRemoteVersionAsync() ?? "0";
-            return Content(ver, "application/json");
+        {
+            var local = await GetLocalVersionAsync();
+            var remote = await GetRemoteVersionAsync() ?? "0";
+            return Ok(new { local, remote, updateAvailable = remote != local });
         }
         catch (Exception ex)
         {
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    [HttpPost("update")]
+    public IActionResult TriggerUpdate()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var remoteVer = await GetRemoteVersionAsync();
+                if (remoteVer == null) return;
+                await SetLocalVersionAsync(remoteVer);
+
+                var tempDir = Path.Combine(Path.GetTempPath(), "weaver-update");
+                Directory.CreateDirectory(tempDir);
+                var tempExe = Path.Combine(tempDir, "Weaver.exe");
+
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromMinutes(5);
+                var bytes = await client.GetByteArrayAsync("https://bughosted.com/assets/Weaver.exe");
+                await System.IO.File.WriteAllBytesAsync(tempExe, bytes);
+
+                var currentExe = Environment.ProcessPath!;
+                Process.Start(currentExe, $"--update-self \"{tempExe}\" \"{currentExe}\"");
+            }
+            catch { }
+
+            await Task.Delay(500);
+            Environment.Exit(0);
+        });
+
+        return Ok(new { updating = true, message = "Update started" });
     }
 
     [HttpGet("commands")]
@@ -432,9 +466,16 @@ public class BughostedController : ControllerBase
         return Ok(new { status = "logged_out" });
     } 
 
+    static string GetVersionFilePath()
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver");
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, ".weaver-version");
+    }
+
     static async Task<string> GetLocalVersionAsync()
     {
-        string versionFile = Path.Combine(AppContext.BaseDirectory, ".weaver-version");
+        var versionFile = GetVersionFilePath();
 
         if (!System.IO.File.Exists(versionFile))
         {
@@ -447,7 +488,7 @@ public class BughostedController : ControllerBase
 
     static async Task SetLocalVersionAsync(string version)
     {
-        string versionFile = Path.Combine(AppContext.BaseDirectory, ".weaver-version");
+        var versionFile = GetVersionFilePath();
         await System.IO.File.WriteAllTextAsync(versionFile, version);
     }
 
