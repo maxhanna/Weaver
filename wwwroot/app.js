@@ -494,7 +494,10 @@
     vm.closeOptionsOnBlur = function (event) { 
       $timeout(function () {
         vm.showProjectOptions = false;
-      }, 100);
+        $timeout(function () {
+          vm.saveSettings();
+        }, 300);
+      }, 300);
     };
 
     vm.changeProject = function () {
