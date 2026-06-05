@@ -120,76 +120,7 @@ public class AgentController : ControllerBase
         string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct = default,
         string? steeringContext = null)
     {
-        string planningPrompt = "You are a software-engineering agent. This is a task with instructions on how to solve the task. Your goal is to produce a JSON plan of specific code changes to accomplish the task, with file paths and exact code edits or commands."
-+ @"### AVAILABLE STEP TYPES (the ""file"" field) ###
-  relative/path.ext     — Edit an existing file (must appear in discovery context below)
-  _command              — Run any terminal command (PowerShell syntax)
-  _create_file          — Create a new file: ""path.ext: describe what to generate""
-  _web_search           — Search the web; put the query in ""change""
-  _web_fetch            — Fetch a URL; put the full URL in ""change""
-  _git                  — Git operation (commit, pull, push, revert, branch)
-  _rename_file          — Rename a file: ""old → new""
-  _move_file            — Move a file: ""old → new""
-  _delete_file          — Delete a file: ""path.ext""
-  _show                 — Display text to the user (Used for showing findings (usually terminal output); Must be used last if used at all.)
-  _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
-  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step when the codebase already satisfies the requirement. Put the reason in ""change"".
-  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified so far and replans the remaining work with fresh file content. Insert between independent phases when later steps depend on the result of earlier ones, or when the plan spans >4 files and >8 steps total.
-  _continue             — Signal that more plan steps follow. Use as the LAST step when your full plan exceeds one response. The system executes all preceding steps, then calls you again with fresh context to continue planning.
-### GENERAL RULES ###
-1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
-2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
-3. EXACT LOCATIONS — for file edits, include exact line numbers or function/class names in ""change""
-4. REAL PATHS ONLY — only reference files that exist in the discovery context below
-5. DO NOT RETURN ANYTHING ELSE BUT VALID JSON - no markdown fences, no explanation. No preambles. Do not return anything else besides the JSON object containing the plan. The JSON must be parseable by standard parsers without modification. If you cannot produce valid JSON, return an empty plan: { ""plan"": [] }
-6. If the task cannot be fully completed yet with the given context information, output only 1 step type: _explore. 
-7. Ignore oldString and newString in output for steps that are not relative/path.ext edits.
-8. Always include oldString and newString for relative/path.ext edits (these are file editing steps).
-9. CRITICAL — Include a ""score"" field (0-100) that represents how confident you are
-    that this plan will accomplish 100% of the task. Be honest:
-    - 100 = the plan will fully and correctly solve the task
-    - 80-99 = minor concerns (edge cases, untested areas)
-    - 50-79 = moderate concerns (missing steps, uncertain edits)
-    - 0-49 = major gaps (insufficient context, unclear requirements)
- 10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
- 11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result.
- 12. OUTPUT BUDGET — You have approximately 4000 tokens for your entire response (including JSON structure). oldString/newString values consume this budget. If the plan needs more steps than fit in one response, end with {""file"": ""_continue"", ""change"": ""reason for continuing""} to continue in the next cycle."
-
-+ @"### FILE EDIT RULES ###
-EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
-  - oldString targets ONLY the line(s) that change. Hard limit: 5 lines OR 250 chars.
-  - If a 30-line function has one line changing, oldString = that one line only.
-  - newString is the replacement. Same 5-line / 250-char limit.
-  - Never reproduce unchanged surrounding code in oldString.
-
-CORRECT (small unique anchor):
-  { ""file"": ""path.cs"", ""oldString"": ""return total;"", ""newString"": ""return total * taxRate;"" }
-
-WRONG (large block where only one value changes — will be REJECTED):
-  { ""oldString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total;"",
-    ""newString"": ""int Calculate() {\n  var x = 1;\n  var y = 2;\n  return total * taxRate;"" }
-
-SPLIT RULE: one file change = one step. Two separate change sites in the same file = two steps.
-  Never expand oldString to cover multiple change sites — emit multiple steps instead.
-
-For insertions: use an existing adjacent line as oldString anchor and include it unchanged in newString:
-  { ""oldString"": ""var config = Load();"", ""newString"": ""var config = Load();\nValidate(config);"" }
-
-- oldString must appear verbatim in the file (exact whitespace, exact indentation)
-- oldString must never be blank for an existing file edit
-- oldString and newString must NOT be identical
-- For brand-new files use _create_file, not a file edit"
-
-+ @"### EXAMPLE OUTPUT — respond with ONLY this type of JSON structure, no markdown, no extra text ###
-{
-  ""thinking"": ""<analyze the task; name files; state if commands or web searches are needed first>"",
-  ""summary"":  ""<one sentence: what the completed plan will accomplish>"",
-  ""score"": <0-100>,
-  ""plan"": [
-    { ""file"": ""_command"", ""change"": ""mkdir -p src/components/Button"", ""oldString"": """", ""newString"": """", ""priority"": 1 },
-    { ""file"": ""relative/path"", ""change"": ""Line 5: add import ..."", ""oldString"": ""using System.Text;"", ""newString"": ""using System.Text;\nusing System.Text.Json;"", ""priority"": 2 }
-  ]
-}";
+        var planningPrompt = BuildPlanningPrompt();
 
         var analysisPromptBuilder = new StringBuilder();
         analysisPromptBuilder.AppendLine("### TASK ###");
@@ -234,6 +165,54 @@ For insertions: use an existing adjacent line as oldString anchor and include it
                 await EmitLog(emitSse, "warn", $"Plan is missing required _web_search: {webSearchViolation}", ct: ct);
                 bestPlan.Score = Math.Min(bestPlan.Score, 40);
             }
+        }
+
+        // ── Size violation completion loop ───────────────────────────────────────
+        // Instead of retrying from scratch, append more steps. Large anchors are
+        // handled later by SplitOversizedEdits in the pipeline.
+        bool completionMadeProgress = false;
+        if (bestPlan != null && bestPlan.Score < 100 && !string.IsNullOrWhiteSpace(raw))
+        {
+            var initialViolations = GetPlanSizeViolations(bestPlan);
+            if (initialViolations.Count > 0)
+            {
+                var completionResult = await TryCompleteSizeViolations(
+                    prompt, projectRoot, emitSse, ct,
+                    raw, bestPlan, webSearchViolation);
+
+                if (completionResult.Resolved)
+                {
+                    bestPlan = completionResult.BestPlan;
+                    webSearchViolation = completionResult.WebSearchViolation;
+                    bestPlan.Score = Math.Max(bestPlan.Score, 60);
+                    completionMadeProgress = true;
+                    await EmitLog(emitSse, "info",
+                        $"Completion loop resolved — score {bestPlan.Score}/100, {GetPlanSizeViolations(bestPlan).Count} violation(s) remaining (will be split later)", ct: ct);
+                }
+                else if (completionResult.ShouldReplan)
+                {
+                    // Hallucinating — fall through to retry loop
+                    await EmitLog(emitSse, "warn",
+                        "Hallucination detected in completion loop — will replan from scratch", ct: ct);
+                }
+                else
+                {
+                    // Not hallucinating but not fully resolved — keep best effort
+                    bestPlan = completionResult.BestPlan;
+                    webSearchViolation = completionResult.WebSearchViolation;
+                    bestPlan.Score = Math.Max(bestPlan.Score, 60);
+                    completionMadeProgress = true;
+                }
+            }
+        }
+
+        // If the completion loop made progress, skip the retry loop entirely.
+        // SplitOversizedEdits in the pipeline will handle large anchors at execution time.
+        if (completionMadeProgress && bestPlan != null)
+        {
+            await EmitLog(emitSse, "info",
+                $"Proceeding with plan — {bestPlan.Plan.Count} step(s), score {bestPlan.Score}/100 — oversized edits deferred to SplitOversizedEdits", ct: ct);
+            return bestPlan;
         }
 
         // ── Self-scoring retry loop ────────────────────────────────────────────
@@ -322,14 +301,21 @@ For insertions: use an existing adjacent line as oldString anchor and include it
     }
     private async Task<(AgentPlan? plan, string? error)> ParseAndScore(string raw, bool emitSse, CancellationToken ct)
     {
-        // Strip markdown fences the LLM sometimes wraps its JSON in
+        // Strip markdown fences the LLM sometimes wraps its output in
         var cleanedRaw = raw.Trim();
         if (cleanedRaw.StartsWith("```"))
         {
-            var fenceMatch = Regex.Match(cleanedRaw, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            var fenceMatch = Regex.Match(cleanedRaw, @"```(?:text)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
             cleanedRaw = fenceMatch.Success ? fenceMatch.Groups[1].Value.Trim() : cleanedRaw.TrimStart('`');
         }
-        var parsedPlan = ParsePlan(cleanedRaw);
+
+        // Try delimited format first (primary protocol), fall back to JSON
+        AgentPlan? parsedPlan = null;
+        if (cleanedRaw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase))
+            parsedPlan = AgentUtilities.ParseDelimitedPlan(cleanedRaw);
+        if (parsedPlan == null)
+            parsedPlan = ParsePlan(cleanedRaw);
+
         if (parsedPlan == null)
         {
             bool containsError = false;
@@ -338,13 +324,17 @@ For insertions: use an existing adjacent line as oldString anchor and include it
                 containsError = true;
             }
 
-            var truncationHint = LooksLikeTruncated(cleanedRaw)
-                ? "Your response was TRUNCATED (ran out of tokens mid-JSON). " +
-                  "Produce a MUCH shorter plan: MAX 2 steps, 1-3 lines per oldString. " +
-                  "Do not start a step you cannot finish." +
-                    "If the task is complex, use a _checkpoint step to divide it into phases."
+            var looksTruncated = cleanedRaw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase)
+                ? !cleanedRaw.Contains("<<<STEP END>>>", StringComparison.OrdinalIgnoreCase) && !cleanedRaw.Contains("<<<DONE>>>", StringComparison.OrdinalIgnoreCase)
+                : LooksLikeTruncated(cleanedRaw);
 
-                : "Failed to parse as valid JSON. Raw output contained no parseable plan block.";
+            var truncationHint = looksTruncated
+                ? "Your response was TRUNCATED (ran out of tokens). " +
+                  "Produce a MUCH shorter plan: MAX 2 steps, 1-3 lines per oldString. " +
+                  "Do not start a step you cannot finish. " +
+                  "Use _continue as the last step if more steps are needed."
+
+                : "Failed to parse plan. Raw output contained no parseable plan block.";
             await EmitLog(emitSse, "error", containsError ? "Error detected. LLM Stopped?" : "Failed to parse plan.", cleanedRaw, ct: ct);
             return (null, truncationHint);
         }
@@ -398,12 +388,26 @@ For insertions: use an existing adjacent line as oldString anchor and include it
             sb.AppendLine("### ⚠ EDIT SIZE FAILURES — fix these before anything else");
             sb.AppendLine();
             sb.AppendLine("WRONG — large anchor wrapping an unchanged block:");
-            sb.AppendLine("  oldString: \"void Render() {\\n  Setup();\\n  Draw();\\n  return;\\n}\"");
-            sb.AppendLine("  newString: \"void Render() {\\n  Setup();\\n  Draw();\\n  Flush();\\n  return;\\n}\"");
+            sb.AppendLine("  <<<OLD>>>");
+            sb.AppendLine("  void Render() {");
+            sb.AppendLine("    Setup();");
+            sb.AppendLine("    Draw();");
+            sb.AppendLine("    return;");
+            sb.AppendLine("  }");
+            sb.AppendLine("  <<<NEW>>>");
+            sb.AppendLine("  void Render() {");
+            sb.AppendLine("    Setup();");
+            sb.AppendLine("    Draw();");
+            sb.AppendLine("    Flush();");
+            sb.AppendLine("    return;");
+            sb.AppendLine("  }");
             sb.AppendLine();
             sb.AppendLine("CORRECT — anchor is only the line(s) that change:");
-            sb.AppendLine("  oldString: \"  return;\"");
-            sb.AppendLine("  newString: \"  Flush();\\n  return;\"");
+            sb.AppendLine("  <<<OLD>>>");
+            sb.AppendLine("    return;");
+            sb.AppendLine("  <<<NEW>>>");
+            sb.AppendLine("    Flush();");
+            sb.AppendLine("    return;");
             sb.AppendLine();
             sb.AppendLine("Specific violations to fix:");
             foreach (var v in allViolations) sb.AppendLine("  " + v);
@@ -439,18 +443,302 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
         sb.AppendLine();
         sb.AppendLine("### RULES REMINDER ###");
-        sb.AppendLine("1. Return ONLY valid JSON — no markdown fences, no extra text before/after");
-        sb.AppendLine("2. Include a \"score\" field (0-100) that honestly reflects how confident you are this plan will fully solve the task");
+        sb.AppendLine("1. Return ONLY delimiter format — no JSON, no markdown fences, no extra text before/after");
+        sb.AppendLine("2. Use <<<SCORE>>> N (0-100) that honestly reflects how confident you are this plan will fully solve the task");
         sb.AppendLine("3. Score must be 100 if you are confident the plan is correct and complete");
         sb.AppendLine("4. If previous attempts had parse errors or were truncated — your response was TOO LONG. Output MAX 2-3 steps. Keep oldString to 1-5 SHORT lines.");
         sb.AppendLine("5. If previous attempts had low scores, identify the gaps and fix them");
         sb.AppendLine("6. oldString must be 1-5 lines of EXISTING code copied verbatim from the file — never copy entire methods");
         sb.AppendLine("7. oldString and newString must NOT be identical");
+        sb.AppendLine("8. Use <<<STEP N>>> / <<<STEP END>>> delimiters. Use <<<OLD>>> and <<<NEW>>> for file edits.");
         sb.AppendLine();
         sb.AppendLine("BEFORE writing the plan, think step by step: what was wrong with each previous attempt?");
         sb.AppendLine("Then produce a corrected plan that addresses every issue.");
         sb.AppendLine("If the plan is now complete and correct, set score to 100.");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Progressive completion loop for size violations. Instead of retrying from scratch,
+    /// shows the LLM its cumulative output so far and asks it to fix just the oversized
+    /// edit anchors. Appends each attempt's output to build a cumulative result.
+    /// After 3 attempts, checks for hallucination and decides: replan from scratch or keep.
+    /// Returns true if violations were resolved (score set to 100).
+    /// </summary>
+    private class SizeCompletionResult
+    {
+        public bool Resolved { get; set; }
+        public string CumulativeRaw { get; set; } = "";
+        public AgentPlan BestPlan { get; set; } = new();
+        public string? WebSearchViolation { get; set; }
+        public bool ShouldReplan { get; set; } // true = hallucinating, need full retry
+    }
+
+    private async Task<SizeCompletionResult> TryCompleteSizeViolations(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        string cumulativeRaw, AgentPlan bestPlan, string? webSearchViolation)
+    {
+        var result = new SizeCompletionResult
+        {
+            CumulativeRaw = cumulativeRaw,
+            BestPlan = bestPlan,
+            WebSearchViolation = webSearchViolation
+        };
+
+        var violations = GetPlanSizeViolations(bestPlan);
+        if (violations.Count == 0) { result.Resolved = true; return result; }
+
+        await EmitLog(emitSse, "info",
+            $"Size violation completion: {violations.Count} violation(s) found — entering repair loop (max 3 attempts)", result, ct: ct);
+
+        var planningPrompt = BuildPlanningPrompt();
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var completionPrompt = BuildEditCompletionPrompt(prompt, result.CumulativeRaw, result.BestPlan, violations, attempt);
+            var (completionRaw, _, llmError) = await CallLlmRawStreaming(planningPrompt, completionPrompt, emitSse, ct,
+                requestTimeout: _infiniteTimeout, maxTokens: 2048);
+
+            if (string.IsNullOrWhiteSpace(completionRaw))
+            {
+                await EmitLog(emitSse, "warn", $"Completion attempt {attempt + 1}/3 returned empty — {llmError}", ct: ct);
+                continue;
+            }
+
+            // Append to cumulative raw output so the parser sees all prior steps
+            result.CumulativeRaw = result.CumulativeRaw.TrimEnd() + "\n" + completionRaw.Trim();
+
+            // Re-parse the combined output
+            var (candidate, parseErr) = await ParseAndScore(result.CumulativeRaw, emitSse, ct);
+            if (candidate != null && candidate.Plan.Count > 0)
+            {
+                result.BestPlan = candidate;
+                var newViolations = GetPlanSizeViolations(result.BestPlan);
+
+                if (newViolations.Count == 0)
+                {
+                    await EmitLog(emitSse, "success",
+                        $"Size violations resolved after {attempt + 1} completion attempt(s)", ct: ct);
+                    result.BestPlan.Score = 100;
+                    result.Resolved = true;
+                    return result;
+                }
+
+                // Check web search violation
+                var cv = DetectMissingWebSearch(prompt, result.BestPlan);
+                if (cv != null)
+                {
+                    result.WebSearchViolation = cv;
+                    result.BestPlan.Score = Math.Min(result.BestPlan.Score, 40);
+                }
+
+                violations = newViolations;
+                await EmitLog(emitSse, "info",
+                    $"Completion attempt {attempt + 1}/3: {violations.Count} violation(s) still remain. Re-checking…", completionRaw, ct: ct);
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Completion attempt {attempt + 1}/3: produced unparseable output — {parseErr ?? "no plan found"}", completionRaw, ct: ct);
+            }
+        }
+
+        // ── After 3 attempts: check for hallucination ─────────────────────────────
+        var isHallucinating = await IsHallucinating(prompt, result.CumulativeRaw, result.BestPlan, ct);
+        if (isHallucinating)
+        {
+            await EmitLog(emitSse, "warn",
+                "Completion loop: LLM appears to be hallucinating. Will replan from scratch.", new {prompt, result}, ct: ct);
+            result.ShouldReplan = true;
+            return result;
+        }
+
+        // Not hallucinating — keep best effort despite remaining violations
+        var remaining = GetPlanSizeViolations(result.BestPlan);
+        await EmitLog(emitSse, remaining.Count > 0 ? "warn" : "info",
+            $"Completion loop ended: {remaining.Count} violation(s) remain but LLM is not hallucinating — proceeding with best effort", result, ct: ct);
+        result.BestPlan.Score = Math.Max(result.BestPlan.Score, 60);
+        result.Resolved = true;
+        return result;
+    }
+
+    /// <summary>
+    /// Builds the system planning prompt (reused for both initial plan and completions).
+    /// </summary>
+    private static string BuildPlanningPrompt()
+    {
+        return "You are a software-engineering agent. This is a task with instructions on how to solve the task. Your goal is to produce a plan of specific code changes to accomplish the task, with file paths and exact code edits or commands."
+            + @"### AVAILABLE STEP TYPES (the ""file"" field) ###
+  relative/path.ext     — Edit an existing file (must appear in discovery context below)
+  _command              — Run any terminal command (PowerShell syntax)
+  _create_file          — Create a new file: ""path.ext: describe what to generate""
+  _web_search           — Search the web; put the query in ""change""
+  _web_fetch            — Fetch a URL; put the full URL in ""change""
+  _git                  — Git operation (commit, pull, push, revert, branch)
+  _rename_file          — Rename a file: ""old → new""
+  _move_file            — Move a file: ""old → new""
+  _delete_file          — Delete a file: ""path.ext""
+  _show                 — Display text to the user (Used for showing findings (usually terminal output); Must be used last if used at all.)
+  _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
+  _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step when the codebase already satisfies the requirement. Put the reason in ""change"".
+  _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified so far and replans the remaining work with fresh file content. Insert between independent phases when later steps depend on the result of earlier ones, or when the plan spans >4 files and >8 steps total.
+  _continue             — Signal that more plan steps follow. Use as the LAST step when your full plan exceeds one response. The system executes all preceding steps, then calls you again with fresh context to continue planning.
+### GENERAL RULES ###
+1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
+2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
+3. EXACT LOCATIONS — for file edits, include exact line numbers or function/class names in ""change""
+4. REAL PATHS ONLY — only reference files that exist in the discovery context below
+5. OUTPUT FORMAT — Use the delimiter format below. NO markdown fences, NO JSON, NO explanation. Return ONLY delimited sections.
+6. If the task cannot be fully completed yet with the given context information, output only 1 step type: _explore. 
+7. Ignore oldString and newString in output for steps that are not relative/path.ext edits.
+8. Always include oldString and newString for relative/path.ext edits (these are file editing steps).
+9. CRITICAL — Include a ""score"" field (0-100) that represents how confident you are
+    that this plan will accomplish 100% of the task. Be honest:
+    - 100 = the plan will fully and correctly solve the task
+    - 80-99 = minor concerns (edge cases, untested areas)
+    - 50-79 = moderate concerns (missing steps, uncertain edits)
+    - 0-49 = major gaps (insufficient context, unclear requirements)
+10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
+11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result.
+12. OUTPUT BUDGET — You have approximately 4000 tokens for your entire response (including JSON structure). oldString/newString values consume this budget. If the plan needs more steps than fit in one response, end with {""file"": ""_continue"", ""change"": ""reason for continuing""} to continue in the next cycle."
+            + @"### FILE EDIT RULES ###
+EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
+  - oldString targets ONLY the line(s) that change. Hard limit: 5 lines OR 250 chars.
+  - If a 30-line function has one line changing, oldString = that one line only.
+  - newString is the replacement. Same 5-line / 250-char limit.
+  - Never reproduce unchanged surrounding code in oldString.
+
+CORRECT (small unique anchor):
+  <<<OLD>>>
+  return total;
+  <<<NEW>>>
+  return total * taxRate;
+
+WRONG (large block where only one value changes):
+  <<<OLD>>>
+  int Calculate() {
+    var x = 1;
+    var y = 2;
+    return total;
+  <<<NEW>>>
+  int Calculate() {
+    var x = 1;
+    var y = 2;
+    return total * taxRate;
+
+SPLIT RULE: one file change = one step. Two separate change sites in the same file = two steps.
+  Never expand oldString to cover multiple change sites — emit multiple steps instead.
+
+For insertions: use an existing adjacent line as oldString anchor and include it unchanged in newString:
+  <<<OLD>>>
+  var config = Load();
+  <<<NEW>>>
+  var config = Load();
+  Validate(config);
+
+- oldString must appear verbatim in the file (exact whitespace, exact indentation)
+- oldString must never be blank for an existing file edit
+- oldString and newString must NOT be identical
+- For brand-new files use _create_file, not a file edit"
+            + @"### EXAMPLE OUTPUT — respond with ONLY this delimiter format, no JSON, no markdown, no extra text ###
+<<<THINKING>>>
+analyze the task; name files; state if commands or web searches are needed first
+<<<SUMMARY>>>
+one sentence: what the completed plan will accomplish
+<<<SCORE>>> 85
+<<<STEP 1>>>
+FILE: _command
+CHANGE: mkdir -p src/components/Button
+<<<STEP END>>>
+<<<STEP 2>>>
+FILE: relative/path
+CHANGE: Line 5: add import
+<<<OLD>>>
+using System.Text;
+<<<NEW>>>
+using System.Text;
+using System.Text.Json;
+<<<STEP END>>>
+<<<DONE>>> false";
+    }
+
+    /// <summary>
+    /// Builds a prompt asking the LLM to complete/fix oversized edit anchors in its previous output.
+    /// Shows the LLM its cumulative raw output so far and highlights remaining violations.
+    /// </summary>
+    private static string BuildEditCompletionPrompt(
+        string originalPrompt, string cumulativeRaw, AgentPlan currentPlan,
+        List<string> remainingViolations, int attempt)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("## ORIGINAL TASK");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+
+        sb.AppendLine("## YOUR PLAN OUTPUT SO FAR (cumulative)");
+        sb.AppendLine("Below is everything you have produced so far. It is VALID — do NOT change or repeat it.");
+        sb.AppendLine();
+        sb.AppendLine("```");
+        var preview = cumulativeRaw.Length > 4000 ? cumulativeRaw[..4000] + "\n…(truncated)" : cumulativeRaw;
+        sb.AppendLine(preview);
+        sb.AppendLine("```");
+        sb.AppendLine();
+
+        sb.AppendLine("## STATUS");
+        if (remainingViolations.Count > 0)
+        {
+            sb.AppendLine("Some steps have oversized edit anchors (oldString >5 lines or >250 chars).");
+            sb.AppendLine("This is OK — the system will split them later. Do NOT try to fix them.");
+            foreach (var v in remainingViolations)
+                sb.AppendLine($"  ℹ {v}");
+            sb.AppendLine();
+        }
+        sb.AppendLine($"Attempt {attempt + 1}/3: continue producing steps where you left off.");
+
+        sb.AppendLine();
+        sb.AppendLine("## WHAT TO OUTPUT NOW");
+        sb.AppendLine("CONTINUE adding more steps to complete the plan. Output additional <<<STEP N>>> blocks.");
+        sb.AppendLine("- Do NOT repeat or modify any step already in your cumulative output");
+        sb.AppendLine("- Do NOT try to fix oversized anchors — the system handles that");
+        sb.AppendLine("- Just output NEW steps that you haven't produced yet");
+        sb.AppendLine("- Use the same <<<STEP N>>> / <<<STEP END>>> format");
+        sb.AppendLine("- If the plan is now complete, output <<<DONE>>> true");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY the new step blocks — no thinking, no summary, no score.");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Quick hallucination check: asks the LLM whether its plan output is making
+    /// meaningful progress or is completely off-track.
+    /// Returns true if the LLM is likely hallucinating.
+    /// </summary>
+    private async Task<bool> IsHallucinating(
+        string originalPrompt, string cumulativeRaw, AgentPlan currentPlan, CancellationToken ct)
+    {
+        const string sys =
+            "You are a plan quality inspector. Given the original task and the plan produced so far, " +
+            "determine if the plan is making REASONABLE PROGRESS or is HALLUCINATING (producing " +
+            "nonsense, phantom files, irrelevant changes, or receding from the goal). " +
+            "Answer EXACTLY one word: either 'progress' or 'hallucination'.";
+
+        var stepSummary = string.Join("\n", currentPlan.Plan.Select(s => $"  {s.File}: {s.Change}"));
+        var sizeInfo = $"Plan has {currentPlan.Plan.Count} step(s)";
+        if (currentPlan.Plan.Count > 0)
+        {
+            var totalChars = currentPlan.Plan.Sum(s => (s.OldString ?? "").Length + (s.NewString ?? "").Length);
+            sizeInfo += $", ~{totalChars} edit chars";
+        }
+
+        var excerpt = cumulativeRaw.Length > 3000 ? cumulativeRaw[..3000] + "…" : cumulativeRaw;
+var user = $"## Original Task\n{originalPrompt}\n\n## Plan Output (excerpt)\n{excerpt}\n\n## Steps\n{stepSummary}\n\n## {sizeInfo}\n\nIs this plan making progress or hallucinating? Answer exactly 'progress' or 'hallucination'.";
+
+        var (raw, _, error) = await CallLlmRaw(sys, user, ct, requestTimeout: TimeSpan.FromSeconds(15));
+        if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+            return false; // Default: not hallucinating (let the plan proceed)
+
+        var answer = raw.Trim().ToLowerInvariant();
+        return answer.Contains("hallucination");
     }
 
     private static string? DetectMissingWebSearch(string prompt, AgentPlan plan)
@@ -1120,13 +1408,93 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     }
 
     /// <summary>
+    /// Decompose a complex task into small independent sub-tasks, each small
+    /// enough that its plan fits within the LLM's output token budget.
+    /// Returns a list of sub-task prompt strings, or empty list if no decomposition needed.
+    /// </summary>
+    private async Task<List<string>> DecomposeTask(
+        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        string? steeringContext = null)
+    {
+        const string systemPrompt =
+            "You are a software-engineering agent. Your goal is to produce a plan of specific code changes (sub-tasks) " +
+            "to accomplish the task, with file paths and exact code edits or commands." +
+            "Each sub-task must be small enough that a plan " +
+            "for it fits in ~4000 tokens of output. " +
+            "Output ONLY delimiter format — no JSON, no markdown, no extra text." +
+            "\n\nFormat:" +
+            "\n<<<SUBTASK 1>>>" +
+            "\nDESCRIPTION: brief one-line description of the sub-task" +
+            "\n<<<TASK END>>>" +
+            "\n<<<SUBTASK 2>>>" +
+            "\nDESCRIPTION: next independent sub-task" +
+            "\n<<<TASK END>>>" +
+            "\n\nRules:" +
+            "\n- Each sub-task must be INDEPENDENT — no sub-task depends on results from another." +
+            "\n- 2-6 sub-tasks maximum." +
+            "\n- Each sub-task must be concrete and actionable (edits a specific file, runs a specific command)." +
+            "\n- PREFER editing existing files over creating new ones. Check the existing file list above." +
+            "\n- If the task is already small enough to plan in one shot, output exactly one sub-task." +
+            "\n- Output <<<DONE>>> true on a line by itself after all sub-tasks.";
+
+        // Quick file listing so the LLM knows what files exist
+        var fileList = new StringBuilder();
+        try
+        {
+            var files = Directory.EnumerateFiles(projectRoot, "*", SearchOption.TopDirectoryOnly)
+                .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+                .Take(30);
+            fileList.AppendLine("## Existing files (project root)");
+            foreach (var f in files) fileList.AppendLine($"  {f}");
+            // Also check wwwroot and Assets for common asset locations
+            foreach (var sub in new[] { "wwwroot", "Assets", "assets" })
+            {
+                var subPath = Path.Combine(projectRoot, sub);
+                if (Directory.Exists(subPath))
+                {
+                    var subFiles = Directory.EnumerateFiles(subPath, "*", SearchOption.TopDirectoryOnly)
+                        .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+                        .Take(10);
+                    foreach (var f in subFiles) fileList.AppendLine($"  {f}");
+                }
+            }
+        }
+        catch { }
+
+        var userPrompt = $"## Task\n{prompt}\n## Project root\n{projectRoot}\n";
+        if (fileList.Length > 0) userPrompt += fileList.ToString();
+        if (!string.IsNullOrWhiteSpace(steeringContext))
+            userPrompt += $"\n## Steering\n{steeringContext}";
+
+        var (raw, error) = await CallLlmRawText(systemPrompt, userPrompt, ct,
+            requestTimeout: TimeSpan.FromSeconds(60));
+        if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Task decomposition failed: {error ?? "empty response"}. Processing as single task.", new {raw, error}, ct: ct);
+            return new List<string>();
+        }
+
+        var subTasks = AgentUtilities.ParseDelimitedSubTasks(raw);
+        if (subTasks.Count <= 1)
+            return new List<string>(); // Single task is not worth decomposing
+
+        await EmitLog(emitSse, "info",
+            $"Decomposed task into {subTasks.Count} sub-tasks", new { subTasks }, ct: ct);
+        if (emitSse)
+            await SendSse(Response, "phase",
+                new { phase = "decompose", message = $"Split into {subTasks.Count} sub-tasks" }, ct);
+
+        return subTasks;
+    }
+
+    /// <summary>
     /// Orchestration Router — classifies the task, routes to the appropriate
     /// pipeline, then feeds results through the Verification Pipeline.
     /// </summary>
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
      string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
      List<string>? attachedFiles = null, bool skipContextReview = false,
-     string? steeringContext = null)
+     string? steeringContext = null, bool skipDecomposition = false)
     { 
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
@@ -1140,6 +1508,29 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
  
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
         await EmitLog(emitSse, "info", $"Router → {pipelineType}", new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
+
+        //── Pre-planning decomposition: split complex tasks into small independent sub-tasks ──
+        if (!skipDecomposition && pipelineType == PipelineType.CodeEdit && editScore > 0.3)
+        {
+            var subTasks = await DecomposeTask(prompt, projectRoot, emitSse, ct, steeringContext);
+            if (subTasks.Count > 1)
+            {
+                await EmitLog(emitSse, "info", $"Processing {subTasks.Count} sub-tasks sequentially…", new { subTasks }, ct: ct);
+                var allCombinedSteps = new List<object>();
+                AgentPlan? combinedPlan = null;
+                foreach (var subTask in subTasks)
+                {
+                    await EmitLog(emitSse, "info", $"Sub-task: {subTask}", ct: ct);
+                    var (subSteps, subPlan, subComplete) = await Orchestrate(
+                        subTask, projectRoot, emitSse, ct,
+                        attachedFiles: attachedFiles, skipContextReview: skipContextReview,
+                        steeringContext: null, skipDecomposition: true);
+                    allCombinedSteps.AddRange(subSteps);
+                    combinedPlan = subPlan ?? combinedPlan;
+                }
+                return (allCombinedSteps, combinedPlan, true);
+            }
+        }
 
         var (allSteps, plan) = pipelineType switch
         {
@@ -2536,6 +2927,10 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             user.AppendLine(content.Length > 6000 ? content[..6000] + "\n…(truncated)" : content);
             user.AppendLine("```");
             user.AppendLine("\nSplit into 2-5 atomic steps targeting only what changes.");
+            user.AppendLine("These steps will be applied SEQUENTIALLY in order.");
+            user.AppendLine("Each step's oldString must exist in the MODIFIED content after all previous steps.");
+            user.AppendLine("Use contiguous non-overlapping blocks — step 2's oldString must still match");
+            user.AppendLine("after step 1's edit is applied to the file.");
 
             var (raw, _, _) = await CallLlmRaw(sys, user.ToString(), ct,
                 TimeSpan.FromSeconds(25), maxTokens: 1024);
@@ -2587,7 +2982,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
     private async Task<AgentPlan> RepairPlanEditAnchors(
         string prompt, AgentPlan plan, string projectRoot, bool emitSse, CancellationToken ct)
     {
-        var contentCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var repairedCount = 0;
         var checkedCount = 0;
 
@@ -2623,18 +3017,13 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 }
             }
 
-            if (!contentCache.TryGetValue(fullPath, out var content))
-            {
-                content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                contentCache[fullPath] = content;
-            }
+            // Read fresh content from disk for each step — do NOT apply cumulative edits.
+            // Sequential application is handled by the execution phase (ApplyEditWithRetry
+            // reads the latest file state from disk before each edit).
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
 
             var validation = ValidatePlannedEdit(content, item);
-            if (validation.ok)
-            {
-                contentCache[fullPath] = validation.newContent!;
-                continue;
-            }
+            if (validation.ok) continue;
 
             var history = new List<(string oldString, string newString, int score, string reason)>
             {
@@ -2656,7 +3045,6 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                 validation = ValidatePlannedEdit(content, item);
                 if (validation.ok)
                 {
-                    contentCache[fullPath] = validation.newContent!;
                     repairedCount++;
                     break;
                 }
@@ -3374,15 +3762,19 @@ Be concise — 2-4 sentences max.";
             {
                 var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
                 var corrected = await CorrectEdit("", relPath, freshContent, item.Change, history, attempt, emitSse, ct);
-                if (corrected == null) return false;
-                // Bail if CorrectEdit returned identical strings — LLM has nothing to fix
-                if ((corrected.Value.oldString ?? "").Trim() == (corrected.Value.newString ?? "").Trim())
+                if (corrected != null)
                 {
-                    await EmitLog(emitSse, "warn", $"CorrectEdit returned identical strings for {relPath} — aborting retries", ct: ct);
-                    return false;
+                    if ((corrected.Value.oldString ?? "").Trim() == (corrected.Value.newString ?? "").Trim())
+                    {
+                        await EmitLog(emitSse, "warn", $"CorrectEdit returned identical strings for {relPath} — continuing with current oldString", ct: ct);
+                    }
+                    else
+                    {
+                        item.OldString = corrected.Value.oldString!;
+                        item.NewString = corrected.Value.newString!;
+                    }
                 }
-                item.OldString = corrected.Value.oldString!;
-                item.NewString = corrected.Value.newString!;
+                // If CorrectEdit returned null or identical strings, continue with current item (will likely fail again, but loop completes properly)
             }
 
             var (applied, reason, score) = await ApplyEdit(item, projectRoot, emitSse, ct);
@@ -3617,7 +4009,7 @@ Rules:
 
         var projectRoot = GetProjectRoot(req.Project);
 
-        var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
+        var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false, skipDecomposition: !req.IsDecomposing);
 
         return Ok(new
         {

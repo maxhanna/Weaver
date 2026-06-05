@@ -8,4 +8,5 @@ public class AgentRequest
     public int? MaxStepsPerBatch { get; set; }
     public string? SteeringContext { get; set; }
     public bool SelfImproving { get; set; }
+    public bool IsDecomposing { get; set; }
 }

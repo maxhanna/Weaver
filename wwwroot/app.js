@@ -101,6 +101,51 @@
     vm.planItems = [];
 
     // Debug logging for file size and token count
+    $http.get('/api/filehints').then(function (resp) {
+  try {
+    var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
+    if (store && store.Projects) {
+      vm.fileHintsData = vm.projects.map(function (p) {
+        var proj = store.Projects[p.Path];
+        return {
+          projectPath: p.Path,
+          hints: proj && proj.Hints ? proj.Hints.map(function (h) {
+            return {
+              keywords: (h.Keywords || []).join(', '),
+              files: (h.Files || []).length >0 ? h.Files.slice(0,3).join(', ') + (h.Files.length >3 ? '...' : '') : 'None',
+              allFiles: h.Files || [],
+              description: h.Description || ''
+            };
+          }) : []
+        };
+      });
+    } else {
+      vm.fileHintsData = [];
+    }
+  } catch (e) {
+    console.error('Error loading file hints:', e);
+    vm.fileHintsData = [];
+  }
+}).catch(function (error) {
+  console.error('HTTP error loading file hints:', error);
+  vm.fileHintsData = [];
+});
+
+    // Fallback for when file hints data is not available
+    if (!vm.fileHintsData || vm.fileHintsData.length === 0) {
+      vm.fileHintsData = vm.projects.map(function (p) {
+        return {
+          projectPath: p.Path,
+          hints: []
+        };
+      });
+    }
+
+    // Ensure proper initialization of fileHintsData when no hints exist
+    if (!vm.fileHintsData) {
+      vm.fileHintsData = [];
+    }
+
     vm.logFileSizeAndTokens = function (filePath, content) {
       if (!filePath || !content) return;
       const fileSize = content.length;
@@ -242,6 +287,22 @@
       });
     };
 
+    // Load file hints from server
+    vm.loadFileHints = function () {
+      $http.get('/api/filehints').then(function (response) {
+        vm.fileHintsData = [];
+        for (var projectKey in response.data.Projects) {
+          vm.fileHintsData.push({
+            projectPath: projectKey,
+            hints: response.data.Projects[projectKey].Hints
+          });
+        }
+      });
+    };
+
+    // Initialize file hints
+    vm.loadFileHints();
+
     vm.addHint = function (projectIndex) {
       if (vm.fileHintsData[projectIndex]) {
         vm.fileHintsData[projectIndex].hints.push({ keywords: '', files: [''] });
@@ -263,7 +324,7 @@
       }
     };
 
-    vm.saveSettings = function () {
+    vm.saveSettings = function (skipCloseSettingsPanel = false) {
       saveSettings();
       $http.get('/api/config').then(function (resp) {
         var cfg = resp.data || { projects: vm.projects };
@@ -307,7 +368,9 @@
         if (!vm.bughostedHeartbeatEnabled && vm.bughostedClientId) {
           vm.bughostedLogout();
         }
-        vm.closeSettingsPanel();
+        if (!skipCloseSettingsPanel) { 
+          vm.closeSettingsPanel();
+        }
       }, function (err) {
         $window.alert('Failed to save settings: ' + (err.data || err.statusText || err));
       });
@@ -495,7 +558,7 @@
       $timeout(function () {
         vm.showProjectOptions = false;
         $timeout(function () {
-          vm.saveSettings();
+          vm.saveSettings(true);
         }, 300);
       }, 300);
     };
@@ -844,7 +907,8 @@
               priority: cal.priority || 'medium',
               ready: true,
               attached: [],
-              selfImproving: false
+              selfImproving: false,
+              isDecomposing: false
             };
             vm.state.todo.push(newCard);
             vm.saveCards();
@@ -903,7 +967,8 @@
           createdAt: new Date().toISOString(),
           priority: cmd.params.priority || 'medium',
           attached: [],
-          selfImproving: false
+          selfImproving: false,
+          isDecomposing: false
         };
         vm.state.todo.push(card);
         vm.saveCards();
@@ -916,7 +981,8 @@
           createdAt: new Date().toISOString(),
           priority: cmd.params.priority || 'medium',
           attached: [],
-          selfImproving: false
+          selfImproving: false,
+          isDecomposing: false
         };
         vm.state.todo.push(card);
         console.log('Added card from remote command:', card);
@@ -1652,7 +1718,8 @@
           maxIterations: 5,
           maxStepsPerBatch: 8,
           steeringContext: vm.steeringContext || '',
-          selfImproving: card.selfImproving || false
+          selfImproving: card.selfImproving || false,
+          isDecomposing: card.isDecomposing || false,
         };
 
         // Move to Doing
@@ -2042,7 +2109,7 @@
         // Build / default — route to agent pipeline
         vm.aiChatLoading = false;
         // Create a temporary card and run the agent
-        var tempCard = { id: 'chat-' + Date.now(), text: userMsg, project: vm.selectedProject, attached: [], ready: true, selfImproving: false };
+        var tempCard = { id: 'chat-' + Date.now(), text: userMsg, project: vm.selectedProject, attached: [], ready: true, selfImproving: false, isDecomposing: false };
         if (!tempCard.project) { vm.aiChatMessages.push({ role: 'assistant', content: '⚠️ No project selected. Select a project first.' }); return; }
         vm.streamingSummary = '';
         vm.streamingPhase = '';

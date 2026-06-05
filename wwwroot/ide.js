@@ -4,7 +4,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
   return {
     init: function(vm, $scope) {
       vm.ide = {
-        showSidebar: true,
+        showSidebar: false,
         openTabs: [],
         currentFile: null,
         currentTab: null,

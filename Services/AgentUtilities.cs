@@ -1312,4 +1312,142 @@ public static class AgentUtilities
 
         return null;
     }
+
+    /// <summary>
+    /// Parse a plan in delimiter format (replaces JSON for output robustness).
+    /// Format:
+    ///   <<<THINKING>>>
+    ///   analysis text
+    ///   <<<SUMMARY>>>
+    ///   one line summary
+    ///   <<<SCORE>>> 85
+    ///   <<<STEP 1>>>
+    ///   FILE: relative/path.cs
+    ///   CHANGE: description
+    ///   <<<OLD>>>
+    ///   old code
+    ///   <<<NEW>>>
+    ///   new code
+    ///   <<<STEP END>>>
+    ///   <<<STEP 2>>>
+    ///   FILE: _command
+    ///   CHANGE: cmd
+    ///   <<<STEP END>>>
+    /// </summary>
+    public static AgentPlan? ParseDelimitedPlan(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var trimmed = raw.Trim();
+        if (trimmed.StartsWith("```"))
+        {
+            var m = Regex.Match(trimmed, @"```(?:text)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) trimmed = m.Groups[1].Value.Trim();
+        }
+
+        var thinking = ExtractDelimitedSection(trimmed, "THINKING", "SUMMARY|SCORE|STEP\\s*\\d+|DONE|$");
+        var summary = ExtractDelimitedSection(trimmed, "SUMMARY", "THINKING|SCORE|STEP\\s*\\d+|DONE|$");
+        var scoreMatch = Regex.Match(trimmed, @"<<<SCORE>>>\s*(\d+)");
+        var score = scoreMatch.Success && int.TryParse(scoreMatch.Groups[1].Value, out var s) ? Math.Clamp(s, 0, 100) : 50;
+        var doneMatch = Regex.Match(trimmed, @"<<<DONE>>>\s*(true|false)", RegexOptions.IgnoreCase);
+        var complete = doneMatch.Success && bool.TryParse(doneMatch.Groups[1].Value, out var d) && d;
+
+        var steps = new List<PlanStep>();
+        var stepPattern = new Regex(@"<<<STEP\s*\d+>>>\s*(.*?)(?=<<<STEP\s*\d+>>>|<<<DONE>>>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var stepMatches = stepPattern.Matches(trimmed);
+        // Also match steps terminated by <<<STEP END>>>
+        var stepEndPattern = new Regex(@"<<<STEP\s*\d+>>>\s*(.*?)<<<STEP END>>>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var stepEndMatches = stepEndPattern.Matches(trimmed);
+
+        // Use step-end matches if available (more reliable), otherwise fall back to step-start matches
+        var preferredMatches = stepEndMatches.Count > 0 ? stepEndMatches : stepMatches;
+
+        foreach (Match m in preferredMatches)
+        {
+            var content = m.Groups[1].Value.Trim();
+            if (string.IsNullOrWhiteSpace(content)) continue;
+
+            var file = ExtractField(content, "FILE");
+            var change = ExtractField(content, "CHANGE");
+            if (string.IsNullOrWhiteSpace(file) && string.IsNullOrWhiteSpace(change)) continue;
+
+            var oldString = ExtractDelimitedSection(content, "OLD", "NEW|STEP END|$");
+            var newString = ExtractDelimitedSection(content, "NEW", "STEP END|$");
+
+            steps.Add(new PlanStep
+            {
+                File = file ?? "",
+                Change = change ?? "",
+                OldString = oldString ?? "",
+                NewString = newString ?? "",
+                Priority = 1
+            });
+        }
+
+        if (steps.Count == 0 && !complete) return null;
+
+        return new AgentPlan
+        {
+            Thinking = thinking ?? "",
+            Summary = summary ?? "",
+            Score = score,
+            Plan = steps
+        };
+    }
+
+    /// <summary>
+    /// Parse pre-planning decomposition output. Format:
+    ///   <<<SUBTASK 1>>>
+    ///   DESCRIPTION: description text
+    ///   <<<TASK END>>>
+    /// Returns list of task description strings.
+    /// </summary>
+    public static List<string> ParseDelimitedSubTasks(string raw)
+    {
+        var tasks = new List<string>();
+        if (string.IsNullOrWhiteSpace(raw)) return tasks;
+
+        var pattern = new Regex(@"<<<SUBTASK\s*\d+>>>\s*(.*?)(?=<<<SUBTASK\s*\d+>>>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        var matches = pattern.Matches(raw.Trim());
+
+        foreach (Match m in matches)
+        {
+            var content = m.Groups[1].Value.Trim();
+            if (string.IsNullOrWhiteSpace(content)) continue;
+
+            // Try DESCRIPTION: field first
+            var desc = ExtractField(content, "DESCRIPTION");
+            if (!string.IsNullOrWhiteSpace(desc))
+            {
+                tasks.Add(desc);
+                continue;
+            }
+
+            // Fall back to raw content
+            tasks.Add(content);
+        }
+
+        // If no subtask delimiters found, treat the whole thing as one task
+        if (tasks.Count == 0 && !string.IsNullOrWhiteSpace(raw.Trim()))
+            tasks.Add(raw.Trim());
+
+        return tasks;
+    }
+
+    private static string? ExtractDelimitedSection(string text, string sectionName, string nextSectionsPattern)
+    {
+        // Normalize optional whitespace in section names (e.g., "STEP 1" matches "STEP1" or "STEP  1")
+        var normalizedNext = Regex.Replace(nextSectionsPattern, @"\\s\*", @"\s*");
+        var pattern = $@"<<<{sectionName}>>>\s*(.*?)(?=<<<(?:{normalizedNext})>>>)";
+        var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
+
+    private static string? ExtractField(string text, string fieldName)
+    {
+        // Match fieldName: followed by content up to the next field name, <<<tag>>>, or end of string
+        // Handles both same-line (FILE: pathCHANGE: desc) and multi-line formats
+        var pattern = $@"{fieldName}:\s*(.*?)(?=\s*(?:FILE:|CHANGE:|DESCRIPTION:|<<<|$))";
+        var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
 }
