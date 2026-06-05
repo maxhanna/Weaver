@@ -474,12 +474,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.saveCards();
       };
 
-      vm.moveCardToDone = function (cardId, targetCol) {
-        targetCol = targetCol || 'done';
+      vm.moveCardToDone = function (card) {
+        targetCol = card.selfImproving ? 'selfImproving' : 'done';
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
         if (idx === -1) return;
-        var card = vm.state.doing.splice(idx, 1)[0];
-        vm.state[targetCol].push(card);
+        var card = vm.state.doing.splice(idx, 1)[0]; 
+        vm.state[targetCol].push(card); 
         vm.activeCardId = null;
         if (!vm.activeCardIds) vm.activeCardIds = new Set();
         vm.activeCardIds.delete(cardId);

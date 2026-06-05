@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
@@ -76,10 +77,17 @@ public class AgentController : ControllerBase
 
     private static async Task SendSse(HttpResponse response, string eventName, object data, CancellationToken ct = default)
     {
-        var json = JsonSerializer.Serialize(data);
-        await response.WriteAsync($"event: {eventName}\n" +
-            $"data: {json}\n\n", ct);
-        await response.Body.FlushAsync(ct);
+        try
+        {
+            var json = JsonSerializer.Serialize(data);
+            await response.WriteAsync($"event: {eventName}\n" +
+                $"data: {json}\n\n", ct);
+            await response.Body.FlushAsync(ct);
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { }
+        catch (Exception) { }
     }
  
  
@@ -322,6 +330,12 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         var parsedPlan = ParsePlan(cleanedRaw);
         if (parsedPlan == null)
         {
+            bool containsError = false;
+            if (cleanedRaw != null && cleanedRaw.ToLower().Contains("error"))
+            {
+                containsError = true;
+            }
+
             var truncationHint = LooksLikeTruncated(cleanedRaw)
                 ? "Your response was TRUNCATED (ran out of tokens mid-JSON). " +
                   "Produce a MUCH shorter plan: MAX 2 steps, 1-3 lines per oldString. " +
@@ -329,7 +343,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
                     "If the task is complex, use a _checkpoint step to divide it into phases."
 
                 : "Failed to parse as valid JSON. Raw output contained no parseable plan block.";
-            await EmitLog(emitSse, "error", "Failed to parse plan.", cleanedRaw, ct: ct);
+            await EmitLog(emitSse, "error", containsError ? "Error detected. LLM Stopped?" : "Failed to parse plan.", cleanedRaw, ct: ct);
             return (null, truncationHint);
         }
         var sizeViolations = GetPlanSizeViolations(parsedPlan);
@@ -3604,11 +3618,38 @@ Rules:
         Response.ContentType = "text/event-stream";
         Response.Headers["Cache-Control"] = "no-cache";
         Response.Headers["X-Accel-Buffering"] = "no";
+        Response.Headers["Connection"] = "keep-alive";
+
+        // Disable IIS/Kestrel response buffering for true streaming
+        var bufferingFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
+        bufferingFeature?.DisableBuffering();
+
+        // Explicitly start the response so headers are sent immediately
+        await Response.StartAsync(Response.HttpContext.RequestAborted);
+
+        // Background keepalive ping every 15 seconds to prevent proxy timeouts
+        var keepaliveCt = CancellationTokenSource.CreateLinkedTokenSource(Response.HttpContext.RequestAborted);
+        var keepaliveTask = Task.Run(async () =>
+        {
+            while (!keepaliveCt.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(15000, keepaliveCt.Token);
+                    // SSE comment = lightweight keepalive ping
+                    await Response.WriteAsync(":\n\n", keepaliveCt.Token);
+                    await Response.Body.FlushAsync(keepaliveCt.Token);
+                }
+                catch { break; }
+            }
+        }, keepaliveCt.Token);
 
         if (string.IsNullOrWhiteSpace(req.Prompt))
         {
             await SendSse(Response, "error", new { message = "Prompt is required" });
             await SendSse(Response, "done", new { });
+            keepaliveCt.Cancel();
+            try { await keepaliveTask; } catch { }
             return;
         }
 
@@ -3663,6 +3704,12 @@ Rules:
         {
             await SendSse(Response, "error", new { message = ex.Message });
             await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
+        }
+        finally
+        {
+            // Stop the keepalive background task
+            keepaliveCt.Cancel();
+            try { await keepaliveTask; } catch { }
         }
     }
 
@@ -3891,7 +3938,8 @@ Rules:
 
         try
         {
-            var resp = await client.PostAsync(target, httpContent, ct);
+            var request = new HttpRequestMessage(HttpMethod.Post, target) { Content = httpContent };
+            var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 var respText = await resp.Content.ReadAsStringAsync(ct);

@@ -1631,6 +1631,7 @@
         vm.streamingTokenBuffer = '';
         vm.planItems = [];
         vm.agentActivityLog = [];
+        vm._lastStreamMs = Date.now();
         vm.activeStepIndex = null;
         vm.lastPhaseLogged = '';
         _lastLogKey = '';
@@ -1683,10 +1684,12 @@
             reader.read().then(function (result) {
               if (result.done) {
                 vm.streamingActive = false;
+                vm._lastStreamMs = null;
                 resumeTerminalPolling();
-                try { $scope.$digest(); } catch (e) { /* infdig — already caught at line 857 */ }
+                $scope.$applyAsync();
                 return;
               }
+              vm._lastStreamMs = Date.now();
               buffer += decoder.decode(result.value, { stream: true });
               var parts = buffer.split('\n\n');
               buffer = parts.pop();
@@ -1859,14 +1862,29 @@
 
                       function finishCard() {
                         if (!incomplete) {
-                          vm.moveCardToDone(card.id);
+                          vm.moveCardToDone(card);
                         }
                         if (vm.autoQueue) {
                           $timeout(function () {
-                            if (card.selfImproving) {
-                              vm.processSelfImprovingQueue();
-                            } else {
-                              vm.processQueue();
+                            // First: prioritize any ready card in the todo column
+                            var readyTodo = vm.state.todo.filter(function (c) {
+                              return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                            });
+                            if (readyTodo.length) {
+                              var next = readyTodo[readyTodo.length - 1];
+                              vm.moveCardToDoing(next.id);
+                              vm.executeAgent(next);
+                              return;
+                            }
+                            // No ready todo cards: auto-start a self-improving card
+                            var siCards = vm.state.selfImproving.filter(function (c) {
+                              return c.filePath === vm.selectedProject && c.selfImproving;
+                            });
+                            if (siCards.length) {
+                              var next = siCards[siCards.length - 1];
+                              next.ready = true;
+                              vm.moveCardToDoing(next.id);
+                              vm.executeAgent(next);
                             }
                           }, 500);
                         }
@@ -1914,14 +1932,15 @@
                   }
                 }
               }
-              try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
+              try { $scope.$applyAsync(); } catch (e) { /* applyAsync guard */ }
               readNext();
             }).catch(function (readErr) {
               if (readErr && readErr.name === 'AbortError') return;
               vm.streamingActive = false;
+              vm._lastStreamMs = null;
               resumeTerminalPolling();
               vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
-              try { if (!$scope.$$phase) $scope.$digest(); } catch (e) { /* infdig guard */ }
+              $scope.$applyAsync();
             });
           }
           readNext();
