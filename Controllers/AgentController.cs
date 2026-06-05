@@ -4009,6 +4009,8 @@ Rules:
 
         var projectRoot = GetProjectRoot(req.Project);
 
+        Console.WriteLine("IsDecomposing:"+req.IsDecomposing);
+
         var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false, skipDecomposition: !req.IsDecomposing);
 
         return Ok(new
@@ -4107,6 +4109,7 @@ Rules:
             (allSteps, plan, complete) =
                 await Orchestrate(req.Prompt, projectRoot, emitSse: true, ct: Response.HttpContext.RequestAborted,
                     attachedFiles: req.Files?.Count > 0 ? req.Files : null,
+                    skipDecomposition: !req.IsDecomposing,
                     steeringContext: req.SteeringContext);
 
             var filesEdited = ExtractFilesEdited(allSteps);
