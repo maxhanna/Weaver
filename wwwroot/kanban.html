@@ -139,9 +139,9 @@
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
 
           <div class="card-tags">
-            <span class="card-tag" ng-if="vm.activeCardId === card.id">ACTIVE</span>
+            <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            <span class="card-tag" ng-if="vm.activeCardId === card.id">In Progress</span>
+            <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
             <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
           </div>
@@ -478,7 +478,7 @@
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
           <div class="card-tags">
-            <span class="card-tag tag-self-improving">🔄 SELF-IMPROVING</span>
+            <span class="card-tag tag-self-improving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">

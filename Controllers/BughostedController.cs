@@ -217,6 +217,9 @@ public class BughostedController : ControllerBase
 
         try
         {
+            // Determine the weaver's own address from the incoming request
+            var weaverAddress = $"{Request.Scheme}://{Request.Host}";
+
             var client = _clientFactory.CreateClient();
             var payload = JsonSerializer.Serialize(new
             {
@@ -224,7 +227,8 @@ public class BughostedController : ControllerBase
                 clientId = session.ClientId,
                 status = "online",
                 kanbanData = req.KanbanData,
-                settings = req.Settings
+                settings = req.Settings,
+                weaverAddress
             });
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/heartbeat")
             {
