@@ -135,6 +135,7 @@ public class AgentController : ControllerBase
   _explore              — Explore deeper context: put a file path or glob pattern in ""change"". The system will read matching files and re-plan with the enriched context. Use this when you need to inspect files not yet in the discovery context. Output ONLY _explore steps when you need more context — no mixed steps.
   _done                 — Task is ALREADY complete; nothing needs changing.Use as the ONLY step when the codebase already satisfies the requirement. Put the reason in ""change"".
   _checkpoint           — Divide a large refactor into phases. The system re-reads every file modified so far and replans the remaining work with fresh file content. Insert between independent phases when later steps depend on the result of earlier ones, or when the plan spans >4 files and >8 steps total.
+  _continue             — Signal that more plan steps follow. Use as the LAST step when your full plan exceeds one response. The system executes all preceding steps, then calls you again with fresh context to continue planning.
 ### GENERAL RULES ###
 1. COMMANDS BEFORE EDITS — if you edit a file that doesn't exist yet, prepend _command (mkdir/New-Item) first
 2. WEB BEFORE CODE — if you need current API docs/library versions, or recent information from the web, add _web_search at the TOP of the plan
@@ -150,8 +151,9 @@ public class AgentController : ControllerBase
     - 80-99 = minor concerns (edge cases, untested areas)
     - 50-79 = moderate concerns (missing steps, uncertain edits)
     - 0-49 = major gaps (insufficient context, unclear requirements)
-10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
-11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result."
+ 10.SELF - STOP — If the existing code already satisfies the requirement, emit a single _done step. Never fabricate phantom edits.
+ 11. PHASE CHECKPOINTS — For refactors touching >4 files or >8 steps, split into phases with _checkpoint between them. Each phase must produce a verifiable partial result.
+ 12. OUTPUT BUDGET — You have approximately 4000 tokens for your entire response (including JSON structure). oldString/newString values consume this budget. If the plan needs more steps than fit in one response, end with {""file"": ""_continue"", ""change"": ""reason for continuing""} to continue in the next cycle."
 
 + @"### FILE EDIT RULES ###
 EDIT SIZE LIMIT — strictly enforced, oversized edits score below 70 automatically:
@@ -209,7 +211,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
         analysisPromptBuilder.AppendLine(discoveryForPlanner);
         var analysisPrompt = analysisPromptBuilder.ToString();
 
-        var (raw, _, llmError) = await CallLlmRawStreaming(planningPrompt, analysisPrompt, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 1500);
+        var (raw, _, llmError) = await CallLlmRawStreaming(planningPrompt, analysisPrompt, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 4096);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -255,7 +257,7 @@ For insertions: use an existing adjacent line as oldString anchor and include it
 
             var retryPrompt = BuildScoreRetryPrompt(prompt, discoveryContext, projectRoot, history, steeringContext, webSearchViolation);
             var (retryRaw, _, _) = await CallLlmRawStreaming(planningPrompt, retryPrompt, emitSse, ct,
-                requestTimeout: _infiniteTimeout, maxTokens: 1500);
+                requestTimeout: _infiniteTimeout, maxTokens: 4096);
             if (string.IsNullOrWhiteSpace(retryRaw))
             {
                 history.Add((0, "", "[empty response]", "LLM returned empty response"));
@@ -2251,8 +2253,40 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
             }
         }, ct);
 
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
-            steeringContext: steeringContext);
+        // ── Continuation loop: if plan ends with _continue, re-plan with fresh context ──
+        var maxContinuations = 3;
+        for (var contIdx = 0; contIdx < maxContinuations; contIdx++)
+        {
+            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
+                steeringContext: steeringContext);
+
+            var hasContinue = allSteps
+                .OfType<Dictionary<string, object?>>()
+                .Any(s => s.TryGetValue("type", out var t) && t?.ToString() == "continue_signal");
+
+            if (!hasContinue) break;
+
+            await EmitLog(emitSse, "info",
+                $"Continuation {contIdx + 1}/{maxContinuations} — re-planning remaining work…", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "phase",
+                    new { phase = "continue", message = $"Continuation {contIdx + 1}: re-planning…" }, ct);
+
+            plan = await AnalyzePromptAndPlanCodeChanges(prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext: steeringContext);
+            if (plan == null || plan.Plan.Count == 0)
+            {
+                await EmitLog(emitSse, "warn", "Continuation returned empty plan — stopping", ct: ct);
+                break;
+            }
+
+            // Remove _continue steps (handled by next iteration's check above)
+            plan.Plan = plan.Plan.Where(p => !p.File.Equals("_continue", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (plan.Plan.Count == 0) break;
+
+            plan = await SplitOversizedEdits(plan, projectRoot, emitSse, ct);
+            plan = await RepairPlanEditAnchors(prompt, plan, projectRoot, emitSse, ct);
+        }
+
         return (allSteps, plan);
     }
 
@@ -2743,6 +2777,20 @@ Respond with ONLY the raw file content — no markdown, no code fences, no expla
                                 new { summary = $"Phase {checkpointCount + 1} plan", items = newSteps }, ct);
                     }
                 }
+                continue;
+            }
+            // ── _continue: signal that more plan steps follow ─────────────────────
+            if (planFile.Equals("_continue", StringComparison.OrdinalIgnoreCase))
+            {
+                await EmitLog(emitSse, "info",
+                    $"Continuation requested: {changeDesc}", ct: ct);
+                allResults.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "continue_signal",
+                    ["status"] = "done",
+                    ["output"] = changeDesc
+                });
+                // Continue executing any remaining steps after _continue too
                 continue;
             }
             // ── _rename marker ────────────────────────────────────────────────────

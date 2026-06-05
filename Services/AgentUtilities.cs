@@ -549,7 +549,7 @@ public static class AgentUtilities
         {
             "_git", "_ping", "_show", "_display", "_create_file", "_package_install",
             "_command", "_web_search", "_web_fetch", "_explore", "_rename", "_rename_file",
-            "_move_file", "_delete_file"
+            "_move_file", "_delete_file", "_continue"
         };
         return !specialMarkers.Contains(path);
     }
