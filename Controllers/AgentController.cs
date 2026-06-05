@@ -567,7 +567,7 @@ public class AgentController : ControllerBase
     /// </summary>
     private static string BuildPlanningPrompt()
     {
-        return "You are a software-engineering agent. This is a task with instructions on how to solve the task. Your goal is to produce a plan of specific code changes to accomplish the task, with file paths and exact code edits or commands."
+        return "You are a software-engineering agent. This is a task with instructions on how to solve the task. Your goal is to produce a plan of specific code changes to accomplish the task, with file paths and exact code edits or commands. Critical: Only output the thinking, summary, score and step with delimiters. Nothing else."
             + @"### AVAILABLE STEP TYPES (the ""file"" field) ###
   relative/path.ext     — Edit an existing file (must appear in discovery context below)
   _command              — Run any terminal command (PowerShell syntax)
