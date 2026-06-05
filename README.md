@@ -51,3 +51,4 @@ The app serves static files and APIs. Open the URL shown in the console (usually
                 │• Return results     │
                 └─────────────────────┘
 ```
+Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
