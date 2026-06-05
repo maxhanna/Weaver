@@ -222,6 +222,7 @@ public class BughostedController : ControllerBase
             var weaverAddress = $"{Request.Scheme}://{Request.Host}";
 
             var client = _clientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(120);
             var payload = JsonSerializer.Serialize(new
             {
                 token = session.Token,
