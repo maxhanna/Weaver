@@ -15,17 +15,19 @@
       <div class="ide-file-tree">
         <div class="ide-file-tree-header">
           <span>Files</span>
+          <span style="font-size:10px;color:#888;">{{vm.ide.filePickerPath || ''}} [{{vm.ide.filePickerEntries.length}}]</span>
           <button class="ide-panel-btn small" ng-click="vm.toggleSidebar()">◀</button>
         </div>
         <div class="ide-file-filter">
           <input type="text" ng-model="vm.ide.searchFilter" placeholder="Filter files..." class="ide-filter-input" ng-change="vm.onSearchChange()" />
         </div>
         <div class="ide-file-tree-items">
-          <div ng-repeat="e in vm.ide.filePickerEntries track by e.path"
+          <div ng-if="vm.ide.filePickerError" class="ide-file-error" style="padding:8px; color:#e06c75; font-size:11px; text-align:center;">{{vm.ide.filePickerError}}</div>
+           <div ng-repeat="e in vm.ide.filePickerEntries"
                class="ide-file-item"
                ng-class="{'ide-file-item--dir': e.isDirectory, 'ide-file-item--selected': vm.ide.currentFile === e.path}">
-            <div ng-if="e.isDirectory" ng-click="vm.pickerEnterDir(e.path)" class="ide-file-item-label">
-              <span ng-click="vm.pickerEnterDir(e.path)">📁</span><span ng-click="vm.pickerEnterDir(e.path)">{{e.name}}/</span>
+             <div ng-if="e.isDirectory" ng-click="vm.idePickerEnterDir(e.path)" class="ide-file-item-label">
+              <span>📁</span><span>{{e.name}}/</span>
             </div>
             <div ng-if="!e.isDirectory" ng-click="vm.openFile(e.path)" class="ide-file-item-label">
               <span>📄</span><span>{{e.name}}</span>
@@ -35,7 +37,7 @@
           </div>
         </div>
         <div class="ide-file-tree-nav" ng-if="vm.ide.filePickerPath">
-          <button class="ide-panel-btn" ng-click="vm.pickerUpDir()" title="Go up">⬆ Up</button>
+          <button class="ide-panel-btn" ng-click="vm.idePickerUpDir()" title="Go up">⬆ Up</button>
           <span class="ide-file-tree-path">{{vm.ide.filePickerPath}}</span>
         </div>
       </div>

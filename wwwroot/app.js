@@ -418,7 +418,6 @@
         if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
         if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
         if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
-        if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
         if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
         vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
         vm.buildCommands = cfg.buildCommands || "";
@@ -490,14 +489,10 @@
       return p ? (p.Description || '') : '';
     };
 
-    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
-    // Close options menu when it loses focus
-    vm.closeOptionsOnBlur = function (event) {
-      console.log("closeOptionsOnBlur!");
-      const optionsElement = document.getElementById('project-options');
-      if (optionsElement && !optionsElement.contains(event.relatedTarget)) {
-        vm.showProjectOptions = false;
-      }
+    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };  
+
+    vm.closeOptionsOnBlur = function (event) { 
+      vm.showProjectOptions = false;
     };
 
     vm.changeProject = function () {

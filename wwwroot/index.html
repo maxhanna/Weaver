@@ -37,6 +37,19 @@
         <!-- Spider abdomen details -->
         <circle cx="12" cy="12" r="2" fill="var(--brand-secondary)" />
         <circle cx="12" cy="12" r="1" fill="white" />
+        <!-- Spider spinnerets -->
+        <circle cx="12" cy="18" r="1.5" fill="var(--brand-secondary)" />
+        <circle cx="12" cy="18" r="0.8" fill="white" />
+        <!-- Spider fangs -->
+        <path d="M10 12 L8 14 M14 12 L16 14" stroke="var(--brand-secondary)" stroke-width="1" fill="none" />
+        <!-- Spider web pattern -->
+        <circle cx="12" cy="12" r="8" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" stroke-dasharray="2,2" />
+        <circle cx="12" cy="12" r="6" fill="none" stroke="var(--brand-secondary)" stroke-width="0.5" stroke-dasharray="2,2" />
+        <!-- Spider web connection lines -->
+        <line x1="12" y1="12" x2="12" y2="4" stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <line x1="12" y1="12" x2="12" y2="20" stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <line x1="12" y1="12" x2="4" y2="12" stroke="var(--brand-secondary)" stroke-width="0.5" />
+        <line x1="12" y1="12" x2="20" y2="12" stroke="var(--brand-secondary)" stroke-width="0.5" />
       </svg>
       <span class="brand-text">Weaver</span>
     </div>
@@ -90,9 +103,8 @@
 
     <!-- RIGHT PANEL: Agent + Terminal -->
     <div class="right-panel" ng-class="{'full-width': !vm.showKanban && !vm.showCalendar}">
-       <!-- IDE Panel -->
-       <div class="panel" data-panel-type="ide" data-panel-id="ide-panel" ng-include="'ide.html'" ng-if="vm.showIDE">
-       </div>
+      <!-- IDE Panel -->
+      <div class="panel" data-panel-type="ide" data-panel-id="ide-panel" ng-include="'ide.html'" ng-if="vm.showIDE"></div>
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI <span class="mode-toggle" ng-click="vm.toggleChatMode()"

@@ -106,6 +106,8 @@ public class FileEditController : ControllerBase
 
         var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var projectRoot = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
+        var projectRootPrefix = projectRoot.EndsWith(Path.DirectorySeparatorChar.ToString())
+            ? projectRoot : projectRoot + Path.DirectorySeparatorChar;
 
         try
         {
@@ -117,7 +119,8 @@ public class FileEditController : ControllerBase
                 var searchRoot = string.IsNullOrWhiteSpace(path) ? projectRoot : Path.GetFullPath(Path.Combine(projectRoot, path.Trim()));
                 
                 // Validate that the search root is within the project root
-                if (!searchRoot.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(searchRoot, projectRoot, StringComparison.OrdinalIgnoreCase) &&
+                    !searchRoot.StartsWith(projectRootPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     return BadRequest("Path outside project root is not allowed.");
                 }
@@ -146,11 +149,12 @@ public class FileEditController : ControllerBase
             }
 
             // Normal directory listing when no search term
-            var relativePath = (path ?? "").Trim();
+            var relativePath = (path ?? "").Trim().TrimStart('/', '\\');
             var targetFull = Path.GetFullPath(Path.Combine(projectRoot, relativePath));
 
             // Ensure the target path is within the project root
-            if (!targetFull.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(targetFull, projectRoot, StringComparison.OrdinalIgnoreCase) &&
+                !targetFull.StartsWith(projectRootPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 return BadRequest("Path outside project root is not allowed.");
             }
@@ -166,16 +170,10 @@ public class FileEditController : ControllerBase
                 });
             }
 
-            // If the path is a file but doesn't exist, return not found
-            if (System.IO.File.Exists(targetFull))
-            {
-                return NotFound("File not found.");
-            }
-
-            // If the path is not a directory, return not found
+            // If the path doesn't exist as a file or directory, return not found
             if (!Directory.Exists(targetFull))
             {
-                return NotFound("Directory not found.");
+                return NotFound("Path not found.");
             }
 
             var dirs = Directory.GetDirectories(targetFull).Select(d => new

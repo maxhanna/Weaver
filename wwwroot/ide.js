@@ -12,6 +12,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         syncing: false,
         filePickerPath: '',
         filePickerEntries: [],
+        filePickerError: '',
         searchFilter: '',
         lastSavedContent: null,
         pendingFileListing: null,
@@ -35,30 +36,29 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       };
 
       vm.loadFilePickerEntries = function() {
-        var params = { project: vm.selectedProject };
-        if (vm.ide.searchFilter && vm.ide.searchFilter.trim()) {
-          params.search = vm.ide.searchFilter.trim();
-          if (vm.ide.filePickerPath) {
-            params.path = vm.ide.filePickerPath;
-          }
-        } else if (vm.ide.filePickerPath) {
+        var params = { project: vm.selectedProject || '' };
+        if (vm.ide.filePickerPath) {
           params.path = vm.ide.filePickerPath;
         }
+        console.log('loadFilePickerEntries', params);
         $http.get('/api/editor/list', { params: params }).then(function(resp) {
+          console.log('loadFilePickerEntries response', resp.data);
           vm.ide.filePickerEntries = (resp.data && resp.data.entries) || [];
-        }, function() {
-          vm.ide.filePickerEntries = [];
+          vm.ide.filePickerError = '';
+        }, function(err) {
+          console.log('loadFilePickerEntries error', err);
+          vm.ide.filePickerError = (err.data && typeof err.data === 'string' ? err.data : (err.statusText || 'Failed to load files'));
         });
       };
 
-      vm.pickerEnterDir = function(path) {
+      vm.idePickerEnterDir = function(path) {
         console.log(path);
         vm.ide.filePickerPath = path;
         vm.ide.searchFilter = '';
         vm.loadFilePickerEntries();
       };
 
-      vm.pickerUpDir = function() {
+      vm.idePickerUpDir = function() {
         if (!vm.ide.filePickerPath) return;
         var segs = vm.ide.filePickerPath.split('/').filter(function(s) { return s && s.length; });
         segs.pop();
