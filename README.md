@@ -1,4 +1,4 @@
-﻿# Weaver Backend
+﻿# Weaver
 
 Weaver is an advanced agentic backend system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It serves as a powerful foundation for building AI-powered workflows that can execute complex tasks autonomously.
 
