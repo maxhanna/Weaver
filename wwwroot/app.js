@@ -492,7 +492,9 @@
     vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };  
 
     vm.closeOptionsOnBlur = function (event) { 
-      vm.showProjectOptions = false;
+      $timeout(function () {
+        vm.showProjectOptions = false;
+      }, 100);
     };
 
     vm.changeProject = function () {
