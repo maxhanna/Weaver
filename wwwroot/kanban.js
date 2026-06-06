@@ -507,6 +507,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.moveCardToDoing = function (cardId) {
+        if (!vm.state.selfImproving) { vm.state.selfImproving = []; }
         var idx = vm.state.todo.findIndex(function (c) { return c.id === cardId; });
         if (idx === -1) {
           idx = vm.state.selfImproving.findIndex(function (c) { return c.id === cardId; });
