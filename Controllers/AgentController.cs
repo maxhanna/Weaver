@@ -215,15 +215,7 @@ public class AgentController : ControllerBase
             if (ffE < ffS)
                 return (null, null, false, null, false, "Response truncated — FULL_FILE not closed. Use smaller edit.");
             var body = raw[(ffS + D_FULL.Length)..ffE];
-            if (body.StartsWith("```", StringComparison.Ordinal))
-            {
-                var fenceEnd = body.IndexOf('\n');
-                if (fenceEnd > 0)
-                    body = body[(fenceEnd + 1)..];
-                if (body.EndsWith("```", StringComparison.Ordinal))
-                    body = body[..^3];
-            }
-            body = body.TrimStart('\r', '\n');
+            body = StripFullFileFence(body);
             return (null, null, true, body, false, null);
         }
 
@@ -2078,8 +2070,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             "Output ONLY raw file content — no markdown, no code fences, no explanation.",
             contentPrompt, ct, _infiniteTimeout);
 
-        var cleaned = content?.Trim() ?? "";
-        if (cleaned.StartsWith("```")) { var fn = cleaned.IndexOf('\n'); if (fn > 0) cleaned = cleaned[(fn + 1)..]; if (cleaned.EndsWith("```")) cleaned = cleaned[..^3].TrimEnd(); }
+        var cleaned = StripFullFileFence(content ?? "");
         if (string.IsNullOrWhiteSpace(cleaned)) { await EmitLog(emitSse, "warn", $"Empty content for {targetRelPath}", ct: ct); return (results, 0); }
 
         var parentDir = Path.GetDirectoryName(fullPath);
@@ -2913,6 +2904,26 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
         var hint = BuildExactMatchHint(content, oldString);
         return (false, content, "oldString not found verbatim in file", hint);
+    }
+
+    private static string StripFullFileFence(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var cleaned = value.Replace("\r\n", "\n");
+        if (cleaned.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstNewline = cleaned.IndexOf('\n');
+            if (firstNewline >= 0)
+                cleaned = cleaned[(firstNewline + 1)..];
+            else
+                return string.Empty;
+        }
+
+        if (cleaned.EndsWith("```", StringComparison.Ordinal))
+            cleaned = cleaned[..^3];
+
+        return cleaned.TrimStart('\n').TrimEnd('\n');
     }
 
     private static string? BuildExactMatchHint(string content, string oldString)
