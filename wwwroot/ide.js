@@ -276,6 +276,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.searchFilter = '';
         vm.ide.sharedEditorActive = false;
         vm.ide.sharedFiles = [];
+        vm.showIDE = false;
       };
 
       // ===== Shared editing via BugHosted =====
