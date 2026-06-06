@@ -1622,7 +1622,7 @@
           if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
             return s.planItemIndex === item.index;
           }
-          return s.path && item.file &&
+          return (s.type === 'edit' || s.type === 'rename') && s.path && item.file &&
             s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
         });
         if (doneSteps.length > 0) item.done = true;
