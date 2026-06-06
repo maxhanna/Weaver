@@ -1856,11 +1856,8 @@
                     case 'plan':
                       if (parsed && parsed.items && parsed.items.length) {
                         var isResumed = parsed.resumed === true;
-                        var resumeCard = isResumed ? findCardById(vm.activeCardId) : null;
-                        var resumeItems = resumeCard && resumeCard._plan ? resumeCard._plan.items : null;
                         vm.planItems = parsed.items.map(function (item, i) {
-                          var existingItem = resumeItems ? resumeItems.find(function (pi) { return pi.index === i; }) : null;
-                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: existingItem ? existingItem.done : false };
+                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false };
                         });
                         if (parsed.summary) {
                           pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });

@@ -332,6 +332,18 @@ public class AgentController : ControllerBase
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+
+            // Verify replacement: the new string should be present in the written file
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                !newContent.Contains(newStr, StringComparison.Ordinal))
+            {
+                var verr = "Replacement produced mismatched content — oldString matched wrong location";
+                await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
+                history.Add((oldStr!, newStr, verr));
+                if (attempt < 2) continue;
+                goto RecordFailure;
+            }
+
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
 
             var result = new Dictionary<string, object?>();
@@ -903,7 +915,7 @@ public class AgentController : ControllerBase
 
             if (!hasDone)
             {
-                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct);
+                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
                 complete = ok;
                 if (!ok)
                 {
@@ -924,7 +936,7 @@ public class AgentController : ControllerBase
                         if (emitSse)
                             await SendSse(Response, "plan",
                                 new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
-                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct);
+                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
                         complete = ok2;
                     }
                 }
@@ -2554,7 +2566,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     }
 
     private async Task<(bool isComplete, string reason)> AssessCompletion(
-        string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct)
+        string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
+        AgentPlan? plan = null)
     {
         var editSteps = executedSteps.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit").ToList();
@@ -2569,6 +2582,15 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
         var sb = new StringBuilder();
         sb.AppendLine("## Task"); sb.AppendLine(prompt); sb.AppendLine();
+
+        if (plan?.Plan?.Count > 0)
+        {
+            sb.AppendLine("## Planned steps");
+            foreach (var step in plan.Plan)
+                sb.AppendLine($"- {step.File}: {step.Change}");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Edit results");
         foreach (var s in editSteps.Take(10))
         {
@@ -2699,6 +2721,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         Dictionary<string, object?> result, string action, string path,
         string? oldStr, string? newStr, string writtenContent)
     {
+        result["type"] = "edit";
         result["status"] = "done";
         result["editAction"] = action;
         result["path"] = path;
