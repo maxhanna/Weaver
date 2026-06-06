@@ -165,23 +165,36 @@ public class AgentController : ControllerBase
 
         if (history?.Count > 0)
         {
+            var hadTruncation = history.Any(h => h.error.Contains("truncated", StringComparison.OrdinalIgnoreCase));
             sb.AppendLine();
             sb.AppendLine($"⚠ PREVIOUS {history.Count} ATTEMPT(S) FAILED. Learn from each failure:");
             for (var i = 0; i < history.Count; i++)
             {
                 var h = history[i];
                 sb.AppendLine($"\nAttempt {i + 1} — Error: {h.error}");
-                sb.AppendLine($"  Bad oldString (first 300 chars): {h.old[..Math.Min(300, h.old.Length)]}");
+                if (!string.IsNullOrWhiteSpace(h.old))
+                    sb.AppendLine($"  Bad oldString (first 300 chars): {h.old[..Math.Min(300, h.old.Length)]}");
             }
             sb.AppendLine();
-            sb.AppendLine("The oldString above was NOT found verbatim. Find the EXACT text from the file.");
-            sb.AppendLine("If the change is large, use <<<FULL_FILE>>> instead.");
+            if (hadTruncation)
+            {
+                sb.AppendLine("Previous FULL_FILE response was too long and got truncated.");
+                sb.AppendLine("Use <<<OLD>>> / <<<NEW>>> targeted edits instead — they are smaller and always fit.");
+                sb.AppendLine("If multiple changes are needed, make one small edit at a time.");
+            }
+            else
+            {
+                sb.AppendLine("The oldString above was NOT found verbatim. Find the EXACT text from the file.");
+                sb.AppendLine("If the change is large, use <<<FULL_FILE>>> instead.");
+            }
         }
 
         sb.AppendLine();
         sb.AppendLine("Output the edit now:");
 
-        var (raw, _, _) = await CallLlmRaw(EditResolveSystemPrompt, sb.ToString(), ct, _infiniteTimeout);
+        if (emitSse)
+            await SendSse(Response, "edit-resolve", new { }, ct);
+        var (raw, _, _) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 8192);
 
         if (string.IsNullOrWhiteSpace(raw))
             return (null, null, false, null, false, "LLM returned empty response");
@@ -1388,7 +1401,45 @@ public class AgentController : ControllerBase
                 }
 
                 // Primary path: resolve the edit via focused LLM call
-                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx);
+                var editStepFailed = false;
+                for (var editRetry = 0; editRetry < 3; editRetry++)
+                {
+                    var prevCount = allResults.Count;
+                    stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx);
+
+                    // Check if the step failed (last result is an error)
+                    if (allResults.Count > prevCount &&
+                        allResults[^1] is Dictionary<string, object?> lastDict &&
+                        lastDict.TryGetValue("status", out var st) && st?.ToString() == "error")
+                    {
+                        // Remove the error entry and step index to retry cleanly
+                        allResults.RemoveAt(allResults.Count - 1);
+                        stepIndex--;
+                        await EmitLog(emitSse, "warn",
+                            $"Step failed for {planFile} — retrying ({editRetry + 1}/3) with fresh resolve…", ct: ct);
+                        editStepFailed = true;
+                        continue;
+                    }
+                    editStepFailed = false;
+                    break;
+                }
+                if (editStepFailed)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"✗ Step permanently failed for {planFile} — all retries exhausted", ct: ct);
+                    var fail = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "edit",
+                        ["status"] = "error",
+                        ["path"] = planFile,
+                        ["error"] = "All retries exhausted",
+                        ["planItemIndex"] = itemIdx
+                    };
+                    if (emitSse) await SendSse(Response, "step", fail, ct);
+                    allResults.Add(fail);
+                    stepIndex++;
+                }
                 continue;
             }
 
@@ -2398,7 +2449,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             if (emitSse)
             {
                 var label = step.Description ?? step.Path ?? step.Command ?? step.Query ?? step.Pattern ?? "";
-                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", ct: ct);
+                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", new {step, result}, ct: ct);
                 await SendSse(Response, "step", result, ct);
             }
             try

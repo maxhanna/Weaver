@@ -97,6 +97,7 @@
     vm.lastStreamingSummary = '';
     vm.lastStreamingThinking = '';
     vm.streamingStepsCopy = [];
+    vm.resolveStreams = [];
     vm.lastStreamingStepsUpdate = 0;
     vm.planItems = [];
 
@@ -1713,6 +1714,7 @@
         vm.activeStepIndex = null;
         vm.lastPhaseLogged = '';
         _lastLogKey = '';
+        vm.resolveStreams = [];
         vm.streamingActive = true;
         pauseTerminalPolling();
 
@@ -1839,6 +1841,8 @@
                     case 'token':
                       if (parsed && parsed.token) {
                         vm.streamingTokenBuffer += parsed.token;
+                        var buf = vm.resolveStreams;
+                        if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
                       }
                       break;
                     case 'thinking':
@@ -1868,6 +1872,11 @@
                         }
                       } else if (parsed && parsed.score !== undefined) {
                         pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);
+                      }
+                      break;
+                    case 'edit-resolve':
+                      if (vm.resolveStreams) {
+                        vm.resolveStreams.push({ content: '' });
                       }
                       break;
                     case 'show':
