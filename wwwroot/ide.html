@@ -6,7 +6,9 @@
       <button class="ide-panel-btn" ng-click="vm.openFileBrowser()" title="Open File">📂</button>
       <button class="ide-panel-btn" ng-click="vm.saveFile()" ng-disabled="!vm.ide.dirty" title="Save File">💾</button>
       <button class="ide-panel-btn" ng-click="vm.newFile()" title="New File">➕</button>
-      <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()" ng-if="vm.ide.conflictFiles && Object.keys(vm.ide.conflictFiles).length" title="Resolve all conflicts">⚠ Resolve</button>
+      <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()"
+        ng-if="vm.ide.conflictFiles && Object.keys(vm.ide.conflictFiles).length" title="Resolve all conflicts">⚠
+        Resolve</button>
       <button class="ide-panel-btn" ng-click="vm.closeIDE()" title="Close IDE">✕</button>
     </div>
   </div>
@@ -15,24 +17,28 @@
       <div class="ide-file-tree">
         <div class="ide-file-tree-header">
           <span>Files</span>
-          <span style="font-size:10px;color:#888;">{{vm.ide.filePickerPath || ''}} [{{vm.ide.filePickerEntries.length}}]</span>
+          <span style="font-size:10px;color:#888;">{{vm.ide.filePickerPath || ''}}
+            [{{vm.ide.filePickerEntries.length}}]</span>
           <button class="ide-panel-btn small" ng-click="vm.toggleSidebar()">◀</button>
         </div>
         <div class="ide-file-filter">
-          <input type="text" ng-model="vm.ide.searchFilter" placeholder="Filter files..." class="ide-filter-input" ng-change="vm.onSearchChange()" />
+          <input type="text" ng-model="vm.ide.searchFilter" placeholder="Filter files..." class="ide-filter-input"
+            ng-change="vm.onSearchChange()" />
         </div>
         <div class="ide-file-tree-items">
-          <div ng-if="vm.ide.filePickerError" class="ide-file-error" style="padding:8px; color:#e06c75; font-size:11px; text-align:center;">{{vm.ide.filePickerError}}</div>
-           <div ng-repeat="e in vm.ide.filePickerEntries"
-               class="ide-file-item"
-               ng-class="{'ide-file-item--dir': e.isDirectory, 'ide-file-item--selected': vm.ide.currentFile === e.path}">
-             <div ng-if="e.isDirectory" ng-click="vm.idePickerEnterDir(e.path)" class="ide-file-item-label">
+          <div ng-if="vm.ide.filePickerError" class="ide-file-error"
+            style="padding:8px; color:#e06c75; font-size:11px; text-align:center;">{{vm.ide.filePickerError}}</div>
+          <div ng-repeat="e in vm.ide.filePickerEntries" class="ide-file-item"
+            ng-class="{'ide-file-item--dir': e.isDirectory, 'ide-file-item--selected': vm.ide.currentFile === e.path}">
+            <div ng-if="e.isDirectory" ng-click="vm.idePickerEnterDir(e.path)" class="ide-file-item-label">
               <span>📁</span><span>{{e.name}}/</span>
             </div>
             <div ng-if="!e.isDirectory" ng-click="vm.openFile(e.path)" class="ide-file-item-label">
               <span>📄</span><span>{{e.name}}</span>
-              <span class="ide-remote-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).remoteEditing" title="Remote user also has this file open">👥</span>
-              <span class="ide-conflict-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).conflict" title="Edit conflict">⚠</span>
+              <span class="ide-remote-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).remoteEditing"
+                title="Remote user also has this file open">👥</span>
+              <span class="ide-conflict-indicator" ng-if="vm.findTab(e.path) && vm.findTab(e.path).conflict"
+                title="Edit conflict">⚠</span>
             </div>
           </div>
         </div>
@@ -45,10 +51,9 @@
     <div class="ide-editor-container" ng-class="{'ide-editor-container--full': !vm.ide.showSidebar}">
       <div class="ide-editor-header" ng-if="vm.ide.openTabs.length > 0">
         <div class="ide-tabs">
-          <div ng-repeat="tab in vm.ide.openTabs track by tab.path"
-               class="ide-tab"
-               ng-class="{'ide-tab--active': tab.path === vm.ide.currentFile, 'ide-tab--dirty': tab.dirty, 'ide-tab--shared': tab.remoteEditing, 'ide-tab--conflict': tab.conflict}"
-               ng-click="vm.switchTab(tab.path)">
+          <div ng-repeat="tab in vm.ide.openTabs track by tab.path" class="ide-tab"
+            ng-class="{'ide-tab--active': tab.path === vm.ide.currentFile, 'ide-tab--dirty': tab.dirty, 'ide-tab--shared': tab.remoteEditing, 'ide-tab--conflict': tab.conflict}"
+            ng-click="vm.switchTab(tab.path)">
             <span class="ide-remote-eye" ng-if="tab.remoteEditing" title="Remote user is viewing this file">👁</span>
             <span class="ide-tab-name">{{tab.displayName}}</span>
             <span class="ide-tab-close" ng-click="vm.closeTab(tab.path, $event)" title="Close">✕</span>
@@ -64,23 +69,22 @@
           <span>Remote user edited this file while you had unsaved changes.</span>
           <button ng-click="vm.resolveConflict(vm.ide.currentFile)" class="ide-panel-btn">Resolve</button>
         </div>
-        <pre class="ide-textarea"><code contenteditable="true"
-                  ng-model="vm.ide.currentTab.content"
-                  ng-change="vm.onContentChange()"
-                  ng-model-options="{debounce: 200}"
-                  ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"
-                  placeholder="Editing {{vm.ide.currentFile}}..."></code></pre>
+        <textarea class="ide-textarea" ng-model="vm.ide.currentTab.content" ng-change="vm.onContentChange()"
+          ng-model-options="{debounce: 200}" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"
+          placeholder="Editing {{vm.ide.currentFile}}..."></textarea>
         <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
           <span>Lines: {{vm.ide.currentTab.lineCount}}</span>
           <span class="ide-dirty-indicator" ng-if="vm.ide.dirty">● unsaved</span>
           <span class="ide-syncing-indicator" ng-if="vm.ide.syncing">⟳ syncing...</span>
-          <span class="ide-shared-editing-indicator" ng-if="vm.ide.currentTab.remoteEditing" title="Remote user has this file open and is editing it">👥 shared editing</span>
+          <span class="ide-shared-editing-indicator" ng-if="vm.ide.currentTab.remoteEditing"
+            title="Remote user has this file open and is editing it">👥 shared editing</span>
           <span class="ide-conflict-badge" ng-if="vm.ide.currentTab.conflict">⚠ conflict</span>
         </div>
       </div>
       <div class="ide-placeholder" ng-if="vm.ide.openTabs.length === 0">
         <p>Open a file from the sidebar to start editing</p>
-        <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active — remote user can browse and edit files</p>
+        <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active —
+          remote user can browse and edit files</p>
       </div>
     </div>
   </div>
