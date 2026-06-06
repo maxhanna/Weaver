@@ -52,7 +52,7 @@ public class AgentController : ControllerBase
         "<<<END_NEW>>>\n\n" +
         "FORMAT B — full file replacement (use for: new files, full rewrites, ASCII art, logos, >15-line changes):\n" +
         "<<<FULL_FILE>>>\n" +
-        "complete file content\n" +
+        "complete file content exactly as it should exist on disk\n" +
         "<<<END_FULL_FILE>>>\n\n" +
         "FORMAT C — no change needed:\n" +
         "<<<ALREADY_DONE>>>\n\n" +
@@ -61,7 +61,9 @@ public class AgentController : ControllerBase
         "- OLD must appear exactly ONCE in the file\n" +
         "- OLD must be MINIMAL — only the lines that actually change\n" +
         "- For insertions: include one adjacent existing line as anchor; repeat it unchanged in NEW\n" +
-        "- Never put ... or placeholders in OLD or NEW";
+        "- Never put ... or placeholders in OLD or NEW\n" +
+        "- For FULL_FILE output, preserve all indentation, tabs, spaces, and blank lines exactly; do not reflow, dedent, or normalize whitespace\n" +
+        "- Do not wrap FULL_FILE content in markdown fences";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -212,7 +214,16 @@ public class AgentController : ControllerBase
         {
             if (ffE < ffS)
                 return (null, null, false, null, false, "Response truncated — FULL_FILE not closed. Use smaller edit.");
-            var body = raw[(ffS + D_FULL.Length)..ffE].TrimStart('\r', '\n');
+            var body = raw[(ffS + D_FULL.Length)..ffE];
+            if (body.StartsWith("```", StringComparison.Ordinal))
+            {
+                var fenceEnd = body.IndexOf('\n');
+                if (fenceEnd > 0)
+                    body = body[(fenceEnd + 1)..];
+                if (body.EndsWith("```", StringComparison.Ordinal))
+                    body = body[..^3];
+            }
+            body = body.TrimStart('\r', '\n');
             return (null, null, true, body, false, null);
         }
 
