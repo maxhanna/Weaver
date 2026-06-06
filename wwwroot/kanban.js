@@ -291,6 +291,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
       vm.clearPlan = function (card) {
         delete card._plan;
+        // Also clear persisted plan data in analysis
+        if (card.agentAnalysis) {
+          delete card.agentAnalysis.planItems;
+        }
+        if (card.agentResult) {
+          delete card.agentResult.planItems;
+        }
+        vm.planItems = [];
         vm.saveCards();
       };
 

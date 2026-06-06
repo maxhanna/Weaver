@@ -2221,6 +2221,20 @@ h3 .small.ghost:hover {
 	margin-left: 4px;
 }
 
+.card-plan {
+	margin-bottom: 6px;
+	padding: 6px 8px;
+    background: var(--glass);
+	border-radius: 6px;
+	border: 1px solid var(--border, #eee);
+}
+
+.plan-header {
+	font-size: 11px;
+	font-weight: 600;
+	margin-bottom: 2px;
+}
+
 .plan-items-list {
 	margin-top: 8px;
 	border-top: 1px solid var(--border, #eee);

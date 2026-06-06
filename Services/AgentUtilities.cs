@@ -1344,6 +1344,11 @@ public static class AgentUtilities
             if (m.Success) trimmed = m.Groups[1].Value.Trim();
         }
 
+        // Normalize ### STEP N ### to <<<STEP N>>> so both formats use the same downstream regex
+        trimmed = Regex.Replace(trimmed, @"###\s*STEP\s*(\d+)\s*###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
+        // Also normalize ###STEPN### (no spaces)
+        trimmed = Regex.Replace(trimmed, @"###STEP(\d+)###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
+
         var thinking = ExtractDelimitedSection(trimmed, "THINKING", "SUMMARY|SCORE|STEP\\s*\\d+|DONE|$");
         var summary = ExtractDelimitedSection(trimmed, "SUMMARY", "THINKING|SCORE|STEP\\s*\\d+|DONE|$");
         var scoreMatch = Regex.Match(trimmed, @"<<<SCORE>>>\s*(\d+)");

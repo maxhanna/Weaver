@@ -1481,7 +1481,7 @@
     // === Agent helpers ===
     function normalizeStepStatus(status) {
       if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
-      if (status === 'running' || status === 'error' || status === 'pending') return status;
+      if (status === 'running' || status === 'error' || status === 'pending' || status === 'skipped') return status;
       return status || 'pending';
     }
 
@@ -1616,8 +1616,13 @@
       if (!vm.planItems || !vm.planItems.length) return;
       vm.planItems.forEach(function (item) {
         if (item.done) return;
+        // Match by planItemIndex from SSE step events (most precise)
         var doneSteps = vm.streamingSteps.filter(function (s) {
-          return s.status === 'done' && s.path && item.file &&
+          if (s.status !== 'done') return false;
+          if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
+            return s.planItemIndex === item.index;
+          }
+          return s.path && item.file &&
             s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
         });
         if (doneSteps.length > 0) item.done = true;
@@ -1711,26 +1716,13 @@
         vm.streamingActive = true;
         pauseTerminalPolling();
 
-        var prompt = card.text;
-        if (card._plan && card._plan.items && card._plan.items.length) {
-          var pendingItems = card._plan.items.filter(function (i) { return !i.done; });
-          if (pendingItems.length > 0 && pendingItems.length < card._plan.items.length) {
-            var resumeCtx = '[Continuing from previous plan:' + card._plan.items.map(function (i) {
-              return '\n  ' + (i.done ? '✅' : '⬜') + ' Step ' + (i.index + 1) + ': ' + (i.file || '') + ' — ' + (i.change || '');
-            }).join('') + '\nResume from the first incomplete step.]\n\n';
-            prompt = resumeCtx + prompt;
-            pushAgentLog('info', 'Resuming from plan — ' + pendingItems.length + ' of ' + card._plan.items.length + ' steps remaining');
-          }
-          delete card._plan;
-        }
-
         pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
         vm.activeCardText = card.text;
         card._lastRunText = card.text;
 
         var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
         var payload = {
-          prompt: prompt,
+          prompt: card.text,
           project: proj,
           files: files,
           maxIterations: 5,
@@ -1739,6 +1731,21 @@
           selfImproving: card.selfImproving || false,
           isDecomposing: card.isDecomposing || false,
         };
+
+        // Pass existing plan to backend for resumption (skip replan, only run incomplete steps)
+        // Note: card._plan is preserved — the SSE plan event handler will update it
+        if (card._plan && card._plan.items && card._plan.items.length) {
+          var pendingItems = card._plan.items.filter(function (i) { return !i.done; });
+          if (pendingItems.length > 0 && pendingItems.length < card._plan.items.length) {
+            payload.plan = card._plan.items.map(function (i) {
+              return { index: i.index, file: i.file, change: i.change, done: i.done };
+            });
+            payload.completedStepIndices = card._plan.items
+              .filter(function (i) { return i.done; })
+              .map(function (i) { return i.index; });
+            pushAgentLog('info', 'Resuming from plan — ' + pendingItems.length + ' of ' + card._plan.items.length + ' steps remaining');
+          }
+        }
 
         // Move to Doing
         vm.moveCardToDoing(card.id);
@@ -1848,11 +1855,15 @@
                       break;
                     case 'plan':
                       if (parsed && parsed.items && parsed.items.length) {
+                        var isResumed = parsed.resumed === true;
+                        var resumeCard = isResumed ? findCardById(vm.activeCardId) : null;
+                        var resumeItems = resumeCard && resumeCard._plan ? resumeCard._plan.items : null;
                         vm.planItems = parsed.items.map(function (item, i) {
-                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false };
+                          var existingItem = resumeItems ? resumeItems.find(function (pi) { return pi.index === i; }) : null;
+                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: existingItem ? existingItem.done : false };
                         });
                         if (parsed.summary) {
-                          pushAgentLog('info', '📋 Plan: ' + parsed.summary, { itemCount: parsed.items.length, score: parsed.score });
+                          pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
                         }
                         var activeCard = findCardById(vm.activeCardId);
                         if (activeCard) {
@@ -1882,6 +1893,8 @@
                           pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
                         } else if (parsed.status === 'error') {
                           pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
+                        } else if (parsed.skipped) {
+                          pushAgentLog('info', '⏭ ' + parsed.type + ': ' + (parsed.description || parsed.path || '') + ' (already done)');
                         }
                       }
                       break;
@@ -1950,6 +1963,15 @@
                       if (doIdx !== -1) {
                         vm.state.doing[doIdx].agentAnalysis = analysis;
                         vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
+                      }
+
+                      // Card is only done when all plan steps are checked off
+                      if (vm.planItems && vm.planItems.length) {
+                        var allDone = vm.planItems.every(function (pi) { return pi.done; });
+                        if (!allDone) {
+                          incomplete = true;
+                          pushAgentLog('warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing');
+                        }
                       }
 
                       function finishCard() {

@@ -227,7 +227,7 @@ public class AgentController : ControllerBase
     /// </summary>
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step, string projectRoot, bool emitSse, CancellationToken ct,
-        List<object> allResults, int stepIndex)
+        List<object> allResults, int stepIndex, int planItemIndex = -1)
     {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
@@ -242,7 +242,8 @@ public class AgentController : ControllerBase
                 type = "edit",
                 status = "running",
                 path = relPath,
-                description = step.Change
+                description = step.Change,
+                planItemIndex
             }, ct);
 
         var history = new List<(string old, string @new, string error)>();
@@ -251,7 +252,7 @@ public class AgentController : ControllerBase
         {
             if (attempt > 0)
                 await EmitLog(emitSse, "warn",
-                    $"Resolve retry {attempt + 1}/3 for {relPath}", ct: ct);
+                    $"Resolve retry {attempt + 1}/3 for {relPath}", new { step, projectRoot }, ct: ct);
 
             var (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
                 await ResolveEditForStep(step, projectRoot, emitSse, ct, history);
@@ -259,7 +260,7 @@ public class AgentController : ControllerBase
             if (resolveError != null)
             {
                 await EmitLog(emitSse, "warn",
-                    $"Resolve attempt {attempt + 1}/3: {resolveError}", ct: ct);
+                    $"Resolve attempt {attempt + 1}/3: {resolveError}", new {resolveError, fullContent}, ct: ct);
                 history.Add((step.OldString ?? "", step.NewString ?? "", resolveError));
                 if (attempt < 2) continue;
                 goto RecordFailure;
@@ -274,7 +275,8 @@ public class AgentController : ControllerBase
                     ["type"] = "edit",
                     ["status"] = "skipped",
                     ["path"] = relPath,
-                    ["reason"] = "already done"
+                    ["reason"] = "already done",
+                    ["planItemIndex"] = planItemIndex
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
@@ -293,6 +295,7 @@ public class AgentController : ControllerBase
                 var r = new Dictionary<string, object?>();
                 PopulateEditResult(r, "modified", relPath, null, fullContent, "");
                 r["index"] = stepIndex;
+                r["planItemIndex"] = planItemIndex;
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
                 return stepIndex + 1;
@@ -334,6 +337,7 @@ public class AgentController : ControllerBase
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
             result["index"] = stepIndex;
+            result["planItemIndex"] = planItemIndex;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
             return stepIndex + 1;
@@ -349,7 +353,8 @@ public class AgentController : ControllerBase
             ["type"] = "edit",
             ["status"] = "error",
             ["path"] = relPath,
-            ["error"] = lastErr
+            ["error"] = lastErr,
+            ["planItemIndex"] = planItemIndex
         };
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
@@ -365,7 +370,8 @@ public class AgentController : ControllerBase
     /// The actual edit (oldString/newString) is resolved per-step during execution.
     /// </summary>
     private static string BuildPlanningPrompt() =>
-        "You are a software-engineering agent. Produce a concise plan of code changes.\n" +
+        "You are a software-engineering agent. " +
+        "Produce a concise plan of code changes with one thinking section and one summary section.\n" +
         "Output ONLY the delimiter format below — no JSON, no markdown, no extra text.\n\n" +
         "### STEP TYPES (the FILE: field) ###\n" +
         "  relative/path.ext  — Edit an existing file (must be in discovery context)\n" +
@@ -438,10 +444,13 @@ public class AgentController : ControllerBase
 
         // Try delimiter format first, fall back to JSON
         AgentPlan? plan = null;
-        if (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase))
+        if (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
+            raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase))
             plan = AgentUtilities.ParseDelimitedPlan(raw);
         if (plan == null)
             plan = ParsePlan(raw);
+        if (plan == null && raw.Contains("STEP", StringComparison.OrdinalIgnoreCase))
+            plan = AgentUtilities.ParseDelimitedPlan(raw);
 
         if (plan == null)
         {
@@ -839,7 +848,8 @@ public class AgentController : ControllerBase
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
-        string? steeringContext = null, bool skipQualityCheck = false)
+        string? steeringContext = null, bool skipQualityCheck = false,
+        AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null)
     {
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
@@ -849,6 +859,25 @@ public class AgentController : ControllerBase
         {
             var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct);
             return (steps, fastPlan, true);
+        }
+
+        // ── Resume from existing plan (skip replanning) ─────────────────────
+        if (existingPlan != null && existingPlan.Plan.Count > 0)
+        {
+            var doneCount = completedStepIndices?.Count ?? 0;
+            await EmitLog(emitSse, "info",
+                $"Using existing plan — {existingPlan.Plan.Count} step(s), {doneCount} already done", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "plan",
+                    new { thinking = existingPlan.Thinking, summary = existingPlan.Summary,
+                          items = existingPlan.Plan, resumed = true }, ct);
+
+            var resumeSteps = new List<object>();
+            await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
+                steeringContext: steeringContext, attachedFiles: attachedFiles,
+                completedStepIndices: completedStepIndices);
+
+            return (resumeSteps, existingPlan, resumeSteps.Count > 0);
         }
 
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
@@ -891,7 +920,10 @@ public class AgentController : ControllerBase
                     if (reSteps.Count > 0)
                     {
                         allSteps.AddRange(reSteps);
-                        plan = rePlan ?? plan;
+                        plan = MergePlans(plan, rePlan);
+                        if (emitSse)
+                            await SendSse(Response, "plan",
+                                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
                         var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct);
                         complete = ok2;
                     }
@@ -952,14 +984,15 @@ public class AgentController : ControllerBase
     private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("Previous plan did not fully complete. Fix the issues and produce a better plan.");
+        sb.AppendLine("Previous plan did not fully complete. Add NEW plan items or suggest modifications to existing incomplete ones.");
+        sb.AppendLine("IMPORTANT: NEVER remove existing plan items. Only expand the plan.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
         sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine();
         sb.AppendLine("## What went wrong");
         foreach (var h in history) sb.AppendLine(h);
         sb.AppendLine();
-        sb.AppendLine("Fix the issues. Try a different approach if needed.");
+        sb.AppendLine("Add new steps to fix the issues. Try a different approach if needed, but keep existing steps.");
         return sb.ToString();
     }
 
@@ -1039,9 +1072,10 @@ public class AgentController : ControllerBase
                 $"Phase 2.5 — EXPLORE: {exploreSteps.Count} target(s)…", ct: ct);
             discoveryContext = await ExplorationPipeline(
                 exploreSteps, discoveryContext, projectRoot, emitSse, ct);
-            plan = await AnalyzePromptAndPlanCodeChanges(
+            var replan = await AnalyzePromptAndPlanCodeChanges(
                 prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-            if (plan == null) throw new InvalidOperationException("Re-plan after exploration returned empty.");
+            if (replan == null) throw new InvalidOperationException("Re-plan after exploration returned empty.");
+            plan = MergePlans(plan, replan);
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
@@ -1158,19 +1192,40 @@ public class AgentController : ControllerBase
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
-        string? steeringContext = null, List<string>? attachedFiles = null)
+        string? steeringContext = null, List<string>? attachedFiles = null,
+        HashSet<int>? completedStepIndices = null)
     {
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
         var webCtx = new StringBuilder();
         var checkpointCount = 0;
         const int MaxCheckpoints = 3;
+        completedStepIndices ??= new HashSet<int>();
 
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
             ct.ThrowIfCancellationRequested();
 
             var item = planItems[itemIdx];
+
+            // Skip steps already completed in a previous run
+            if (completedStepIndices.Contains(itemIdx))
+            {
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "plan",
+                        description = item.Change,
+                        path = item.File,
+                        status = "done",
+                        skipped = true,
+                        planItemIndex = itemIdx,
+                        message = "Already completed in a previous run"
+                    }, ct);
+                stepIndex++;
+                continue;
+            }
             var planFile = item.File;
             var changeDesc = item.Change;
 
@@ -1196,8 +1251,8 @@ public class AgentController : ControllerBase
                     var newSteps = await CheckpointReplan(prompt, discoveryContext, remaining, allResults, projectRoot, emitSse, ct, steeringContext);
                     if (newSteps?.Count > 0)
                     {
-                        planItems = planItems.Take(itemIdx + 1).Concat(newSteps).ToList();
-                        if (emitSse) await SendSse(Response, "plan", new { summary = $"Phase {checkpointCount + 1}", items = newSteps }, ct);
+                        planItems = MergePlanSteps(planItems, newSteps);
+                        if (emitSse) await SendSse(Response, "plan", new { summary = $"Phase {checkpointCount + 1}", items = planItems }, ct);
                     }
                 }
                 continue;
@@ -1310,6 +1365,7 @@ public class AgentController : ControllerBase
                         var er = new Dictionary<string, object?>();
                         PopulateEditResult(er, "modified", planFile.Replace('\\', '/'), item.OldString, item.NewString ?? "", "");
                         er["index"] = stepIndex;
+                        er["planItemIndex"] = itemIdx;
                         if (emitSse) await SendSse(Response, "step", er, ct);
                         allResults.Add(er); stepIndex++;
                         continue;
@@ -1320,7 +1376,7 @@ public class AgentController : ControllerBase
                 }
 
                 // Primary path: resolve the edit via focused LLM call
-                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex);
+                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx);
                 continue;
             }
 
@@ -1456,8 +1512,7 @@ public class AgentController : ControllerBase
                 var rp = await ReplanRemainingSteps(prompt, remaining, uctx, emitSse, ct);
                 if (rp?.Count > 0)
                 {
-                    planItems.RemoveRange(itemIdx + 1, planItems.Count - itemIdx - 1);
-                    planItems.AddRange(rp);
+                    planItems = MergePlanSteps(planItems, rp);
                     discoveryContext = uctx;
                     if (emitSse)
                         await SendSse(Response, "plan", new { summary = "Plan updated after web results", items = planItems }, ct);
@@ -1668,10 +1723,10 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     {
         if (remaining.Count == 0) return null;
         var sb = new StringBuilder();
-        sb.AppendLine("Revise remaining steps given web results. Original task: " + originalPrompt);
+        sb.AppendLine("Revise remaining steps given web results. Keep ALL existing steps and add any new ones needed. Original task: " + originalPrompt);
         foreach (var s in remaining) sb.AppendLine($"  {s.File}: {s.Change}");
         sb.AppendLine(updatedContext);
-        const string sys = "Revise remaining execution steps. Output ONLY JSON: {\"plan\":[{\"file\":\"...\",\"change\":\"...\",\"priority\":1}]}";
+        const string sys = "Revise remaining execution steps. NEVER remove existing steps. Output ONLY JSON: {\"plan\":[{\"file\":\"...\",\"change\":\"...\",\"priority\":1}]}";
         var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout, maxTokens: 2048);
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var cleaned = raw.Trim();
@@ -1976,11 +2031,33 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             await SendSse(Response, "phase", new { phase = "start", projectRoot });
             await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt });
 
+            // Convert existing plan from request if provided
+            AgentPlan? existingPlan = null;
+            HashSet<int>? completedIndices = null;
+            if (req.Plan != null && req.Plan.Count > 0)
+            {
+                existingPlan = new AgentPlan
+                {
+                    Summary = req.SteeringContext ?? "",
+                    Plan = req.Plan.Select(p => new PlanStep
+                    {
+                        File = p.File,
+                        Change = p.Change,
+                        Priority = 1
+                    }).ToList()
+                };
+                completedIndices = req.CompletedStepIndices != null
+                    ? new HashSet<int>(req.CompletedStepIndices)
+                    : new HashSet<int>(req.Plan.Where(p => p.Done).Select(p => p.Index));
+            }
+
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
                 ct: Response.HttpContext.RequestAborted,
                 attachedFiles: req.Files?.Count > 0 ? req.Files : null,
-                steeringContext: req.SteeringContext);
+                steeringContext: req.SteeringContext,
+                existingPlan: existingPlan,
+                completedStepIndices: completedIndices);
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
@@ -2484,7 +2561,11 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         if (editSteps.Count == 0) return (true, "No edit steps — command-only task");
 
         var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
-        if (failed.Count == editSteps.Count) return (false, $"All {failed.Count} edit step(s) failed");
+        if (failed.Count > 0)
+        {
+            var failedPaths = string.Join(", ", failed.Select(f => f.GetValueOrDefault("path")?.ToString() ?? "?").Distinct());
+            return (false, $"{failed.Count} edit step(s) failed: {failedPaths}");
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine("## Task"); sb.AppendLine(prompt); sb.AppendLine();
@@ -2533,6 +2614,33 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         catch { return (failed.Count == 0, "Could not parse assessment"); }
     }
 
+    private static AgentPlan MergePlans(AgentPlan? original, AgentPlan? replan)
+    {
+        if (original == null) return replan ?? new AgentPlan();
+        if (replan == null) return original;
+        var merged = new AgentPlan
+        {
+            Thinking = !string.IsNullOrWhiteSpace(replan.Thinking) ? replan.Thinking : original.Thinking,
+            Summary = !string.IsNullOrWhiteSpace(replan.Summary) ? replan.Summary : original.Summary,
+            Score = replan.Score > 0 ? replan.Score : original.Score,
+            Plan = MergePlanSteps(original.Plan, replan.Plan)
+        };
+        return merged;
+    }
+
+    private static List<PlanStep> MergePlanSteps(IEnumerable<PlanStep> existing, IEnumerable<PlanStep> additions)
+    {
+        var result = new List<PlanStep>(existing);
+        var existingKeys = new HashSet<string>(existing.Select(s => $"{s.File}|||{s.Change}"), StringComparer.OrdinalIgnoreCase);
+        foreach (var step in additions)
+        {
+            var key = $"{step.File}|||{step.Change}";
+            if (existingKeys.Add(key))
+                result.Add(step);
+        }
+        return result;
+    }
+
     private async Task<List<PlanStep>?> CheckpointReplan(
         string originalPrompt, string currentDiscoveryContext, List<PlanStep> remainingSteps,
         List<object> completedResults, string projectRoot, bool emitSse, CancellationToken ct,
@@ -2556,7 +2664,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         }
         if (remainingSteps.Count == 0) return null;
 
-        var remainDesc = new StringBuilder("Intended remaining work:\n");
+        var remainDesc = new StringBuilder("Intended remaining work (KEEP ALL of these — only add new ones):\n");
         foreach (var step in remainingSteps) remainDesc.AppendLine($"- {step.File}: {step.Change}");
         var replanPrompt = $"## Original task\n{originalPrompt}\n\n{remainDesc}" +
             (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n## Steering\n{steeringContext}");
