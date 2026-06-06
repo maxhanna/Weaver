@@ -17,20 +17,31 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       // Start with an immediate default state, then replace with persisted
       // state loaded from the server when available.
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
-      $http.get('/api/boarddata/load').then(function (resp) {
-        try {
-          var data = resp.data;
-          if (typeof data === 'string') {
-            data = JSON.parse(data);
+
+      function loadBoardData() {
+        $http.get('/api/boarddata/load').then(function (resp) {
+          try {
+            var data = resp.data;
+            if (typeof data === 'string') {
+              data = JSON.parse(data);
+            }
+            if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
+              vm.state = data;
+            }
+          } catch (e) {
+            console.warn('Failed to parse boarddata from server, using default state');
           }
-          if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
-            vm.state = data;
-          }
-        } catch (e) {
-          console.warn('Failed to parse boarddata from server, using default state');
+          if ($scope) $scope.$applyAsync();
+        }, function () { /* ignore load errors, keep default state */ });
+      }
+
+      loadBoardData();
+      vm.refreshBoardData = function (detail) {
+        loadBoardData();
+        if (detail && detail.target === 'boarddata') {
+          console.debug('[boarddata] refresh requested', detail);
         }
-        if ($scope) $scope.$applyAsync();
-      }, function () { /* ignore load errors, keep default state */ });
+      };
       _cardsCache = {};
       _cardsVersion = 0;
 

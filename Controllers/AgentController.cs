@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Weaver.Services;
 using Weaver;
@@ -18,6 +19,7 @@ public class AgentController : ControllerBase
     private readonly FileHintsManager _fileHints;
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
+    private readonly BoardDataService _boardData;
     private const int MaxFileContextChars = 24_000;
     private const int MAX_COMMAND_ITERATIONS = 30;
     private bool _lastConnectionCheckResult = true;
@@ -64,10 +66,11 @@ public class AgentController : ControllerBase
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
-        ConfigFileService configFile, EmailService emailService)
+        ConfigFileService configFile, EmailService emailService, BoardDataService boardData)
     {
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
+        _boardData = boardData;
     }
 
     private string ResolveWorkspaceRoot()
@@ -240,7 +243,8 @@ public class AgentController : ControllerBase
     /// </summary>
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step, string projectRoot, bool emitSse, CancellationToken ct,
-        List<object> allResults, int stepIndex, int planItemIndex = -1)
+        List<object> allResults, int stepIndex, int planItemIndex = -1,
+        string? cardId = null)
     {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
@@ -311,6 +315,7 @@ public class AgentController : ControllerBase
                 r["planItemIndex"] = planItemIndex;
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
                 return stepIndex + 1;
             }
 
@@ -365,6 +370,7 @@ public class AgentController : ControllerBase
             result["planItemIndex"] = planItemIndex;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
             return stepIndex + 1;
         }
 
@@ -384,6 +390,61 @@ public class AgentController : ControllerBase
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
         return stepIndex + 1;
+    }
+
+    private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || planItemIndex < 0)
+            return;
+
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    if (cardObj["_plan"] is not JsonObject planObj || planObj["items"] is not JsonArray items)
+                        continue;
+
+                    var target = items.FirstOrDefault(i => i is JsonObject obj && obj["index"]?.GetValue<int>() == planItemIndex);
+                    if (target is JsonObject stepObj)
+                    {
+                        stepObj["done"] = true;
+                        var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                        await _boardData.SaveRawAsync(saved);
+                        if (emitSse)
+                        {
+                            await SendSse(Response, "refresh", new
+                            {
+                                target = "boarddata",
+                                reason = "plan-step-completed",
+                                cardId,
+                                planItemIndex
+                            }, ct);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist boarddata plan progress", new { cardId, planItemIndex, error = ex.Message });
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -874,7 +935,8 @@ public class AgentController : ControllerBase
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
-        AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null)
+        AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
+        string? cardId = null)
     {
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
@@ -882,7 +944,8 @@ public class AgentController : ControllerBase
         var fastPlan = AgentUtilities.TryDetectSimpleIntent(prompt);
         if (fastPlan != null)
         {
-            var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct);
+            var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct,
+                cardId: cardId);
             return (steps, fastPlan, true);
         }
 
@@ -900,7 +963,7 @@ public class AgentController : ControllerBase
             var resumeSteps = new List<object>();
             await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
-                completedStepIndices: completedStepIndices);
+                completedStepIndices: completedStepIndices, cardId: cardId);
 
             return (resumeSteps, existingPlan, resumeSteps.Count > 0);
         }
@@ -916,7 +979,7 @@ public class AgentController : ControllerBase
                 await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct, steeringContext: steeringContext),
             _ => await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
-                steeringContext: steeringContext)
+                steeringContext: steeringContext, cardId: cardId)
         };
 
         // ── Quality check ─────────────────────────────────────────────────
@@ -1022,14 +1085,16 @@ public class AgentController : ControllerBase
     }
 
     private async Task<List<object>> QuickPipeline(
-        string prompt, string projectRoot, bool emitSse, AgentPlan fastPlan, CancellationToken ct)
+        string prompt, string projectRoot, bool emitSse, AgentPlan fastPlan, CancellationToken ct,
+        string? cardId = null)
     {
         await EmitLog(emitSse, "info", $"Fast-path → {fastPlan.Summary}", ct: ct);
         if (emitSse)
             await SendSse(Response, "plan",
                 new { thinking = fastPlan.Thinking, summary = fastPlan.Summary, items = fastPlan.Plan }, ct);
         var allResults = new List<object>();
-        await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, allResults);
+        await ExecutePlan(prompt, projectRoot, emitSse, "", fastPlan, ct, allResults,
+            cardId: cardId);
         return allResults;
     }
 
@@ -1041,7 +1106,8 @@ public class AgentController : ControllerBase
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
-        string? steeringContext = null)
+        string? steeringContext = null,
+        string? cardId = null)
     {
         var allSteps = new List<object>();
 
@@ -1112,7 +1178,8 @@ public class AgentController : ControllerBase
             await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
 
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
-            steeringContext: steeringContext, attachedFiles: attachedFiles);
+            steeringContext: steeringContext, attachedFiles: attachedFiles,
+            cardId: cardId);
 
         return (allSteps, plan);
     }
@@ -1218,7 +1285,7 @@ public class AgentController : ControllerBase
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
         string? steeringContext = null, List<string>? attachedFiles = null,
-        HashSet<int>? completedStepIndices = null)
+        HashSet<int>? completedStepIndices = null, string? cardId = null)
     {
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
@@ -1405,7 +1472,7 @@ public class AgentController : ControllerBase
                 for (var editRetry = 0; editRetry < 3; editRetry++)
                 {
                     var prevCount = allResults.Count;
-                    stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx);
+                    stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx, cardId);
 
                     // Check if the step failed (last result is an error)
                     if (allResults.Count > prevCount &&
@@ -2120,7 +2187,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 attachedFiles: req.Files?.Count > 0 ? req.Files : null,
                 steeringContext: req.SteeringContext,
                 existingPlan: existingPlan,
-                completedStepIndices: completedIndices);
+                completedStepIndices: completedIndices,
+                cardId: req.CardId);
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);

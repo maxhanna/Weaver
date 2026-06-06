@@ -9,6 +9,7 @@ public class AgentRequest
     public string? SteeringContext { get; set; }
     public bool SelfImproving { get; set; }
     public bool IsDecomposing { get; set; }
+    public string? CardId { get; set; }
 
     /// <summary>Existing plan items from a previous run, used for resumption.</summary>
     public List<ExistingPlanItem>? Plan { get; set; }

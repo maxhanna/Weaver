@@ -1615,6 +1615,7 @@
 
     function reconcilePlanItems() {
       if (!vm.planItems || !vm.planItems.length) return;
+      var changed = false;
       vm.planItems.forEach(function (item) {
         if (item.done) return;
         // Match by planItemIndex from SSE step events (most precise)
@@ -1626,11 +1627,17 @@
           return (s.type === 'edit' || s.type === 'rename') && s.path && item.file &&
             s.path.replace(/\\/g, '/').toLowerCase() === item.file.toLowerCase();
         });
-        if (doneSteps.length > 0) item.done = true;
+        if (doneSteps.length > 0) {
+          item.done = true;
+          changed = true;
+        }
       });
       var activeCard = findCardById(vm.activeCardId);
       if (activeCard && activeCard._plan) {
         activeCard._plan.items = angular.copy(vm.planItems);
+      }
+      if (changed && vm.saveCards) {
+        vm.saveCards();
       }
     }
 
@@ -1732,6 +1739,7 @@
           steeringContext: vm.steeringContext || '',
           selfImproving: card.selfImproving || false,
           isDecomposing: card.isDecomposing || false,
+          cardId: card.id
         };
 
         // Pass existing plan to backend for resumption (skip replan, only run incomplete steps)
@@ -1889,6 +1897,13 @@
                       if (parsed && parsed.question) {
                         vm.aiResponse = parsed.question;
                         pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
+                      }
+                      break;
+                    case 'refresh':
+                      if (parsed && parsed.target) {
+                        if (parsed.target === 'boarddata' && vm.refreshBoardData) {
+                          vm.refreshBoardData(parsed);
+                        }
                       }
                       break;
                     case 'step':
