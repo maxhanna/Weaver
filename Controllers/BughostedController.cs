@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using System.Text;
+using System.IO.Compression;
 using Weaver.Services;
 
 [ApiController]
@@ -228,8 +229,8 @@ public class BughostedController : ControllerBase
                 token = session.Token,
                 clientId = session.ClientId,
                 status = "online",
-                kanbanData = req.KanbanData,
-                settings = req.Settings,
+                kanbanData = GzipCompress(req.KanbanData ?? ""),
+                settings = GzipCompress(req.Settings ?? ""),
                 weaverAddress
             });
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/heartbeat")
@@ -505,6 +506,18 @@ public class BughostedController : ControllerBase
         {
             return null;
         }
+    }
+
+    private static string GzipCompress(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return "";
+        var bytes = Encoding.UTF8.GetBytes(input);
+        using var ms = new MemoryStream();
+        using (var gzip = new GZipStream(ms, CompressionLevel.Fastest))
+        {
+            gzip.Write(bytes, 0, bytes.Length);
+        }
+        return Convert.ToBase64String(ms.ToArray());
     }
 }
 
