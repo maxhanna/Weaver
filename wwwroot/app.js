@@ -1622,6 +1622,10 @@
         });
         if (doneSteps.length > 0) item.done = true;
       });
+      var activeCard = findCardById(vm.activeCardId);
+      if (activeCard && activeCard._plan) {
+        activeCard._plan.items = angular.copy(vm.planItems);
+      }
     }
 
     function upsertStreamingStep(parsed) {
@@ -1706,13 +1710,27 @@
         _lastLogKey = '';
         vm.streamingActive = true;
         pauseTerminalPolling();
+
+        var prompt = card.text;
+        if (card._plan && card._plan.items && card._plan.items.length) {
+          var pendingItems = card._plan.items.filter(function (i) { return !i.done; });
+          if (pendingItems.length > 0 && pendingItems.length < card._plan.items.length) {
+            var resumeCtx = '[Continuing from previous plan:' + card._plan.items.map(function (i) {
+              return '\n  ' + (i.done ? '✅' : '⬜') + ' Step ' + (i.index + 1) + ': ' + (i.file || '') + ' — ' + (i.change || '');
+            }).join('') + '\nResume from the first incomplete step.]\n\n';
+            prompt = resumeCtx + prompt;
+            pushAgentLog('info', 'Resuming from plan — ' + pendingItems.length + ' of ' + card._plan.items.length + ' steps remaining');
+          }
+          delete card._plan;
+        }
+
         pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
         vm.activeCardText = card.text;
         card._lastRunText = card.text;
 
         var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
         var payload = {
-          prompt: card.text,
+          prompt: prompt,
           project: proj,
           files: files,
           maxIterations: 5,
@@ -1835,6 +1853,10 @@
                         });
                         if (parsed.summary) {
                           pushAgentLog('info', '📋 Plan: ' + parsed.summary, { itemCount: parsed.items.length, score: parsed.score });
+                        }
+                        var activeCard = findCardById(vm.activeCardId);
+                        if (activeCard) {
+                          activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
                         }
                       } else if (parsed && parsed.score !== undefined) {
                         pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);

@@ -119,6 +119,30 @@
               </div>
             </details>
           </div>
+          <!-- Saved plan on Todo cards -->
+          <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
+            <details open>
+              <summary style="cursor:pointer;font-size:11px;font-weight:600;">
+                📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
+                <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              </summary>
+              <div class="plan-items-list">
+                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                  <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
+                    style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-file">{{item.file}}</span>
+                  <span class="plan-item-change">{{item.change}}</span>
+                  <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                    style="cursor:pointer;opacity:0.5;" title="Remove this step">✕</span>
+                </div>
+              </div>
+              <div style="margin-top:4px;">
+                <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
+                  title="Delete entire plan and start fresh">🗑 Delete Plan</button>
+              </div>
+            </details>
+          </div>
         </div>
       </div>
     </div>
@@ -211,6 +235,30 @@
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
                   </div>
                 </details>
+              </div>
+            </details>
+          </div>
+          <!-- Saved plan on Doing cards -->
+          <div class="card-plan" ng-if="!vm.streamingActive && card._plan && card._plan.items && card._plan.items.length">
+            <details open>
+              <summary style="cursor:pointer;font-size:11px;font-weight:600;">
+                📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
+                <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              </summary>
+              <div class="plan-items-list">
+                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                  <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
+                    style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-file">{{item.file}}</span>
+                  <span class="plan-item-change">{{item.change}}</span>
+                  <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                    style="cursor:pointer;opacity:0.5;" title="Remove this step">✕</span>
+                </div>
+              </div>
+              <div style="margin-top:4px;">
+                <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
+                  title="Delete entire plan and start fresh">🗑 Delete Plan</button>
               </div>
             </details>
           </div>
@@ -363,6 +411,22 @@
                     <pre class="log-detail-raw">{{vm.formatLogDetail(e.detail)}}</pre>
                   </div>
                 </details>
+              </div>
+            </details>
+          </div>
+          <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
+            <details>
+              <summary style="cursor:pointer;font-size:11px;font-weight:600;">
+                📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
+                <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              </summary>
+              <div class="plan-items-list">
+                <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
+                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                  <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
+                  <span class="plan-item-file">{{item.file}}</span>
+                  <span class="plan-item-change">{{item.change}}</span>
+                </div>
               </div>
             </details>
           </div>

@@ -150,6 +150,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
+          // Trigger syntax highlighting
+          if (vm.highlightSyntax) {
+            vm.highlightSyntax(tab);
+          }
           if (vm.bughostedStatus === 'connected') {
             $timeout(function() { vm.syncEditorState(); }, 50);
           }
@@ -168,6 +172,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.currentTab.dirty = isDirty;
         vm.ide.currentTab.lineCount = (vm.ide.currentTab.content.match(/\n/g) || []).length + 1;
         vm.ide.dirty = isDirty;
+        // Trigger syntax highlighting
+        if (vm.highlightSyntax) {
+          vm.highlightSyntax(vm.ide.currentTab);
+        }
         if (_contentSyncDebounce) { $timeout.cancel(_contentSyncDebounce); }
         _contentSyncDebounce = $timeout(function() {
           if (vm.bughostedStatus === 'connected' && vm.bughostedClientId) {

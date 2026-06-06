@@ -266,6 +266,34 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         }
       };
 
+      vm.planDoneCount = function (items) {
+        if (!items || !items.length) return 0;
+        return items.filter(function (i) { return i.done; }).length;
+      };
+
+      vm.togglePlanItem = function (card, index) {
+        if (!card._plan || !card._plan.items) return;
+        var item = card._plan.items.find(function (i) { return i.index === index; });
+        if (item) {
+          item.done = !item.done;
+          vm.saveCards();
+        }
+      };
+
+      vm.removePlanItem = function (card, index) {
+        if (!card._plan || !card._plan.items) return;
+        card._plan.items = card._plan.items.filter(function (i) { return i.index !== index; });
+        if (card._plan.items.length === 0) {
+          delete card._plan;
+        }
+        vm.saveCards();
+      };
+
+      vm.clearPlan = function (card) {
+        delete card._plan;
+        vm.saveCards();
+      };
+
       vm.moveCard = function (id, from, to) {
         var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
         if (idx === -1) return;
