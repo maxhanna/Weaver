@@ -401,3 +401,59 @@
     background: var(--accent);
     opacity: 0.5;
 }
+
+.ide-textarea {
+    /* Keywords */
+    --keyword: #c792ea;
+    /* Strings */
+    --string: #89ddff;
+    /* Comments */
+    --comment: #637777;
+    /* Numbers */
+    --number: #f78c6c;
+    /* Functions */
+    --function: #82b1ff;
+    /* Variables */
+    --variable: #a6e22e;
+    /* Operators */
+    --operator: #89ddff;
+    /* Brackets */
+    --bracket: #89ddff;
+}
+
+.ide-textarea::selection {
+    background: rgba(98, 114, 255, 0.3);
+}
+
+/* Syntax Highlighting Classes */
+.ide-textarea .keyword {
+    color: var(--keyword);
+}
+
+.ide-textarea .string {
+    color: var(--string);
+}
+
+.ide-textarea .comment {
+    color: var(--comment);
+}
+
+.ide-textarea .number {
+    color: var(--number);
+}
+
+.ide-textarea .function {
+    color: var(--function);
+}
+
+.ide-textarea .variable {
+    color: var(--variable);
+}
+
+.ide-textarea .operator {
+    color: var(--operator);
+}
+
+.ide-textarea .bracket {
+    color: var(--bracket);
+}
