@@ -62,7 +62,8 @@ public class AgentController : ControllerBase
         "- OLD must be MINIMAL — only the lines that actually change\n" +
         "- For insertions: include one adjacent existing line as anchor; repeat it unchanged in NEW\n" +
         "- Never put ... or placeholders in OLD or NEW\n" +
-        "- For FULL_FILE output, preserve all indentation, tabs, spaces, and blank lines exactly; do not reflow, dedent, or normalize whitespace\n";
+        "- OLD must be a verbatim COPY from the file content shown above — count your spaces and tabs\n" +
+        "- If OLD contains leading whitespace, it MUST match the indentation in the file exactly";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -150,7 +151,7 @@ public class AgentController : ControllerBase
         else if (fileContent.Length > 10000)
         {
             sb.AppendLine($"FILE IS LARGE ({fileContent.Length} chars). Relevant excerpt:");
-            sb.AppendLine("If the change cannot be expressed as a small targeted edit, use <<<FULL_FILE>>>.");
+            sb.AppendLine("Use <<<OLD>>> / <<<NEW>>> targeted edits only — copy the EXACT text from the excerpt below.");
             sb.AppendLine();
             sb.AppendLine("```");
             // Show more of the file for better context
@@ -189,7 +190,7 @@ public class AgentController : ControllerBase
             else
             {
                 sb.AppendLine("The oldString above was NOT found verbatim. Find the EXACT text from the file.");
-                sb.AppendLine("If the change is large, use <<<FULL_FILE>>> instead.");
+                sb.AppendLine("Use targeted <<<OLD>>> / <<<NEW>>> edits. Copy the oldString character-for-character from the file content.");
             }
         }
 

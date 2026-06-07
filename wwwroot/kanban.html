@@ -35,11 +35,20 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
+          </div> 
+          <div class="card-text">
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
+              placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
+            <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
+              ng-class="{'recording': vm.isRecording}"
+              title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"
+              ng-show="vm.voiceSupported">🎤</button>
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
-          <!-- Plan always visible at top -->
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
-              <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              <span class="text-xs"
+                style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
               <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
                 style="float:right;font-size:10px;" title="Delete entire plan and start fresh">🗑</button>
             </div>
@@ -54,15 +63,6 @@
                   style="cursor:pointer;opacity:0.5;" title="Remove this step">✕</span>
               </div>
             </div>
-          </div>
-          <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
-              placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
-            <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
-              ng-class="{'recording': vm.isRecording}"
-              title="{{vm.isRecording ? 'Stop recording' : 'Record voice to text'}}"
-              ng-show="vm.voiceSupported">🎤</button>
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
@@ -157,10 +157,16 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-          <!-- Plan always visible at top -->
+      
+          <div class="card-text">
+            {{card.text}}
+          </div>
+          <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
-              <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              <span class="text-xs"
+                style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
               <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
                 style="float:right;font-size:10px;" title="Delete entire plan and start fresh">🗑</button>
             </div>
@@ -176,10 +182,6 @@
               </div>
             </div>
           </div>
-          <div class="card-text">
-            {{card.text}}
-          </div>
-          <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
 
           <div class="card-tags">
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
@@ -371,10 +373,16 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-          <!-- Plan always visible at top -->
+        
+          <div class="card-text">
+            {{card.text}}
+            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+          </div>
+
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
-              <span class="text-xs" style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+              <span class="text-xs"
+                style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
@@ -385,10 +393,7 @@
               </div>
             </div>
           </div>
-          <div class="card-text">
-            {{card.text}}
-            <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
-          </div>
+
           <div class="card-tags">
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
