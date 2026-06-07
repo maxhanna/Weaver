@@ -654,7 +654,7 @@ header h1 {
 @keyframes popupFadeIn {
 	from {
 		opacity: 0;
-		transform: scale(0.9);
+		transform: scale(0.1);
 	}
 
 	to {
@@ -2780,6 +2780,7 @@ h3 .small.ghost:hover {
 	overflow: auto;
 	animation: popupFadeIn 0.2s ease-out;
 	z-index: 1201;
+	opacity: 0;
 }
 
 .popup-header {
