@@ -82,8 +82,8 @@
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
-              <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-              <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'todo'); $event.stopPropagation()">✕</span>
+              <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
+              <span class="remove" ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
             </div>
           </div>
           <div class="card-actions">

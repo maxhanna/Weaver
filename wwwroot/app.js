@@ -1392,6 +1392,22 @@
       vm.pickerSelected = [];
       vm.isSearchResult = false;
       vm.searchFilter = '';
+      // Calculate existing files count
+      vm.existingFilesCount = 0;
+      if (cardId && vm.state) {
+        ['todo', 'doing', 'done'].forEach(function (col) {
+          var cards = vm.state[col];
+          for (var i = 0; i < cards.length; i++) {
+            if (cards[i].id === cardId) {
+              var attached = cards[i].attached;
+              if (attached) {
+                vm.existingFilesCount = Array.isArray(attached) ? attached.length : 1;
+              }
+              break;
+            }
+          }
+        });
+      }
       $timeout(function () {
         var searchInput = document.getElementById('attachFilePickerSearchInput');
         if (searchInput) {
@@ -1502,18 +1518,20 @@
       if (attachedCount > 0) {
         var filePicker = document.getElementById('filePicker');
         if (filePicker) {
-          var fileItems = filePicker.querySelectorAll('.file-item');
+          var fileItems = filePicker.querySelectorAll('.entry');
           fileItems.forEach(function (item) {
-            var fileName = item.getAttribute('data-filename');
+            var fileName = item.querySelector('.entryTypeAndName span:last-child').textContent;
             if (vm.pickerSelected.includes(fileName)) {
               item.classList.add('existing-file');
             }
           });
         }
       }
+      var card = findCardById(cardId);
+      if (card) {
+        card.attachedCount = attachedCount;
+      }
     };
-
-    // === Agent helpers ===
 
     // === Agent helpers ===
     function normalizeStepStatus(status) {
@@ -1550,6 +1568,7 @@
         message: message,
         detail: detail
       };
+
       vm.agentActivityLog.push(entry);
       vm.agentActivityLogLength = vm.agentActivityLog.length;
       if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift(); // was 80
@@ -2382,8 +2401,9 @@
         if (card && selected.length > 0) {
           card.confirmedContextFiles = selected;
           var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-          selected.forEach(function (f) {
-            if (existing.indexOf(f) === -1) existing.push(f);
+          files.forEach(function (f) {
+            var filePath = typeof f === 'string' ? f : (f.path || f);
+            if (existing.indexOf(filePath) === -1) existing.push(filePath);
           });
           card.attached = existing;
           vm.saveCards();

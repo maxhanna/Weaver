@@ -1304,7 +1304,7 @@ public class AgentController : ControllerBase
 
             if (!hasDone)
             {
-                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
+                var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
                 complete = ok;
                 if (!ok)
                 {
@@ -1335,7 +1335,7 @@ public class AgentController : ControllerBase
                             completedStepIndices: doneIndices, cardId: cardId);
                         allSteps.AddRange(retryResults);
 
-                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
+                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
                         complete = ok2;
                     }
 
@@ -1358,7 +1358,8 @@ public class AgentController : ControllerBase
                     {
                         await EmitLog(emitSse, "info", "All steps done — generating additional steps…", ct: ct);
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                            steeringContext, projectRoot, emitSse, ct);
+                            steeringContext, projectRoot, emitSse, ct,
+                            attachedFiles: attachedFiles, qualityCheckReason: reason);
                         if (newSteps?.Count > 0)
                         {
                             plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
@@ -1384,7 +1385,7 @@ public class AgentController : ControllerBase
                                 completedStepIndices: mergedDone, cardId: cardId);
                             allSteps.AddRange(newResults);
 
-                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
+                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
                             complete = ok3;
                         }
                         else
@@ -1454,7 +1455,8 @@ public class AgentController : ControllerBase
     }
 
     private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null,
-        AgentPlan? existingPlan = null, List<object>? executedSteps = null)
+        AgentPlan? existingPlan = null, List<object>? executedSteps = null,
+        string qualityCheckReason = "", string fileContents = "")
     {
         var sb = new StringBuilder();
         sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
@@ -1491,10 +1493,26 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine();
+
+        if (!string.IsNullOrWhiteSpace(qualityCheckReason))
+        {
+            sb.AppendLine("## Quality check assessment");
+            sb.AppendLine(qualityCheckReason);
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## What went wrong");
         foreach (var h in history) sb.AppendLine(h);
         sb.AppendLine();
-        sb.AppendLine("Add at most 2-3 new steps to fix ONLY the failed items. If everything is done, return an EMPTY plan with no steps.");
+
+        if (!string.IsNullOrWhiteSpace(fileContents))
+        {
+            sb.AppendLine("## Current file contents");
+            sb.Append(fileContents);
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Add at most 2-3 new steps to fix ONLY the issues identified. If everything is done, return an EMPTY plan with no steps.");
         return sb.ToString();
     }
 
@@ -1504,11 +1522,33 @@ public class AgentController : ControllerBase
     /// </summary>
     private async Task<List<PlanStep>?> GenerateReplanStepsAsync(
         string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
-        string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct)
+        string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
+        List<string>? attachedFiles = null, string qualityCheckReason = "")
     {
         var failHist = BuildFailedEditHistory(executedSteps);
+
+        // Read current content of all files that were modified or attached, for richer context
+        var fileContents = new StringBuilder();
+        var pathsToRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var step in executedSteps.OfType<Dictionary<string, object?>>())
+        {
+            var p = step.GetValueOrDefault("path")?.ToString();
+            if (!string.IsNullOrWhiteSpace(p)) pathsToRead.Add(p.Replace('\\', '/'));
+        }
+        if (attachedFiles != null)
+        {
+            foreach (var f in attachedFiles) pathsToRead.Add(f.Replace('\\', '/'));
+        }
+        foreach (var relPath in pathsToRead.Take(8))
+        {
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
+            if (!System.IO.File.Exists(fullPath)) continue;
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            fileContents.AppendLine($"### {relPath}\n```\n{content}\n```\n");
+        }
+
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
-            steeringContext, existingPlan, executedSteps);
+            steeringContext, existingPlan, executedSteps, qualityCheckReason, fileContents.ToString());
 
         var (raw, _, llmError) = await CallLlmRaw(
             "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 3 steps. Empty array if all done.",
@@ -3130,7 +3170,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
     private async Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
-        AgentPlan? plan = null)
+        AgentPlan? plan = null, List<string>? attachedFiles = null)
     {
         var editSteps = executedSteps.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit").ToList();
@@ -3164,28 +3204,65 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         }
         sb.AppendLine();
 
-        var modifiedPaths = editSteps
-            .Where(s => s.TryGetValue("status", out var st) && st?.ToString() == "done")
-            .Select(s => s.GetValueOrDefault("path")?.ToString())
-            .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().Take(2).ToList();
-
-        foreach (var relPath in modifiedPaths)
+        // Collect paths of files modified by edit steps
+        var modifiedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in editSteps)
         {
-            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath!.Replace('/', Path.DirectorySeparatorChar)));
-            if (!System.IO.File.Exists(fullPath)) continue;
-            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            string preview;
-            if (content.Length > 12000)
-                preview = content[..6000] + "\n\n... [middle omitted] ...\n\n" + content[^4000..];
-            else
-                preview = content;
-            sb.AppendLine($"## Current {relPath}\n```\n{preview}\n```\n");
+            var p = s.GetValueOrDefault("path")?.ToString();
+            if (!string.IsNullOrWhiteSpace(p))
+                modifiedSet.Add(p.Replace('\\', '/'));
         }
 
-        sb.AppendLine("Is the task complete? Answer with JSON only: {\"complete\": true|false, \"reason\": \"one sentence\"}");
+        // Attached files that were NOT modified: show their current content as "original context"
+        if (attachedFiles != null && attachedFiles.Count > 0)
+        {
+            sb.AppendLine("## Original attached files");
+            foreach (var relPath in attachedFiles)
+            {
+                var normalized = relPath.Replace('\\', '/');
+                if (modifiedSet.Contains(normalized)) continue; // skip modified — shown fresh below
+                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, normalized));
+                if (!System.IO.File.Exists(fullPath)) continue;
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                sb.AppendLine($"### {normalized}\n```\n{content}\n```\n");
+            }
+        }
 
-        const string sys = "You are a task completion verifier. Output ONLY JSON: {\"complete\": true|false, \"reason\": \"one sentence\"}";
-        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(20));
+        // All modified files: refetch fresh from disk (no truncation)
+        var allModifiedPaths = editSteps
+            .Where(s => s.TryGetValue("status", out var st) && st?.ToString() == "done")
+            .Select(s => s.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p)).Distinct().ToList();
+
+        if (allModifiedPaths.Count > 0)
+        {
+            sb.AppendLine("## Modified files (current state after edits)");
+            foreach (var relPath in allModifiedPaths)
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath!.Replace('/', Path.DirectorySeparatorChar)));
+                if (!System.IO.File.Exists(fullPath)) { sb.AppendLine($"### {relPath}\n*File not found*\n"); continue; }
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                sb.AppendLine($"### {relPath}\n```\n{content}\n```\n");
+            }
+        }
+
+        sb.AppendLine(@"Evaluate the code changes against the original task. Check for:
+1. Does the code solve the original task completely?
+2. Are there any bugs, syntax errors, or logic issues in the modified files?
+3. Are there any missing pieces or regressions?
+
+Respond with JSON only:
+```json
+{
+  ""complete"": true|false,
+  ""reason"": ""one sentence summary"",
+  ""issues"": [""description of each bug or remaining work""]
+}
+```");
+
+        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, syntax mistakes, and whether the task requirements are fully met. Output ONLY valid JSON in the format specified.";
+
+        var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(30));
         if (string.IsNullOrWhiteSpace(raw)) return (failed.Count == 0, "Assessment timed out");
 
         try
@@ -3198,6 +3275,18 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             var root = doc.RootElement;
             var isComplete = root.TryGetProperty("complete", out var c) && c.ValueKind == JsonValueKind.True;
             var reason = root.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
+            // Collect issues into the reason for richer feedback
+            if (root.TryGetProperty("issues", out var issues) && issues.ValueKind == JsonValueKind.Array)
+            {
+                var issueList = new List<string>();
+                foreach (var issue in issues.EnumerateArray())
+                {
+                    if (issue.ValueKind == JsonValueKind.String)
+                        issueList.Add(issue.GetString() ?? "");
+                }
+                if (issueList.Count > 0)
+                    reason = reason + " | Issues: " + string.Join("; ", issueList);
+            }
             return (isComplete, reason);
         }
         catch { return (failed.Count == 0, "Could not parse assessment"); }
@@ -3665,28 +3754,79 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         var replLines = replacement.Split('\n');
         var replBaseIndent = replLines.Where(l => l.Length > 0).Select(GetLeadingWhitespace).FirstOrDefault();
 
-        // No adjustment needed if they match
-        if (replBaseIndent == fileIndent)
-            return replacement;
-
-        for (var i = 0; i < replLines.Length; i++)
+        if (replBaseIndent != fileIndent)
         {
-            if (replLines[i].Length == 0) continue;
-            var lineIndent = GetLeadingWhitespace(replLines[i]);
-            if (lineIndent.StartsWith(replBaseIndent, StringComparison.Ordinal))
+            for (var i = 0; i < replLines.Length; i++)
             {
-                // Replace the replacement's base indent with the file's base indent,
-                // preserving any extra (inner) indentation beyond the base
-                var excess = lineIndent[replBaseIndent.Length..];
-                replLines[i] = fileIndent + excess + replLines[i][lineIndent.Length..];
-            }
-            else
-            {
-                // Line doesn't start with expected base — prepend file indent
-                replLines[i] = fileIndent + replLines[i];
+                if (replLines[i].Length == 0) continue;
+                var lineIndent = GetLeadingWhitespace(replLines[i]);
+                if (lineIndent.StartsWith(replBaseIndent, StringComparison.Ordinal))
+                {
+                    var excess = lineIndent[replBaseIndent.Length..];
+                    replLines[i] = fileIndent + excess + replLines[i][lineIndent.Length..];
+                }
+                else
+                {
+                    replLines[i] = fileIndent + replLines[i];
+                }
             }
         }
-        return string.Join("\n", replLines);
+
+        // Auto-indent: apply proper inner indentation based on brace/scoping depth
+        return AutoIndentFromFile(string.Join("\n", replLines), fileIndent, fileLines, start);
+    }
+
+    /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
+    private static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
+    {
+        // Infer indent size from the file (difference between parent and child indent levels)
+        var indentSize = InferIndentSize(fileLines, start);
+        if (indentSize <= 0) return replacement;
+
+        var lines = replacement.Split('\n');
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Trim().Length == 0) continue;
+
+            var trimmed = lines[i].TrimStart();
+            // Compute indent depth for THIS line only (don't mutate depth yet)
+            var lineDepth = depth;
+            if (trimmed.StartsWith("}"))
+                lineDepth = Math.Max(0, lineDepth - 1);
+
+            var expectedIndent = fileIndent + new string(' ', lineDepth * indentSize);
+            var lineIndent = GetLeadingWhitespace(lines[i]);
+            if (lineIndent != expectedIndent)
+                lines[i] = expectedIndent + trimmed;
+
+            // Update depth for the NEXT line by counting braces in this line
+            foreach (var c in trimmed)
+            {
+                if (c == '{') depth++;
+                if (c == '}') depth = Math.Max(0, depth - 1);
+            }
+        }
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>Infer the file's indent size (e.g. 2 or 4) by sampling indentation deltas.</summary>
+    private static int InferIndentSize(string[] fileLines, int start)
+    {
+        var sampleStart = Math.Max(0, start - 5);
+        var sampleEnd = Math.Min(fileLines.Length, start + 20);
+        var deltas = new List<int>();
+        for (var i = sampleStart + 1; i < sampleEnd; i++)
+        {
+            var prev = GetLeadingWhitespace(fileLines[i - 1]).Length;
+            var curr = GetLeadingWhitespace(fileLines[i]).Length;
+            var delta = Math.Abs(curr - prev);
+            if (delta > 0 && delta <= 8)
+                deltas.Add(delta);
+        }
+        if (deltas.Count == 0) return 2; // default
+        // Return the most common delta (or the average rounded)
+        return (int)Math.Round(deltas.Average());
     }
 
     private static string GetLeadingWhitespace(string s)
