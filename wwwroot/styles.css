@@ -1784,6 +1784,46 @@ h3 .small.ghost:hover {
 	overflow-y: auto;
 }
 
+.agent-resolve-streams {
+	margin: 4px 0;
+	background: #1a1a2e;
+	border-radius: 4px;
+	padding: 4px 8px;
+}
+
+.agent-resolve-streams details {
+	margin: 2px 0;
+}
+
+.agent-resolve-streams summary {
+	font-size: 11px;
+	color: #80cbc4;
+	cursor: pointer;
+}
+
+.resolve-stream-section {
+	margin-bottom: 2px;
+}
+
+.resolve-stream-section .streaming-text {
+	font-family: ui-monospace, monospace;
+	font-size: 11px;
+	color: #e0e0e0;
+	max-height: 200px;
+	overflow-y: auto;
+	background: #0d0d1a;
+	padding: 4px 6px;
+	border-radius: 3px;
+	margin: 2px 0;
+}
+
+.resolve-stream-delimiter {
+	color: #444;
+	font-size: 10px;
+	text-align: center;
+	user-select: none;
+}
+
 .agent-steps {
 	margin-top: 8px;
 }

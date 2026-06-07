@@ -43,14 +43,14 @@ public class AgentController : ControllerBase
 
     private const string EditResolveSystemPrompt =
         "You are a surgical code editor. Output ONLY the edit block — no explanation, no markdown, nothing else.\n\n" +
-        "FORMAT A — targeted replacement (use when change is ≤15 lines):\n" +
+        "FORMAT A — targeted replacement (1-5 lines of code):\n" +
         "<<<OLD>>>\n" +
         "exact lines to replace, copied VERBATIM from the file (preserve all whitespace/indentation)\n" +
         "<<<END_OLD>>>\n" +
         "<<<NEW>>>\n" +
         "replacement lines\n" +
         "<<<END_NEW>>>\n\n" +
-        "FORMAT B — full file replacement (use for: new files, full rewrites, ASCII art, logos, >15-line changes):\n" +
+        "FORMAT B — full file creation (use only for new files):\n" +
         "<<<FULL_FILE>>>\n" +
         "complete file content exactly as it should exist on disk\n" +
         "<<<END_FULL_FILE>>>\n\n" +
@@ -62,8 +62,7 @@ public class AgentController : ControllerBase
         "- OLD must be MINIMAL — only the lines that actually change\n" +
         "- For insertions: include one adjacent existing line as anchor; repeat it unchanged in NEW\n" +
         "- Never put ... or placeholders in OLD or NEW\n" +
-        "- For FULL_FILE output, preserve all indentation, tabs, spaces, and blank lines exactly; do not reflow, dedent, or normalize whitespace\n" +
-        "- Do not wrap FULL_FILE content in markdown fences";
+        "- For FULL_FILE output, preserve all indentation, tabs, spaces, and blank lines exactly; do not reflow, dedent, or normalize whitespace\n";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -311,7 +310,7 @@ public class AgentController : ControllerBase
                     Directory.CreateDirectory(dir);
                 await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
                 await EmitLog(emitSse, "success",
-                    $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
+                    $"✓ Written {relPath} ({fullContent.Length} chars)", new {fullContent, fullFile }, ct: ct);
                 var r = new Dictionary<string, object?>();
                 PopulateEditResult(r, "modified", relPath, null, fullContent, "");
                 r["index"] = stepIndex;
@@ -461,7 +460,7 @@ public class AgentController : ControllerBase
     private static string BuildPlanningPrompt() =>
         "You are a software-engineering agent. " +
         "Produce a concise plan of code changes with one thinking section and one summary section.\n" +
-        "Output ONLY the delimiter format below — no JSON, no markdown, no extra text.\n\n" +
+        "Output ONLY the delimiter format below. \n\n" +
         "### STEP TYPES (the FILE: field) ###\n" +
         "  relative/path.ext  — Edit an existing file (must be in discovery context)\n" +
         "  _command            — Run a terminal command; put the full command in CHANGE:\n" +
@@ -543,7 +542,20 @@ public class AgentController : ControllerBase
 
         if (plan == null)
         {
-            await EmitLog(emitSse, "error", "Failed to parse plan", raw, ct: ct);
+            bool containsLLMError = false;
+            bool containsLLMLoading = false;
+            if (!string.IsNullOrEmpty(raw)) {
+                if (raw.ToLower().Contains("error")) {
+                    containsLLMError = true;
+                }
+                if (raw.ToLower().Contains("loading model")) {
+                    containsLLMLoading = true;
+                }
+            }
+            string errorMessage = containsLLMLoading ? " Model Loading. Please retry after a short period of time."
+                                    : containsLLMError ? " LLM Returned Error state. Check LLM." 
+                                    : "";
+            await EmitLog(emitSse, "error", "Failed to parse plan." + errorMessage, raw, ct: ct);
             return null;
         }
 

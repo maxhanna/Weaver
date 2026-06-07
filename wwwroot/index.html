@@ -354,6 +354,16 @@
             </details>
           </div>
 
+          <div class="agent-resolve-streams" ng-if="vm.resolveStreams && vm.resolveStreams.length">
+            <div ng-repeat="rs in vm.resolveStreams track by $index" class="resolve-stream-section">
+              <details>
+                <summary>💬 Resolve {{$index + 1}}</summary>
+                <pre class="streaming-text">{{rs.content}}</pre>
+              </details>
+              <div ng-if="!$last" class="resolve-stream-delimiter">━━━━━━━━━━━━━━━━━━━━</div>
+            </div>
+          </div>
+
           <div class="agent-streaming-thinking" ng-if="vm.streamingThinking">
             <details>
               <summary>🧠 Plan</summary>
