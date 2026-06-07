@@ -91,7 +91,7 @@
     vm.agentResult = null;
     vm.steeringContext = '';
     vm.clarificationReply = '';
-    vm.abortController = null;
+    vm.abortController = new AbortController();
     vm.destroyed = false;
     vm.lastStreamingSteps = [];
     vm.lastStreamingPhase = '';
@@ -699,8 +699,10 @@
 
     var _bhHeartbeatFailCount = 0;
     var _bhHeartbeatTimer = null;
+    var _isBhHearting = null;
     var _bhEditorSyncTimer = null;
     var _lastSyncedEditorState = null;
+    var _isSyncingData = false;
 
     function buildHeartbeatPayload() {
       return {
@@ -761,6 +763,10 @@
         content: vm.ide.currentTab ? vm.ide.currentTab.content : '',
         dirty: vm.ide.dirty || false
       } : null;
+
+      if (_isSyncingData) return;
+      _isSyncingData = true;
+
       var curStateStr = curState ? JSON.stringify(curState) : null;
       if (_lastSyncedEditorState === curStateStr) return;
       _lastSyncedEditorState = curStateStr;
@@ -768,18 +774,22 @@
       $http.post('/api/bughosted/heartbeat', data).then(function () {
         _bhHeartbeatFailCount = 0;
         vm.bughostedStatus = 'connected';
+        _isSyncingData = false;
       }, function () {
         _bhHeartbeatFailCount++;
         if (_bhHeartbeatFailCount >= 3) {
           vm.bughostedStatus = 'error';
+          _isSyncingData = false;
         }
       });
     };
 
     function startBughostedHeartbeat() {
-      stopBughostedHeartbeat();
+      stopBughostedHeartbeat(); 
       // Full state sync every30 seconds (kanban, agent, etc.)
       _bhHeartbeatTimer = $interval(function () {
+        if (_isBhHearting) return;
+        _isBhHearting = true;
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         _lastSyncedEditorState = null;
         var data = buildHeartbeatPayload();
@@ -787,10 +797,12 @@
         $http.post('/api/bughosted/heartbeat', data, { signal: vm.abortController.signal }).then(function () {
           _bhHeartbeatFailCount = 0;
           vm.bughostedStatus = 'connected';
+          _isBhHearting = false;
         }, function () {
           _bhHeartbeatFailCount++;
           if (_bhHeartbeatFailCount >= 3) {
             vm.bughostedStatus = 'error';
+            _isBhHearting = false;
           }
         });
       }, 60000, 0, false);
@@ -806,25 +818,42 @@
     }
 
     var _bhCommandTimer = null;
+    var _bhTimerRunning = false;
     function startBughostedCommandPolling() {
+      if (vm.destroyed) {
+        return;
+      }
       stopBughostedCommandPolling();
-      _bhCommandTimer = $interval(function () {
+      _bhCommandTimer = $interval(function () { 
+        if (vm.destroyed || _bhTimerRunning) {
+          return;
+        }
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-        var controller = new AbortController();
-        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: controller.signal })
+        vm.abortController = new AbortController();
+        _bhTimerRunning = true; 
+        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
           .then(function (resp) {
-            var cmds = resp.data || [];
-            cmds.forEach(function (cmd) {
-              //
-              if (cmd.parameters && !cmd.params) {
-                try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
+            if (resp && resp.data) {
+              console.log("GOT COMMAND : ", resp);
+              var cmds = resp.data || undefined;
+              if (cmds && cmds.length > 0) { 
+                cmds.forEach(function (cmd) {
+                  if (cmd.parameters && !cmd.params) {
+                    try { 
+                      cmd.params = JSON.parse(cmd.parameters);
+                    } catch (e) { cmd.params = {}; }
+                  }
+                  if (!vm.remoteCommands) { vm.remoteCommands = []; }
+                  var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
+                  if (!existing && cmd.command) { 
+                    vm.remoteCommands.push(cmd);
+                    vm.executeRemoteCommand(cmd); 
+                  }
+                });
               }
-              var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
-              if (!existing && cmd.command) {
-                vm.remoteCommands.push(cmd);
-                vm.executeRemoteCommand(cmd);
-              }
-            });
+            }
+          }).finally(res => {  
+            _bhTimerRunning = false; 
           });
       }, 15000, 0, false);
     }
@@ -1766,8 +1795,7 @@
         vm.streamingPhase = '';
         vm.streamingContextSize = 0;
         vm.streamingSteps = [];
-        vm.streamingFilesEdited = [];
-        vm.streamingTokenBuffer = '';
+        vm.streamingFilesEdited = []; 
         vm.planItems = [];
         vm.agentActivityLog = [];
         vm._lastStreamMs = Date.now();
@@ -1887,8 +1915,10 @@
                     case 'token':
                       if (parsed && parsed.token) {
                         vm.streamingTokenBuffer += parsed.token;
-                        var buf = vm.resolveStreams;
-                        if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
+                        if (vm.resolveStreams) { 
+                          var buf = vm.resolveStreams;
+                          if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
+                        }
                       }
                       break;
                     case 'thinking':
@@ -2132,8 +2162,7 @@
 
         }).catch(function (err) {
           vm.streamingActive = false;
-          resumeTerminalPolling();
-          vm.abortController = null;
+          resumeTerminalPolling(); 
           if (err.name === 'AbortError') {
             vm.agentResult = { warning: 'Agent stopped by user.' };
           } else {
@@ -2287,6 +2316,7 @@
     };
     vm.refreshTerminal = function () {
       if (vm.destroyed) return;
+
       fetch('/api/terminal/output').then(function (r) { return r.json(); }).then(function (data) {
         var newOutput = (data && data.output) || '';
         if (newOutput !== vm.terminalOutput) {
@@ -2305,7 +2335,7 @@
 
     vm.refreshTerminalApprovals = function () { 
       if (vm.destroyed) return;
-      console.log("FETCHING TERMINAL APPROVALS");
+      
       fetch('/api/terminal/approvals/pending')
         .then(function (r) { return r.json(); })
         .then(function (data) {
@@ -2416,8 +2446,7 @@
 
     vm.stopAgent = function (card) {
       if (vm.abortController) {
-        vm.abortController.abort();
-        vm.abortController = null;
+        vm.abortController.abort(); 
       }
       vm.streamingActive = false;
       vm.agentResult = { warning: 'Agent stopped by user.' };

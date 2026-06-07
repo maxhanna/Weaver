@@ -27,10 +27,7 @@ public static class AgentUtilities
         if (TryDetectSimpleIntent(prompt) != null) cmdScore += 100;
 
         if (Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
-            cmdScore += 80;
-
-        if (Regex.IsMatch(lower, @"\b(cat|type)\s+\S+"))
-            cmdScore += 70;
+            cmdScore += 80; 
 
         if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
             cmdScore += 60;

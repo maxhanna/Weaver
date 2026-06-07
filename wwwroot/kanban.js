@@ -447,8 +447,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.saveCardText = function (card) {
+        console.log("saving card text");
         vm.saveCards();
       };
+
+      vm.todoTextAreaClicked = function(event) {
+        event.stopPropagation();
+        event.preventDefault(); 
+      }
 
       vm.splitCardIntoSubtasks = function (card) {
         if (!card || !card.text) return;
@@ -589,6 +595,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.focusCardTextarea = function (card) {
+        console.log("focusing on text area ", card);
         if (!card) return;
         var el = document.querySelector('[data-card-id="' + card.id + '"] textarea');
         if (el && !card.text.trim()) {
