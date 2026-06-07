@@ -92,6 +92,7 @@
     vm.steeringContext = '';
     vm.clarificationReply = '';
     vm.abortController = null;
+    vm.destroyed = false;
     vm.lastStreamingSteps = [];
     vm.lastStreamingPhase = '';
     vm.lastStreamingSummary = '';
@@ -784,7 +785,7 @@
         var data = buildHeartbeatPayload();
         vm.abortController = new AbortController();
         $http.post('/api/bughosted/heartbeat', data, { signal: vm.abortController.signal }).then(function () {
-          _bhHeartbeatFailCount =0;
+          _bhHeartbeatFailCount = 0;
           vm.bughostedStatus = 'connected';
         }, function () {
           _bhHeartbeatFailCount++;
@@ -804,17 +805,17 @@
       if (_bhEditorSyncTimer) { $interval.cancel(_bhEditorSyncTimer); _bhEditorSyncTimer = null; }
     }
 
-var _bhCommandTimer = null;
- function startBughostedCommandPolling() {
- stopBughostedCommandPolling();
- _bhCommandTimer = $interval(function () {
- if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
- var controller = new AbortController();
- $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: controller.signal })
- .then(function (resp) {
- var cmds = resp.data || [];
- cmds.forEach(function (cmd) {
- //
+    var _bhCommandTimer = null;
+    function startBughostedCommandPolling() {
+      stopBughostedCommandPolling();
+      _bhCommandTimer = $interval(function () {
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        var controller = new AbortController();
+        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: controller.signal })
+          .then(function (resp) {
+            var cmds = resp.data || [];
+            cmds.forEach(function (cmd) {
+              //
               if (cmd.parameters && !cmd.params) {
                 try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
               }
@@ -1372,10 +1373,10 @@ var _bhCommandTimer = null;
 
       var isAttached = card.attached.includes(path);
 
-      if (isAttached) { 
+      if (isAttached) {
         var idx = vm.pickerSelected.indexOf(path);
         if (idx !== -1) vm.pickerSelected.splice(idx, 1);
- 
+
         var idxAttached = card.attached.indexOf(path);
         if (idxAttached !== -1) card.attached.splice(idxAttached, 1);
 
@@ -1385,7 +1386,7 @@ var _bhCommandTimer = null;
         card.attached.push(path);
         console.log("attaching file:", path, card.attached, vm.pickerSelected);
       }
-      vm.saveCards(); 
+      vm.saveCards();
     };
 
     vm.attachFile = function (cardId) {
@@ -1435,7 +1436,7 @@ var _bhCommandTimer = null;
             }
             vm.existingFilesCount = Array.isArray(attached) ? attached.length : 1;
           }
-        } 
+        }
       }
       $timeout(function () {
         var searchInput = document.getElementById('attachFilePickerSearchInput');
@@ -1520,7 +1521,7 @@ var _bhCommandTimer = null;
     vm.clearSearch = function () {
       vm.searchFilter = '';
       vm.loadPickerEntries();
-    }; 
+    };
 
     // === Agent helpers ===
     function normalizeStepStatus(status) {
@@ -2034,7 +2035,7 @@ var _bhCommandTimer = null;
 
                       function finishCard() {
                         if (!incomplete) {
-                          targetCol = card.selfImproving ? 'Self-Improving' : 'Done'; 
+                          targetCol = card.selfImproving ? 'Self-Improving' : 'Done';
                           pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
                           vm.moveCardToDone(card);
                         }
@@ -2285,6 +2286,7 @@ var _bhCommandTimer = null;
       });
     };
     vm.refreshTerminal = function () {
+      if (vm.destroyed) return;
       fetch('/api/terminal/output').then(function (r) { return r.json(); }).then(function (data) {
         var newOutput = (data && data.output) || '';
         if (newOutput !== vm.terminalOutput) {
@@ -2300,8 +2302,9 @@ var _bhCommandTimer = null;
         }
       });
     };
-    
-    vm.refreshTerminalApprovals = function () {
+
+    vm.refreshTerminalApprovals = function () { 
+      if (vm.destroyed) return;
       console.log("FETCHING TERMINAL APPROVALS");
       fetch('/api/terminal/approvals/pending')
         .then(function (r) { return r.json(); })
@@ -2426,31 +2429,31 @@ var _bhCommandTimer = null;
       vm.activeCardIds = new Set();
     };
 
- vm.formatLogDetail = formatLogDetail;
- vm.refreshTerminal();
- }]);
+    vm.formatLogDetail = formatLogDetail;
+    vm.refreshTerminal();
 
- // Refresh terminal periodically — but NOT while the agent is streaming.
- // $interval always calls $apply after each tick. When the agent is active,
- // $scope.$digest() is already being called manually in readNext() for every SSE
- // chunk. Two concurrent digest sources produce the $rootScope:infdig loop
- // (Angular sees a watcher — the terminal output string length / scroll geometry —
- // still dirty after10 passes and throws). Pausing the interval during streaming
- // and resuming on done/error keeps exactly one digest source active at a time.
- var _terminalInterval = $interval(vm.refreshTerminal,3000,0, false);
- var _approvalInterval = $interval(vm.refreshTerminalApprovals,1500,0, false);
 
- function pauseTerminalPolling() {
-   if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
-   if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
- }
- function resumeTerminalPolling() {
-   if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal,3000,0, false);
-   if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals,1500,0, false);
- }
 
- // Cleanup function to stop heartbeat and command polling when component is destroyed
- $scope.$on('$destroy', function() {
-   if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
-   if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
- }); 
+    if ($interval) {
+      var _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
+      var _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
+    }
+
+    function pauseTerminalPolling() {
+      if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+      if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
+    }
+    function resumeTerminalPolling() {
+      if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
+      if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
+    }
+
+    // Cleanup function to stop heartbeat and command polling when component is destroyed
+    $scope.$on('$destroy', function () {
+      vm.destroyed = true;
+      console.log("ON DESTROY FIRED");
+      vm.abortController.abort();
+      if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+      if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
+    });
+  }]); 
