@@ -48,16 +48,24 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       vm.saveCards = function() {
         console.log("Saving cards", vm.state);
         // Save to .boarddata file
-        $http.post('/api/boarddata/save', vm.state).catch(function(err) {
-          console.error('Failed to save to .boarddata file:', err);
-        });
-        _cardsVersion++;
-        vm.updateSelfImprovingCount();
+        try {
+          $http.post('/api/boarddata/save', vm.state).catch(function (err) {
+            console.error('Failed to save to .boarddata file:', err);
+          });
+          _cardsVersion++;
+          vm.updateSelfImprovingCount(); 
+        } catch (e) {
+          console.log("Save cards error:", e);
+        }
       };
 
       vm.updateSelfImprovingCount = function () {
-        if (vm.countSelfImprovingCards) {
-          vm.selfImprovingCardCount = vm.countSelfImprovingCards();
+        try { 
+          if (vm.countSelfImprovingCards) {
+            vm.selfImprovingCardCount = vm.countSelfImprovingCards();
+          }
+        } catch (e) {
+          console.log("Ignoring selfImproveCount errors", e);
         }
       };
 
@@ -548,10 +556,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         }
         var card = vm.state.doing.splice(idx, 1)[0]; 
         if (card) {
+          console.log("Found card in doing, moving to " + targetCol);
           vm.state[targetCol].push(card);
+          console.log("card added to "+ targetCol + " setting active card to null");
           vm.activeCardId = null;
           if (!vm.activeCardIds) vm.activeCardIds = new Set();
           vm.activeCardIds.delete(cardId);
+          console.log("saving cards");
           vm.saveCards();
         } else {
           console.log("ERROR: Could not find card to move in Doing column");

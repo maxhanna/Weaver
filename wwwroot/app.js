@@ -793,7 +793,6 @@
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         _lastSyncedEditorState = null;
         var data = buildHeartbeatPayload();
-        vm.abortController = new AbortController();
         $http.post('/api/bughosted/heartbeat', data, { signal: vm.abortController.signal }).then(function () {
           _bhHeartbeatFailCount = 0;
           vm.bughostedStatus = 'connected';
@@ -829,31 +828,36 @@
           return;
         }
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-        vm.abortController = new AbortController();
         _bhTimerRunning = true; 
         $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
           .then(function (resp) {
             if (resp && resp.data) {
               console.log("GOT COMMAND : ", resp);
-              var cmds = resp.data || undefined;
-              if (cmds && cmds.length > 0) { 
-                cmds.forEach(function (cmd) {
-                  if (cmd.parameters && !cmd.params) {
-                    try { 
-                      cmd.params = JSON.parse(cmd.parameters);
-                    } catch (e) { cmd.params = {}; }
-                  }
-                  if (!vm.remoteCommands) { vm.remoteCommands = []; }
-                  var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
-                  if (!existing && cmd.command) { 
-                    vm.remoteCommands.push(cmd);
-                    vm.executeRemoteCommand(cmd); 
-                  }
-                });
-              }
+              try {
+                var cmds = resp.data || undefined;
+                if (cmds && cmds.length > 0) {
+                  cmds.forEach(function (cmd) {
+                    if (cmd.parameters && !cmd.params) {
+                      try {
+                        cmd.params = JSON.parse(cmd.parameters);
+                      } catch (e) { cmd.params = {}; }
+                    }
+                    if (!vm.remoteCommands) { vm.remoteCommands = []; }
+                    var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
+                    if (!existing && cmd.command) {
+                      vm.remoteCommands.push(cmd);
+                      vm.executeRemoteCommand(cmd);
+                    }
+                  });
+                }
+              } catch (e) {
+                console.log("trying to absorb the infidigs", e);
+              }              
             }
           }).finally(res => {  
             _bhTimerRunning = false; 
+          }).catch(e => {
+            console.log("trying to ignore the infidigs", e);
           });
       }, 15000, 0, false);
     }
@@ -1071,8 +1075,11 @@
               vm.saveCards();
             }
           }, function (err) {
-            var c = findCardById(cmd.params.cardId);
-            if (c) { c.prStatus = { status: 'error', error: err.statusText || 'Network error' }; vm.saveCards(); }
+            console.log("PR command errored", err);
+            if (cmd.params.cardId) { 
+              var c = findCardById(cmd.params.cardId);
+              if (c) { c.prStatus = { status: 'error', error: err.statusText || 'Network error' }; vm.saveCards(); }
+            }
           });
         }
       } else if (cmd.command === 'finishPr' && cmd.params && cmd.params.cardId) {
@@ -1098,18 +1105,22 @@
               vm.saveCards();
             }
           }, function (err) {
-            var c = findCardById(cmd.params.cardId);
-            if (c) { c.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: cmd.params.branchName }; vm.saveCards(); }
+            if (cmd.params.cardId) { 
+              var c = findCardById(cmd.params.cardId);
+              if (c) { c.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: cmd.params.branchName }; vm.saveCards(); }
+            }
           });
         }
       } else if (cmd.command === 'deleteCard' && cmd.params && cmd.params.cardId) {
         console.log('Deleting card from remote command:', cmd);
-        var col = findCardColumn(cmd.params.cardId);
-        if (col) {
-          var cards = vm.state[col] || [];
-          var idx = cards.findIndex(function (c) { return c.id === cmd.params.cardId; });
-          if (idx !== -1) cards.splice(idx, 1);
-          vm.saveCards();
+        if (cmd.params.cardId) { 
+          var col = findCardColumn(cmd.params.cardId);
+          if (col) {
+            var cards = vm.state[col] || [];
+            var idx = cards.findIndex(function (c) { return c.id === cmd.params.cardId; });
+            if (idx !== -1) cards.splice(idx, 1);
+            vm.saveCards();
+          }
         }
       } else if (cmd.command === 'changeCardText' && cmd.params && cmd.params.cardId) {
         console.log('Changing card text from remote command:', cmd);
@@ -1247,6 +1258,7 @@
     };
 
     vm.addProjectFromPanel = function () {
+      console.log("adding project from panel");
       if (!vm.newProjectName) return $window.alert('Project name is required');
       if (!vm.newProjectPath) return $window.alert('Project path is required');
       $http.post('/api/config/projects/add', {
@@ -1264,6 +1276,7 @@
     };
 
     vm.saveProject = function (p) {
+      console.log("saving project", p);
       if (!p.Name || !p.Path) return $window.alert('Name and Path are required');
       var originalPath = p._origPath || p.Path;
       $http.get('/api/config').then(function (resp) {
@@ -1284,6 +1297,7 @@
     };
 
     vm.removeProject = function (p, event) {
+      console.log("removing project", p);
       if (event) event.stopPropagation();
       if (!p || !p.Path) return;
       if (!$window.confirm('Remove project "' + (p.Name || '') + '" (' + p.Path + ')?')) return;
@@ -1308,6 +1322,7 @@
     };
 
     vm.triggerUpdate = function () {
+      console.log("trigger update");
       vm.updating = true;
       $http.post('/api/bughosted/update').then(function () {
         // app will restart
@@ -1318,6 +1333,7 @@
     };
 
     vm.openSettingsPanel = function () {
+      console.log(":opening settings panel");
       vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject;
       vm.showSettingsPanel = true;
       vm.fileHintsData = [];
@@ -1570,28 +1586,32 @@
     function pushAgentLog(level, message, detail) {
       if (!message || level === 'status') return;
 
-      // Normalise by stripping all digits so "Plan score: 88/100" and
-      // "Plan score: 90/100" are treated as duplicates and suppressed.
-      function normalise(s) { return (s || '').replace(/\d+/g, '#'); }
+      try {
+        // Normalise by stripping all digits so "Plan score: 88/100" and
+        // "Plan score: 90/100" are treated as duplicates and suppressed.
+        function normalise(s) { return (s || '').replace(/\d+/g, '#'); }
 
-      var recentDupe = vm.agentActivityLog.length > 0 &&
-        vm.agentActivityLog.slice(-3).some(function (e) {
-          return e.level === level && normalise(e.message) === normalise(message);
-        });
+        var recentDupe = vm.agentActivityLog.length > 0 &&
+          vm.agentActivityLog.slice(-3).some(function (e) {
+            return e.level === level && normalise(e.message) === normalise(message);
+          });
 
-      if (recentDupe && level !== 'error' && level !== 'warn') return;
+        if (recentDupe && level !== 'error' && level !== 'warn') return;
 
-      var entry = {
-        ts: new Date().toLocaleTimeString(),
-        level: level || 'info',
-        message: message,
-        detail: detail
-      };
+        var entry = {
+          ts: new Date().toLocaleTimeString(),
+          level: level || 'info',
+          message: message,
+          detail: detail
+        };
 
-      vm.agentActivityLog.push(entry);
-      vm.agentActivityLogLength = vm.agentActivityLog.length;
-      if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift(); // was 80
-      vm.scrollToBottom();
+        vm.agentActivityLog.push(entry);
+        vm.agentActivityLogLength = vm.agentActivityLog.length;
+        if (vm.agentActivityLogLength > 100) vm.agentActivityLog.shift(); // was 80
+        vm.scrollToBottom();
+      } catch (e) {
+        console.log("abosrbing all infidfgis", e);
+      }
     }
 
     vm.getActiveStep = function () {
@@ -1830,9 +1850,7 @@
         if (!vm.activeCardIds) {
           vm.activeCardIds = new Set();
         }
-        vm.activeCardIds.add(card.id);
-
-        vm.abortController = new AbortController();
+        vm.activeCardIds.add(card.id); 
 
         fetch('/api/agent/execute-stream', {
           method: 'POST',
@@ -1840,6 +1858,7 @@
           body: JSON.stringify(payload),
           signal: vm.abortController.signal
         }).then(function (response) {
+          console.log("Executing stream", payload);
           if (!response.ok) {
             vm.streamingActive = false;
             resumeTerminalPolling();
@@ -2161,6 +2180,7 @@
           readNext();
 
         }).catch(function (err) {
+          console.log("eating all errs", err);
           vm.streamingActive = false;
           resumeTerminalPolling(); 
           if (err.name === 'AbortError') {
@@ -2168,7 +2188,6 @@
           } else {
             vm.agentResult = { error: 'Connection failed: ' + err.message };
           }
-          $scope.$applyAsync();
         });
       }
 
@@ -2445,7 +2464,9 @@
     };
 
     vm.stopAgent = function (card) {
+      console.log("Stopping agent.");
       if (vm.abortController) {
+        console.log("abort signal launched");
         vm.abortController.abort(); 
       }
       vm.streamingActive = false;
@@ -2469,10 +2490,12 @@
     }
 
     function pauseTerminalPolling() {
+      console.log("Pausing terminal polling");
       if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
       if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
     }
     function resumeTerminalPolling() {
+      console.log("Resuming terminal polling");
       if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
       if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
     }
