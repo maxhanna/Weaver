@@ -2820,6 +2820,12 @@ h3 .small.ghost:hover {
 	font-weight: 600;
 }
 
+.attachFileFooter {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
 .muted {
 	color: var(--muted);
 }

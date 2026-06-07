@@ -791,7 +791,7 @@
             vm.bughostedStatus = 'error';
           }
         });
-      }, 30000, 0, false);
+      }, 60000, 0, false);
       // Rapid editor state sync every 3 seconds
       _bhEditorSyncTimer = $interval(function () {
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
@@ -1358,9 +1358,32 @@
     };
 
     vm.pickerToggleFile = function (path) {
-      var idx = vm.pickerSelected.indexOf(path);
-      if (idx === -1) vm.pickerSelected.push(path);
-      else vm.pickerSelected.splice(idx, 1);
+      console.log(vm.pickerCardId);
+      var card = findCardById(vm.pickerCardId);
+
+      if (!card) return;
+
+      console.log("already attached files:", card.attached);
+
+      // Always normalize
+      if (!Array.isArray(card.attached)) card.attached = [];
+
+      var isAttached = card.attached.includes(path);
+
+      if (isAttached) { 
+        var idx = vm.pickerSelected.indexOf(path);
+        if (idx !== -1) vm.pickerSelected.splice(idx, 1);
+ 
+        var idxAttached = card.attached.indexOf(path);
+        if (idxAttached !== -1) card.attached.splice(idxAttached, 1);
+
+        console.log("file was attached, now removed:", path, card.attached, vm.pickerSelected);
+      } else {
+        vm.pickerSelected.push(path);
+        card.attached.push(path);
+        console.log("attaching file:", path, card.attached, vm.pickerSelected);
+      }
+      vm.saveCards(); 
     };
 
     vm.attachFile = function (cardId) {
@@ -1395,18 +1418,22 @@
       // Calculate existing files count
       vm.existingFilesCount = 0;
       if (cardId && vm.state) {
-        ['todo', 'doing', 'done'].forEach(function (col) {
-          var cards = vm.state[col];
-          for (var i = 0; i < cards.length; i++) {
-            if (cards[i].id === cardId) {
-              var attached = cards[i].attached;
-              if (attached) {
-                vm.existingFilesCount = Array.isArray(attached) ? attached.length : 1;
+        var card = findCardById(cardId);
+        if (card) {
+          var attached = card.attached;
+          if (attached) {
+            console.log("Previous Attached files: ", attached);
+            if (Array.isArray(attached)) {
+              for (let x = 0; x < attached.length; x++) {
+                if (attached[x]) {
+                  var idx = vm.pickerSelected.indexOf(attached[x]);
+                  if (idx === -1) vm.pickerSelected.push(attached[x]);
+                }
               }
-              break;
             }
+            vm.existingFilesCount = Array.isArray(attached) ? attached.length : 1;
           }
-        });
+        } 
       }
       $timeout(function () {
         var searchInput = document.getElementById('attachFilePickerSearchInput');
@@ -1491,48 +1518,7 @@
     vm.clearSearch = function () {
       vm.searchFilter = '';
       vm.loadPickerEntries();
-    };
-
-    vm.confirmFilePicker = function () {
-      if (!vm.pickerSelected.length) return $window.alert('Select at least one file');
-      var cardId = vm.pickerCardId;
-      if (!cardId) return vm.closeFilePicker();
-      var attachedCount = 0;
-      ['todo', 'doing', 'done'].forEach(function (col) {
-        var cards = vm.state[col];
-        for (var i = 0; i < cards.length; i++) {
-          if (cards[i].id === cardId) {
-            var existing = Array.isArray(cards[i].attached) ? cards[i].attached : (cards[i].attached ? [cards[i].attached] : []);
-            vm.pickerSelected.forEach(function (f) {
-              if (existing.indexOf(f) === -1) existing.push(f);
-            });
-            cards[i].attached = existing;
-            cards[i].attachedProject = vm.selectedProject;
-            attachedCount = existing.length;
-            break;
-          }
-        }
-      });
-      vm.saveCards();
-      vm.closeFilePicker();
-      if (attachedCount > 0) {
-        var filePicker = document.getElementById('filePicker');
-        if (filePicker) {
-          var fileItems = filePicker.querySelectorAll('.entry');
-          fileItems.forEach(function (item) {
-            var fileName = item.querySelector('.entryTypeAndName span:last-child').textContent;
-            if (vm.pickerSelected.includes(fileName)) {
-              item.classList.add('existing-file');
-            }
-          });
-        }
-      }
-      var card = findCardById(cardId);
-      if (card) {
-        card.attachedCount = attachedCount;
-      }
-      vm.loadPickerEntries(vm.pickerCardId);
-    };
+    }; 
 
     // === Agent helpers ===
     function normalizeStepStatus(status) {
@@ -2046,6 +2032,8 @@
 
                       function finishCard() {
                         if (!incomplete) {
+                          targetCol = card.selfImproving ? 'Self-Improving' : 'Done'; 
+                          pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
                           vm.moveCardToDone(card);
                         }
                         if (incomplete && card.id === vm.activeCardId) {

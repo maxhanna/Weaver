@@ -3756,7 +3756,7 @@ Respond with JSON only:
         var replLines = replacement.Split('\n');
         var replBaseIndent = replLines.Where(l => l.Length > 0).Select(GetLeadingWhitespace).FirstOrDefault();
 
-        if (replBaseIndent != fileIndent)
+        if (replBaseIndent != null && replBaseIndent != fileIndent)
         {
             for (var i = 0; i < replLines.Length; i++)
             {

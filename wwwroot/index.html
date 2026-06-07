@@ -550,11 +550,9 @@
             in this directory</div>
         </div>
       </div>
-      <div class="popup-footer">
-        <span class="text-sm muted" ng-if="vm.pickerSelected.length">{{vm.pickerSelected.length + vm.existingFilesCount}} file(s)
-        selected</span>
-        <button ng-click="vm.confirmFilePicker()">Attach</button>
-        <button ng-click="vm.closeFilePicker()">Cancel</button>
+      <div class="popup-footer attachFileFooter">
+        <span class="text-sm muted" ng-if="vm.pickerSelected.length">{{vm.pickerSelected.length}} file(s) selected</span>
+        <button ng-click="vm.closeFilePicker()">Close</button>
       </div>
     </div>
   </div>
