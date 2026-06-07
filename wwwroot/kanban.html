@@ -54,7 +54,7 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
                 <span class="plan-item-file">{{item.file}}</span>
@@ -172,7 +172,7 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
                 <span class="plan-item-file">{{item.file}}</span>
@@ -329,9 +329,8 @@
                   <div class="plan-items-list"
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
-                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
-                        '⬜'}}</span>
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -386,7 +385,7 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
                 <span class="plan-item-file">{{item.file}}</span>
                 <span class="plan-item-change">{{item.change}}</span>
@@ -499,9 +498,8 @@
                   <div class="plan-items-list"
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
-                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
-                        '⬜'}}</span>
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
