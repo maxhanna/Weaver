@@ -1531,6 +1531,7 @@
       if (card) {
         card.attachedCount = attachedCount;
       }
+      vm.loadPickerEntries(vm.pickerCardId); 
     };
 
     // === Agent helpers ===
@@ -2426,14 +2427,7 @@
       pushAgentLog('warn', 'Agent stopped by user');
       if (card) {
         vm.activeCardIds.delete(card.id);
-      }
-      if (vm.activeCardIds.size === 0) {
-        vm.streamingActive = false;
-        vm.abortController = null;
-        if (vm.state.todo.length > 0 && !vm.activeCardIds.size) {
-          vm.moveCardToDoing(vm.state.todo[0].id);
-        }
-      }
+      } 
       vm.activeCardId = null;
       vm.activeCardIds = new Set();
     };

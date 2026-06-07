@@ -2585,6 +2585,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     {
         if (string.IsNullOrWhiteSpace(req.Prompt)) return BadRequest("Prompt is required");
         var projectRoot = GetProjectRoot(req.Project);
+        await EmitLog(true, "info", "Orchestrating Request.", new { projectRoot, task = req.Prompt });
+
         var (allSteps, plan, complete) = await Orchestrate(req.Prompt, projectRoot, emitSse: false);
         return Ok(new
         {
