@@ -540,19 +540,19 @@
             <div class="entryTypeAndName"><span>📁</span><span>{{vm.isSearchResult ? e.path + '/' : e.name + '/'}}</span></div>
           </div>
           <div class="entry" ng-repeat="e in vm.pickerEntries" ng-if="!e.isDirectory"
-            ng-click="vm.pickerToggleFile(e.path)">
-            <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1}">
-              <span ng-show="vm.pickerSelected.indexOf(e.path)!==-1" class="checkmark">✔</span>
-            </div>
-            <div class="entryTypeAndName"><span>📄</span><span>{{vm.isSearchResult ? e.path : e.name}}</span></div>
-          </div>
+           ng-click="vm.pickerToggleFile(e.path)">
+            <div class="checkbox" ng-class="{checked: vm.pickerSelected.indexOf(e.path)!==-1 || vm.isFileAttached(e.path)}">
+            <span ng-show="vm.pickerSelected.indexOf(e.path)!==-1 || vm.isFileAttached(e.path)" class="checkmark">✔</span>
+           </div>
+           <div class="entryTypeAndName"><span>📄</span><span>{{vm.isSearchResult ? e.path : e.name}}</span></div>
+           </div>
           <div ng-if="!vm.pickerEntries.length" class="muted text-sm" style="padding:12px;text-align:center;">No files
             in this directory</div>
         </div>
       </div>
       <div class="popup-footer">
-        <span class="text-sm muted" ng-if="vm.pickerSelected.length">{{vm.pickerSelected.length}} file(s)
-          selected</span>
+        <span class="text-sm muted" ng-if="vm.pickerSelected.length">{{vm.pickerSelected.length + vm.existingFilesCount}} file(s)
+        selected</span>
         <button ng-click="vm.confirmFilePicker()">Attach</button>
         <button ng-click="vm.closeFilePicker()">Cancel</button>
       </div>

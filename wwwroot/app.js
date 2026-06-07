@@ -103,34 +103,34 @@
 
     // Debug logging for file size and token count
     $http.get('/api/filehints').then(function (resp) {
-  try {
-    var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
-    if (store && store.Projects) {
-      vm.fileHintsData = vm.projects.map(function (p) {
-        var proj = store.Projects[p.Path];
-        return {
-          projectPath: p.Path,
-          hints: proj && proj.Hints ? proj.Hints.map(function (h) {
+      try {
+        var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
+        if (store && store.Projects) {
+          vm.fileHintsData = vm.projects.map(function (p) {
+            var proj = store.Projects[p.Path];
             return {
-              keywords: (h.Keywords || []).join(', '),
-              files: (h.Files || []).length >0 ? h.Files.slice(0,3).join(', ') + (h.Files.length >3 ? '...' : '') : 'None',
-              allFiles: h.Files || [],
-              description: h.Description || ''
+              projectPath: p.Path,
+              hints: proj && proj.Hints ? proj.Hints.map(function (h) {
+                return {
+                  keywords: (h.Keywords || []).join(', '),
+                  files: (h.Files || []).length > 0 ? h.Files.slice(0, 3).join(', ') + (h.Files.length > 3 ? '...' : '') : 'None',
+                  allFiles: h.Files || [],
+                  description: h.Description || ''
+                };
+              }) : []
             };
-          }) : []
-        };
-      });
-    } else {
+          });
+        } else {
+          vm.fileHintsData = [];
+        }
+      } catch (e) {
+        console.error('Error loading file hints:', e);
+        vm.fileHintsData = [];
+      }
+    }).catch(function (error) {
+      console.error('HTTP error loading file hints:', error);
       vm.fileHintsData = [];
-    }
-  } catch (e) {
-    console.error('Error loading file hints:', e);
-    vm.fileHintsData = [];
-  }
-}).catch(function (error) {
-  console.error('HTTP error loading file hints:', error);
-  vm.fileHintsData = [];
-});
+    });
 
     // Fallback for when file hints data is not available
     if (!vm.fileHintsData || vm.fileHintsData.length === 0) {
@@ -369,7 +369,7 @@
         if (!vm.bughostedHeartbeatEnabled && vm.bughostedClientId) {
           vm.bughostedLogout();
         }
-        if (!skipCloseSettingsPanel) { 
+        if (!skipCloseSettingsPanel) {
           vm.closeSettingsPanel();
         }
       }, function (err) {
@@ -553,9 +553,9 @@
       return p ? (p.Description || '') : '';
     };
 
-    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };  
+    vm.toggleProjectOptions = function () { vm.showProjectOptions = !vm.showProjectOptions; };
 
-    vm.closeOptionsOnBlur = function (event) { 
+    vm.closeOptionsOnBlur = function (event) {
       $timeout(function () {
         vm.showProjectOptions = false;
         $timeout(function () {
@@ -1400,6 +1400,24 @@
       }, 10);
     };
 
+    vm.isFileAttached = function (filePath) {
+      if (!vm.pickerCardId || !vm.state) return false;
+      var cols = ['todo', 'doing', 'done'];
+      for (var ci = 0; ci < cols.length; ci++) {
+        var cards = vm.state[cols[ci]];
+        if (!cards) continue;
+        for (var i = 0; i < cards.length; i++) {
+          if (cards[i].id === vm.pickerCardId) {
+            var attached = cards[i].attached;
+            if (Array.isArray(attached)) return attached.indexOf(filePath) !== -1;
+            if (attached) return attached === filePath;
+            return false;
+          }
+        }
+      }
+      return false;
+    };
+
     vm.loadPickerEntries = function (cardId) {
       var params = { project: vm.selectedProject };
       if (vm.searchFilter && vm.searchFilter.trim()) {
@@ -1463,18 +1481,36 @@
       if (!vm.pickerSelected.length) return $window.alert('Select at least one file');
       var cardId = vm.pickerCardId;
       if (!cardId) return vm.closeFilePicker();
+      var attachedCount = 0;
       ['todo', 'doing', 'done'].forEach(function (col) {
         var cards = vm.state[col];
         for (var i = 0; i < cards.length; i++) {
           if (cards[i].id === cardId) {
-            cards[i].attached = angular.copy(vm.pickerSelected);
+            var existing = Array.isArray(cards[i].attached) ? cards[i].attached : (cards[i].attached ? [cards[i].attached] : []);
+            vm.pickerSelected.forEach(function (f) {
+              if (existing.indexOf(f) === -1) existing.push(f);
+            });
+            cards[i].attached = existing;
             cards[i].attachedProject = vm.selectedProject;
+            attachedCount = existing.length;
             break;
           }
         }
       });
       vm.saveCards();
       vm.closeFilePicker();
+      if (attachedCount > 0) {
+        var filePicker = document.getElementById('filePicker');
+        if (filePicker) {
+          var fileItems = filePicker.querySelectorAll('.file-item');
+          fileItems.forEach(function (item) {
+            var fileName = item.getAttribute('data-filename');
+            if (vm.pickerSelected.includes(fileName)) {
+              item.classList.add('existing-file');
+            }
+          });
+        }
+      }
     };
 
     // === Agent helpers ===
@@ -1686,12 +1722,20 @@
       vm.executeAgent(card);
     };
 
-    vm.executeAgent = function (card) {
+    vm.executeAgent = function (card, isAutoRestart) {
       if (!card) return;
       if (vm.streamingActive) return;
       if (!card.text) return $window.alert('Card has no task text');
       var proj = card.filePath || vm.selectedProject;
       if (!proj) return $window.alert('No project assigned');
+
+      // Track iterations to prevent infinite restart loop
+      if (!isAutoRestart) card._agentIteration = 0;
+      card._agentIteration++;
+      if (card._agentIteration > 5) {
+        pushAgentLog('error', 'Card exceeded max iterations (5) — stopping');
+        return;
+      }
 
       // Clear previous analysis for this fresh run
       delete card.agentAnalysis;
@@ -1741,21 +1785,6 @@
           isDecomposing: card.isDecomposing || false,
           cardId: card.id
         };
-
-        // Pass existing plan to backend for resumption (skip replan, only run incomplete steps)
-        // Note: card._plan is preserved — the SSE plan event handler will update it
-        if (card._plan && card._plan.items && card._plan.items.length) {
-          var pendingItems = card._plan.items.filter(function (i) { return !i.done; });
-          if (pendingItems.length > 0 && pendingItems.length < card._plan.items.length) {
-            payload.plan = card._plan.items.map(function (i) {
-              return { index: i.index, file: i.file, change: i.change, done: i.done };
-            });
-            payload.completedStepIndices = card._plan.items
-              .filter(function (i) { return i.done; })
-              .map(function (i) { return i.index; });
-            pushAgentLog('info', 'Resuming from plan — ' + pendingItems.length + ' of ' + card._plan.items.length + ' steps remaining');
-          }
-        }
 
         // Move to Doing
         vm.moveCardToDoing(card.id);
@@ -1869,7 +1898,7 @@
                       if (parsed && parsed.items && parsed.items.length) {
                         var isResumed = parsed.resumed === true;
                         vm.planItems = parsed.items.map(function (item, i) {
-                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false };
+                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
                         });
                         if (parsed.summary) {
                           pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
@@ -1998,6 +2027,16 @@
                       function finishCard() {
                         if (!incomplete) {
                           vm.moveCardToDone(card);
+                        }
+                        if (incomplete && card.id === vm.activeCardId) {
+                          // Auto-restart: task isn't complete yet, keep working on this card
+                          var pendingCount = 0;
+                          if (vm.planItems) {
+                            pendingCount = vm.planItems.filter(function (pi) { return !pi.done; }).length;
+                          }
+                          pushAgentLog('info', 'Re-starting agent — ' + (pendingCount || 'quality') + ' issue(s) remain for this card');
+                          vm.executeAgent(card, true);
+                          return;
                         }
                         if (vm.autoQueue) {
                           $timeout(function () {
@@ -2367,7 +2406,6 @@
       pushAgentLog('warn', 'Agent stopped by user');
       if (card) {
         vm.activeCardIds.delete(card.id);
-        vm.updateCardStatus(card.id, 'todo');
       }
       if (vm.activeCardIds.size === 0) {
         vm.streamingActive = false;

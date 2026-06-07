@@ -200,12 +200,24 @@ public class AgentController : ControllerBase
                     sb.AppendLine($"  ```");
                     sb.AppendLine($"  {h.old[..Math.Min(400, h.old.Length)]}");
                     sb.AppendLine($"  ```");
-                    // Show what lines in the file were close
-                    var hint = BuildExactMatchHint(fileContent, h.old);
-                    if (hint != null)
+                    // Show exact file lines at the fuzzy-match location for verbatim copying
+                    var exactBlock = BuildExactMatchBlock(fileContent, h.old);
+                    if (exactBlock != null)
                     {
-                        sb.AppendLine($"  These lines in the file are SIMILAR to what you wrote (maybe one of these is the right target with correct whitespace?):");
-                        sb.AppendLine($"  {hint}");
+                        sb.AppendLine($"  The EXACT lines from the file at the matched location (copy these VERBATIM for oldString):");
+                        sb.AppendLine($"  ```");
+                        sb.AppendLine($"  {exactBlock}");
+                        sb.AppendLine($"  ```");
+                    }
+                    else
+                    {
+                        // Show what lines in the file were close (fallback)
+                        var hint = BuildExactMatchHint(fileContent, h.old);
+                        if (hint != null)
+                        {
+                            sb.AppendLine($"  These lines in the file are SIMILAR to what you wrote:");
+                            sb.AppendLine($"  {hint}");
+                        }
                     }
                 }
             }
@@ -487,7 +499,38 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
                 await EmitLog(emitSse, "warn",
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+
+                // Self-heal: if the oldString doesn't match but fuzzy location is found,
+                // extract the exact file lines and retry immediately
+                var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!);
+                if (correctedBlock != null && correctedBlock != oldStr)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Self-healing: extracted exact oldString from file ({correctedBlock.Length} chars)", ct: ct);
+                    var (replaced2, newContent2, _, _) =
+                        TryReplaceSafe(fileContent, correctedBlock, newStr ?? string.Empty);
+                    if (replaced2)
+                    {
+                        var (approved2, verifyReason2, _) =
+                            VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2);
+                        if (approved2)
+                        {
+                            await System.IO.File.WriteAllTextAsync(fullPath, newContent2, Encoding.UTF8, ct);
+                            await EmitLog(emitSse, "success", $"✓ Edited {relPath} (self-healed)", ct: ct);
+                            var r = new Dictionary<string, object?>();
+                            PopulateEditResult(r, "modified", relPath, correctedBlock, newStr ?? "", "self-healed");
+                            r["index"] = stepIndex;
+                            r["planItemIndex"] = planItemIndex;
+                            if (emitSse) await SendSse(Response, "step", r, ct);
+                            allResults.Add(r);
+                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                            return stepIndex + 1;
+                        }
+                    }
+                }
+
                 history.Add((oldStr!, newStr ?? "", err));
+
 
                 // Detect stuck: same oldString repeated 3+ times
                 if (string.Equals(oldStr, lastOld, StringComparison.Ordinal))
@@ -530,10 +573,16 @@ public class AgentController : ControllerBase
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 !newContent.Contains(newStr, StringComparison.Ordinal))
             {
-                var verr = "Replacement produced mismatched content — oldString matched wrong location";
-                await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
-                history.Add((oldStr!, newStr, verr));
-                continue;
+                // Indentation may have been adjusted — retry with leading whitespace stripped
+                var strippedNew = StripLineLeadingWhitespace(newStr);
+                var strippedContent = StripLineLeadingWhitespace(newContent);
+                if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
+                {
+                    var verr = "Replacement produced mismatched content — oldString matched wrong location";
+                    await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
+                    history.Add((oldStr!, newStr, verr));
+                    continue;
+                }
             }
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
@@ -621,6 +670,78 @@ public class AgentController : ControllerBase
         }
     }
 
+    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices)> LoadPlanFromBoardDataAsync(string? cardId)
+    {
+        if (string.IsNullOrWhiteSpace(cardId))
+            return (null, null);
+
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return (null, null);
+
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return (null, null);
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    if (cardObj["_plan"] is not JsonObject planObj)
+                        continue;
+
+                    var itemsArr = planObj["items"] as JsonArray;
+                    if (itemsArr == null || itemsArr.Count == 0)
+                        continue;
+
+                    var steps = new List<PlanStep>();
+                    var completed = new HashSet<int>();
+                    for (var i = 0; i < itemsArr.Count; i++)
+                    {
+                        if (itemsArr[i] is not JsonObject si) continue;
+                        var step = new PlanStep
+                        {
+                            File = si["file"]?.GetValue<string>() ?? "",
+                            Change = si["change"]?.GetValue<string>() ?? "",
+                            Priority = si["priority"]?.GetValue<int>() ?? 1,
+                            OldString = si["oldString"]?.GetValue<string>() ?? "",
+                            NewString = si["newString"]?.GetValue<string>() ?? ""
+                        };
+                        // Use stored index if available, otherwise position in array
+                        var idx = si["index"]?.GetValue<int>() ?? i;
+                        steps.Add(step);
+                        var done = si["done"]?.GetValue<bool>() ?? false;
+                        if (done) completed.Add(idx);
+                    }
+
+                    if (steps.Count == 0) return (null, null);
+
+                    var plan = new AgentPlan
+                    {
+                        Summary = planObj["summary"]?.GetValue<string>() ?? "",
+                        Plan = steps
+                    };
+
+                    return (plan, completed.Count > 0 ? completed : null);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to load plan from board data", new { cardId, error = ex.Message });
+        }
+
+        return (null, null);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  PLANNING — simplified, no oldString/newString in plan
     // ═══════════════════════════════════════════════════════════════════════
@@ -651,16 +772,17 @@ public class AgentController : ControllerBase
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement\n" +
-        "6. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
-        "7. Each step must be ONE focused change — do not combine unrelated edits in one step\n" +
-        "8. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed\n" +
-        "9. Never put ... or [...] or placeholders in oldString or newString\n" +
-        "10. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" +
+        "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
+        "7. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
+        "8. Each step must be ONE focused change — do not combine unrelated edits in one step\n" +
+        "9. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed\n" +
+        "10. Never put ... or [...] or placeholders in oldString or newString\n" +
+        "11. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" + 
         "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-4 lines: which files need changing and why\",\n" +
         "  \"summary\": \"one sentence: what this plan accomplishes\",\n" +
-        "  \"score\": 90,\n" +
+        "  \"score\": <0-100>,\n" +
         "  \"plan\": [\n" +
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
@@ -1091,10 +1213,12 @@ public class AgentController : ControllerBase
         var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
         if (fb >= 0 && lb > fb) { var bc = cleaned[fb..(lb + 1)]; if (LooksLikePlanJson(bc)) jsonBlocks.Add(bc); }
         foreach (var candidate in jsonBlocks.Distinct())
+        {
             foreach (var repaired in AgentUtilities.GeneratePlanJsonCandidates(candidate))
             {
                 try { var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts); if (result?.Plan != null) return result; } catch { }
             }
+        } 
         var arrayCandidates = new List<string> { cleaned };
         var f2 = cleaned.IndexOf('['); var l2 = cleaned.LastIndexOf(']');
         if (f2 >= 0 && l2 > f2) arrayCandidates.Add(cleaned[f2..(l2 + 1)]);
@@ -1105,7 +1229,7 @@ public class AgentController : ControllerBase
                 var c = block.Trim();
                 if (!c.StartsWith("[")) continue;
                 var steps = JsonSerializer.Deserialize<List<PlanStep>>(c, opts);
-                if (steps is { Count: > 0 }) return new AgentPlan { Summary = "Parsed array", Plan = steps };
+                    if (steps is { Count: > 0 }) return new AgentPlan { Summary = "Parsed array", Plan = steps, Score = 0 };
             }
             catch { }
         }
@@ -1186,19 +1310,38 @@ public class AgentController : ControllerBase
                 {
                     await EmitLog(emitSse, "warn", $"Quality check: {reason}", ct: ct);
 
-                    // One replan pass — generate ONLY additional steps, no full pipeline
-                    await EmitLog(emitSse, "info", "Replan — one pass with failure context…", ct: ct);
-                    var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                        steeringContext, projectRoot, emitSse, ct);
-                    if (newSteps?.Count > 0)
+                    // Build completedStepIndices from existing results
+                    var doneIndices = new HashSet<int>();
+                    for (var i = 0; i < (plan?.Plan?.Count ?? 0); i++)
                     {
-                        plan = MergePlans(plan, new AgentPlan { Plan = newSteps });
-                        if (emitSse)
-                            await SendSse(Response, "plan",
-                                new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
+                        var step = plan!.Plan[i];
+                        var result = allSteps.OfType<Dictionary<string, object?>>()
+                            .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                                s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
+                                s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
+                        if (result != null) doneIndices.Add(i);
+                    }
 
-                        // Build completedStepIndices from existing results
-                        var doneIndices = new HashSet<int>();
+                    var hasIncomplete = plan != null && doneIndices.Count < plan.Plan.Count;
+
+                    if (hasIncomplete)
+                    {
+                        // Retry incomplete steps from the existing plan first
+                        await EmitLog(emitSse, "info",
+                            $"Replan: retrying {plan!.Plan.Count - doneIndices.Count} incomplete step(s)…", ct: ct);
+                        var retryResults = new List<object>();
+                        await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, retryResults,
+                            steeringContext: steeringContext, attachedFiles: attachedFiles,
+                            completedStepIndices: doneIndices, cardId: cardId);
+                        allSteps.AddRange(retryResults);
+
+                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
+                        complete = ok2;
+                    }
+
+                    // Rebuild doneIndices after retry for the check below
+                    if (!complete && plan?.Plan?.Count > 0)
+                    {
                         for (var i = 0; i < plan.Plan.Count; i++)
                         {
                             var step = plan.Plan[i];
@@ -1208,27 +1351,53 @@ public class AgentController : ControllerBase
                                     s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
                             if (result != null) doneIndices.Add(i);
                         }
-
-                        // Execute only remaining steps (no new discovery, no new planning)
-                        var newResults = new List<object>();
-                        await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, newResults,
-                            steeringContext: steeringContext, attachedFiles: attachedFiles,
-                            completedStepIndices: doneIndices, cardId: cardId);
-                        allSteps.AddRange(newResults);
-
-                        var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
-                        complete = ok2;
                     }
-                    else
+
+                    // Only generate new steps if all original steps are done but quality check still failed
+                    if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
-                        await EmitLog(emitSse, "warn", "No additional steps needed — stopping.", ct: ct);
-                        complete = plan?.Plan?.All(p =>
+                        await EmitLog(emitSse, "info", "All steps done — generating additional steps…", ct: ct);
+                        var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                            steeringContext, projectRoot, emitSse, ct);
+                        if (newSteps?.Count > 0)
                         {
-                            var result = allSteps.OfType<Dictionary<string, object?>>()
-                                .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), p.File, StringComparison.OrdinalIgnoreCase) &&
-                                    s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
-                            return result != null && result.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped";
-                        }) ?? true;
+                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
+                            if (emitSse)
+                                await SendSse(Response, "plan",
+                                    new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
+
+                            // Rebuild doneIndices with merged plan and execute remaining
+                            var mergedDone = new HashSet<int>();
+                            for (var i = 0; i < plan.Plan.Count; i++)
+                            {
+                                var step = plan.Plan[i];
+                                var result = allSteps.OfType<Dictionary<string, object?>>()
+                                    .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                                        s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
+                                        s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
+                                if (result != null) mergedDone.Add(i);
+                            }
+
+                            var newResults = new List<object>();
+                            await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, newResults,
+                                steeringContext: steeringContext, attachedFiles: attachedFiles,
+                                completedStepIndices: mergedDone, cardId: cardId);
+                            allSteps.AddRange(newResults);
+
+                            var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
+                            complete = ok3;
+                        }
+                        else
+                        {
+                            await EmitLog(emitSse, "warn", "No additional steps needed — stopping.", ct: ct);
+                            complete = plan?.Plan?.All(p =>
+                            {
+                                var result = allSteps.OfType<Dictionary<string, object?>>()
+                                    .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), p.File, StringComparison.OrdinalIgnoreCase) &&
+                                        s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
+                                return result != null && result.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped";
+                            }) ?? true;
+                        }
                     }
                 }
                 else
@@ -1943,18 +2112,29 @@ public class AgentController : ControllerBase
         // newString must be present in result
         if (!string.IsNullOrEmpty(normNew) &&
             !normNewContent.Contains(normNew, StringComparison.Ordinal))
-            return (false, "newString not found after replacement", 4);
+        {
+            // Indentation may have been adjusted — retry with leading whitespace stripped from each line
+            var strippedNew = StripLineLeadingWhitespace(normNew);
+            var strippedContent = StripLineLeadingWhitespace(normNewContent);
+            if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
+                return (false, "newString not found after replacement", 4);
+        }
 
         // oldString should not appear as-frequently in the result
         // (it was supposed to be replaced). Only check this for non-trivial oldStrings.
         if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10)
         {
+            // Strip leading whitespace from each line for indentation-aware comparison
+            var strippedOld = StripLineLeadingWhitespace(normOld);
+            var strippedOldContent = StripLineLeadingWhitespace(normOldContent);
+            var strippedNewContent = StripLineLeadingWhitespace(normNewContent);
+
             var oldCount = 0; var newCount = 0; var pos = 0;
-            while ((pos = normOldContent.IndexOf(normOld, pos, StringComparison.Ordinal)) >= 0)
-            { oldCount++; pos += normOld.Length; }
+            while ((pos = strippedOldContent.IndexOf(strippedOld, pos, StringComparison.Ordinal)) >= 0)
+            { oldCount++; pos += strippedOld.Length; }
             pos = 0;
-            while ((pos = normNewContent.IndexOf(normOld, pos, StringComparison.Ordinal)) >= 0)
-            { newCount++; pos += normOld.Length; }
+            while ((pos = strippedNewContent.IndexOf(strippedOld, pos, StringComparison.Ordinal)) >= 0)
+            { newCount++; pos += strippedOld.Length; }
             // If oldString appears the same number of times, the edit was a no-op
             if (oldCount > 0 && newCount >= oldCount)
                 return (false, "oldString still fully present after replacement — edit hit wrong location", 4);
@@ -1966,6 +2146,14 @@ public class AgentController : ControllerBase
             return (false, "oldString and newString are identical after normalization", 3);
 
         return (true, "Programmatic check passed", 10);
+    }
+
+    private static string StripLineLeadingWhitespace(string s)
+    {
+        var lines = s.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+            lines[i] = lines[i].TrimStart();
+        return string.Join("\n", lines);
     }
 
     private async Task<bool> ApplyEditWithRetry(
@@ -2427,25 +2615,15 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             await SendSse(Response, "phase", new { phase = "start", projectRoot });
             await EmitLog(true, "info", "Agent started", new { projectRoot, task = req.Prompt });
 
-            // Convert existing plan from request if provided
+            // Load existing plan from board data (by cardId) — no need for frontend to pass it
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
-            if (req.Plan != null && req.Plan.Count > 0)
+            if (!string.IsNullOrWhiteSpace(req.CardId))
             {
-                existingPlan = new AgentPlan
-                {
-                    Summary = req.SteeringContext ?? "",
-                    Plan = req.Plan.Select(p => new PlanStep
-                    {
-                        File = p.File,
-                        Change = p.Change,
-                        Priority = 1
-                    }).ToList()
-                };
-                completedIndices = req.CompletedStepIndices != null
-                    ? new HashSet<int>(req.CompletedStepIndices)
-                    : new HashSet<int>(req.Plan.Where(p => p.Done).Select(p => p.Index));
-            }
+                var (loadedPlan, loadedCompleted) = await LoadPlanFromBoardDataAsync(req.CardId);
+                existingPlan = loadedPlan;
+                completedIndices = loadedCompleted;
+            } 
 
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
@@ -2996,7 +3174,11 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath!.Replace('/', Path.DirectorySeparatorChar)));
             if (!System.IO.File.Exists(fullPath)) continue;
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            var preview = content.Length > 700 ? content[..700] + "\n…" : content;
+            string preview;
+            if (content.Length > 12000)
+                preview = content[..6000] + "\n\n... [middle omitted] ...\n\n" + content[^4000..];
+            else
+                preview = content;
             sb.AppendLine($"## Current {relPath}\n```\n{preview}\n```\n");
         }
 
@@ -3204,17 +3386,20 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     private static (int lineIdx, double score, bool hasExactLine) FindBestFuzzyBlock(string[] fileLines, string[] oldLines)
     {
         if (oldLines.Length == 0 || fileLines.Length < oldLines.Length) return (-1, 0, false);
+        // Collapse whitespace so indentation/style differences don't penalize similarity
+        var collapsedFile = fileLines.Select(CollapseWhitespace).ToArray();
+        var collapsedOld = oldLines.Select(CollapseWhitespace).ToArray();
         var bestScore = 0.0; var bestIdx = -1; var bestHasExact = false;
-        for (var fi = 0; fi <= fileLines.Length - oldLines.Length; fi++)
+        for (var fi = 0; fi <= collapsedFile.Length - collapsedOld.Length; fi++)
         {
             var totalSim = 0.0; var anyExact = false;
-            for (var li = 0; li < oldLines.Length; li++)
+            for (var li = 0; li < collapsedOld.Length; li++)
             {
-                var sim = ComputeLineSimilarity(fileLines[fi + li], oldLines[li]);
+                var sim = ComputeLineSimilarity(collapsedFile[fi + li], collapsedOld[li]);
                 totalSim += sim;
                 if (sim >= 0.95) anyExact = true;
             }
-            var avg = totalSim / oldLines.Length;
+            var avg = totalSim / collapsedOld.Length;
             if (avg > bestScore) { bestScore = avg; bestIdx = fi; bestHasExact = anyExact; }
         }
         return (bestIdx, bestScore, bestHasExact);
@@ -3310,33 +3495,34 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 $"oldString too short or generic ({meaningfulChars} meaningful chars, longest line {maxMeaningfulLine} chars)", null);
         }
 
-        // ── Resist fuzzy matching: return failure with diagnostic info ─────
-        // S5/S6/S7 detect WHERE the oldString should be but DO NOT auto-apply
-        // because they can match at wrong locations. Instead, we report the
-        // near-miss so the LLM retry can produce an exact-match oldString.
-        // The snippet always carries the fuzzy-match location for debugging.
+        // ── Fuzzy strategies: apply edit at high confidence ────────────────
+        // S5 and S6 APPLY the edit when similarity is high enough.
+        // The caller (ResolveAndApplyEdit) runs VerifyEdit on the result,
+        // which catches any wrong-location matches.
 
-        // S5: Fuzzy Levenshtein block match — failure with location hint
+        // S5: Fuzzy Levenshtein block match (high threshold → apply)
         {
-            var (fl, score, _) = FindBestFuzzyBlock(fileLines, oldLines);
+            var (fl, score, hasExact) = FindBestFuzzyBlock(fileLines, oldLines);
+            if (fl >= 0 && score >= 0.95)
+            {
+                var snippet = $"fuzzy {score:P0} at line {fl + 1}";
+                return (true, ReplaceLineBlock(fileLines, fl, oldLines.Length, newString), null, snippet);
+            }
+            // Lower threshold → report location hint only (don't apply)
             if (fl >= 0 && score >= 0.88)
             {
-                var ctxBefore = fl > 0 ? fileLines[fl - 1] : "(file start)";
-                var ctxAfter = fl + oldLines.Length < fileLines.Length ? fileLines[fl + oldLines.Length] : "(file end)";
                 return (false, content, "oldString not found verbatim in file",
-                    $"fuzzy {score:P0} at line {fl + 1}: before=[{ctxBefore}] after=[{ctxAfter}]");
+                    $"fuzzy {score:P0} at line {fl + 1}: too low confidence ({score:P0} < 95%)");
             }
         }
 
-        // S6: Anchor-line block match — failure with location hint
+        // S6: Anchor-line block match (high threshold → apply)
         {
-            var (al, score, _) = FindBestAnchorLineBlock(fileLines, oldLines);
-            if (al >= 0 && score >= 0.80)
+            var (al, score, exactCount) = FindBestAnchorLineBlock(fileLines, oldLines);
+            if (al >= 0 && score >= 0.90 && exactCount >= 2)
             {
-                var ctxBefore = al > 0 ? fileLines[al - 1] : "(file start)";
-                var ctxAfter = al + oldLines.Length < fileLines.Length ? fileLines[al + oldLines.Length] : "(file end)";
-                return (false, content, "oldString not found verbatim in file",
-                    $"anchor {score:P0} at line {al + 1}: before=[{ctxBefore}] after=[{ctxAfter}]");
+                var snippet = $"anchor {score:P0} at line {al + 1} ({exactCount} exact line(s))";
+                return (true, ReplaceLineBlock(fileLines, al, oldLines.Length, newString), null, snippet);
             }
         }
 
@@ -3414,6 +3600,32 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         return string.Join('\n', detail);
     }
 
+    /// <summary>Find where oldString fuzzily matches the file and return the verbatim file lines for copying.</summary>
+    private static string? BuildExactMatchBlock(string content, string oldString)
+    {
+        var fileLines = content.Split('\n');
+        var oldLines = oldString.Split('\n');
+        if (oldLines.Length < 2 || fileLines.Length < oldLines.Length) return null;
+
+        // Use collapsed-whitespace fuzzy matching (same logic as FindBestFuzzyBlock)
+        var collapsedFile = fileLines.Select(CollapseWhitespace).ToArray();
+        var collapsedOld = oldLines.Select(CollapseWhitespace).ToArray();
+
+        var bestScore = 0.0; var bestIdx = -1;
+        for (var fi = 0; fi <= collapsedFile.Length - collapsedOld.Length; fi++)
+        {
+            var totalSim = 0.0;
+            for (var li = 0; li < collapsedOld.Length; li++)
+                totalSim += ComputeLineSimilarity(collapsedFile[fi + li], collapsedOld[li]);
+            var avg = totalSim / collapsedOld.Length;
+            if (avg > bestScore) { bestScore = avg; bestIdx = fi; }
+        }
+
+        if (bestIdx < 0 || bestScore < 0.85) return null;
+
+        return string.Join("\n", fileLines.Skip(bestIdx).Take(oldLines.Length));
+    }
+
     private static string? GetUnsafeEditPayloadReason(string oldString, string newString)
     {
         foreach (var marker in UnsafeEditMarkers)
@@ -3434,9 +3646,54 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     {
         var sb = new StringBuilder();
         for (var i = 0; i < start; i++) { sb.Append(fileLines[i]); sb.Append('\n'); }
-        sb.Append(replacement);
+        sb.Append(IndentReplacement(fileLines, start, replacement));
         for (var i = start + count; i < fileLines.Length; i++) { sb.Append('\n'); sb.Append(fileLines[i]); }
         return sb.ToString();
+    }
+
+    /// <summary>Adjust replacement indentation to match the target block's base indent.</summary>
+    private static string IndentReplacement(string[] fileLines, int start, string replacement)
+    {
+        if (string.IsNullOrEmpty(replacement) || start >= fileLines.Length)
+            return replacement;
+
+        var fileIndent = GetLeadingWhitespace(fileLines[start]);
+        if (fileIndent.Length == 0)
+            return replacement;
+
+        // Find the indentation of the first non-empty replacement line
+        var replLines = replacement.Split('\n');
+        var replBaseIndent = replLines.Where(l => l.Length > 0).Select(GetLeadingWhitespace).FirstOrDefault();
+
+        // No adjustment needed if they match
+        if (replBaseIndent == fileIndent)
+            return replacement;
+
+        for (var i = 0; i < replLines.Length; i++)
+        {
+            if (replLines[i].Length == 0) continue;
+            var lineIndent = GetLeadingWhitespace(replLines[i]);
+            if (lineIndent.StartsWith(replBaseIndent, StringComparison.Ordinal))
+            {
+                // Replace the replacement's base indent with the file's base indent,
+                // preserving any extra (inner) indentation beyond the base
+                var excess = lineIndent[replBaseIndent.Length..];
+                replLines[i] = fileIndent + excess + replLines[i][lineIndent.Length..];
+            }
+            else
+            {
+                // Line doesn't start with expected base — prepend file indent
+                replLines[i] = fileIndent + replLines[i];
+            }
+        }
+        return string.Join("\n", replLines);
+    }
+
+    private static string GetLeadingWhitespace(string s)
+    {
+        var i = 0;
+        while (i < s.Length && (s[i] == ' ' || s[i] == '\t')) i++;
+        return s[..i];
     }
 
     // ── Individual step executors ──────────────────────────────────────────
