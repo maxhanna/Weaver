@@ -33,6 +33,7 @@ public class AgentController : ControllerBase
     };
 
     // ── Delimiter constants for edit resolution ────────────────────────────
+    // Legacy delimiter constants — kept for fallback parsing
     private const string D_OLD = "<<<OLD>>>";
     private const string D_OLD_END = "<<<END_OLD>>>";
     private const string D_NEW = "<<<NEW>>>";
@@ -42,28 +43,44 @@ public class AgentController : ControllerBase
     private const string D_DONE = "<<<ALREADY_DONE>>>";
 
     private const string EditResolveSystemPrompt =
-        "You are a surgical code editor. Output ONLY the edit block — no explanation, no markdown, nothing else.\n\n" +
-        "FORMAT A — targeted replacement (1-5 lines of code):\n" +
-        "<<<OLD>>>\n" +
-        "exact lines to replace, copied VERBATIM from the file (preserve all whitespace/indentation)\n" +
-        "<<<END_OLD>>>\n" +
-        "<<<NEW>>>\n" +
-        "replacement lines\n" +
-        "<<<END_NEW>>>\n\n" +
-        "FORMAT B — full file creation (use only for new files):\n" +
-        "<<<FULL_FILE>>>\n" +
-        "complete file content exactly as it should exist on disk\n" +
-        "<<<END_FULL_FILE>>>\n\n" +
-        "FORMAT C — no change needed:\n" +
-        "<<<ALREADY_DONE>>>\n\n" +
-        "RULES for FORMAT A:\n" +
-        "- OLD must exist VERBATIM in the file — copy character-for-character\n" +
-        "- OLD must appear exactly ONCE in the file\n" +
-        "- OLD must be MINIMAL — only the lines that actually change\n" +
-        "- For insertions: include one adjacent existing line as anchor; repeat it unchanged in NEW\n" +
-        "- Never put ... or placeholders in OLD or NEW\n" +
-        "- OLD must be a verbatim COPY from the file content shown above — count your spaces and tabs\n" +
-        "- If OLD contains leading whitespace, it MUST match the indentation in the file exactly";
+        "You are a surgical code editor. Output ONLY a JSON object.\n\n" +
+        "FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
+        "{\n" +
+        "  \"oldString\": [\n" +
+        "    \"  first line EXACTLY as it appears in the file\",\n" +
+        "    \"  second line\",\n" +
+        "    \"  third line\"\n" +
+        "  ],\n" +
+        "  \"newString\": [\n" +
+        "    \"  first line\",\n" +
+        "    \"  replacement second line\"\n" +
+        "  ]\n" +
+        "}\n\n" +
+        "FORMAT B — single-line (escape newlines as \\n):\n" +
+        "{\n" +
+        "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
+        "  \"newString\": \"replacement line 1\\nreplacement line 2\"\n" +
+        "}\n\n" +
+        "FULL FILE:\n" +
+        "{\n" +
+        "  \"fullFile\": \"Complete file content (use array format for multi-line)\",\n" +
+        "  \"fullFile\": [\"line1\", \"line2\"]\n" +
+        "}\n\n" +
+        "NO CHANGE:\n" +
+        "{\n" +
+        "  \"alreadyDone\": true\n" +
+        "}\n\n" +
+        "CRITICAL RULES:\n" +
+        "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY space and tab\n" +
+        "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
+        "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
+        "4. NEVER add trailing whitespace to any line in oldString — trim trailing spaces from each line\n" +
+        "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
+        "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
+        "7. Every line in oldString must be ≥ 8 characters (after trimming) — lines like `}`, `);`, `{` are too short and match everywhere\n" +
+        "8. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
+        "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
+        "10. Output ONLY the JSON — no markdown, no code fences, no introductory text";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -176,9 +193,21 @@ public class AgentController : ControllerBase
             for (var i = 0; i < history.Count; i++)
             {
                 var h = history[i];
-                sb.AppendLine($"\nAttempt {i + 1} — Error: {h.error}");
+                sb.AppendLine($"\n--- Attempt {i + 1} — Error: {h.error} ---");
                 if (!string.IsNullOrWhiteSpace(h.old))
-                    sb.AppendLine($"  Bad oldString (first 300 chars): {h.old[..Math.Min(300, h.old.Length)]}");
+                {
+                    sb.AppendLine($"  Your oldString was:");
+                    sb.AppendLine($"  ```");
+                    sb.AppendLine($"  {h.old[..Math.Min(400, h.old.Length)]}");
+                    sb.AppendLine($"  ```");
+                    // Show what lines in the file were close
+                    var hint = BuildExactMatchHint(fileContent, h.old);
+                    if (hint != null)
+                    {
+                        sb.AppendLine($"  These lines in the file are SIMILAR to what you wrote (maybe one of these is the right target with correct whitespace?):");
+                        sb.AppendLine($"  {hint}");
+                    }
+                }
             }
             sb.AppendLine();
             if (hadTruncation)
@@ -189,8 +218,13 @@ public class AgentController : ControllerBase
             }
             else
             {
-                sb.AppendLine("The oldString above was NOT found verbatim. Find the EXACT text from the file.");
-                sb.AppendLine("Use targeted <<<OLD>>> / <<<NEW>>> edits. Copy the oldString character-for-character from the file content.");
+                sb.AppendLine("COMMON FAILURES to avoid:");
+                sb.AppendLine("- Did you ADD extra blank lines at the start or end of OLD? Trim them.");
+                sb.AppendLine("- Did you ADD trailing spaces to lines in OLD? Trim trailing whitespace.");
+                sb.AppendLine("- Did you change the indentation? Copy INDENTATION character-for-character from the file.");
+                sb.AppendLine("- Did you write a shortened/paraphrased version? OLD must be a VERBATIM copy.");
+                sb.AppendLine("- Is OLD too short (only 1 line)? Include 1-2 surrounding lines as ANCHOR context.");
+                sb.AppendLine("- Look at the SIMILAR lines above — pick the closest one and copy it exactly.");
             }
         }
 
@@ -204,39 +238,121 @@ public class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(raw))
             return (null, null, false, null, false, "LLM returned empty response");
 
-        if (raw.Contains(D_DONE, StringComparison.OrdinalIgnoreCase))
-            return (null, null, false, null, true, null);
+        string? oldStr = null, newStr = null;
 
-        // Full file
-        var ffS = raw.IndexOf(D_FULL, StringComparison.OrdinalIgnoreCase);
-        var ffE = raw.IndexOf(D_FULL_END, StringComparison.OrdinalIgnoreCase);
-        if (ffS >= 0)
+        // Try JSON first
+        try
         {
-            if (ffE < ffS)
-                return (null, null, false, null, false, "Response truncated — FULL_FILE not closed. Use smaller edit.");
-            var body = raw[(ffS + D_FULL.Length)..ffE];
-            body = StripFullFileFence(body);
-            return (null, null, true, body, false, null);
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb)
+                cleaned = cleaned[fb..(lb + 1)];
+
+            // Pre-process: escape literal newlines inside JSON string values so parsing doesn't choke
+            // The LLM often outputs raw newlines instead of \n in string values
+            cleaned = RepairJsonNewlines(cleaned);
+
+            using var jDoc = JsonDocument.Parse(cleaned);
+            var jRoot = jDoc.RootElement;
+
+            // Already done
+            if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
+                return (null, null, false, null, true, null);
+
+            // Full file (string or array)
+            if (jRoot.TryGetProperty("fullFile", out var ff))
+            {
+                string? body = null;
+                if (ff.ValueKind == JsonValueKind.String)
+                    body = ff.GetString();
+                else if (ff.ValueKind == JsonValueKind.Array)
+                {
+                    var lines = new List<string>();
+                    foreach (var item in ff.EnumerateArray())
+                    {
+                        if (item.ValueKind == JsonValueKind.String)
+                            lines.Add(item.GetString() ?? "");
+                    }
+                    if (lines.Count > 0) body = string.Join("\n", lines);
+                }
+                if (!string.IsNullOrWhiteSpace(body))
+                {
+                    body = StripFullFileFence(body);
+                    return (null, null, true, body, false, null);
+                }
+            }
+
+            // Targeted edit — support both string and array formats
+            // String:  "oldString": "line1\nline2"
+            // Array:   "oldString": ["line1", "line2"]
+            {
+                string? ResolveString(JsonElement el)
+                {
+                    if (el.ValueKind == JsonValueKind.String)
+                        return el.GetString();
+                    if (el.ValueKind == JsonValueKind.Array)
+                    {
+                        var lines = new List<string>();
+                        foreach (var item in el.EnumerateArray())
+                        {
+                            if (item.ValueKind == JsonValueKind.String)
+                                lines.Add(item.GetString() ?? "");
+                        }
+                        return lines.Count > 0 ? string.Join("\n", lines) : null;
+                    }
+                    return null;
+                }
+
+                oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
+                newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(oldStr))
+                return (oldStr, newStr ?? "", false, null, false, null);
+
+            return (null, null, false, null, false, "JSON has no oldString, fullFile, or alreadyDone field");
         }
+        catch
+        {
+            // Fallback: legacy delimiter format
+            if (raw.Contains(D_DONE, StringComparison.OrdinalIgnoreCase))
+                return (null, null, false, null, true, null);
 
-        // Targeted edit
-        var oS = raw.IndexOf(D_OLD, StringComparison.OrdinalIgnoreCase);
-        var oE = raw.IndexOf(D_OLD_END, StringComparison.OrdinalIgnoreCase);
-        var nS = raw.IndexOf(D_NEW, StringComparison.OrdinalIgnoreCase);
-        var nE = raw.IndexOf(D_NEW_END, StringComparison.OrdinalIgnoreCase);
+            var ffS = raw.IndexOf(D_FULL, StringComparison.OrdinalIgnoreCase);
+            var ffE = raw.IndexOf(D_FULL_END, StringComparison.OrdinalIgnoreCase);
+            if (ffS >= 0)
+            {
+                if (ffE < ffS)
+                    return (null, null, false, null, false, "Response truncated — FULL_FILE not closed.");
+                var body = raw[(ffS + D_FULL.Length)..ffE];
+                body = StripFullFileFence(body);
+                return (null, null, true, body, false, null);
+            }
 
-        if (oS < 0)
-            return (null, null, false, null, false, "No edit markers found — check LLM output");
-        if (oE < 0 || nS < 0 || nE < 0)
-            return (null, null, false, null, false, "Response truncated — markers not closed");
+            var oS = raw.IndexOf(D_OLD, StringComparison.OrdinalIgnoreCase);
+            var oE = raw.IndexOf(D_OLD_END, StringComparison.OrdinalIgnoreCase);
+            var nS = raw.IndexOf(D_NEW, StringComparison.OrdinalIgnoreCase);
+            var nE = raw.IndexOf(D_NEW_END, StringComparison.OrdinalIgnoreCase);
 
-        var oldStr = raw[(oS + D_OLD.Length)..oE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
-        var newStr = raw[(nS + D_NEW.Length)..nE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
+            if (oS < 0)
+                return (null, null, false, null, false, "No edit markers found — check LLM output");
+            if (oE < 0 || nS < 0 || nE < 0)
+                return (null, null, false, null, false, "Response truncated — markers not closed");
 
-        if (string.IsNullOrWhiteSpace(oldStr))
-            return (null, null, false, null, false, "OLD section is empty");
+            oldStr = raw[(oS + D_OLD.Length)..oE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
+            newStr = raw[(nS + D_NEW.Length)..nE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
 
-        return (oldStr, newStr, false, null, false, null);
+            if (string.IsNullOrWhiteSpace(oldStr))
+                return (null, null, false, null, false, "OLD section is empty");
+
+            return (oldStr, newStr, false, null, false, null);
+        }
     }
 
     /// <summary>
@@ -267,23 +383,58 @@ public class AgentController : ControllerBase
             }, ct);
 
         var history = new List<(string old, string @new, string error)>();
+        var planOldStr = step.OldString;
+        var planNewStr = step.NewString;
+        var planOldTried = false;
+        var stuckCount = 0;
+        var resolveStuckCount = 0;
+        var lastResolveError = "";
+        var lastOld = "";
+        const int MaxAttempts = 20;
 
-        for (var attempt = 0; attempt < 3; attempt++)
+        for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
-            if (attempt > 0)
-                await EmitLog(emitSse, "warn",
-                    $"Resolve retry {attempt + 1}/3 for {relPath}", new { step, projectRoot }, ct: ct);
+            string? oldStr = null, newStr = null, resolveError = null;
+            bool fullFile = false, alreadyDone = false;
+            string? fullContent = null;
 
-            var (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
-                await ResolveEditForStep(step, projectRoot, emitSse, ct, history);
+            // Attempt 0: use plan-provided oldString/newString directly if available
+            if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
+            {
+                planOldTried = true;
+                oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                newStr = AgentUtilities.NormalizeLineEndings(planNewStr ?? "");
+                await EmitLog(emitSse, "info",
+                    $"Using plan-provided edit for {relPath}", ct: ct);
+            }
+            else
+            {
+                if (attempt > 0)
+                    await EmitLog(emitSse, "warn",
+                        $"Resolve retry {attempt + 1} for {relPath}", new { step, projectRoot }, ct: ct);
+
+                (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
+                    await ResolveEditForStep(step, projectRoot, emitSse, ct, history);
+            }
 
             if (resolveError != null)
             {
                 await EmitLog(emitSse, "warn",
-                    $"Resolve attempt {attempt + 1}/3: {resolveError}", new {resolveError, fullContent}, ct: ct);
+                    $"Resolve attempt {attempt + 1}/{MaxAttempts}: {resolveError}", new {resolveError, fullContent}, ct: ct);
                 history.Add((step.OldString ?? "", step.NewString ?? "", resolveError));
-                if (attempt < 2) continue;
-                goto RecordFailure;
+
+                // Detect stuck: 3+ consecutive resolve errors (LLM not outputting valid format)
+                if (resolveError == lastResolveError)
+                    resolveStuckCount++;
+                else
+                { resolveStuckCount = 0; lastResolveError = resolveError; }
+                if (resolveStuckCount >= 3)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"LLM keeps failing to produce valid edit output — aborting {relPath}", ct: ct);
+                    goto RecordFailure;
+                }
+                continue;
             }
 
             if (alreadyDone)
@@ -335,10 +486,21 @@ public class AgentController : ControllerBase
                 var err = matchError ?? "oldString not found verbatim";
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
                 await EmitLog(emitSse, "warn",
-                    $"Edit attempt {attempt + 1}/3 failed for {relPath}: {err}", ct: ct);
+                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", err));
-                if (attempt < 2) continue;
-                goto RecordFailure;
+
+                // Detect stuck: same oldString repeated 3+ times
+                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal))
+                    stuckCount++;
+                else
+                { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (stuckCount >= 3)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"LLM keeps producing the same oldString — aborting {relPath}", ct: ct);
+                    goto RecordFailure;
+                }
+                continue;
             }
 
             var (approved, verifyReason, _) =
@@ -348,8 +510,18 @@ public class AgentController : ControllerBase
                 await EmitLog(emitSse, "warn",
                     $"Verify failed for {relPath}: {verifyReason}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", verifyReason));
-                if (attempt < 2) continue;
-                goto RecordFailure;
+
+                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal))
+                    stuckCount++;
+                else
+                { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (stuckCount >= 3)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"LLM keeps producing the same oldString — aborting {relPath}", ct: ct);
+                    goto RecordFailure;
+                }
+                continue;
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -361,8 +533,7 @@ public class AgentController : ControllerBase
                 var verr = "Replacement produced mismatched content — oldString matched wrong location";
                 await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
                 history.Add((oldStr!, newStr, verr));
-                if (attempt < 2) continue;
-                goto RecordFailure;
+                continue;
             }
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
@@ -460,44 +631,49 @@ public class AgentController : ControllerBase
     /// </summary>
     private static string BuildPlanningPrompt() =>
         "You are a software-engineering agent. " +
-        "Produce a concise plan of code changes with one thinking section and one summary section.\n" +
-        "Output ONLY the delimiter format below. \n\n" +
-        "### STEP TYPES (the FILE: field) ###\n" +
-        "  relative/path.ext  — Edit an existing file (must be in discovery context)\n" +
-        "  _command            — Run a terminal command; put the full command in CHANGE:\n" +
-        "  _create_file        — Create a new file: \"path.ext: describe what to generate\"\n" +
-        "  _web_search         — Search the web; put the query in CHANGE:\n" +
-        "  _web_fetch          — Fetch a URL; put the full URL in CHANGE:\n" +
-        "  _git                — Git operation (commit/pull/push/branch/revert)\n" +
-        "  _rename_file        — Rename: \"old → new\"\n" +
-        "  _delete_file        — Delete a file path\n" +
-        "  _show               — Display text to the user (use last)\n" +
-        "  _explore            — Explore a file/glob for more context before planning\n" +
-        "  _done               — Task is already complete; put reason in CHANGE:\n" +
-        "  _checkpoint         — Split large refactor into phases\n\n" +
+        "Produce a concise JSON plan of code changes.\n" +
+        "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
+        "### STEP TYPES (the \"file\" field) ###\n" +
+        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). INCLUDE \"oldString\" and \"newString\".\n" +
+        "  \"_command\"            — Run a terminal command; put the full command in \"change\"\n" +
+        "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
+        "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
+        "  \"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"\n" +
+        "  \"_git\"                — Git operation (commit/pull/push/branch/revert)\n" +
+        "  \"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"\n" +
+        "  \"_delete_file\"        — Delete a file path in \"change\"\n" +
+        "  \"_show\"               — Display text to the user (use last)\n" +
+        "  \"_done\"               — Task is already complete; put reason in \"change\"\n" +
+        "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
         "1. Only reference files that exist in the discovery context\n" +
-        "2. Do NOT include oldString or newString — describe WHAT to change in CHANGE:\n" +
-        "   Be specific: name the function, CSS class, element ID, line range, or value\n" +
-        "3. WEB FIRST: add _web_search if you need current API docs or recent data\n" +
-        "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command first\n" +
+        "2. For EDIT steps (relative/path.ext), INCLUDE \"oldString\" — copy EXACT VERBATIM text from the file (character-for-character including indentation). INCLUDE \"newString\" — the replacement text\n" +
+        "3. WEB FIRST: add a _web_search step if you need current API docs or recent data\n" +
+        "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement\n" +
-        "6. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n\n" +
+        "6. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
+        "7. Each step must be ONE focused change — do not combine unrelated edits in one step\n" +
+        "8. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed\n" +
+        "9. Never put ... or [...] or placeholders in oldString or newString\n" +
+        "10. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" +
         "### OUTPUT FORMAT ###\n" +
-        "<<<THINKING>>>\n" +
-        "1-4 lines: which files need changing and why\n" +
-        "<<<SUMMARY>>>\n" +
-        "one sentence: what this plan accomplishes\n" +
-        "<<<SCORE>>> 90\n" +
-        "<<<STEP 1>>>\n" +
-        "FILE: wwwroot/ide.html\n" +
-        "CHANGE: Replace the <textarea class=\"ide-textarea\"> element with a <div contenteditable=\"true\" class=\"ide-textarea\">\n" +
-        "<<<STEP END>>>\n" +
-        "<<<STEP 2>>>\n" +
-        "FILE: _command\n" +
-        "CHANGE: dotnet build\n" +
-        "<<<STEP END>>>\n" +
-        "<<<DONE>>> false";
+        "{\n" +
+        "  \"thinking\": \"1-4 lines: which files need changing and why\",\n" +
+        "  \"summary\": \"one sentence: what this plan accomplishes\",\n" +
+        "  \"score\": 90,\n" +
+        "  \"plan\": [\n" +
+        "    {\n" +
+        "      \"file\": \"wwwroot/app.js\",\n" +
+        "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
+        "      \"oldString\": \"var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);\\nfiles.forEach(function (f) {\\nif (existing.indexOf(f) === -1) existing.push(f);\\n});\\ncard.attached = existing;\",\n" +
+        "      \"newString\": \"var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);\\nfiles.forEach(function (f) {\\nif (existing.indexOf(f) === -1) existing.push(f);\\n});\\ncard.attached = existing;\\nvm.saveCards();\"\n" +
+        "    },\n" +
+        "    {\n" +
+        "      \"file\": \"_command\",\n" +
+        "      \"change\": \"dotnet build\"\n" +
+        "    }\n" +
+        "  ]\n" +
+        "}";
 
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
@@ -531,14 +707,11 @@ public class AgentController : ControllerBase
             return null;
         }
 
-        // Try delimiter format first, fall back to JSON
-        AgentPlan? plan = null;
-        if (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
-            raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase))
-            plan = AgentUtilities.ParseDelimitedPlan(raw);
-        if (plan == null)
-            plan = ParsePlan(raw);
-        if (plan == null && raw.Contains("STEP", StringComparison.OrdinalIgnoreCase))
+        // Try JSON first, fall back to delimiter format
+        AgentPlan? plan = ParsePlan(raw);
+        if (plan == null && (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
+            raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase) ||
+            raw.Contains("STEP", StringComparison.OrdinalIgnoreCase)))
             plan = AgentUtilities.ParseDelimitedPlan(raw);
 
         if (plan == null)
@@ -1013,23 +1186,49 @@ public class AgentController : ControllerBase
                 {
                     await EmitLog(emitSse, "warn", $"Quality check: {reason}", ct: ct);
 
-                    // One replan pass with enriched failure context
-                    var failHist = BuildFailedEditHistory(allSteps);
-                    var replanPrompt = BuildReplanPrompt(prompt, new List<string> { failHist }, steeringContext);
+                    // One replan pass — generate ONLY additional steps, no full pipeline
                     await EmitLog(emitSse, "info", "Replan — one pass with failure context…", ct: ct);
-                    var (reSteps, rePlan, _) = await Orchestrate(
-                        replanPrompt, projectRoot, emitSse, ct,
-                        attachedFiles: attachedFiles, skipContextReview: true,
-                        skipQualityCheck: true);
-                    if (reSteps.Count > 0)
+                    var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                        steeringContext, projectRoot, emitSse, ct);
+                    if (newSteps?.Count > 0)
                     {
-                        allSteps.AddRange(reSteps);
-                        plan = MergePlans(plan, rePlan);
+                        plan = MergePlans(plan, new AgentPlan { Plan = newSteps });
                         if (emitSse)
                             await SendSse(Response, "plan",
-                                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+                                new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
+
+                        // Build completedStepIndices from existing results
+                        var doneIndices = new HashSet<int>();
+                        for (var i = 0; i < plan.Plan.Count; i++)
+                        {
+                            var step = plan.Plan[i];
+                            var result = allSteps.OfType<Dictionary<string, object?>>()
+                                .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                                    s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
+                                    s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
+                            if (result != null) doneIndices.Add(i);
+                        }
+
+                        // Execute only remaining steps (no new discovery, no new planning)
+                        var newResults = new List<object>();
+                        await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, newResults,
+                            steeringContext: steeringContext, attachedFiles: attachedFiles,
+                            completedStepIndices: doneIndices, cardId: cardId);
+                        allSteps.AddRange(newResults);
+
                         var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan);
                         complete = ok2;
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "warn", "No additional steps needed — stopping.", ct: ct);
+                        complete = plan?.Plan?.All(p =>
+                        {
+                            var result = allSteps.OfType<Dictionary<string, object?>>()
+                                .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), p.File, StringComparison.OrdinalIgnoreCase) &&
+                                    s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
+                            return result != null && result.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped";
+                        }) ?? true;
                     }
                 }
                 else
@@ -1085,19 +1284,96 @@ public class AgentController : ControllerBase
         return new List<string> { buildCommands.Trim() };
     }
 
-    private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null)
+    private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null,
+        AgentPlan? existingPlan = null, List<object>? executedSteps = null)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("Previous plan did not fully complete. Add NEW plan items or suggest modifications to existing incomplete ones.");
-        sb.AppendLine("IMPORTANT: NEVER remove existing plan items. Only expand the plan.");
+        sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
+        sb.AppendLine("IMPORTANT: Only plan steps that address specific failures below. Do NOT repeat existing steps.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
+
+        // Show what was already planned and their results
+        if (existingPlan?.Plan?.Count > 0)
+        {
+            sb.AppendLine("## Existing plan with results");
+            foreach (var step in existingPlan.Plan)
+            {
+                // Look up the result for this step
+                string? status = null;
+                if (executedSteps != null)
+                {
+                    var result = executedSteps.OfType<Dictionary<string, object?>>()
+                        .LastOrDefault(s =>
+                            string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase));
+                    if (result != null)
+                        status = result.GetValueOrDefault("status")?.ToString();
+                }
+                var tag = status switch
+                {
+                    "done" or "modified" or "created" => "✓ DONE",
+                    "skipped" => "○ SKIPPED",
+                    "error" => "✗ FAILED",
+                    _ => "… PENDING"
+                };
+                sb.AppendLine($"  {tag} {step.File}: {step.Change}");
+            }
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine();
         sb.AppendLine("## What went wrong");
         foreach (var h in history) sb.AppendLine(h);
         sb.AppendLine();
-        sb.AppendLine("Add new steps to fix the issues. Try a different approach if needed, but keep existing steps.");
+        sb.AppendLine("Add at most 2-3 new steps to fix ONLY the failed items. If everything is done, return an EMPTY plan with no steps.");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Lightweight replan: asks the LLM for only the additional PlanSteps needed,
+    /// without running discovery or full planning again.
+    /// </summary>
+    private async Task<List<PlanStep>?> GenerateReplanStepsAsync(
+        string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
+        string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var failHist = BuildFailedEditHistory(executedSteps);
+        var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
+            steeringContext, existingPlan, executedSteps);
+
+        var (raw, _, llmError) = await CallLlmRaw(
+            "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 3 steps. Empty array if all done.",
+            replanPrompt, ct, TimeSpan.FromSeconds(30));
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
+            var s2 = cleaned.IndexOf('{'); var e2 = cleaned.LastIndexOf('}');
+            if (s2 >= 0 && e2 > s2) cleaned = cleaned[s2..(e2 + 1)];
+            using var doc = JsonDocument.Parse(cleaned);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("plan", out var planEl) || planEl.ValueKind != JsonValueKind.Array)
+                return null;
+
+            var steps = new List<PlanStep>();
+            foreach (var item in planEl.EnumerateArray())
+            {
+                var file = item.TryGetProperty("file", out var f) ? f.GetString() : null;
+                var change = item.TryGetProperty("change", out var c) ? c.GetString() : null;
+                var priority = item.TryGetProperty("priority", out var p) ? p.GetInt32() : 1;
+                if (!string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(change))
+                    steps.Add(new PlanStep { File = file, Change = change, Priority = priority });
+            }
+            return steps.Count > 0 ? steps : null;
+        }
+        catch
+        {
+            await EmitLog(emitSse, "warn", "Failed to parse replan steps from LLM response", ct: ct);
+            return null;
+        }
     }
 
     private async Task<List<object>> QuickPipeline(
@@ -1461,67 +1737,16 @@ public class AgentController : ControllerBase
             // ── File edit: resolve then apply ─────────────────────────────
             if (AgentUtilities.IsRelativePath(planFile))
             {
-                // If the plan already has a valid-sized oldString (legacy path), try it first
-                if (!string.IsNullOrWhiteSpace(item.OldString) &&
-                    item.OldString.Trim() != (item.NewString ?? "").Trim() &&
-                    item.OldString.Split('\n').Length <= 10)
-                {
-                    // Try direct apply; if it fails fall through to resolve
-                    var applied = await ApplyEditWithRetry(item, projectRoot, emitSse, ct);
-                    if (applied)
-                    {
-                        var er = new Dictionary<string, object?>();
-                        PopulateEditResult(er, "modified", planFile.Replace('\\', '/'), item.OldString, item.NewString ?? "", "");
-                        er["index"] = stepIndex;
-                        er["planItemIndex"] = itemIdx;
-                        if (emitSse) await SendSse(Response, "step", er, ct);
-                        allResults.Add(er); stepIndex++;
-                        continue;
-                    }
-                    // Falls through to resolve
-                    await EmitLog(emitSse, "warn",
-                        $"Direct apply failed for {planFile} — falling back to resolve", ct: ct);
-                }
+                // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
+                var prevCount = allResults.Count;
+                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx, cardId);
 
-                // Primary path: resolve the edit via focused LLM call
-                var editStepFailed = false;
-                for (var editRetry = 0; editRetry < 3; editRetry++)
-                {
-                    var prevCount = allResults.Count;
-                    stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx, cardId);
-
-                    // Check if the step failed (last result is an error)
-                    if (allResults.Count > prevCount &&
-                        allResults[^1] is Dictionary<string, object?> lastDict &&
-                        lastDict.TryGetValue("status", out var st) && st?.ToString() == "error")
-                    {
-                        // Remove the error entry and step index to retry cleanly
-                        allResults.RemoveAt(allResults.Count - 1);
-                        stepIndex--;
-                        await EmitLog(emitSse, "warn",
-                            $"Step failed for {planFile} — retrying ({editRetry + 1}/3) with fresh resolve…", ct: ct);
-                        editStepFailed = true;
-                        continue;
-                    }
-                    editStepFailed = false;
-                    break;
-                }
-                if (editStepFailed)
+                if (allResults.Count > prevCount &&
+                    allResults[^1] is Dictionary<string, object?> lastDict &&
+                    lastDict.TryGetValue("status", out var st) && st?.ToString() == "error")
                 {
                     await EmitLog(emitSse, "error",
-                        $"✗ Step permanently failed for {planFile} — all retries exhausted", ct: ct);
-                    var fail = new Dictionary<string, object?>
-                    {
-                        ["index"] = stepIndex,
-                        ["type"] = "edit",
-                        ["status"] = "error",
-                        ["path"] = planFile,
-                        ["error"] = "All retries exhausted",
-                        ["planItemIndex"] = itemIdx
-                    };
-                    if (emitSse) await SendSse(Response, "step", fail, ct);
-                    allResults.Add(fail);
-                    stepIndex++;
+                        $"✗ Step permanently failed for {planFile} — {lastDict.GetValueOrDefault("error")}", ct: ct);
                 }
                 continue;
             }
@@ -1709,11 +1934,37 @@ public class AgentController : ControllerBase
         string oldString, string newString, string oldContent, string newContent)
     {
         if (oldContent == newContent) return (false, "Edit produced no change", 3);
+
+        var normOld = AgentUtilities.NormalizeLineEndings(oldString);
         var normNew = AgentUtilities.NormalizeLineEndings(newString);
-        var normContent = AgentUtilities.NormalizeLineEndings(newContent);
+        var normOldContent = AgentUtilities.NormalizeLineEndings(oldContent);
+        var normNewContent = AgentUtilities.NormalizeLineEndings(newContent);
+
+        // newString must be present in result
         if (!string.IsNullOrEmpty(normNew) &&
-            !normContent.Contains(normNew, StringComparison.Ordinal))
+            !normNewContent.Contains(normNew, StringComparison.Ordinal))
             return (false, "newString not found after replacement", 4);
+
+        // oldString should not appear as-frequently in the result
+        // (it was supposed to be replaced). Only check this for non-trivial oldStrings.
+        if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10)
+        {
+            var oldCount = 0; var newCount = 0; var pos = 0;
+            while ((pos = normOldContent.IndexOf(normOld, pos, StringComparison.Ordinal)) >= 0)
+            { oldCount++; pos += normOld.Length; }
+            pos = 0;
+            while ((pos = normNewContent.IndexOf(normOld, pos, StringComparison.Ordinal)) >= 0)
+            { newCount++; pos += normOld.Length; }
+            // If oldString appears the same number of times, the edit was a no-op
+            if (oldCount > 0 && newCount >= oldCount)
+                return (false, "oldString still fully present after replacement — edit hit wrong location", 4);
+        }
+
+        // Verify the replacement actually changed the target area:
+        // oldString and newString should be meaningfully different
+        if (string.Equals(normOld.Trim(), normNew.Trim(), StringComparison.Ordinal))
+            return (false, "oldString and newString are identical after normalization", 3);
+
         return (true, "Programmatic check passed", 10);
     }
 
@@ -2868,20 +3119,143 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         result["newLines"] = (newStr ?? "").Split('\n');
     }
 
-    // ── String replacement (exact + whitespace-normalized) ─────────────────
+    // ── Multi-strategy string replacement (progressive fallback chain) ────
 
-    private static (bool ok, string content, string? error, string? snippet) TryReplacePrecise(
-        string content, string oldString, string newString)
+    private static string RepairJsonNewlines(string json)
     {
-        content = AgentUtilities.NormalizeLineEndings(content);
-        oldString = AgentUtilities.NormalizeLineEndings(oldString);
-        newString = AgentUtilities.NormalizeLineEndings(newString);
-        if (string.IsNullOrEmpty(oldString)) return (false, content, "oldString is empty", null);
-        var firstIdx = content.IndexOf(oldString, StringComparison.Ordinal);
-        if (firstIdx < 0) return (false, content, "oldString not found exactly in file", BuildExactMatchHint(content, oldString));
-        var secondIdx = content.IndexOf(oldString, firstIdx + oldString.Length, StringComparison.Ordinal);
-        if (secondIdx >= 0) return (false, content, "oldString is ambiguous (appears more than once)", null);
-        return (true, content[..firstIdx] + newString + content[(firstIdx + oldString.Length)..], null, null);
+        // The LLM often outputs literal newlines inside JSON string values instead of \n.
+        // We try to repair this by scanning inside string boundaries and escaping raw newlines.
+        var sb = new StringBuilder(json.Length);
+        var inString = false;
+        var escaped = false;
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+            if (escaped) { sb.Append(c); escaped = false; continue; }
+            if (c == '\\' && inString) { sb.Append(c); escaped = true; continue; }
+            if (c == '"' && !escaped) { inString = !inString; sb.Append(c); continue; }
+            if (inString && (c == '\n' || c == '\r'))
+            {
+                sb.Append("\\n");
+                if (c == '\r' && i + 1 < json.Length && json[i + 1] == '\n') i++;
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    private static string CollapseWhitespace(string s) =>
+        string.Join(" ", s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static int FindLineBlock(string[] fileLines, string[] patternLines, StringComparison cmp)
+    {
+        if (patternLines.Length == 0 || fileLines.Length < patternLines.Length) return -1;
+        for (var fi = 0; fi <= fileLines.Length - patternLines.Length; fi++)
+        {
+            var match = true;
+            for (var li = 0; li < patternLines.Length; li++)
+            {
+                if (!string.Equals(fileLines[fi + li], patternLines[li], cmp))
+                { match = false; break; }
+            }
+            if (match) return fi;
+        }
+        return -1;
+    }
+
+    private static int ComputeLevenshteinDistance(string a, string b)
+    {
+        var m = a.Length; var n = b.Length;
+        if (m == 0) return n; if (n == 0) return m;
+        var d = new int[n + 1];
+        for (var i = 0; i <= n; i++) d[i] = i;
+        for (var i = 1; i <= m; i++)
+        {
+            var prev = d[0]; d[0] = i;
+            for (var j = 1; j <= n; j++)
+            {
+                var temp = d[j];
+                d[j] = Math.Min(Math.Min(d[j] + 1, d[j - 1] + 1),
+                    prev + (a[i - 1] == b[j - 1] ? 0 : 1));
+                prev = temp;
+            }
+        }
+        return d[n];
+    }
+
+    private static double ComputeLineSimilarity(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) && string.IsNullOrEmpty(b)) return 1.0;
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0.0;
+        var aNorm = a.Trim().ToLowerInvariant();
+        var bNorm = b.Trim().ToLowerInvariant();
+        var maxLen = Math.Max(aNorm.Length, bNorm.Length);
+        if (maxLen == 0) return 1.0;
+        // For short strings use exact char comparison, for longer use Levenshtein
+        if (maxLen <= 80)
+            return 1.0 - (double)ComputeLevenshteinDistance(aNorm, bNorm) / maxLen;
+        // For long strings, check common prefix ratio
+        var common = 0; var minLen = Math.Min(aNorm.Length, bNorm.Length);
+        for (var i = 0; i < minLen; i++) { if (aNorm[i] == bNorm[i]) common++; else break; }
+        return (double)common / maxLen;
+    }
+
+    private static (int lineIdx, double score, bool hasExactLine) FindBestFuzzyBlock(string[] fileLines, string[] oldLines)
+    {
+        if (oldLines.Length == 0 || fileLines.Length < oldLines.Length) return (-1, 0, false);
+        var bestScore = 0.0; var bestIdx = -1; var bestHasExact = false;
+        for (var fi = 0; fi <= fileLines.Length - oldLines.Length; fi++)
+        {
+            var totalSim = 0.0; var anyExact = false;
+            for (var li = 0; li < oldLines.Length; li++)
+            {
+                var sim = ComputeLineSimilarity(fileLines[fi + li], oldLines[li]);
+                totalSim += sim;
+                if (sim >= 0.95) anyExact = true;
+            }
+            var avg = totalSim / oldLines.Length;
+            if (avg > bestScore) { bestScore = avg; bestIdx = fi; bestHasExact = anyExact; }
+        }
+        return (bestIdx, bestScore, bestHasExact);
+    }
+
+    private static (int lineIdx, double score, int exactCount) FindBestAnchorLineBlock(string[] fileLines, string[] oldLines)
+    {
+        if (oldLines.Length == 0) return (-1, 0, 0);
+
+        // A line is a candidate anchor only if it's long enough to be distinctive
+        var candidates = oldLines
+            .Select((l, i) => (line: l.Trim(), idx: i))
+            .Where(x => x.line.Length >= 8)
+            .OrderByDescending(x => x.line.Length)
+            .ToList();
+
+        foreach (var anchor in candidates)
+        {
+            var matches = new List<int>();
+            for (var fi = 0; fi < fileLines.Length; fi++)
+            {
+                if (string.Equals(fileLines[fi].Trim(), anchor.line, StringComparison.Ordinal))
+                    matches.Add(fi);
+            }
+            if (matches.Count != 1) continue;
+
+            var filePos = matches[0] - anchor.idx;
+            if (filePos < 0 || filePos + oldLines.Length > fileLines.Length) continue;
+
+            var totalSim = 0.0; var exactCount = 0;
+            for (var li = 0; li < oldLines.Length; li++)
+            {
+                var sim = ComputeLineSimilarity(fileLines[filePos + li], oldLines[li]);
+                totalSim += sim;
+                if (sim >= 0.95) exactCount++;
+            }
+            var avg = totalSim / oldLines.Length;
+            if (avg >= 0.80 && exactCount >= 2)
+                return (filePos, avg, exactCount);
+        }
+        return (-1, 0, 0);
     }
 
     private static (bool ok, string content, string? error, string? snippet) TryReplaceSafe(
@@ -2889,30 +3263,99 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     {
         content = AgentUtilities.NormalizeLineEndings(content);
         oldString = AgentUtilities.NormalizeLineEndings(oldString);
+        newString = AgentUtilities.NormalizeLineEndings(newString);
 
-        // Pass 1: exact
+        if (string.IsNullOrEmpty(oldString))
+            return (false, content, "oldString is empty", null);
+
+        // ── S1: Exact ordinal match ─────────────────────────────────────────
         var idx = content.IndexOf(oldString, StringComparison.Ordinal);
         if (idx >= 0)
         {
             var sec = content.IndexOf(oldString, idx + oldString.Length, StringComparison.Ordinal);
-            if (sec >= 0) return (false, content, "oldString appears more than once — use a longer unique anchor", null);
+            if (sec >= 0) return (false, content,
+                "oldString appears more than once — use a longer unique anchor", null);
             return (true, content[..idx] + newString + content[(idx + oldString.Length)..], null, null);
         }
 
         var fileLines = content.Split('\n');
-        var rawOldLines = oldString.Split('\n');
-        if (rawOldLines.Length == 0) return (false, content, "oldString is empty", null);
+        var oldLines = oldString.Split('\n');
+        if (oldLines.Length == 0) return (false, content, "oldString is empty", null);
 
-        // Pass 2: whitespace-normalised per line
-        var wsFile = fileLines.Select(l => string.Join(" ", l.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))).ToArray();
-        var wsOld = rawOldLines.Select(l => string.Join(" ", l.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))).ToArray();
-        for (var fi = 0; fi <= fileLines.Length - rawOldLines.Length; fi++)
+        // ── S2: Trailing-whitespace-trimmed exact match ────────────────────
+        var trimmedOld = oldLines.Select(l => l.TrimEnd()).ToArray();
+        var trimmedFile = fileLines.Select(l => l.TrimEnd()).ToArray();
+        var matchLine = FindLineBlock(trimmedFile, trimmedOld, StringComparison.Ordinal);
+        if (matchLine >= 0)
+            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+
+        // ── S3: Whitespace-collapsed case-sensitive match ──────────────────
+        var wsOld = oldLines.Select(l => CollapseWhitespace(l)).ToArray();
+        var wsFile = fileLines.Select(l => CollapseWhitespace(l)).ToArray();
+        matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal);
+        if (matchLine >= 0)
+            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+
+        // ── S4: Whitespace-collapsed case-insensitive match ────────────────
+        matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase);
+        if (matchLine >= 0)
+            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+
+        // ── Guard: reject oldStrings that are too short or generic for fuzzy strategies ──
+        var meaningfulChars = oldLines.Sum(l => l.Trim().Length);
+        var maxMeaningfulLine = oldLines.Max(l => l.Trim().Length);
+        if (meaningfulChars < 20 || maxMeaningfulLine < 8)
         {
-            var match = true;
-            for (var li = 0; li < rawOldLines.Length; li++)
-                if (!string.Equals(wsFile[fi + li], wsOld[li], StringComparison.OrdinalIgnoreCase))
-                { match = false; break; }
-            if (match) return (true, ReplaceLineBlock(fileLines, fi, rawOldLines.Length, newString), null, null);
+            return (false, content,
+                $"oldString too short or generic ({meaningfulChars} meaningful chars, longest line {maxMeaningfulLine} chars)", null);
+        }
+
+        // ── Resist fuzzy matching: return failure with diagnostic info ─────
+        // S5/S6/S7 detect WHERE the oldString should be but DO NOT auto-apply
+        // because they can match at wrong locations. Instead, we report the
+        // near-miss so the LLM retry can produce an exact-match oldString.
+        // The snippet always carries the fuzzy-match location for debugging.
+
+        // S5: Fuzzy Levenshtein block match — failure with location hint
+        {
+            var (fl, score, _) = FindBestFuzzyBlock(fileLines, oldLines);
+            if (fl >= 0 && score >= 0.88)
+            {
+                var ctxBefore = fl > 0 ? fileLines[fl - 1] : "(file start)";
+                var ctxAfter = fl + oldLines.Length < fileLines.Length ? fileLines[fl + oldLines.Length] : "(file end)";
+                return (false, content, "oldString not found verbatim in file",
+                    $"fuzzy {score:P0} at line {fl + 1}: before=[{ctxBefore}] after=[{ctxAfter}]");
+            }
+        }
+
+        // S6: Anchor-line block match — failure with location hint
+        {
+            var (al, score, _) = FindBestAnchorLineBlock(fileLines, oldLines);
+            if (al >= 0 && score >= 0.80)
+            {
+                var ctxBefore = al > 0 ? fileLines[al - 1] : "(file start)";
+                var ctxAfter = al + oldLines.Length < fileLines.Length ? fileLines[al + oldLines.Length] : "(file end)";
+                return (false, content, "oldString not found verbatim in file",
+                    $"anchor {score:P0} at line {al + 1}: before=[{ctxBefore}] after=[{ctxAfter}]");
+            }
+        }
+
+        // S7: Single-line exact match (safe to apply — trimmed line appears exactly once)
+        if (oldLines.Length == 1)
+        {
+            var trimmed = oldLines[0].Trim();
+            if (trimmed.Length >= 15)
+            {
+                var occ = 0; var occIdx = -1;
+                for (var fi = 0; fi < fileLines.Length; fi++)
+                {
+                    if (string.Equals(fileLines[fi].Trim(), trimmed, StringComparison.Ordinal))
+                    { occ++; occIdx = fi; }
+                }
+                if (occ == 1)
+                    return (true, ReplaceLineBlock(fileLines, occIdx, 1, newString),
+                        null, $"single-line: line {occIdx + 1}");
+            }
         }
 
         var hint = BuildExactMatchHint(content, oldString);
@@ -2941,12 +3384,34 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
     private static string? BuildExactMatchHint(string content, string oldString)
     {
-        var patternLines = oldString.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0)
-            .OrderByDescending(l => l.Length).Take(3).ToList();
-        if (patternLines.Count == 0) return null;
-        var hints = content.Split('\n')
-            .Where(l => patternLines.Any(p => l.Contains(p, StringComparison.Ordinal))).Take(3).ToList();
-        return hints.Count > 0 ? string.Join("\n", hints) : null;
+        var fileLines = content.Split('\n');
+        var oldLines = oldString.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length >= 8)  // skip short generic lines like "}", ");"
+            .ToList();
+        if (oldLines.Count == 0 || fileLines.Length == 0) return null;
+
+        var results = new List<(int fileIdx, double score, string line)>();
+        for (var fi = 0; fi < fileLines.Length; fi++)
+        {
+            var fLine = fileLines[fi];
+            if (fLine.Trim().Length < 8) continue;  // skip short file lines too
+            var bestSim = oldLines.Max(o => ComputeLineSimilarity(fLine, o));
+            if (bestSim >= 0.50)
+                results.Add((fi, bestSim, fLine));
+        }
+
+        // Take the top 3 highest-scoring results, prefer longer lines for disambiguation
+        var best = results
+            .OrderByDescending(r => r.score)
+            .ThenByDescending(r => r.line.Trim().Length)
+            .Take(3)
+            .ToList();
+        if (best.Count == 0) return null;
+
+        var detail = best.Select(b =>
+            $"  ({(b.score * 100):F0}% match) line {b.fileIdx + 1}: {b.line}");
+        return string.Join('\n', detail);
     }
 
     private static string? GetUnsafeEditPayloadReason(string oldString, string newString)
@@ -3207,8 +3672,14 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 if (ur != null) { results.Add(new EditResult { Path = filePath, Status = "error", Error = ur }); hasError = true; break; }
                 if (!fileExists && string.IsNullOrEmpty(edit.OldString)) { content = edit.NewString ?? ""; continue; }
                 if (string.IsNullOrEmpty(edit.OldString)) { content += edit.NewString ?? ""; continue; }
-                var (ok, newContent, err, _) = TryReplaceSafe(content, edit.OldString, edit.NewString ?? "");
-                if (!ok) { results.Add(new EditResult { Path = filePath, Status = "error", Error = err }); hasError = true; break; }
+                var (ok, newContent, err, snippet) = TryReplaceSafe(content, edit.OldString, edit.NewString ?? "");
+                if (!ok)
+                {
+                    var fullErr = err;
+                    if (!string.IsNullOrEmpty(snippet)) fullErr += $". Nearby: {snippet}";
+                    results.Add(new EditResult { Path = filePath, Status = "error", Error = fullErr });
+                    hasError = true; break;
+                }
                 content = newContent;
             }
             if (!hasError)
