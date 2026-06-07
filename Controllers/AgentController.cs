@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Weaver.Services;
 using Weaver;
+using System.Security.AccessControl;
 
 [ApiController]
 [Route("api/agent")]
@@ -774,7 +775,7 @@ public class AgentController : ControllerBase
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement\n" +
         "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
         "7. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
-        "8. Each step must be ONE focused change — do not combine unrelated edits in one step\n" +
+        "8. Each step must be ONE focused change — do not combine unrelated edits in one step, do not edit the same method in two seperate steps. Combine all edits to the same method in one step. \n" +
         "9. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed\n" +
         "10. Never put ... or [...] or placeholders in oldString or newString\n" +
         "11. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" + 
@@ -3003,7 +3004,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             if (emitSse)
             {
                 var label = step.Description ?? step.Path ?? step.Command ?? step.Query ?? step.Pattern ?? "";
-                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", new {step, result}, ct: ct);
+                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", new {result}, ct: ct);
                 await SendSse(Response, "step", result, ct);
             }
             try
@@ -3020,6 +3021,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     case "web": case "web_search": case "web_fetch": await ExecuteWebStep(step, result); break;
                     default: result["status"] = "error"; result["error"] = $"Unknown step type: {step.Type}"; break;
                 }
+                await EmitLog(true, "log", "Raw Step Result", result, ct); 
             }
             catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
@@ -3067,8 +3069,9 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     case "read": await ExecuteReadStep(step, projectRoot, result); break;
                     default: result["status"] = "error"; result["error"] = $"Unknown: {step.Type}"; break;
                 }
-            }
+            } 
             catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
+            await EmitLog(true, "log", "Raw Discovery Step Result", result); 
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
         }));
         await Task.WhenAll(tasks);
@@ -3915,8 +3918,16 @@ Respond with JSON only:
     {
         var relPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
         var targetPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
-        if (!AgentUtilities.IsPathUnderRoot(targetPath, projectRoot)) { result["status"] = "error"; result["error"] = "Path outside root"; return; }
-        if (!System.IO.File.Exists(targetPath)) { result["status"] = "error"; result["error"] = "File not found"; return; }
+        if (!AgentUtilities.IsPathUnderRoot(targetPath, projectRoot)) { 
+            result["status"] = "error"; 
+            result["error"] = "Path outside root"; 
+            return;
+        }
+        if (!System.IO.File.Exists(targetPath)) { 
+            result["status"] = "error"; 
+            result["error"] = "File not found"; 
+            return; 
+        }
         result["path"] = step.Path;
         result["output"] = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
         result["status"] = "done";

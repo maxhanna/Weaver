@@ -777,13 +777,14 @@
 
     function startBughostedHeartbeat() {
       stopBughostedHeartbeat();
-      // Full state sync every 30 seconds (kanban, agent, etc.)
+      // Full state sync every30 seconds (kanban, agent, etc.)
       _bhHeartbeatTimer = $interval(function () {
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         _lastSyncedEditorState = null;
         var data = buildHeartbeatPayload();
-        $http.post('/api/bughosted/heartbeat', data).then(function () {
-          _bhHeartbeatFailCount = 0;
+        vm.abortController = new AbortController();
+        $http.post('/api/bughosted/heartbeat', data, { signal: vm.abortController.signal }).then(function () {
+          _bhHeartbeatFailCount =0;
           vm.bughostedStatus = 'connected';
         }, function () {
           _bhHeartbeatFailCount++;
@@ -803,16 +804,17 @@
       if (_bhEditorSyncTimer) { $interval.cancel(_bhEditorSyncTimer); _bhEditorSyncTimer = null; }
     }
 
-    var _bhCommandTimer = null;
-    function startBughostedCommandPolling() {
-      stopBughostedCommandPolling();
-      _bhCommandTimer = $interval(function () {
-        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId))
-          .then(function (resp) {
-            var cmds = resp.data || [];
-            cmds.forEach(function (cmd) {
-              // parse JSON string into object
+var _bhCommandTimer = null;
+ function startBughostedCommandPolling() {
+ stopBughostedCommandPolling();
+ _bhCommandTimer = $interval(function () {
+ if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+ var controller = new AbortController();
+ $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: controller.signal })
+ .then(function (resp) {
+ var cmds = resp.data || [];
+ cmds.forEach(function (cmd) {
+ //
               if (cmd.parameters && !cmd.params) {
                 try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
               }
@@ -1737,11 +1739,11 @@
 
       // Track iterations to prevent infinite restart loop
       if (!isAutoRestart) card._agentIteration = 0;
-      card._agentIteration++;
-      if (card._agentIteration > 5) {
-        pushAgentLog('error', 'Card exceeded max iterations (5) — stopping');
-        return;
-      }
+      // card._agentIteration++;
+      // if (card._agentIteration > 5) {
+      //   pushAgentLog('error', 'Card exceeded max iterations (5) — stopping');
+      //   return;
+      // }
 
       // Clear previous analysis for this fresh run
       delete card.agentAnalysis;
@@ -2298,16 +2300,20 @@
         }
       });
     };
-
+    
     vm.refreshTerminalApprovals = function () {
-      fetch('/api/terminal/approvals/pending').then(function (r) { return r.json(); }).then(function (data) {
-        vm.pendingTerminalApprovals = (data && data.approvals) || [];
-        if (!$scope.$$phase) $scope.$digest();
-      }, function () {
-        vm.pendingTerminalApprovals = [];
-        if (!$scope.$$phase) $scope.$digest();
-      });
+      console.log("FETCHING TERMINAL APPROVALS");
+      fetch('/api/terminal/approvals/pending')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          vm.pendingTerminalApprovals = (data && data.approvals) || [];
+          // no $digest / $apply / $applyAsync here
+        }, function () {
+          vm.pendingTerminalApprovals = [];
+          // no $digest / $apply / $applyAsync here
+        });
     };
+
 
     vm.approveTerminalCommand = function (approval, scope) {
       if (!approval) return;
@@ -2420,26 +2426,31 @@
       vm.activeCardIds = new Set();
     };
 
-    vm.formatLogDetail = formatLogDetail;
-    vm.refreshTerminal();
-    vm.refreshTerminalApprovals();
+ vm.formatLogDetail = formatLogDetail;
+ vm.refreshTerminal();
+ }]);
 
-    // Refresh terminal periodically — but NOT while the agent is streaming.
-    // $interval always calls $apply after each tick.  When the agent is active,
-    // $scope.$digest() is already being called manually in readNext() for every SSE
-    // chunk.  Two concurrent digest sources produce the $rootScope:infdig loop
-    // (Angular sees a watcher — the terminal output string length / scroll geometry —
-    // still dirty after 10 passes and throws).  Pausing the interval during streaming
-    // and resuming on done/error keeps exactly one digest source active at a time.
-    var _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
-    var _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
+ // Refresh terminal periodically — but NOT while the agent is streaming.
+ // $interval always calls $apply after each tick. When the agent is active,
+ // $scope.$digest() is already being called manually in readNext() for every SSE
+ // chunk. Two concurrent digest sources produce the $rootScope:infdig loop
+ // (Angular sees a watcher — the terminal output string length / scroll geometry —
+ // still dirty after10 passes and throws). Pausing the interval during streaming
+ // and resuming on done/error keeps exactly one digest source active at a time.
+ var _terminalInterval = $interval(vm.refreshTerminal,3000,0, false);
+ var _approvalInterval = $interval(vm.refreshTerminalApprovals,1500,0, false);
 
-    function pauseTerminalPolling() {
-      if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
-      if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
-    }
-    function resumeTerminalPolling() {
-      if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal, 3000, 0, false);
-      if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals, 1500, 0, false);
-    }
-  }]);
+ function pauseTerminalPolling() {
+   if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+   if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
+ }
+ function resumeTerminalPolling() {
+   if (!_terminalInterval) _terminalInterval = $interval(vm.refreshTerminal,3000,0, false);
+   if (!_approvalInterval) _approvalInterval = $interval(vm.refreshTerminalApprovals,1500,0, false);
+ }
+
+ // Cleanup function to stop heartbeat and command polling when component is destroyed
+ $scope.$on('$destroy', function() {
+   if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
+   if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
+ }); 

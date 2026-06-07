@@ -46,14 +46,13 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       _cardsVersion = 0;
 
       vm.saveCards = function() {
+        console.log("Saving cards", vm.state);
         // Save to .boarddata file
         $http.post('/api/boarddata/save', vm.state).catch(function(err) {
           console.error('Failed to save to .boarddata file:', err);
         });
         _cardsVersion++;
-        if (vm.countSelfImprovingCards) {
-          vm.selfImprovingCardCount = vm.countSelfImprovingCards();
-        }
+        vm.updateSelfImprovingCount();
       };
 
       vm.updateSelfImprovingCount = function () {
@@ -508,30 +507,49 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
       vm.moveCardToDoing = function (cardId) {
         if (!vm.state.selfImproving) { vm.state.selfImproving = []; }
+        var card = undefined;
+
         var idx = vm.state.todo.findIndex(function (c) { return c.id === cardId; });
         if (idx === -1) {
           idx = vm.state.selfImproving.findIndex(function (c) { return c.id === cardId; });
-          if (idx === -1) return;
-          var card = vm.state.selfImproving.splice(idx, 1)[0];
+          if (idx === -1) {
+            idx = vm.state.archived.findIndex(function (c) { return c.id === cardId; });
+            if (idx === -1) {
+              return;
+            } else {
+              card = vm.state.archived.splice(idx, 1)[0]; 
+            }
+          }
+          else {
+            card = vm.state.selfImproving.splice(idx, 1)[0];
+          }
+        } else {
+          card = vm.state.todo.splice(idx, 1)[0];
+        }
+        if (card) { 
           vm.state.doing.push(card);
           vm.saveCards();
-          return;
         }
-        var card = vm.state.todo.splice(idx, 1)[0];
-        vm.state.doing.push(card);
-        vm.saveCards();
       };
 
       vm.moveCardToDone = function (card) {
         targetCol = card.selfImproving ? 'selfImproving' : 'done';
+        console.log("Moving card to " + targetCol);
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
-        if (idx === -1) return;
+        if (idx === -1) { 
+          console.log("ERROR: Could not find card in doing column");
+          return; 
+        }
         var card = vm.state.doing.splice(idx, 1)[0]; 
-        vm.state[targetCol].push(card); 
-        vm.activeCardId = null;
-        if (!vm.activeCardIds) vm.activeCardIds = new Set();
-        vm.activeCardIds.delete(cardId);
-        vm.saveCards();
+        if (card) {
+          vm.state[targetCol].push(card);
+          vm.activeCardId = null;
+          if (!vm.activeCardIds) vm.activeCardIds = new Set();
+          vm.activeCardIds.delete(cardId);
+          vm.saveCards();
+        } else {
+          console.log("ERROR: Could not find card to move in Doing column");
+        }
       };
 
       vm.startCard = function (card) {
