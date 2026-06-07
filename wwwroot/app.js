@@ -435,9 +435,7 @@
         acct.testing = false;
         acct.testResult = { success: false, message: 'Connection test failed: ' + (error.data || error.statusText || 'Unknown error') };
       });
-    };
-
-
+    }; 
 
     vm.countArchivedCards = function () {
       if (!vm.state || !vm.state.archived) {
@@ -445,23 +443,25 @@
         return;
       }
 
-      // Handle different archived data structures
-      if (Array.isArray(vm.state.archived)) {
-        // If archived is an array, filter by current project
-        vm.archiveCardCount = vm.state.archived.filter(function (card) {
-          return card.filePath === vm.selectedProject;
-        }).length;
-      } else if (typeof vm.state.archived === 'object') {
-        // If archived is an object, check if it has project keys
-        var archivedData = vm.state.archived[vm.selectedProject];
-        if (Array.isArray(archivedData)) {
-          vm.archiveCardCount = archivedData.length;
+      try {
+        // Handle different archived data structures
+        if (Array.isArray(vm.state.archived)) {
+          // If archived is an array, filter by current project
+          vm.archiveCardCount = vm.state.archived.filter(function (card) {
+            return card.filePath === vm.selectedProject;
+          }).length;
+        } else if (typeof vm.state.archived === 'object') {
+          // If archived is an object, check if it has project keys
+          var archivedData = vm.state.archived[vm.selectedProject];
+          if (Array.isArray(archivedData)) {
+            vm.archiveCardCount = archivedData.length;
+          } else {
+            vm.archiveCardCount = 0;
+          }
         } else {
           vm.archiveCardCount = 0;
         }
-      } else {
-        vm.archiveCardCount = 0;
-      }
+      } catch (e) { console.log("CountArchivedCards error", e); } 
     };
 
     // === Project config ===
@@ -470,66 +470,70 @@
     }
 
     vm.loadConfig = function (project) {
+      console.log("Loading config for project", project);
       return $http.get('/api/config').then(function (resp) {
-        var cfg = resp.data || {};
-        var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
-          { Name: 'Project Alpha', Path: '../project-alpha' }
-        ];
-        vm.projects = normalizeProjects(raw);
-        vm.selectedProject = project || cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
-        vm.defaultProject = project || cfg.defaultProject;
-        if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
-        if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
-        if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
-        if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
-        if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
-        if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
-        vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
-        vm.buildCommands = cfg.buildCommands || "";
-        vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
-        vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
-        vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
-        vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
-        vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
-        vm.fileHintsData = [];
-        vm.emailAccounts = (cfg.emailAccounts || []).map(function (a) {
-          return {
-            imapServer: a.imapServer || '',
-            imapPort: a.imapPort || 993,
-            useSsl: a.useSsl !== false,
-            username: a.username || '',
-            password: a.password || '',
-            label: a.label || '',
-            showAppPasswordInstructions: false,
-            testing: false,
-            testResult: null
-          };
-        });
-        // If no accounts but legacy fields exist, migrate
-        if (vm.emailAccounts.length === 0 && (cfg.emailUsername || cfg.emailImapServer)) {
-          var label = '';
-          if (cfg.emailUsername && cfg.emailUsername.indexOf('@') > 0) {
-            label = cfg.emailUsername.split('@')[0];
-          }
-          vm.emailAccounts.push({
-            imapServer: cfg.emailImapServer || '',
-            imapPort: cfg.emailImapPort || 993,
-            useSsl: cfg.emailUseSsl !== false,
-            username: cfg.emailUsername || '',
-            password: cfg.emailPassword || '',
-            label: label,
-            showAppPasswordInstructions: false,
-            testing: false,
-            testResult: null
+        try {
+          var cfg = resp.data || {};
+          var raw = (cfg.projects && cfg.projects.length) ? cfg.projects : [
+            { Name: 'Project Alpha', Path: '../project-alpha' }
+          ];
+          vm.projects = normalizeProjects(raw);
+          vm.selectedProject = project || cfg.defaultProject || (vm.projects.length ? vm.projects[0].Path : '');
+          vm.defaultProject = project || cfg.defaultProject;
+          if (typeof cfg.showTerminal === 'boolean') vm.showTerminal = cfg.showTerminal;
+          if (typeof cfg.showAI === 'boolean') vm.showAI = cfg.showAI;
+          if (typeof cfg.showKanban === 'boolean') vm.showKanban = cfg.showKanban;
+          if (typeof cfg.showCalendar === 'boolean') vm.showCalendar = cfg.showCalendar;
+          if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
+          if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
+          vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
+          vm.buildCommands = cfg.buildCommands || "";
+          vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
+          vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
+          vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
+          vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
+          vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
+          vm.fileHintsData = [];
+          vm.emailAccounts = (cfg.emailAccounts || []).map(function (a) {
+            return {
+              imapServer: a.imapServer || '',
+              imapPort: a.imapPort || 993,
+              useSsl: a.useSsl !== false,
+              username: a.username || '',
+              password: a.password || '',
+              label: a.label || '',
+              showAppPasswordInstructions: false,
+              testing: false,
+              testResult: null
+            };
           });
-        }
-        vm.bughostedUsername = cfg.bughostedUsername || '';
-        vm.bughostedPassword = cfg.bughostedPassword || '';
-        vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
-        if (vm.bughostedHeartbeatEnabled && vm.bughostedUsername && !vm.bughostedClientId) {
-          vm.bughostedLogin();
-        }
-
+          // If no accounts but legacy fields exist, migrate
+          if (vm.emailAccounts.length === 0 && (cfg.emailUsername || cfg.emailImapServer)) {
+            var label = '';
+            if (cfg.emailUsername && cfg.emailUsername.indexOf('@') > 0) {
+              label = cfg.emailUsername.split('@')[0];
+            }
+            vm.emailAccounts.push({
+              imapServer: cfg.emailImapServer || '',
+              imapPort: cfg.emailImapPort || 993,
+              useSsl: cfg.emailUseSsl !== false,
+              username: cfg.emailUsername || '',
+              password: cfg.emailPassword || '',
+              label: label,
+              showAppPasswordInstructions: false,
+              testing: false,
+              testResult: null
+            });
+          }
+          vm.bughostedUsername = cfg.bughostedUsername || '';
+          vm.bughostedPassword = cfg.bughostedPassword || '';
+          vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
+          if (vm.bughostedHeartbeatEnabled && vm.bughostedUsername && !vm.bughostedClientId) {
+            vm.bughostedLogin();
+          }
+        } catch (e) {
+          console.log("Loading config error", e);
+        } 
       }, function () {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
@@ -638,10 +642,14 @@
         Username: vm.bughostedUsername,
         Password: vm.bughostedPassword
       }).then(function (resp) {
-        vm.bughostedClientId = resp.data.clientId;
-        vm.bughostedStatus = 'connected';
-        startBughostedHeartbeat();
-        startBughostedCommandPolling();
+        try { 
+          vm.bughostedClientId = resp.data.clientId;
+          vm.bughostedStatus = 'connected';
+          startBughostedHeartbeat();
+          startBughostedCommandPolling();
+        } catch(e) {
+          console.log("BugHosted login error", e);
+        }
       }, function () {
         vm.bughostedStatus = 'error';
         vm.bughostedClientId = '';
@@ -649,13 +657,17 @@
     };
 
     vm.bughostedLogout = function () {
-      if (vm.bughostedClientId) {
-        $http.post('/api/bughosted/logout', { clientId: vm.bughostedClientId });
-      }
-      vm.bughostedClientId = '';
-      vm.bughostedStatus = 'disconnected';
-      stopBughostedHeartbeat();
-      stopBughostedCommandPolling();
+      try {
+        if (vm.bughostedClientId) {
+          $http.post('/api/bughosted/logout', { clientId: vm.bughostedClientId });
+        }
+        vm.bughostedClientId = '';
+        vm.bughostedStatus = 'disconnected';
+        stopBughostedHeartbeat();
+        stopBughostedCommandPolling();
+      } catch(e) {
+        console.log("Bughosted logout error" , e);
+      } 
     };
 
     vm.bughostedToggle = function () {
@@ -670,23 +682,29 @@
       if (!vm.bughostedUsername || !vm.bughostedPassword) return;
       vm.bughostedTesting = true;
       vm.bughostedTestResult = '';
-      $http.post('/api/bughosted/test', {
-        Username: vm.bughostedUsername,
-        Password: vm.bughostedPassword
-      }).then(function (resp) {
-        var d = resp.data;
-        if (d.success) {
-          vm.bughostedTestResult = 'ok';
-        } else {
+      console.log("testing connection");
+      try {
+        $http.post('/api/bughosted/test', {
+          Username: vm.bughostedUsername,
+          Password: vm.bughostedPassword
+        }).then(function (resp) {
+          var d = resp.data;
+          if (d.success) {
+            vm.bughostedTestResult = 'ok';
+          } else {
+            vm.bughostedTestResult = 'fail';
+            vm.bughostedTestError = d.error || 'HTTP ' + d.statusCode;
+          }
+          vm.bughostedTesting = false;
+        }, function () {
           vm.bughostedTestResult = 'fail';
-          vm.bughostedTestError = d.error || 'HTTP ' + d.statusCode;
-        }
-        vm.bughostedTesting = false;
-      }, function () {
-        vm.bughostedTestResult = 'fail';
-        vm.bughostedTestError = 'Cannot reach server';
-        vm.bughostedTesting = false;
-      });
+          vm.bughostedTestError = 'Cannot reach server';
+          vm.bughostedTesting = false;
+        });
+      }
+      catch (e) {
+        console.log("Connection test error", e);
+      }
     };
 
     vm.bughostedForceReconnect = function () {
@@ -822,44 +840,48 @@
       if (vm.destroyed) {
         return;
       }
-      stopBughostedCommandPolling();
-      _bhCommandTimer = $interval(function () { 
-        if (vm.destroyed || _bhTimerRunning) {
-          return;
-        }
-        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-        _bhTimerRunning = true; 
-        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
-          .then(function (resp) {
-            if (resp && resp.data) {
-              console.log("GOT COMMAND : ", resp);
-              try {
-                var cmds = resp.data || undefined;
-                if (cmds && cmds.length > 0) {
-                  cmds.forEach(function (cmd) {
-                    if (cmd.parameters && !cmd.params) {
-                      try {
-                        cmd.params = JSON.parse(cmd.parameters);
-                      } catch (e) { cmd.params = {}; }
-                    }
-                    if (!vm.remoteCommands) { vm.remoteCommands = []; }
-                    var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
-                    if (!existing && cmd.command) {
-                      vm.remoteCommands.push(cmd);
-                      vm.executeRemoteCommand(cmd);
-                    }
-                  });
+      try {
+        stopBughostedCommandPolling();
+        _bhCommandTimer = $interval(function () {
+          if (vm.destroyed || _bhTimerRunning) {
+            return;
+          }
+          if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+          _bhTimerRunning = true;
+          $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
+            .then(function (resp) {
+              if (resp && resp.data) {
+                console.log("GOT COMMAND : ", resp);
+                try {
+                  var cmds = resp.data || undefined;
+                  if (cmds && cmds.length > 0) {
+                    cmds.forEach(function (cmd) {
+                      if (cmd.parameters && !cmd.params) {
+                        try {
+                          cmd.params = JSON.parse(cmd.parameters);
+                        } catch (e) { cmd.params = {}; }
+                      }
+                      if (!vm.remoteCommands) { vm.remoteCommands = []; }
+                      var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
+                      if (!existing && cmd.command) {
+                        vm.remoteCommands.push(cmd);
+                        vm.executeRemoteCommand(cmd);
+                      }
+                    });
+                  }
+                } catch (e) {
+                  console.log("trying to absorb the infidigs", e);
                 }
-              } catch (e) {
-                console.log("trying to absorb the infidigs", e);
-              }              
-            }
-          }).finally(res => {  
-            _bhTimerRunning = false; 
-          }).catch(e => {
-            console.log("trying to ignore the infidigs", e);
-          });
-      }, 15000, 0, false);
+              }
+            }).finally(res => {
+              _bhTimerRunning = false;
+            }).catch(e => {
+              console.log("trying to ignore the infidigs", e);
+            });
+        }, 15000, 0, false);
+      } catch (e) {
+        console.log("startBughostedCommandPolling error", e);
+      } 
     }
     function stopBughostedCommandPolling() {
       if (_bhCommandTimer) { $interval.cancel(_bhCommandTimer); _bhCommandTimer = null; }
@@ -900,68 +922,71 @@
           if (!Array.isArray(data)) return;
         } catch (e) { return; }
 
-        var now = new Date();
-        var todayStr = now.getFullYear() + '-' +
-          String(now.getMonth() + 1).padStart(2, '0') + '-' +
-          String(now.getDate()).padStart(2, '0');
-        var currentMinutes = now.getHours() * 60 + now.getMinutes();
-        var changed = false;
+        try {
+          var now = new Date();
+          var todayStr = now.getFullYear() + '-' +
+            String(now.getMonth() + 1).padStart(2, '0') + '-' +
+            String(now.getDate()).padStart(2, '0');
+          var currentMinutes = now.getHours() * 60 + now.getMinutes();
+          var changed = false;
 
-        for (var ci = 0; ci < data.length; ci++) {
-          var cal = data[ci];
-          if (!cal.date || !cal.text) continue;
+          for (var ci = 0; ci < data.length; ci++) {
+            var cal = data[ci];
+            if (!cal.date || !cal.text) continue;
 
-          var shouldFire = false;
+            var shouldFire = false;
 
-          if (cal.cronExpression) {
-            // cron recurring entry
-            if (cronMatches(cal.cronExpression, now)) {
-              var lastFired = cal.lastFired ? new Date(cal.lastFired).getTime() : 0;
-              // prevent double-firing within the same minute
-              if (now.getTime() - lastFired > 60000) {
+            if (cal.cronExpression) {
+              // cron recurring entry
+              if (cronMatches(cal.cronExpression, now)) {
+                var lastFired = cal.lastFired ? new Date(cal.lastFired).getTime() : 0;
+                // prevent double-firing within the same minute
+                if (now.getTime() - lastFired > 60000) {
+                  shouldFire = true;
+                }
+              }
+            } else {
+              // one-shot entry
+              if (cal.processed) continue;
+              var calMinute = 0;
+              if (cal.time) {
+                var tp = cal.time.split(':');
+                calMinute = parseInt(tp[0], 10) * 60 + parseInt(tp[1], 10);
+              }
+              if (cal.date < todayStr || (cal.date === todayStr && calMinute <= currentMinutes)) {
                 shouldFire = true;
               }
             }
-          } else {
-            // one-shot entry
-            if (cal.processed) continue;
-            var calMinute = 0;
-            if (cal.time) {
-              var tp = cal.time.split(':');
-              calMinute = parseInt(tp[0], 10) * 60 + parseInt(tp[1], 10);
-            }
-            if (cal.date < todayStr || (cal.date === todayStr && calMinute <= currentMinutes)) {
-              shouldFire = true;
+
+            if (shouldFire) {
+              var newCard = {
+                id: uid(),
+                text: cal.text,
+                filePath: cal.project || vm.selectedProject,
+                createdAt: now.toISOString(),
+                priority: cal.priority || 'medium',
+                ready: true,
+                attached: [],
+                selfImproving: false,
+                isDecomposing: false
+              };
+              vm.state.todo.push(newCard);
+              vm.saveCards();
+              changed = true;
+
+              if (cal.cronExpression) {
+                cal.lastFired = now.toISOString();
+              } else {
+                cal.processed = true;
+              }
+
+              if (!vm.streamingActive) {
+                vm.executeAgent(newCard);
+              }
             }
           }
-
-          if (shouldFire) {
-            var newCard = {
-              id: uid(),
-              text: cal.text,
-              filePath: cal.project || vm.selectedProject,
-              createdAt: now.toISOString(),
-              priority: cal.priority || 'medium',
-              ready: true,
-              attached: [],
-              selfImproving: false,
-              isDecomposing: false
-            };
-            vm.state.todo.push(newCard);
-            vm.saveCards();
-            changed = true;
-
-            if (cal.cronExpression) {
-              cal.lastFired = now.toISOString();
-            } else {
-              cal.processed = true;
-            }
-
-            if (!vm.streamingActive) {
-              vm.executeAgent(newCard);
-            }
-          }
-        }
+        } catch (e) { console.log("processCalendarEvents error ", e); }
+        
 
         if (changed) {
           $http.post('/api/calendar/save', data).catch(function () { });
@@ -1751,33 +1776,44 @@
 
     function findCardById(cardId) {
       if (!cardId || !vm.state) return null;
-      var cols = ['todo', 'doing', 'done', 'selfImproving'];
-      for (var c = 0; c < cols.length; c++) {
-        var cards = vm.state[cols[c]] || [];
-        for (var i = 0; i < cards.length; i++) {
-          if (cards[i].id === cardId) return cards[i];
+
+      try {
+        var cols = ['todo', 'doing', 'done', 'selfImproving'];
+        for (var c = 0; c < cols.length; c++) {
+          var cards = vm.state[cols[c]] || [];
+          for (var i = 0; i < cards.length; i++) {
+            if (cards[i].id === cardId) return cards[i];
+          }
         }
+      } catch (e) {
+        console.log("findCardById error", e);
       }
+      
       return null;
     }
 
     vm.submitClarification = function () {
       var reply = (vm.clarificationReply || '').trim();
       if (!reply) return;
-      var card = findCardById(vm.activeCardId);
-      if (!card) {
-        vm.aiChatMessages.push({ role: 'user', content: reply });
+
+      try {
+        var card = findCardById(vm.activeCardId);
+        if (!card) {
+          vm.aiChatMessages.push({ role: 'user', content: reply });
+          vm.clarificationReply = '';
+          return;
+        }
+        var question = (vm.agentResult && (vm.agentResult.question || vm.agentResult.summary)) || 'Clarification';
+        card.text = (card.text || '') + '\n\nClarification requested: ' + question + '\nUser answer: ' + reply;
+        delete card.agentAnalysis;
+        delete card.agentLog;
+        vm.saveCards();
         vm.clarificationReply = '';
-        return;
-      }
-      var question = (vm.agentResult && (vm.agentResult.question || vm.agentResult.summary)) || 'Clarification';
-      card.text = (card.text || '') + '\n\nClarification requested: ' + question + '\nUser answer: ' + reply;
-      delete card.agentAnalysis;
-      delete card.agentLog;
-      vm.saveCards();
-      vm.clarificationReply = '';
-      vm.agentResult = null;
-      vm.executeAgent(card);
+        vm.agentResult = null;
+        vm.executeAgent(card);
+      } catch (e) {
+        console.log("submitClarification error", e);
+      } 
     };
 
     vm.executeAgent = function (card, isAutoRestart) {
@@ -1787,432 +1823,431 @@
       var proj = card.filePath || vm.selectedProject;
       if (!proj) return $window.alert('No project assigned');
 
-      // Track iterations to prevent infinite restart loop
-      if (!isAutoRestart) card._agentIteration = 0;
-      // card._agentIteration++;
-      // if (card._agentIteration > 5) {
-      //   pushAgentLog('error', 'Card exceeded max iterations (5) — stopping');
-      //   return;
-      // }
-
-      // Clear previous analysis for this fresh run
-      delete card.agentAnalysis;
-      delete card.agentLog;
-      // If task text changed, remove context-discovered files from attachments
-      if (card.confirmedContextFiles && card._lastRunText && card.text !== card._lastRunText) {
-        var remove = card.confirmedContextFiles;
-        var attached = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-        card.attached = attached.filter(function (f) { return remove.indexOf(f) === -1; });
-        delete card.confirmedContextFiles;
-      }
-
-      function startAgent() {
-        // Reset
-        vm.agentResult = null;
-        vm.aiResponse = '';
-        vm.streamingThinking = '';
-        vm.streamingSummary = '';
-        vm.streamingPhase = '';
-        vm.streamingContextSize = 0;
-        vm.streamingSteps = [];
-        vm.streamingFilesEdited = []; 
-        vm.planItems = [];
-        vm.agentActivityLog = [];
-        vm._lastStreamMs = Date.now();
-        vm.activeStepIndex = null;
-        vm.lastPhaseLogged = '';
-        _lastLogKey = '';
-        vm.resolveStreams = [];
-        vm.streamingActive = true;
-        pauseTerminalPolling();
-
-        pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
-        vm.activeCardText = card.text;
-        card._lastRunText = card.text;
-
-        var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
-        var payload = {
-          prompt: card.text,
-          project: proj,
-          files: files,
-          maxIterations: 5,
-          maxStepsPerBatch: 8,
-          steeringContext: vm.steeringContext || '',
-          selfImproving: card.selfImproving || false,
-          isDecomposing: card.isDecomposing || false,
-          cardId: card.id
-        };
-
-        // Move to Doing
-        vm.moveCardToDoing(card.id);
-
-        vm.activeCardId = card.id;
-        if (!vm.activeCardIds) {
-          vm.activeCardIds = new Set();
+      try {
+        // Track iterations to prevent infinite restart loop
+        if (!isAutoRestart) card._agentIteration = 0;
+        // Clear previous analysis for this fresh run
+        delete card.agentAnalysis;
+        delete card.agentLog;
+        // If task text changed, remove context-discovered files from attachments
+        if (card.confirmedContextFiles && card._lastRunText && card.text !== card._lastRunText) {
+          var remove = card.confirmedContextFiles;
+          var attached = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
+          card.attached = attached.filter(function (f) { return remove.indexOf(f) === -1; });
+          delete card.confirmedContextFiles;
         }
-        vm.activeCardIds.add(card.id); 
 
-        fetch('/api/agent/execute-stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: vm.abortController.signal
-        }).then(function (response) {
-          console.log("Executing stream", payload);
-          if (!response.ok) {
-            vm.streamingActive = false;
-            resumeTerminalPolling();
-            vm.agentResult = { error: 'Server error: ' + response.status };
-            $scope.$applyAsync();
-            return;
+        function startAgent() {
+          // Reset
+          vm.agentResult = null;
+          vm.aiResponse = '';
+          vm.streamingThinking = '';
+          vm.streamingSummary = '';
+          vm.streamingPhase = '';
+          vm.streamingContextSize = 0;
+          vm.streamingSteps = [];
+          vm.streamingFilesEdited = [];
+          vm.planItems = [];
+          vm.agentActivityLog = [];
+          vm._lastStreamMs = Date.now();
+          vm.activeStepIndex = null;
+          vm.lastPhaseLogged = '';
+          _lastLogKey = '';
+          vm.resolveStreams = [];
+          vm.streamingActive = true;
+          pauseTerminalPolling();
+
+          pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
+          vm.activeCardText = card.text;
+          card._lastRunText = card.text;
+
+          var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
+          var payload = {
+            prompt: card.text,
+            project: proj,
+            files: files,
+            maxIterations: 5,
+            maxStepsPerBatch: 8,
+            steeringContext: vm.steeringContext || '',
+            selfImproving: card.selfImproving || false,
+            isDecomposing: card.isDecomposing || false,
+            cardId: card.id
+          };
+
+          // Move to Doing
+          vm.moveCardToDoing(card.id);
+
+          vm.activeCardId = card.id;
+          if (!vm.activeCardIds) {
+            vm.activeCardIds = new Set();
           }
-          var reader = response.body.getReader();
-          var decoder = new TextDecoder();
-          var buffer = '';
+          vm.activeCardIds.add(card.id);
 
-          function readNext() {
-            reader.read().then(function (result) {
-              if (result.done) {
-                vm.streamingActive = false;
-                vm._lastStreamMs = null;
-                resumeTerminalPolling();
-                $scope.$applyAsync();
-                return;
-              }
-              vm._lastStreamMs = Date.now();
-              buffer += decoder.decode(result.value, { stream: true });
-              var parts = buffer.split('\n\n');
-              buffer = parts.pop();
+          fetch('/api/agent/execute-stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: vm.abortController.signal
+          }).then(function (response) {
+            console.log("Executing stream", payload);
+            if (!response.ok) {
+              vm.streamingActive = false;
+              resumeTerminalPolling();
+              vm.agentResult = { error: 'Server error: ' + response.status };
+              $scope.$applyAsync();
+              return;
+            }
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = '';
 
-              for (var p = 0; p < parts.length; p++) {
-                var block = parts[p];
-                var lines = block.split('\n');
-                var eventName = '';
-                var data = '';
-
-                var eventLineFound = false;
-                for (var l = 0; l < lines.length; l++) {
-                  var line = lines[l];
-                  if (!eventLineFound && line.startsWith('event: ')) {
-                    eventName = line.slice(7).trim();
-                    eventLineFound = true;
-                  } else if (line.startsWith('data: ')) {
-                    if (data) data += '\n';
-                    data += line.slice(6);
+            function readNext() {
+              try {
+                reader.read().then(function (result) {
+                  if (result.done) {
+                    vm.streamingActive = false;
+                    vm._lastStreamMs = null;
+                    resumeTerminalPolling();
+                    $scope.$applyAsync();
+                    return;
                   }
-                }
+                  vm._lastStreamMs = Date.now();
+                  buffer += decoder.decode(result.value, { stream: true });
+                  var parts = buffer.split('\n\n');
+                  buffer = parts.pop();
 
-                data = data.trimEnd ? data.trimEnd() : data.replace(/\s+$/, '');
+                  for (var p = 0; p < parts.length; p++) {
+                    var block = parts[p];
+                    var lines = block.split('\n');
+                    var eventName = '';
+                    var data = '';
 
-                if (eventName) {
-                  var parsed = null;
-                  try { parsed = JSON.parse(data); } catch (e) {
-                    if (data && data.length > 2) {
-                      console.warn('[SSE] Failed to parse data for event "' + eventName + '":', data.slice(0, 120));
+                    var eventLineFound = false;
+                    for (var l = 0; l < lines.length; l++) {
+                      var line = lines[l];
+                      if (!eventLineFound && line.startsWith('event: ')) {
+                        eventName = line.slice(7).trim();
+                        eventLineFound = true;
+                      } else if (line.startsWith('data: ')) {
+                        if (data) data += '\n';
+                        data += line.slice(6);
+                      }
                     }
-                  }
 
-                  switch (eventName) {
-                    case 'log':
-                      if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
-                      break;
-                    case 'phase':
-                      if (parsed && parsed.message) {
-                        vm.streamingPhase = parsed.message;
-                        if (parsed.message !== vm.lastPhaseLogged) {
-                          vm.lastPhaseLogged = parsed.message;
-                          pushAgentLog('phase', parsed.message);
-                        }
-                      } else if (parsed && parsed.phase) {
-                        vm.streamingPhase = parsed.phase;
-                      }
-                      if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
-                      break;
-                    case 'status':
-                      if (parsed && parsed.message) vm.streamingPhase = parsed.message;
-                      break;
-                    case 'token':
-                      if (parsed && parsed.token) {
-                        vm.streamingTokenBuffer += parsed.token;
-                        if (vm.resolveStreams) { 
-                          var buf = vm.resolveStreams;
-                          if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
+                    data = data.trimEnd ? data.trimEnd() : data.replace(/\s+$/, '');
+
+                    if (eventName) {
+                      var parsed = null;
+                      try { parsed = JSON.parse(data); } catch (e) {
+                        if (data && data.length > 2) {
+                          console.warn('[SSE] Failed to parse data for event "' + eventName + '":', data.slice(0, 120));
                         }
                       }
-                      break;
-                    case 'thinking':
-                      if (parsed && parsed.text) {
-                        vm.streamingThinking = parsed.text;
-                        pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
-                      }
-                      break;
-                    case 'summary':
-                      if (parsed && parsed.text) {
-                        vm.streamingSummary = parsed.text;
-                        pushAgentLog('summary', parsed.text);
-                      }
-                      break;
-                    case 'plan':
-                      if (parsed && parsed.items && parsed.items.length) {
-                        var isResumed = parsed.resumed === true;
-                        vm.planItems = parsed.items.map(function (item, i) {
-                          return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
-                        });
-                        if (parsed.summary) {
-                          pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
-                        }
-                        var activeCard = findCardById(vm.activeCardId);
-                        if (activeCard) {
-                          activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
-                        }
-                      } else if (parsed && parsed.score !== undefined) {
-                        pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);
-                      }
-                      break;
-                    case 'edit-resolve':
-                      if (vm.resolveStreams) {
-                        vm.resolveStreams.push({ content: '' });
-                      }
-                      break;
-                    case 'show':
-                      if (parsed && parsed.text) {
-                        vm.aiResponse = parsed.text;
-                        pushAgentLog('info', '📄 ' + parsed.text);
-                      }
-                      break;
-                    case 'clarification':
-                      if (parsed && parsed.question) {
-                        vm.aiResponse = parsed.question;
-                        pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
-                      }
-                      break;
-                    case 'refresh':
-                      if (parsed && parsed.target) {
-                        if (parsed.target === 'boarddata' && vm.refreshBoardData) {
-                          vm.refreshBoardData(parsed);
-                        }
-                      }
-                      break;
-                    case 'step':
-                      if (parsed) {
-                        upsertStreamingStep(parsed);
-                        reconcilePlanItems();
-                        if (parsed.status === 'running') {
-                          pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
-                        } else if (parsed.status === 'error') {
-                          pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
-                        } else if (parsed.skipped) {
-                          pushAgentLog('info', '⏭ ' + parsed.type + ': ' + (parsed.description || parsed.path || '') + ' (already done)');
-                        }
-                      }
-                      break;
-                    case 'context-review':
-                      try {
-                        if (parsed && parsed.id && parsed.files) {
-                          const ctx = parsed;
-                          ctx.files.forEach(function (f) { f.keep = true; });
-                          vm.pendingContextReview = ctx;
-                          vm._contextReviewSubmitted = false;
-                          vm.contextReviewCountdown = 5;
-                          pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
-                          if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
-                          if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); }
-                          vm.contextReviewTimer = $interval(function () {
-                            vm.contextReviewCountdown--;
-                            if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
-                          }, 1000, 5, false);
-                          vm.contextReviewAutoConfirm = $timeout(function () {
-                            if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
-                              vm.confirmContextReview();
+
+                      switch (eventName) {
+                        case 'log':
+                          if (parsed) pushAgentLog(parsed.level, parsed.message, parsed.detail);
+                          break;
+                        case 'phase':
+                          if (parsed && parsed.message) {
+                            vm.streamingPhase = parsed.message;
+                            if (parsed.message !== vm.lastPhaseLogged) {
+                              vm.lastPhaseLogged = parsed.message;
+                              pushAgentLog('phase', parsed.message);
                             }
-                          }, 5000);
-                        }
-                      } catch (e) {
-                        pushAgentLog('error', 'Context review error: ' + (e.message || e));
-                      }
-                      break;
-                    case 'done':
-                      vm.streamingActive = false;
-                      resumeTerminalPolling();
-                      vm.steeringContext = '';
-                      var editsApplied = parsed && parsed.editsApplied;
-                      // Check if agent finished with no file edits and no more cards to process
-                      if (!editsApplied && !vm.activeCardId) {
-                        // Stop the agent properly
-                        vm.stopAgent();
-                      }
-                      var incomplete = parsed && parsed.incomplete;
-                      if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
-                      pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
-                        { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
-                      var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
-                      var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
-                      var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
-                      if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
-                        vm.streamingFilesEdited = parsed.filesEdited;
-                      } else {
-                        refreshFilesEditedFromSteps();
-                      }
-                      vm.agentResult = {
-                        summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited,
-                        steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning,
-                        incomplete: incomplete, needsClarification: parsed && parsed.needsClarification,
-                        question: parsed && (parsed.question || parsed.warning || finalSummary)
-                      };
-                      vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
-                      var analysis = {
-                        summary: finalSummary, thinking: finalThinking, steps: finalSteps,
-                        filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems),
-                        warning: parsed && parsed.warning, incomplete: incomplete,
-                        needsClarification: parsed && parsed.needsClarification,
-                        question: parsed && (parsed.question || parsed.warning || finalSummary)
-                      };
-                      var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
-                      if (doIdx !== -1) {
-                        vm.state.doing[doIdx].agentAnalysis = analysis;
-                        vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
-                      }
-
-                      // Card is only done when all plan steps are checked off
-                      if (vm.planItems && vm.planItems.length) {
-                        var allDone = vm.planItems.every(function (pi) { return pi.done; });
-                        if (!allDone) {
-                          incomplete = true;
-                          pushAgentLog('warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing');
-                        }
-                      }
-
-                      function finishCard() {
-                        if (!incomplete) {
-                          targetCol = card.selfImproving ? 'Self-Improving' : 'Done';
-                          pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
-                          vm.moveCardToDone(card);
-                        }
-                        if (incomplete && card.id === vm.activeCardId) {
-                          // Auto-restart: task isn't complete yet, keep working on this card
-                          var pendingCount = 0;
-                          if (vm.planItems) {
-                            pendingCount = vm.planItems.filter(function (pi) { return !pi.done; }).length;
+                          } else if (parsed && parsed.phase) {
+                            vm.streamingPhase = parsed.phase;
                           }
-                          pushAgentLog('info', 'Re-starting agent — ' + (pendingCount || 'quality') + ' issue(s) remain for this card');
-                          vm.executeAgent(card, true);
-                          return;
-                        }
-                        if (vm.autoQueue) {
-                          $timeout(function () {
-                            // First: prioritize any ready card in the todo column
-                            var readyTodo = vm.state.todo.filter(function (c) {
-                              return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                          if (parsed && parsed.contextSize) { vm.streamingContextSize = parsed.contextSize; }
+                          break;
+                        case 'status':
+                          if (parsed && parsed.message) vm.streamingPhase = parsed.message;
+                          break;
+                        case 'token':
+                          if (parsed && parsed.token) {
+                            vm.streamingTokenBuffer += parsed.token;
+                            if (vm.resolveStreams) {
+                              var buf = vm.resolveStreams;
+                              if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
+                            }
+                          }
+                          break;
+                        case 'thinking':
+                          if (parsed && parsed.text) {
+                            vm.streamingThinking = parsed.text;
+                            pushAgentLog('think', 'Plan updated (Plan length: ' + parsed.text.length + ' chars)', { text: parsed.text });
+                          }
+                          break;
+                        case 'summary':
+                          if (parsed && parsed.text) {
+                            vm.streamingSummary = parsed.text;
+                            pushAgentLog('summary', parsed.text);
+                          }
+                          break;
+                        case 'plan':
+                          if (parsed && parsed.items && parsed.items.length) {
+                            var isResumed = parsed.resumed === true;
+                            vm.planItems = parsed.items.map(function (item, i) {
+                              return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
                             });
-                            if (readyTodo.length) {
-                              var next = readyTodo[readyTodo.length - 1];
-                              vm.moveCardToDoing(next.id);
-                              vm.executeAgent(next);
+                            if (parsed.summary) {
+                              pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
+                            }
+                            var activeCard = findCardById(vm.activeCardId);
+                            if (activeCard) {
+                              activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
+                            }
+                          } else if (parsed && parsed.score !== undefined) {
+                            pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);
+                          }
+                          break;
+                        case 'edit-resolve':
+                          if (vm.resolveStreams) {
+                            vm.resolveStreams.push({ content: '' });
+                          }
+                          break;
+                        case 'show':
+                          if (parsed && parsed.text) {
+                            vm.aiResponse = parsed.text;
+                            pushAgentLog('info', '📄 ' + parsed.text);
+                          }
+                          break;
+                        case 'clarification':
+                          if (parsed && parsed.question) {
+                            vm.aiResponse = parsed.question;
+                            pushAgentLog('warn', 'Clarification needed', { question: parsed.question });
+                          }
+                          break;
+                        case 'refresh':
+                          if (parsed && parsed.target) {
+                            if (parsed.target === 'boarddata' && vm.refreshBoardData) {
+                              vm.refreshBoardData(parsed);
+                            }
+                          }
+                          break;
+                        case 'step':
+                          if (parsed) {
+                            upsertStreamingStep(parsed);
+                            reconcilePlanItems();
+                            if (parsed.status === 'running') {
+                              pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
+                            } else if (parsed.status === 'error') {
+                              pushAgentLog('error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
+                            } else if (parsed.skipped) {
+                              pushAgentLog('info', '⏭ ' + parsed.type + ': ' + (parsed.description || parsed.path || '') + ' (already done)');
+                            }
+                          }
+                          break;
+                        case 'context-review':
+                          try {
+                            if (parsed && parsed.id && parsed.files) {
+                              const ctx = parsed;
+                              ctx.files.forEach(function (f) { f.keep = true; });
+                              vm.pendingContextReview = ctx;
+                              vm._contextReviewSubmitted = false;
+                              vm.contextReviewCountdown = 5;
+                              pushAgentLog('phase', '📋 Context review — ' + ctx.files.length + ' file(s) discovered, auto-confirm in 5s');
+                              if (vm.contextReviewTimer) { $interval.cancel(vm.contextReviewTimer); }
+                              if (vm.contextReviewAutoConfirm) { $timeout.cancel(vm.contextReviewAutoConfirm); }
+                              vm.contextReviewTimer = $interval(function () {
+                                vm.contextReviewCountdown--;
+                                if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
+                              }, 1000, 5, false);
+                              vm.contextReviewAutoConfirm = $timeout(function () {
+                                if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
+                                  vm.confirmContextReview();
+                                }
+                              }, 5000);
+                            }
+                          } catch (e) {
+                            pushAgentLog('error', 'Context review error: ' + (e.message || e));
+                          }
+                          break;
+                        case 'done':
+                          vm.streamingActive = false;
+                          resumeTerminalPolling();
+                          vm.steeringContext = '';
+                          var editsApplied = parsed && parsed.editsApplied;
+                          // Check if agent finished with no file edits and no more cards to process
+                          if (!editsApplied && !vm.activeCardId) {
+                            // Stop the agent properly
+                            vm.stopAgent();
+                          }
+                          var incomplete = parsed && parsed.incomplete;
+                          if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
+                          pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
+                            { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
+                          var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
+                          var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
+                          var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
+                          if (parsed && parsed.filesEdited && parsed.filesEdited.length) {
+                            vm.streamingFilesEdited = parsed.filesEdited;
+                          } else {
+                            refreshFilesEditedFromSteps();
+                          }
+                          vm.agentResult = {
+                            summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited,
+                            steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning,
+                            incomplete: incomplete, needsClarification: parsed && parsed.needsClarification,
+                            question: parsed && (parsed.question || parsed.warning || finalSummary)
+                          };
+                          vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
+                          var analysis = {
+                            summary: finalSummary, thinking: finalThinking, steps: finalSteps,
+                            filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems),
+                            warning: parsed && parsed.warning, incomplete: incomplete,
+                            needsClarification: parsed && parsed.needsClarification,
+                            question: parsed && (parsed.question || parsed.warning || finalSummary)
+                          };
+                          var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
+                          if (doIdx !== -1) {
+                            vm.state.doing[doIdx].agentAnalysis = analysis;
+                            vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
+                          }
+
+                          // Card is only done when all plan steps are checked off
+                          if (vm.planItems && vm.planItems.length) {
+                            var allDone = vm.planItems.every(function (pi) { return pi.done; });
+                            if (!allDone) {
+                              incomplete = true;
+                              pushAgentLog('warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing');
+                            }
+                          }
+
+                          function finishCard() {
+                            if (!incomplete) {
+                              targetCol = card.selfImproving ? 'Self-Improving' : 'Done';
+                              pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
+                              vm.moveCardToDone(card);
+                            }
+                            if (incomplete && card.id === vm.activeCardId) {
+                              // Auto-restart: task isn't complete yet, keep working on this card
+                              var pendingCount = 0;
+                              if (vm.planItems) {
+                                pendingCount = vm.planItems.filter(function (pi) { return !pi.done; }).length;
+                              }
+                              pushAgentLog('info', 'Re-starting agent — ' + (pendingCount || 'quality') + ' issue(s) remain for this card');
+                              vm.executeAgent(card, true);
                               return;
                             }
-                            // No ready todo cards: auto-start a self-improving card
-                            var siCards = vm.state.selfImproving.filter(function (c) {
-                              return c.filePath === vm.selectedProject && c.selfImproving;
-                            });
-                            if (siCards.length) {
-                              var next = siCards[siCards.length - 1];
-                              next.ready = true;
-                              vm.moveCardToDoing(next.id);
-                              vm.executeAgent(next);
+                            if (vm.autoQueue) {
+                              $timeout(function () {
+                                // First: prioritize any ready card in the todo column
+                                var readyTodo = vm.state.todo.filter(function (c) {
+                                  return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                                });
+                                if (readyTodo.length) {
+                                  var next = readyTodo[readyTodo.length - 1];
+                                  vm.moveCardToDoing(next.id);
+                                  vm.executeAgent(next);
+                                  return;
+                                }
+                                // No ready todo cards: auto-start a self-improving card
+                                var siCards = vm.state.selfImproving.filter(function (c) {
+                                  return c.filePath === vm.selectedProject && c.selfImproving;
+                                });
+                                if (siCards.length) {
+                                  var next = siCards[siCards.length - 1];
+                                  next.ready = true;
+                                  vm.moveCardToDoing(next.id);
+                                  vm.executeAgent(next);
+                                }
+                              }, 500);
                             }
-                          }, 500);
-                        }
-                      }
-
-                      if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
-                        card.prStatus.status = 'creating-pr';
-                        pushAgentLog('info', 'Creating PR for branch ' + card.prStatus.branch + '...');
-                        $http.post('/api/pr/finish', {
-                          projectPath: proj,
-                          cardId: card.id,
-                          cardText: card.text,
-                          branchName: card.prStatus.branch,
-                          summary: finalSummary,
-                          originalBranch: card.prStatus.originalBranch
-                        }).then(function (prResp) {
-                          var prData = prResp.data;
-                          if (prData && prData.success) {
-                            card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prData.prUrl };
-                            pushAgentLog('info', 'PR created: ' + (prData.prUrl || 'Check your repository'));
-                          } else {
-                            card.prStatus = { status: 'error', error: (prData && prData.error) || 'PR creation failed', branch: card.prStatus.branch };
-                            pushAgentLog('warn', 'PR creation: ' + card.prStatus.error);
                           }
-                          finishCard();
-                        }, function (err) {
-                          card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch };
-                          pushAgentLog('warn', 'PR creation failed: ' + card.prStatus.error);
-                          finishCard();
-                        });
-                      } else {
-                        if (incomplete) {
-                          pushAgentLog('warn', 'Card kept in Doing — no files were modified');
-                        }
-                        finishCard();
+
+                          if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
+                            card.prStatus.status = 'creating-pr';
+                            pushAgentLog('info', 'Creating PR for branch ' + card.prStatus.branch + '...');
+                            $http.post('/api/pr/finish', {
+                              projectPath: proj,
+                              cardId: card.id,
+                              cardText: card.text,
+                              branchName: card.prStatus.branch,
+                              summary: finalSummary,
+                              originalBranch: card.prStatus.originalBranch
+                            }).then(function (prResp) {
+                              var prData = prResp.data;
+                              if (prData && prData.success) {
+                                card.prStatus = { status: 'pr-created', branch: card.prStatus.branch, prUrl: prData.prUrl };
+                                pushAgentLog('info', 'PR created: ' + (prData.prUrl || 'Check your repository'));
+                              } else {
+                                card.prStatus = { status: 'error', error: (prData && prData.error) || 'PR creation failed', branch: card.prStatus.branch };
+                                pushAgentLog('warn', 'PR creation: ' + card.prStatus.error);
+                              }
+                              finishCard();
+                            }, function (err) {
+                              card.prStatus = { status: 'error', error: err.statusText || 'PR failed', branch: card.prStatus.branch };
+                              pushAgentLog('warn', 'PR creation failed: ' + card.prStatus.error);
+                              finishCard();
+                            });
+                          } else {
+                            if (incomplete) {
+                              pushAgentLog('warn', 'Card kept in Doing — no files were modified');
+                            }
+                            finishCard();
+                          }
+                          break;
+                        case 'error':
+                          vm.streamingActive = false;
+                          resumeTerminalPolling();
+                          pushAgentLog('error', parsed ? parsed.message : data);
+                          vm.agentResult = { error: parsed ? parsed.message : data };
+                          vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
+                          break;
                       }
-                      break;
-                    case 'error':
-                      vm.streamingActive = false;
-                      resumeTerminalPolling();
-                      pushAgentLog('error', parsed ? parsed.message : data);
-                      vm.agentResult = { error: parsed ? parsed.message : data };
-                      vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
-                      break;
+                    }
                   }
-                }
-              }
-              try { $scope.$applyAsync(); } catch (e) { /* applyAsync guard */ }
-              readNext();
-            }).catch(function (readErr) {
-              if (readErr && readErr.name === 'AbortError') return;
-              vm.streamingActive = false;
-              vm._lastStreamMs = null;
-              resumeTerminalPolling();
-              vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
-              $scope.$applyAsync();
-            });
-          }
-          readNext();
-
-        }).catch(function (err) {
-          console.log("eating all errs", err);
-          vm.streamingActive = false;
-          resumeTerminalPolling(); 
-          if (err.name === 'AbortError') {
-            vm.agentResult = { warning: 'Agent stopped by user.' };
-          } else {
-            vm.agentResult = { error: 'Connection failed: ' + err.message };
-          }
-        });
-      }
-
-      // PR: create branch before starting agent
-      if (card.autoPr && proj) {
-        pushAgentLog('info', 'Creating PR branch...');
-        $http.post('/api/pr/start', { projectPath: proj, cardId: card.id, cardText: card.text })
-          .then(function (resp) {
-            var d = resp.data;
-            if (d && d.success) {
-              card.prStatus = { status: 'branch-created', branch: d.branchName, originalBranch: d.originalBranch };
-              pushAgentLog('info', 'PR branch: ' + card.prStatus.branch);
-            } else {
-              card.prStatus = { status: 'error', error: (d && d.error) || 'Branch creation failed' };
-              pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
+                  try { $scope.$applyAsync(); } catch (e) { /* applyAsync guard */ }
+                  readNext();
+                }).catch(function (readErr) {
+                  if (readErr && readErr.name === 'AbortError') return;
+                  vm.streamingActive = false;
+                  vm._lastStreamMs = null;
+                  resumeTerminalPolling();
+                  vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
+                  $scope.$applyAsync();
+                });
+              } catch (e) {
+                console.log("readNext error", e);
+              } 
             }
-            startAgent();
-          }, function (err) {
-            card.prStatus = { status: 'error', error: err.statusText || 'Network error' };
-            pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
-            startAgent();
+            readNext();
+
+          }).catch(function (err) {
+            console.log("eating all errs", err);
+            vm.streamingActive = false;
+            resumeTerminalPolling();
+            if (err.name === 'AbortError') {
+              vm.agentResult = { warning: 'Agent stopped by user.' };
+            } else {
+              vm.agentResult = { error: 'Connection failed: ' + err.message };
+            }
           });
-      } else {
-        startAgent();
-      }
+        }
+        // PR: create branch before starting agent
+        if (card.autoPr && proj) {
+          pushAgentLog('info', 'Creating PR branch...');
+          $http.post('/api/pr/start', { projectPath: proj, cardId: card.id, cardText: card.text })
+            .then(function (resp) {
+              var d = resp.data;
+              if (d && d.success) {
+                card.prStatus = { status: 'branch-created', branch: d.branchName, originalBranch: d.originalBranch };
+                pushAgentLog('info', 'PR branch: ' + card.prStatus.branch);
+              } else {
+                card.prStatus = { status: 'error', error: (d && d.error) || 'Branch creation failed' };
+                pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
+              }
+              startAgent();
+            }, function (err) {
+              card.prStatus = { status: 'error', error: err.statusText || 'Network error' };
+              pushAgentLog('warn', 'PR branch failed: ' + card.prStatus.error);
+              startAgent();
+            });
+        } else {
+          startAgent();
+        }
+      } catch (e) { console.log("executeAgent error", e); }  
     };
 
     // === AI Chat ===

@@ -278,9 +278,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.toggleCardReady = function (card) {
-        card.ready = !card.ready;
-        if (card.ready && vm.activeCardIds.size === 0) {
-          vm.startCard(card);
+        try {
+          card.ready = !card.ready;
+          if (card.ready && vm.activeCardIds.size === 0) {
+            vm.startCard(card);
+          }
+        }
+        catch (e) {
+          console.log("toggleCardReady error", e);
         }
       };
 
@@ -571,12 +576,17 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
 
       vm.startCard = function (card) {
         if (!card) return;
-        if (card.ready) {
-          vm.moveCardToDoing(card.id);
-          vm.executeAgent(card);
-        } else {
-          card.ready = true;
-          vm.saveCards();
+        try {
+          if (card.ready) {
+            vm.moveCardToDoing(card.id);
+            vm.executeAgent(card);
+          } else {
+            card.ready = true;
+            vm.saveCards();
+          }
+        }
+        catch (e) {
+          console.log("startCard error", e);
         }
       };
 

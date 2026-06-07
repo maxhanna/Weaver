@@ -138,7 +138,58 @@ public class AgentController : ControllerBase
     // ═══════════════════════════════════════════════════════════════════════
     //  EDIT RESOLUTION  (two-phase: plan describes WHAT, resolve finds HOW)
     // ═══════════════════════════════════════════════════════════════════════
+    /// <summary>
+    /// For large files, returns the excerpt most likely to contain the relevant edit target,
+    /// centered around the plan's oldString or change-description keywords.
+    /// Falls back to head+tail only when no location clue is available.
+    /// </summary>
+    private static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString)
+    {
+        const int RadiusLines = 60;
+        var lines = fileContent.Split('\n');
 
+        // Strategy A: anchor on the first long line of planOldString
+        if (!string.IsNullOrWhiteSpace(planOldString))
+        {
+            var anchor = planOldString.Split('\n')
+                .Select(l => l.Trim())
+                .FirstOrDefault(l => l.Length >= 8);
+
+            if (anchor != null)
+            {
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    if (!lines[i].Contains(anchor, StringComparison.OrdinalIgnoreCase)) continue;
+                    var s = Math.Max(0, i - 10);
+                    var e = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
+                    var prefix = s > 0 ? $"... [lines 1–{s} omitted]\n" : "";
+                    var suffix = e < lines.Length ? $"\n... [lines {e + 1}–{lines.Length} omitted]" : "";
+                    return prefix + string.Join('\n', lines.Skip(s).Take(e - s)) + suffix;
+                }
+            }
+        }
+
+        // Strategy B: keyword scan on the change description
+        var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
+                                     .Where(kw => kw.Length >= 5).ToList();
+        if (keywords.Count > 0)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
+                var s = Math.Max(0, i - 20);
+                var e = Math.Min(lines.Length, i + RadiusLines);
+                var prefix = s > 0 ? $"... [lines 1–{s} omitted]\n" : "";
+                var suffix = e < lines.Length ? $"\n... [lines {e + 1}–{lines.Length} omitted]" : "";
+                return prefix + string.Join('\n', lines.Skip(s).Take(e - s)) + suffix;
+            }
+        }
+
+        // Fallback: head + tail
+        return fileContent.Length > 12000
+            ? fileContent[..6000] + "\n\n... [middle omitted] ...\n\n" + fileContent[^4000..]
+            : fileContent;
+    }
     /// <summary>
     /// Makes a focused LLM call to resolve the exact edit for a single plan step.
     /// The LLM sees the real file content and outputs delimiter-format diff.
@@ -159,8 +210,18 @@ public class AgentController : ControllerBase
 
         var sb = new StringBuilder();
         sb.AppendLine($"FILE: {relPath}");
-        sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
+        sb.AppendLine($"CHANGE REQUIRED: {step.Change}"); 
+
+        // NEW: file-type hint so the LLM preserves structure
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".svg")
+            sb.AppendLine("⚠ HTML FILE: preserve ALL relative indentation exactly — " +
+                          "child elements must be indented MORE than their parent tag.");
+        else if (ext is ".css" or ".scss" or ".sass")
+            sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
+                          "(e.g. '0px 1px' must stay as two tokens with a space).");
         sb.AppendLine();
+         
 
         if (!fileExists)
         {
@@ -173,9 +234,8 @@ public class AgentController : ControllerBase
             sb.AppendLine();
             sb.AppendLine("```");
             // Show more of the file for better context
-            sb.AppendLine(fileContent.Length > 12000
-                ? fileContent[..6000] + "\n\n... [middle omitted] ...\n\n" + fileContent[^4000..]
-                : fileContent);
+            sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
+
             sb.AppendLine("```");
         }
         else
@@ -768,17 +828,18 @@ public class AgentController : ControllerBase
         "  \"_done\"               — Task is already complete; put reason in \"change\"\n" +
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
-        "1. Only reference files that exist in the discovery context\n" +
+        "1. Only reference files that exist in the discovery context.\n" +
         "2. For EDIT steps (relative/path.ext), INCLUDE \"oldString\" — copy EXACT VERBATIM text from the file (character-for-character including indentation). INCLUDE \"newString\" — the replacement text\n" +
-        "3. WEB FIRST: add a _web_search step if you need current API docs or recent data\n" +
-        "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step\n" +
-        "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement\n" +
+        "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
+        "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
+        "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
         "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
         "7. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
         "8. Each step must be ONE focused change — do not combine unrelated edits in one step, do not edit the same method in two seperate steps. Combine all edits to the same method in one step. \n" +
-        "9. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed\n" +
-        "10. Never put ... or [...] or placeholders in oldString or newString\n" +
-        "11. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" + 
+        "9. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
+        "10. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed.\n" +
+        "11. Never put ... or [...] or placeholders in oldString or newString.\n" +
+        "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" + 
         "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-4 lines: which files need changing and why\",\n" +
@@ -1183,6 +1244,29 @@ public class AgentController : ControllerBase
     // ═══════════════════════════════════════════════════════════════════════
     //  PLAN PARSING
     // ═══════════════════════════════════════════════════════════════════════
+    private AgentPlan DeduplicatePlan(AgentPlan plan)
+    {
+        if (plan?.Plan == null || plan.Plan.Count == 0)
+            return plan;
+
+        var seen = new HashSet<string>();
+        var unique = new List<PlanStep>();
+
+        foreach (var step in plan.Plan)
+        {
+            // Only dedupe steps that contain both oldString and newString
+            var key = step.File + "\n" + step.OldString + "\n" + step.NewString;
+
+            if (!seen.Contains(key))
+            {
+                seen.Add(key);
+                unique.Add(step);
+            }
+        }
+
+        plan.Plan = unique;
+        return plan;
+    }
 
     public AgentPlan? ParsePlan(string jsonString)
     {
@@ -1205,19 +1289,37 @@ public class AgentController : ControllerBase
             var truncOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, AllowTrailingCommas = true };
             foreach (var candidate in AgentUtilities.GeneratePlanJsonCandidates(truncRepaired))
             {
-                try { var r = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts); if (r?.Plan?.Count > 0) return r; } catch { }
+                try { 
+                    var deserializedPlan = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts); 
+                    if (deserializedPlan?.Plan?.Count > 0) 
+                    return DeduplicatePlan(deserializedPlan); 
+                } 
+                catch { }
             }
         }
-        var jsonBlocks = AgentUtilities.ExtractJsonBlocks(cleaned)
-            .Where(LooksLikePlanJson).OrderByDescending(b => b.Length).ToList();
-        if (LooksLikePlanJson(cleaned) && cleaned.StartsWith("{")) jsonBlocks.Insert(0, cleaned);
-        var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
-        if (fb >= 0 && lb > fb) { var bc = cleaned[fb..(lb + 1)]; if (LooksLikePlanJson(bc)) jsonBlocks.Add(bc); }
+        var jsonBlocks = AgentUtilities.ExtractJsonBlocks(cleaned).Where(LooksLikePlanJson).OrderByDescending(b => b.Length).ToList();
+        if (LooksLikePlanJson(cleaned) && cleaned.StartsWith("{"))
+        {
+            jsonBlocks.Insert(0, cleaned); 
+        }
+        var fb = cleaned.IndexOf('{'); 
+        var lb = cleaned.LastIndexOf('}');
+        if (fb >= 0 && lb > fb) { 
+            var bc = cleaned[fb..(lb + 1)]; 
+            if (LooksLikePlanJson(bc)) {
+                jsonBlocks.Add(bc); 
+            } 
+        }
         foreach (var candidate in jsonBlocks.Distinct())
         {
             foreach (var repaired in AgentUtilities.GeneratePlanJsonCandidates(candidate))
             {
-                try { var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts); if (result?.Plan != null) return result; } catch { }
+                try { 
+                    var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts); 
+                    if (result?.Plan != null) {
+                        return DeduplicatePlan(result); 
+                    } 
+                } catch { }
             }
         } 
         var arrayCandidates = new List<string> { cleaned };
@@ -3745,7 +3847,9 @@ Respond with JSON only:
         return sb.ToString();
     }
 
-    /// <summary>Adjust replacement indentation to match the target block's base indent.</summary>
+    private static bool IsHtmlLikeContent(string content) =>
+     content.Contains('<') && Regex.IsMatch(content, @"</?\w+[\s/>]");
+
     private static string IndentReplacement(string[] fileLines, int start, string replacement)
     {
         if (string.IsNullOrEmpty(replacement) || start >= fileLines.Length)
@@ -3755,7 +3859,6 @@ Respond with JSON only:
         if (fileIndent.Length == 0)
             return replacement;
 
-        // Find the indentation of the first non-empty replacement line
         var replLines = replacement.Split('\n');
         var replBaseIndent = replLines.Where(l => l.Length > 0).Select(GetLeadingWhitespace).FirstOrDefault();
 
@@ -3777,10 +3880,64 @@ Respond with JSON only:
             }
         }
 
-        // Auto-indent: apply proper inner indentation based on brace/scoping depth
+        // HTML/template files use tag-based nesting — AutoIndentFromFile only tracks { }
+        // and collapses everything to depth-0. Use HTML-aware indentation instead.
+        if (IsHtmlLikeContent(replacement))
+            return AutoIndentHtml(string.Join("\n", replLines), fileIndent);
+
         return AutoIndentFromFile(string.Join("\n", replLines), fileIndent, fileLines, start);
     }
+    private static readonly HashSet<string> VoidHtmlElements = new(StringComparer.OrdinalIgnoreCase)
+{
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr"
+};
 
+    /// <summary>
+    /// Applies HTML-tag-depth indentation when the LLM produces flat output.
+    /// If the replacement already has relative indentation (multiple distinct indent levels)
+    /// it is returned unchanged. Otherwise, each line is placed at the correct tag depth.
+    /// </summary>
+    private static string AutoIndentHtml(string html, string baseIndent)
+    {
+        const string IndentStep = "  "; // 2 spaces per nesting level
+        var lines = html.Split('\n');
+
+        // If the content already has relative structure, preserve it exactly
+        var distinctDepths = lines
+            .Where(l => l.Trim().Length > 0)
+            .Select(l => GetLeadingWhitespace(l).Length)
+            .Distinct().Count();
+        if (distinctDepths > 1) return html;
+
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].Trim();
+            if (trimmed.Length == 0) continue;
+
+            // Closing tag → dedent BEFORE placing this line
+            if (Regex.IsMatch(trimmed, @"^</[\w-]"))
+                depth = Math.Max(0, depth - 1);
+
+            lines[i] = baseIndent + new string(' ', depth * IndentStep.Length) + trimmed;
+
+            // Opening tag: indent the NEXT line if this tag doesn't close on the same line
+            var tagMatch = Regex.Match(trimmed, @"^<([\w-]+)[\s>]");
+            if (tagMatch.Success)
+            {
+                var tag = tagMatch.Groups[1].Value;
+                var isSelfClosing = trimmed.EndsWith("/>") || VoidHtmlElements.Contains(tag);
+                var closedInline = trimmed.Contains($"</{tag}>");
+                var isClosing = trimmed.StartsWith("</");
+                var isComment = trimmed.StartsWith("<!--");
+                if (!isSelfClosing && !closedInline && !isClosing && !isComment)
+                    depth++;
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
     /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
     private static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
     {
