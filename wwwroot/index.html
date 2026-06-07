@@ -662,13 +662,12 @@
           </details>
         </details>
       </div>
+      <div class="popup-footer">
+        <button ng-click="vm.closeDiscordPanel()">Close</button>
+      </div>
     </div>
-    <div class="popup-footer">
-      <button ng-click="vm.closeDiscordPanel()">Close</button>
-    </div>
-  </div>
-  </div>
-
+  </div> 
+  
   <!-- SETTINGS MODAL -->
   <div class="popup-overlay" ng-if="vm.showSettingsPanel" ng-click="vm.closeSettingsPanel()">
     <div class="popup-panel settings-panel" style="max-width:480px;" ng-click="$event.stopPropagation()">
