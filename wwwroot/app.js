@@ -2029,6 +2029,11 @@
                           if (parsed) {
                             upsertStreamingStep(parsed);
                             reconcilePlanItems();
+                            // Mark item as cancelled if the step was cancelled by user
+                            if (parsed.message === 'Cancelled by user' && parsed.planItemIndex !== undefined && vm.planItems) {
+                              var cancelledItem = vm.planItems.find(function (pi) { return pi.index === parsed.planItemIndex; });
+                              if (cancelledItem) { cancelledItem.cancelled = true; }
+                            }
                             if (parsed.status === 'running') {
                               pushAgentLog('step', '▶ ' + parsed.type + ': ' + (parsed.description || parsed.path || parsed.command || ''));
                             } else if (parsed.status === 'error') {
@@ -2512,6 +2517,25 @@
       }
       vm.activeCardId = null;
       vm.activeCardIds = new Set();
+    };
+
+    vm.cancelPlanStep = function (card, stepIndex) {
+      if (!card) return;
+      var cardId = card.id || card._id;
+      if (!cardId) return;
+      // Optimistic update
+      if (vm.planItems) {
+        var item = vm.planItems.find(function (pi) { return pi.index === stepIndex; });
+        if (item) { item.cancelled = true; }
+      }
+      $http.post('/api/agent/cancel-step', { cardId: cardId, stepIndex: stepIndex })
+        .catch(function () {
+          // Revert on failure
+          if (vm.planItems) {
+            var item2 = vm.planItems.find(function (pi) { return pi.index === stepIndex; });
+            if (item2) { delete item2.cancelled; }
+          }
+        });
     };
 
     vm.formatLogDetail = formatLogDetail;

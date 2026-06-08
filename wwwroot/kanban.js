@@ -1,6 +1,6 @@
 ﻿'use strict';
 
-angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, VoiceInput, $http) { 
+angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, VoiceInput, $http) {
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
   function loadCards() {
@@ -13,7 +13,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
   var _cardsVersion = 0;
 
   return {
-    init: function(vm, $scope) {
+    init: function (vm, $scope) {
       // Start with an immediate default state, then replace with persisted
       // state loaded from the server when available.
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
@@ -45,7 +45,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       _cardsCache = {};
       _cardsVersion = 0;
 
-      vm.saveCards = function() {
+      vm.saveCards = function () {
         console.log("Saving cards", vm.state);
         // Save to .boarddata file
         try {
@@ -53,14 +53,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
             console.error('Failed to save to .boarddata file:', err);
           });
           _cardsVersion++;
-          vm.updateSelfImprovingCount(); 
+          vm.updateSelfImprovingCount();
         } catch (e) {
           console.log("Save cards error:", e);
         }
       };
 
       vm.updateSelfImprovingCount = function () {
-        try { 
+        try {
           if (vm.countSelfImprovingCards) {
             vm.selfImprovingCardCount = vm.countSelfImprovingCards();
           }
@@ -69,7 +69,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         }
       };
 
-      vm.handleFileSearchChange = function() {
+      vm.handleFileSearchChange = function () {
         // When search changes in file attachment modal, show all files/folders
         // This bypasses the normal filtering to help users navigate faster
         if (vm.fileSearchFilter) {
@@ -174,7 +174,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
           VoiceInput.start(card, $scope);
           vm.isRecording = true;
           // Focus the textarea for the card when starting recording
-          $timeout(function() {
+          $timeout(function () {
             var textarea = document.querySelector('[data-card-id="' + card.id + '"] textarea');
             if (textarea) {
               textarea.focus();
@@ -326,88 +326,99 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
       };
 
       vm.moveCard = function (id, from, to) {
-        var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
-        if (idx === -1) return;
-        var card = vm.state[from][idx];
-        if (!card.selfImproving && to === 'selfImproving') {
-          card.selfImproving = true;
-          card.ready = false;
-        }
-        if (card.selfImproving && to !== 'selfImproving' && to !== 'doing') {
-          to = 'selfImproving';
-        }
-        if (from === 'todo' && to === 'doing' && !card.ready) {
-          return $window.alert('Mark the card as Ready first (press Start)');
-        }
-         
-        vm.state[from].splice(idx, 1);
-        if (from === 'doing' && to === 'todo') {
-          card.ready = false;
-          // Preserve agentAnalysis/agentLog for previous-analysis display
-          vm.activeCardId = null;
-          if (vm.streamingActive && vm.activeCardId === card.id) {
+        try {
+          var idx = vm.state[from].findIndex(function (c) { return c.id === id; });
+          if (idx === -1) return;
+
+          var card = vm.state[from][idx];
+
+          if (from.toLowerCase() === "doing" && to.toLowerCase() === "todo" && vm.streamingActive && vm.activeCardId === card.id) {
+            console.log("Back pressed on active card; Stopping agent.");
             vm.stopAgent(card);
           }
-          // Scroll to the card after moving it back to To Do
-          $timeout(function() {
-            var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
-            if (cardElement) {
-              cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
-          }, 0);
-        }
-        if (from === 'doing' && to === 'done') {
-          // Only clear activeCardId if it's not part of the current project
-          if (card.filePath !== vm.selectedProject) {
-            vm.activeCardId = null;
+
+          if (!card.selfImproving && to === 'selfImproving') {
+            card.selfImproving = true;
+            card.ready = false;
           }
-        }
-        if (from === 'doing' && to === 'selfImproving') {
-          card.selfImproving = true;
-          card.ready = false;
-        }
-        if (from === 'selfImproving' && to === 'doing' && !card.ready) {
-          vm.state.selfImproving.push(card);
+          if (card.selfImproving && to !== 'selfImproving' && to !== 'doing') {
+            to = 'selfImproving';
+          }
+          if (from === 'todo' && to === 'doing' && !card.ready) {
+            return $window.alert('Mark the card as Ready first (press Start)');
+          }
+
+          vm.state[from].splice(idx, 1);
+          if (from === 'doing' && to === 'todo') {
+            card.ready = false;
+            // Preserve agentAnalysis/agentLog for previous-analysis display
+            vm.activeCardId = null;
+            if (vm.streamingActive && vm.activeCardId === card.id) {
+              vm.stopAgent(card);
+            }
+            // Scroll to the card after moving it back to To Do
+            $timeout(function () {
+              var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
+              if (cardElement) {
+                cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }
+            }, 0);
+          }
+          if (from === 'doing' && to === 'done') {
+            // Only clear activeCardId if it's not part of the current project
+            if (card.filePath !== vm.selectedProject) {
+              vm.activeCardId = null;
+            }
+          }
+          if (from === 'doing' && to === 'selfImproving') {
+            card.selfImproving = true;
+            card.ready = false;
+          }
+          if (from === 'selfImproving' && to === 'doing' && !card.ready) {
+            vm.state.selfImproving.push(card);
+            vm.saveCards();
+            return $window.alert('Mark the card as Ready first (press Start)');
+          }
+          if (from === 'done' && to === 'todo') {
+            card.ready = false;
+            // Preserve agentAnalysis/agentLog for previous-analysis display
+            // Only clear activeCardId if it's not part of the current project
+            if (card.filePath !== vm.selectedProject) {
+              vm.activeCardId = null;
+            }
+            // Scroll to the card after moving it back to To Do
+            $timeout(function () {
+              var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
+              if (cardElement) {
+                cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }
+            }, 0);
+          }
+          if (from === 'todo' && to === 'done') {
+            card.ready = false;
+            delete card.agentAnalysis;
+            delete card.agentSteps;
+            // Only clear activeCardId if it's not part of the current project
+            if (card.filePath !== vm.selectedProject) {
+              vm.activeCardId = null;
+            }
+          }
+          vm.state[to].push(card);
+          if (from === 'todo' && to === 'doing' && card.ready) {
+            // Clear previous analysis when starting a fresh run
+            delete card.agentAnalysis;
+            delete card.agentLog;
+            vm.executeAgent(card);
+          }
+          if (from === 'selfImproving' && to === 'doing' && card.ready) {
+            delete card.agentAnalysis;
+            delete card.agentLog;
+            vm.executeAgent(card);
+          }
           vm.saveCards();
-          return $window.alert('Mark the card as Ready first (press Start)');
+        } catch (e) {
+          console.log("moveCard error.", e);
         }
-        if (from === 'done' && to === 'todo') {
-          card.ready = false;
-          // Preserve agentAnalysis/agentLog for previous-analysis display
-          // Only clear activeCardId if it's not part of the current project
-          if (card.filePath !== vm.selectedProject) {
-            vm.activeCardId = null;
-          }
-          // Scroll to the card after moving it back to To Do
-          $timeout(function() {
-            var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
-            if (cardElement) {
-              cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-            }
-          }, 0);
-        }
-        if (from === 'todo' && to === 'done') {
-          card.ready = false;
-          delete card.agentAnalysis;
-          delete card.agentSteps;
-          // Only clear activeCardId if it's not part of the current project
-          if (card.filePath !== vm.selectedProject) {
-            vm.activeCardId = null;
-          }
-        }
-        vm.state[to].push(card);
-        if (from === 'todo' && to === 'doing' && card.ready) {
-          // Clear previous analysis when starting a fresh run
-          delete card.agentAnalysis;
-          delete card.agentLog;
-          vm.executeAgent(card);
-        }
-        if (from === 'selfImproving' && to === 'doing' && card.ready) {
-          delete card.agentAnalysis;
-          delete card.agentLog;
-          vm.executeAgent(card);
-        }
-        vm.saveCards();
       };
 
       vm.reopenCard = function (card) {
@@ -419,7 +430,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.state.todo.push(card);
         vm.saveCards();
         // Scroll to the card after reopening it to To Do
-        $timeout(function() {
+        $timeout(function () {
           var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
           if (cardElement) {
             cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -447,7 +458,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
             break;
           }
         }
-        
+
         vm.saveCards();
       };
 
@@ -464,9 +475,9 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         vm.saveCards();
       };
 
-      vm.todoTextAreaClicked = function(event) {
+      vm.todoTextAreaClicked = function (event) {
         event.stopPropagation();
-        event.preventDefault(); 
+        event.preventDefault();
       }
 
       vm.splitCardIntoSubtasks = function (card) {
@@ -536,7 +547,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
             if (idx === -1) {
               return;
             } else {
-              card = vm.state.archived.splice(idx, 1)[0]; 
+              card = vm.state.archived.splice(idx, 1)[0];
             }
           }
           else {
@@ -545,7 +556,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         } else {
           card = vm.state.todo.splice(idx, 1)[0];
         }
-        if (card) { 
+        if (card) {
           vm.state.doing.push(card);
           vm.saveCards();
         }
@@ -555,15 +566,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function($window, $timeout, V
         targetCol = card.selfImproving ? 'selfImproving' : 'done';
         console.log("Moving card to " + targetCol);
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
-        if (idx === -1) { 
+        if (idx === -1) {
           console.log("ERROR: Could not find card in doing column");
-          return; 
+          return;
         }
-        var card = vm.state.doing.splice(idx, 1)[0]; 
+        var card = vm.state.doing.splice(idx, 1)[0];
         if (card) {
           console.log("Found card in doing, moving to " + targetCol);
           vm.state[targetCol].push(card);
-          console.log("card added to "+ targetCol + " setting active card to null");
+          console.log("card added to " + targetCol + " setting active card to null");
           vm.activeCardId = null;
           if (!vm.activeCardIds) vm.activeCardIds = new Set();
           vm.activeCardIds.delete(cardId);

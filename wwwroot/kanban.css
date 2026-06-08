@@ -685,3 +685,9 @@ body.dragging-active .card:hover {
 .tag-pr-url a:hover {
     text-decoration: underline;
 }
+
+.plan-item-text {
+    display: flex;
+    flex-direction: column;
+    max-width: calc(100% - 10px);
+}

@@ -1,21 +1,24 @@
 ﻿<div style="display: flex; flex-direction: column;">
   <div class="search-container">
     <input type="text" ng-model="vm.searchFilter" placeholder="Search cards..." class="search-input" />
-    <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button> 
-    <button ng-click="vm.showArchived = !vm.showArchived" class="{{vm.showArchived ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      🗄 ({{vm.archiveCardCount}})
+    <button ng-click="vm.searchFilter = ''" class="clear-button" ng-if="vm.searchFilter">✕</button>
+    <button ng-click="vm.showArchived = !vm.showArchived" class="{{vm.showArchived ? 'active' : 'ghost'}}"
+      style="margin-left:4px;">
+      🗄 ({{vm.cardsForProject('archived').length}})
     </button>
-    <button ng-click="vm.showSelfImproving = !vm.showSelfImproving" class="{{vm.showSelfImproving ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      📈 ({{vm.selfImprovingCardCount}})
+    <button ng-click="vm.showSelfImproving = !vm.showSelfImproving"
+      class="{{vm.showSelfImproving ? 'active' : 'ghost'}}" style="margin-left:4px;">
+      📈 ({{vm.cardsForProject('selfImproving').length}})
     </button>
     <button ng-click="vm.showTodo = !vm.showTodo" class="{{vm.showTodo ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      📋 ({{vm.cardsForProject('todo').length}}) 
+      📋 ({{vm.cardsForProject('todo').length}})
     </button>
-    <button ng-click="vm.showDoing = !vm.showDoing" class="{{vm.showDoing ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      ⚡ ({{vm.cardsForProject('doing').length}}) 
+    <button ng-click="vm.showDoing = !vm.showDoing" class="{{vm.showDoing ? 'active' : 'ghost'}}"
+      style="margin-left:4px;">
+      ⚡ ({{vm.cardsForProject('doing').length}})
     </button>
     <button ng-click="vm.showDone = !vm.showDone" class="{{vm.showDone ? 'active' : 'ghost'}}" style="margin-left:4px;">
-      ✅ ({{vm.cardsForProject('done').length}}) 
+      ✅ ({{vm.cardsForProject('done').length}})
     </button>
   </div>
   <!-- KANBAN BOARD -->
@@ -35,11 +38,9 @@
           <div class="card-meta">
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
-          </div> 
+          </div>
           <div class="card-text">
-            <textarea ng-model="card.text" 
-              ng-blur="vm.saveCardText(card)" 
-              rows="2" 
+            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
               ng-click="vm.todoTextAreaClicked($event)"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
@@ -57,13 +58,35 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                  style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
-                <span class="plan-item-file">{{item.file}}</span>
-                <span class="plan-item-change">{{item.change}}</span>
-                <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
-                  style="cursor:pointer;opacity:0.5;" title="Remove this step">✕</span>
+                  style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
+                  '⬜'}}</span>
+                <div class="plan-item-body" style="flex:1;min-width:0;">
+                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                    <div class="plan-item-text">
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                    </div>
+
+                    <span ng-if="item.oldString || item.newString"
+                      ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                      {{item._showDetail ? '▲' : '▼'}}
+                    </span>
+                    <span class="plan-item-icon"
+                      ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
+                  </div>
+                  <div ng-if="item._showDetail" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                      item.newString.slice(0,200) + '…' : item.newString}}</div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -86,7 +109,8 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f.path || f}}">{{f.path || f}}</span>
-              <span class="remove" ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
+              <span class="remove"
+                ng-click="vm.removeAttachment(card.id, f.path || f, 'todo'); $event.stopPropagation()">✕</span>
             </div>
           </div>
           <div class="card-actions">
@@ -160,7 +184,7 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-      
+
           <div class="card-text">
             {{card.text}}
           </div>
@@ -175,13 +199,38 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-pending': !item.done && !item.cancelled}"
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
-                  style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' : '⬜'}}</span>
-                <span class="plan-item-file">{{item.file}}</span>
-                <span class="plan-item-change">{{item.change}}</span>
-                <span class="plan-item-icon" ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
-                  style="cursor:pointer;opacity:0.5;" title="Remove this step">✕</span>
+                  style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
+                  item.cancelled ? '⏭' : '⬜'}}</span>
+                <div class="plan-item-body" style="flex:1;min-width:0;">
+                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                    <div class="plan-item-text">
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                    </div>
+                    <span ng-if="item.oldString || item.newString"
+                      ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                      {{item._showDetail ? '▲' : '▼'}}
+                    </span>
+                    <span ng-if="vm.streamingActive && vm.activeCardId === card.id && !item.done && !item.cancelled"
+                      ng-click="vm.cancelPlanStep(card, item.index); $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.6;color:#e06c75;font-size:11px;flex-shrink:0;"
+                      title="Cancel this step">⏹</span>
+                    <span class="plan-item-icon"
+                      ng-click="vm.removePlanItem(card, item.index); $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.5;flex-shrink:0;" title="Remove this step">✕</span>
+                  </div>
+                  <div ng-if="item._showDetail" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                      item.newString.slice(0,200) + '…' : item.newString}}</div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -189,7 +238,8 @@
           <div class="card-tags">
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
-            <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄 SELF-IMPROVING</span>
+            <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
+              SELF-IMPROVING</span>
             <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
           </div>
@@ -330,9 +380,11 @@
                   <summary style="cursor:pointer;opacity:0.6;font-size:11px;">Reasoning</summary>
                   <pre>{{card.agentAnalysis.thinking}}</pre>
                   <div class="plan-items-list"
-                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
+                    ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length"
+                    title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
-                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
@@ -375,7 +427,7 @@
             <span class="card-id">#{{card.id | limitTo:6}}</span>
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
-        
+
           <div class="card-text">
             {{card.text}}
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
@@ -388,10 +440,29 @@
             </div>
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
-                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
                 <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
-                <span class="plan-item-file">{{item.file}}</span>
-                <span class="plan-item-change">{{item.change}}</span>
+                <div class="plan-item-body" style="flex:1;min-width:0;">
+                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                    <div class="plan-item-text">
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                    </div>
+                    <span ng-if="item.oldString || item.newString"
+                      ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                      style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                      {{item._showDetail ? '▲' : '▼'}}
+                    </span>
+                  </div>
+                  <div ng-if="item._showDetail" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                    <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                      item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                    <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                      item.newString.slice(0,200) + '…' : item.newString}}</div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -501,8 +572,10 @@
                   <div class="plan-items-list"
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
-                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}" title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                      ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}</span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -549,16 +622,19 @@
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
             <div class="attachment" ng-repeat="f in vm.getAttachedFiles(card)">
               <span>📎</span><span class="name" title="{{f}}">{{f}}</span>
-              <span class="remove" ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
+              <span class="remove"
+                ng-click="vm.removeAttachment(card.id, f, 'selfImproving'); $event.stopPropagation()">✕</span>
             </div>
           </div>
           <div class="card-actions">
             <button ng-click="vm.attachFile(card.id); $event.stopPropagation()" class="small"
               title="Attach file">📎</button>
             <button ng-click="vm.toggleCardReady(card); $event.stopPropagation()" class="primary small"
-              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run Self-Improving'}}</button>
+              ng-class="{'btn-ready': card.ready}">{{card.ready ? '⏹ UnReady' : vm.streamingActive ? '▶ Ready' : '▶ Run
+              Self-Improving'}}</button>
             <button ng-click="vm.moveCard(card.id,'selfImproving','todo')" class="small ghost">← To Todo</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'selfImproving')" class="small ghost" title="Delete card">✕ Delete</button>
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'selfImproving')" class="small ghost"
+              title="Delete card">✕ Delete</button>
           </div>
           <!-- Previous analysis on returned self-improving cards -->
           <div class="card-analysis previous-analysis" ng-if="card.agentAnalysis">

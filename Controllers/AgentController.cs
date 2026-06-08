@@ -5,9 +5,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Weaver.Services;
 using Weaver;
-using System.Security.AccessControl;
 
 [ApiController]
 [Route("api/agent")]
@@ -23,11 +25,13 @@ public class AgentController : ControllerBase
     private readonly BoardDataService _boardData;
     private const int MaxFileContextChars = 24_000;
     private const int MAX_COMMAND_ITERATIONS = 30;
+    private const int MaxFullFileTokens = 4096; // 8192 max / 2 — fullFile must not exceed half the LLM's token limit
     private bool _lastConnectionCheckResult = true;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
+    private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
     private static readonly string[] UnsafeEditMarkers =
     {
         "…(truncated)", "â€¦(truncated)", "...(truncated)"
@@ -57,12 +61,36 @@ public class AgentController : ControllerBase
         "    \"  replacement second line\"\n" +
         "  ]\n" +
         "}\n\n" +
-        "FORMAT B — single-line (escape newlines as \\n):\n" +
-        "{\n" +
-        "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
-        "  \"newString\": \"replacement line 1\\nreplacement line 2\"\n" +
-        "}\n\n" +
-        "FULL FILE:\n" +
+"FORMAT B — single-line (escape newlines as \\n):\n" +
+"{\n" +
+"  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
+"  \"newString\": \"replacement line 1\\nreplacement line 2\"\n" +
+"}\n\n" +
+"FORMAT C — AST-based (for C# files — safest, no text matching needed):\n" +
+"{\n" +
+"  \"targetType\": \"method\",\n" +
+"  \"targetName\": \"CalculateTotal\",\n" +
+"  \"newCode\": \"    public int CalculateTotal() { return 42; }\"\n" +
+"}\n" +
+"  Supported targetType values: method, class, property, interface, struct, record, enum, constructor\n" +
+"  newCode can be a string or array of lines (like FORMAT A).\n" +
+"  The tool will parse the file's AST, find the named node, and replace its body.\n" +
+"  INDENTATION in newCode: the first line (method signature) must start with the SAME indentation as the original method in the file.\n" +
+"  Subsequent lines (method body) must be progressively indented: class indent + method indent + block indent.\n" +
+"  Example — if the method is inside a class at 8 spaces, output newCode with 8 spaces before the signature\n" +
+"  and each nested block adds 4 more spaces.\n\n" +
+"INSERT-AFTER (add a new method without replacing existing ones):\n" +
+"{\n" +
+"  \"targetType\": \"method\",\n" +
+"  \"targetName\": \"ExistingMethodName\",\n" +
+"  \"insertAfter\": true,\n" +
+"  \"newCode\": \"    public async Task<IActionResult> NewMethod() { ... }\"\n" +
+"}\n" +
+"  Use insertAfter:true to INSERT a new method/constructor RIGHT AFTER an existing one.\n" +
+"  The target method is NOT replaced — the new code is added after its closing brace.\n" +
+"  This is the SAFEST way to add a new method: no existing code is touched.\n" +
+"  DO NOT use targetType=\"class\" to add methods — use insertAfter with targetType=\"method\" instead.\n\n" +
+"FULL FILE:\n" +
         "{\n" +
         "  \"fullFile\": \"Complete file content (use array format for multi-line)\",\n" +
         "  \"fullFile\": [\"line1\", \"line2\"]\n" +
@@ -72,16 +100,21 @@ public class AgentController : ControllerBase
         "  \"alreadyDone\": true\n" +
         "}\n\n" +
         "CRITICAL RULES:\n" +
-        "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY space and tab\n" +
+        "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
         "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
         "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
-        "4. NEVER add trailing whitespace to any line in oldString — trim trailing spaces from each line\n" +
+        "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
         "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
         "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
-        "7. Every line in oldString must be ≥ 8 characters (after trimming) — lines like `}`, `);`, `{` are too short and match everywhere\n" +
+        "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
         "8. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
-        "10. Output ONLY the JSON — no markdown, no code fences, no introductory text";
+        "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
+         "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
+         "12. FOR C# FILES: ONLY FORMAT C (targetType/targetName/newCode) is supported. oldString/newString will fail for C# files.\n" +
+         "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
+         "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
+         "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -129,10 +162,10 @@ public class AgentController : ControllerBase
             await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
             await response.Body.FlushAsync(ct);
         }
-        catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (IOException) { }
-        catch (Exception) { }
+        catch (OperationCanceledException) { Console.WriteLine("ERROR, OperationCanceledException"); }
+        catch (ObjectDisposedException) { Console.WriteLine("ERROR, ObjectDisposedException"); }
+        catch (IOException) { Console.WriteLine("ERROR, IOException"); }
+        catch (Exception) { Console.WriteLine("ERROR, Exception"); }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -190,6 +223,167 @@ public class AgentController : ControllerBase
             ? fileContent[..6000] + "\n\n... [middle omitted] ...\n\n" + fileContent[^4000..]
             : fileContent;
     }
+
+    /// <summary>Use Roslyn to find a C# AST node and return its exact source text as oldString.</summary>
+    private (string? oldStr, string? error) AstResolveEdit(string fullPath, string targetType, string targetName, bool returnTail = false)
+    {
+        if (!System.IO.File.Exists(fullPath))
+            return (null, "File not found for AST edit");
+
+        var ext = Path.GetExtension(fullPath).ToLowerInvariant();
+        if (ext != ".cs")
+            return (null, $"AST editing not supported for {ext} files");
+
+        var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+        if (string.IsNullOrWhiteSpace(sourceText))
+            return (null, "File is empty");
+
+        SyntaxTree tree;
+        try { tree = CSharpSyntaxTree.ParseText(sourceText); }
+        catch (Exception ex)
+        {
+            return (null, $"Failed to parse C# file: {ex.Message}");
+        }
+
+        var root = tree.GetRoot();
+        SyntaxNode? targetNode = null;
+
+        if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<MethodDeclarationSyntax>()
+                .FirstOrDefault(m => string.Equals(m.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<ClassDeclarationSyntax>()
+                .FirstOrDefault(c => string.Equals(c.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "property", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<PropertyDeclarationSyntax>()
+                .FirstOrDefault(p => string.Equals(p.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "interface", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<InterfaceDeclarationSyntax>()
+                .FirstOrDefault(i => string.Equals(i.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "struct", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<StructDeclarationSyntax>()
+                .FirstOrDefault(s => string.Equals(s.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "record", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<RecordDeclarationSyntax>()
+                .FirstOrDefault(r => string.Equals(r.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "enum", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<EnumDeclarationSyntax>()
+                .FirstOrDefault(e => string.Equals(e.Identifier.Text, targetName, StringComparison.Ordinal));
+        }
+        else if (string.Equals(targetType, "constructor", StringComparison.OrdinalIgnoreCase))
+        {
+            targetNode = root.DescendantNodes()
+                .OfType<ConstructorDeclarationSyntax>()
+                .FirstOrDefault(c =>
+                {
+                    var ct = c.Parent as TypeDeclarationSyntax;
+                    return ct != null && string.Equals(ct.Identifier.Text, targetName, StringComparison.Ordinal);
+                });
+        }
+        else
+        {
+            return (null, $"Unknown targetType '{targetType}'. Supported: method, class, property, interface, struct, record, enum, constructor");
+        }
+
+        if (targetNode == null)
+        {
+            var kind = char.ToUpper(targetType[0]) + targetType[1..];
+            return (null, $"{kind} '{targetName}' not found in file");
+        }
+
+        if (returnTail)
+        {
+            // Return only the closing lines (last 2-3 lines) of the target node.
+            // This is used for "insert after" — the LLM's newCode gets inserted
+            // right before these closing lines.
+            var nodeBody = targetNode.ToString();
+            var lines = nodeBody.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+            var tailCount = Math.Min(3, lines.Length);
+            var tail = string.Join("\n", lines[^tailCount..]);
+            return (tail, null);
+        }
+
+        // Include leading trivia (comments, attributes) but not trailing whitespace
+        var leading = targetNode.GetLeadingTrivia().ToFullString();
+        var body = targetNode.ToString();
+        var oldStr = leading + body;
+
+        // Normalize line endings
+        oldStr = oldStr.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        return (oldStr, null);
+    }
+
+    /// <summary>
+    /// Detects the base indentation of the original AST node (method/class) and
+    /// normalizes the LLM's newCode to match. If the LLM outputs flat code
+    /// (1-3 spaces) but the file uses 8+ spaces, this shifts the entire block
+    /// to the correct base while preserving relative internal nesting.
+    /// </summary>
+    private static string AutoIndentCode(string oldSource, string newCode)
+    {
+        var oldLines = oldSource.Split('\n');
+        var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (firstRealLine == null) return newCode;
+
+        var baseIndent = Regex.Match(firstRealLine, @"^(\s*)").Value;
+        if (string.IsNullOrEmpty(baseIndent)) return newCode;
+        var baseIndentLen = baseIndent.Length;
+
+        var newLines = newCode.Split('\n');
+        if (newLines.Length <= 1) return newCode;
+
+        // Find the minimum leading whitespace across all non-empty lines in newCode
+        var nonEmpty = newLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (nonEmpty.Count == 0) return newCode;
+        var minNewIndent = nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length);
+
+        // If the new code's minimum indent is already >= the old code's base,
+        // it's already properly indented — leave it alone
+        if (minNewIndent >= baseIndentLen) return newCode;
+
+        // Shift: strip the common minimum from newCode, then prepend the old base indent.
+        // This preserves the relative indentation structure (try/catch nesting, etc.)
+        var result = new List<string>();
+        foreach (var line in newLines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                result.Add(line);
+            }
+            else
+            {
+                // Strip up to minNewIndent chars of leading whitespace
+                var trimmed = line.Length > minNewIndent
+                    ? line.Substring(minNewIndent)
+                    : line.TrimStart();
+                result.Add(baseIndent + trimmed);
+            }
+        }
+        return string.Join("\n", result);
+    }
+
     /// <summary>
     /// Makes a focused LLM call to resolve the exact edit for a single plan step.
     /// The LLM sees the real file content and outputs delimiter-format diff.
@@ -220,6 +414,21 @@ public class AgentController : ControllerBase
         else if (ext is ".css" or ".scss" or ".sass")
             sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
                           "(e.g. '0px 1px' must stay as two tokens with a space).");
+        else if (ext is ".ts" or ".tsx" or ".js" or ".jsx")
+            sb.AppendLine("⚠ TS/JS FILE: preserve ALL indentation exactly — " +
+                          "methods inside a class body MUST be indented, nested blocks " +
+                          "must be indented relative to their parent. Copy the leading " +
+                          "whitespace from oldString character-for-character into newString.");
+        else if (ext == ".cs")
+            sb.AppendLine("⚠ C# FILE: USE FORMAT C (targetType/targetName/newCode). This is the ONLY supported format for C# files. " +
+                          "It uses AST parsing and bypasses text-matching entirely. Just name the method/class/property " +
+                          "to replace or insert after and output its new body. " +
+                          "Do NOT use oldString/newString for C# files — they WILL fail. " +
+                          "To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method. " +
+                          "Do NOT use targetType=\"class\" — that replaces the entire class. " +
+                          "INDENTATION: newCode MUST include proper C# indentation — method signature at the class member level " +
+                          "(typically 4 or 8 spaces), method body indented 4 spaces more, nested blocks (try/catch/using/if/for) " +
+                          "each indented 4 spaces more than their parent. Copy the file's existing indentation pattern.");
         sb.AppendLine();
          
 
@@ -227,24 +436,36 @@ public class AgentController : ControllerBase
         {
             sb.AppendLine("FILE DOES NOT EXIST YET. Use <<<FULL_FILE>>> to create it with complete content.");
         }
-        else if (fileContent.Length > 10000)
-        {
-            sb.AppendLine($"FILE IS LARGE ({fileContent.Length} chars). Relevant excerpt:");
-            sb.AppendLine("Use <<<OLD>>> / <<<NEW>>> targeted edits only — copy the EXACT text from the excerpt below.");
-            sb.AppendLine();
-            sb.AppendLine("```");
-            // Show more of the file for better context
-            sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
-
-            sb.AppendLine("```");
-        }
         else
         {
-            sb.AppendLine("CURRENT FILE CONTENT:");
-            sb.AppendLine("```");
-            sb.AppendLine(fileContent);
-            sb.AppendLine("```");
+            var lineCount = fileContent.Split('\n').Length;
+            var isLarge = fileContent.Length > 3000 || lineCount > 80;
+            if (isLarge)
+            {
+                sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
+                sb.AppendLine("```");
+                sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
+                sb.AppendLine("```");
+                sb.AppendLine();
+                sb.AppendLine("⚠ Do NOT output the full file. Use FORMAT C (targetType/targetName/newCode) for C# files, " +
+                              "or a small oldString (≤10 lines) anchored around the exact change location.");
+            }
+            else
+            {
+                sb.AppendLine("CURRENT FILE CONTENT:");
+                sb.AppendLine("```");
+                sb.AppendLine(fileContent);
+                sb.AppendLine("```");
+            }
         }
+
+        // Always encourage small, focused oldStrings
+        sb.AppendLine();
+        sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
+        sb.AppendLine("For C# files: use FORMAT C (targetType/targetName/newCode) — no oldString needed.");
+        sb.AppendLine("To ADD a new method to a C# file: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
+        sb.AppendLine("To REPLACE a C# method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
+        sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
 
         if (history?.Count > 0)
         {
@@ -361,6 +582,50 @@ public class AgentController : ControllerBase
                 }
             }
 
+            // AST-based edit (C# only): targetType + targetName + newCode
+            if (jRoot.TryGetProperty("targetType", out var ttEl) &&
+                jRoot.TryGetProperty("targetName", out var tnEl) &&
+                jRoot.TryGetProperty("newCode", out var ncEl))
+            {
+                var targetType = ttEl.GetString();
+                var targetName = tnEl.GetString();
+                var newCodeStr = ncEl.ValueKind == JsonValueKind.String ? ncEl.GetString()
+                    : ncEl.ValueKind == JsonValueKind.Array
+                        ? string.Join("\n", ncEl.EnumerateArray().Select(e => e.GetString() ?? ""))
+                        : null;
+
+                if (!string.IsNullOrWhiteSpace(targetType) && !string.IsNullOrWhiteSpace(targetName) && newCodeStr != null)
+                {
+                    var insertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl) && iaEl.GetBoolean();
+
+                    if (insertAfter)
+                    {
+                        // INSERT mode: retrieve the FULL method text and append newCode after it.
+                        // oldStr = the full existing method (guaranteed unique in the file via AST),
+                        // newStr = the same method text + newline + indented newCode.
+                        // This avoids fragile tail matching (closing braces match wrong locations).
+                        var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        if (fullStr == null)
+                            return (null, null, false, null, false, astErr ?? "AST resolution failed");
+
+                        var indented = AutoIndentCode(fullStr, newCodeStr);
+                        newStr = fullStr + "\n" + indented;
+                        return (fullStr, newStr, false, null, false, null);
+                    }
+                    else
+                    {
+                        // REPLACE mode: find the full node and replace it entirely
+                        var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        if (astOldStr != null)
+                        {
+                            var indented = AutoIndentCode(astOldStr, newCodeStr);
+                            return (astOldStr, indented, false, null, false, null);
+                        }
+                        return (null, null, false, null, false, astErr ?? "AST resolution failed");
+                    }
+                }
+            }
+
             // Targeted edit — support both string and array formats
             // String:  "oldString": "line1\nline2"
             // Array:   "oldString": ["line1", "line2"]
@@ -389,7 +654,7 @@ public class AgentController : ControllerBase
             if (!string.IsNullOrWhiteSpace(oldStr))
                 return (oldStr, newStr ?? "", false, null, false, null);
 
-            return (null, null, false, null, false, "JSON has no oldString, fullFile, or alreadyDone field");
+            return (null, null, false, null, false, "JSON has no oldString, targetType, fullFile, or alreadyDone field");
         }
         catch
         {
@@ -428,6 +693,120 @@ public class AgentController : ControllerBase
         }
     }
 
+    private enum PreEditVerdict { Proceed, AlreadyDone, Irrelevant }
+
+    /// <summary>
+    /// Quick pre-edit validation: checks if the edit is still relevant before
+    /// calling the LLM. Verifies oldString still exists, newString isn't already
+    /// present, and the edit makes sense given the current file content.
+    /// </summary>
+    private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent))
+            return (PreEditVerdict.Proceed, "");
+
+        var content = AgentUtilities.NormalizeLineEndings(fileContent);
+
+        // Already done: newString already exists in the file
+        if (!string.IsNullOrWhiteSpace(step.NewString))
+        {
+            var newStr = AgentUtilities.NormalizeLineEndings(step.NewString);
+            if (content.Contains(newStr, StringComparison.Ordinal))
+                return (PreEditVerdict.AlreadyDone, "code already present in file");
+        }
+
+        // Gone stale: oldString no longer exists in the file
+        if (!string.IsNullOrWhiteSpace(step.OldString))
+        {
+            var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
+            if (!content.Contains(oldStr, StringComparison.Ordinal))
+            {
+                // Try trimmed (trailing whitespace removed)
+                var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
+                var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
+                if (!trimFile.Contains(trimOld, StringComparison.Ordinal))
+                    return (PreEditVerdict.Irrelevant, "oldString not found — context changed or already applied");
+            }
+        }
+
+        return (PreEditVerdict.Proceed, "");
+    }
+
+    private static readonly HashSet<string> _builtInTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "string", "int", "long", "double", "float", "decimal", "bool", "char", "byte",
+        "short", "uint", "ulong", "ushort", "sbyte", "object", "dynamic", "void",
+        "Task", "ValueTask", "Task<T>", "ValueTask<T>", "IActionResult", "ActionResult",
+        "OkResult", "OkObjectResult", "BadRequestResult", "BadRequestObjectResult",
+        "NotFoundResult", "StatusCodeResult", "ObjectResult", "RedirectResult",
+        "FileResult", "ContentResult", "JsonResult", "IEnumerable<T>", "IQueryable<T>",
+        "List<T>", "Dictionary<TKey,TValue>", "HashSet<T>", "IList<T>", "ICollection<T>",
+        "HttpResponse", "HttpRequest", "CancellationToken", "DateTime", "TimeSpan",
+        "Guid", "Uri", "Exception", "InvalidOperationException", "ArgumentNullException",
+        "ArgumentException", "NotSupportedException", "MySqlConnection", "MySqlCommand",
+        "MySqlDataReader", "MySqlParameter", "MySqlDbType", "DbConnection", "DbCommand",
+        "HttpClient", "HttpContent", "HttpMethod", "HttpStatusCode"
+    };
+
+    /// <summary>
+    /// After an edit is applied, scans the new code for referenced types that
+    /// don't exist in the file. Appends minimal class definitions at the bottom.
+    /// </summary>
+    private static List<string> ScanMissingTypes(string fullFileContent, string newCode)
+    {
+        // Existing type declarations in the file
+        var declaredTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(fullFileContent,
+            @"\b(class|record|struct|enum|interface)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            RegexOptions.Multiline))
+            declaredTypes.Add(m.Groups[2].Value);
+
+        // Namespaces in using directives (we won't flag types from known namespaces)
+        var usingNamespaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(fullFileContent, @"using\s+([A-Za-z_.][A-Za-z0-9_.]*)\s*;"))
+            usingNamespaces.Add(m.Groups[1].Value);
+
+        // Extract all PascalCase identifiers from the new code
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(newCode, @"\b[A-Z][a-zA-Z0-9_]+\b"))
+        {
+            var name = m.Value;
+            if (name.Length < 3) continue;
+            if (_builtInTypes.Contains(name)) continue;
+            if (declaredTypes.Contains(name)) continue;
+            // Skip anything that starts with a known namespace prefix
+            if (usingNamespaces.Any(ns => name.StartsWith(ns.Split('.').Last(), StringComparison.OrdinalIgnoreCase)))
+                continue;
+            candidates.Add(name);
+        }
+
+        // Heuristic: only flag types that follow heuristics for DTO/request/response
+        // or appear after [FromBody] or as a generic argument
+        var result = new List<string>();
+        foreach (var c in candidates)
+        {
+            // Pattern 1: [FromBody] TypeName
+            var fbPattern = @"\[FromBody\]\s+\b" + Regex.Escape(c) + @"\b";
+            if (Regex.IsMatch(newCode, fbPattern))
+            { result.Add(c); continue; }
+
+            // Pattern 2: ends with Request / Response / Dto / Model / Result / Args / Data
+            if (c.EndsWith("Request", StringComparison.OrdinalIgnoreCase) ||
+                c.EndsWith("Response", StringComparison.OrdinalIgnoreCase) ||
+                c.EndsWith("Dto", StringComparison.OrdinalIgnoreCase) ||
+                c.EndsWith("Model", StringComparison.OrdinalIgnoreCase) ||
+                c.EndsWith("Result", StringComparison.OrdinalIgnoreCase))
+            { result.Add(c); continue; }
+
+            // Pattern 3: used as generic type argument <TypeName>
+            var genericPattern = @"<" + Regex.Escape(c) + @"\s*>";
+            if (Regex.IsMatch(newCode, genericPattern))
+            { result.Add(c); continue; }
+        }
+
+        return result.Distinct().ToList();
+    }
+
     /// <summary>
     /// Resolves and applies a single file edit step.  Up to 3 resolve attempts
     /// before giving up and moving on.  Each failure re-feeds the bad anchor back
@@ -454,6 +833,46 @@ public class AgentController : ControllerBase
                 description = step.Change,
                 planItemIndex
             }, ct);
+
+        // ── Pre-edit validation: check if edit is still relevant before calling LLM ──
+        if (System.IO.File.Exists(fullPath))
+        {
+            var currentContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var (verdict, reason) = PreEditValidation(currentContent, step);
+            if (verdict == PreEditVerdict.AlreadyDone)
+            {
+                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {reason}", ct: ct);
+                var r = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "edit",
+                    ["status"] = "skipped",
+                    ["path"] = relPath,
+                    ["reason"] = reason,
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", r, ct);
+                allResults.Add(r);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                return stepIndex + 1;
+            }
+            if (verdict == PreEditVerdict.Irrelevant)
+            {
+                await EmitLog(emitSse, "warn", $"⏭ Skipping {relPath} — {reason}", ct: ct);
+                var r = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "edit",
+                    ["status"] = "skipped",
+                    ["path"] = relPath,
+                    ["reason"] = reason,
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", r, ct);
+                allResults.Add(r);
+                return stepIndex + 1;
+            }
+        }
 
         var history = new List<(string old, string @new, string error)>();
         var planOldStr = step.OldString;
@@ -530,20 +949,24 @@ public class AgentController : ControllerBase
             // ── Full file replacement ─────────────────────────────────────
             if (fullFile && fullContent != null)
             {
-                var dir = Path.GetDirectoryName(fullPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
-                await EmitLog(emitSse, "success",
-                    $"✓ Written {relPath} ({fullContent.Length} chars)", new {fullContent, fullFile }, ct: ct);
-                var r = new Dictionary<string, object?>();
-                PopulateEditResult(r, "modified", relPath, null, fullContent, "");
-                r["index"] = stepIndex;
-                r["planItemIndex"] = planItemIndex;
-                if (emitSse) await SendSse(Response, "step", r, ct);
-                allResults.Add(r);
-                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
-                return stepIndex + 1;
+                var fileAlreadyExists = System.IO.File.Exists(fullPath);
+                if (fileAlreadyExists)
+                {
+                    // fullFile on an existing file is never correct — log and fail
+                    var e = "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
+                    await EmitLog(emitSse, "error", e, ct: ct);
+                    history.Add((step.OldString ?? "", step.NewString ?? "", e));
+                    continue;
+                }
+                if (fullContent.Length > MaxFullFileTokens * 4) // rough char→token ratio
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"fullFile too large ({fullContent.Length} chars, max {MaxFullFileTokens * 4}) — skipping, will be picked up in next plan pass", ct: ct);
+                    continue;
+                }
+                stepIndex = await ApplyFullFile(fullContent, step, fullPath, relPath,
+                    projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
+                return stepIndex;
             }
 
             // ── Targeted replacement ──────────────────────────────────────
@@ -628,9 +1051,7 @@ public class AgentController : ControllerBase
                 continue;
             }
 
-            await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-
-            // Verify replacement: the new string should be present in the written file
+            // Verify replacement: the new string should be present in the result
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 !newContent.Contains(newStr, StringComparison.Ordinal))
             {
@@ -643,6 +1064,34 @@ public class AgentController : ControllerBase
                     await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
                     history.Add((oldStr!, newStr, verr));
                     continue;
+                }
+            }
+
+            // ── Auto-format C# files before write ─────────────────────────
+            var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
+            if (fileExt == ".cs")
+            {
+                try
+                {
+                    var fmtTree = CSharpSyntaxTree.ParseText(newContent);
+                    var fmtRoot = fmtTree.GetRoot();
+                    newContent = fmtRoot.NormalizeWhitespace().ToFullString();
+                }
+                catch { /* non-critical — use unformatted content */ }
+            }
+
+            await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+
+            // ── Post-edit: scan for missing types referenced in the edit ────
+            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
+            {
+                var missing = ScanMissingTypes(newContent, newStr);
+                if (missing.Count > 0)
+                {
+                    newContent += "\n" + string.Join("\n\n", missing.Select(t => $"public class {t}\n{{\n}}"));
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "info",
+                        $"Appended missing type(s): {string.Join(", ", missing)}", ct: ct);
                 }
             }
 
@@ -812,11 +1261,10 @@ public class AgentController : ControllerBase
     /// The actual edit (oldString/newString) is resolved per-step during execution.
     /// </summary>
     private static string BuildPlanningPrompt() =>
-        "You are a software-engineering agent. " +
-        "Produce a concise JSON plan of code changes.\n" +
+        "You are a software-engineering agent. Plan only 1-2 SMALL focused steps at a time.\n" +
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
         "### STEP TYPES (the \"file\" field) ###\n" +
-        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). INCLUDE \"oldString\" and \"newString\".\n" +
+        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\"\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
         "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
@@ -829,35 +1277,79 @@ public class AgentController : ControllerBase
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
         "1. Only reference files that exist in the discovery context.\n" +
-        "2. For EDIT steps (relative/path.ext), INCLUDE \"oldString\" — copy EXACT VERBATIM text from the file (character-for-character including indentation). INCLUDE \"newString\" — the replacement text\n" +
+        "2. Plan AT MOST 2 steps. Smaller steps are better — you will be re-invoked to add more.\n" +
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
         "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
-        "7. CHECKPOINTS: for >4 files or >8 steps, split phases with _checkpoint\n" +
-        "8. Each step must be ONE focused change — do not combine unrelated edits in one step, do not edit the same method in two seperate steps. Combine all edits to the same method in one step. \n" +
-        "9. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
-        "10. \"oldString\" must appear exactly ONCE in the file — include 1-2 surrounding lines as context if needed.\n" +
-        "11. Never put ... or [...] or placeholders in oldString or newString.\n" +
-        "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n\n" + 
+        "7. Each step must be ONE focused change — do not combine unrelated edits.\n" +
+        "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
+        "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
+        "10. The exact edit content (oldString/newString) will be resolved later when the file content is available — just describe what to change in the \"change\" field.\n\n" +
         "### OUTPUT FORMAT ###\n" +
         "{\n" +
-        "  \"thinking\": \"1-4 lines: which files need changing and why\",\n" +
-        "  \"summary\": \"one sentence: what this plan accomplishes\",\n" +
+        "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
+        "  \"summary\": \"one sentence: what this step accomplishes\",\n" +
         "  \"score\": <0-100>,\n" +
         "  \"plan\": [\n" +
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
-        "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
-        "      \"oldString\": \"var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);\\nfiles.forEach(function (f) {\\nif (existing.indexOf(f) === -1) existing.push(f);\\n});\\ncard.attached = existing;\",\n" +
-        "      \"newString\": \"var existing = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);\\nfiles.forEach(function (f) {\\nif (existing.indexOf(f) === -1) existing.push(f);\\n});\\ncard.attached = existing;\\nvm.saveCards();\"\n" +
-        "    },\n" +
-        "    {\n" +
-        "      \"file\": \"_command\",\n" +
-        "      \"change\": \"dotnet build\"\n" +
+        "      \"change\": \"Modify confirmFilePicker to append files to existing list\"\n" +
         "    }\n" +
         "  ]\n" +
         "}";
+
+    /// <summary>Quick LLM validation of plan steps before execution. Returns null if valid, or a reason string if invalid.</summary>
+    private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("You are validating a code-change plan. Determine if the plan makes sense and is complete given the user's request.");
+        sb.AppendLine("Check each step for:");
+        sb.AppendLine("- Does the file path look reasonable for the change?");
+        sb.AppendLine("- Is the change description clear and actionable?");
+        sb.AppendLine("- Are steps in the right order (commands before edits)?");
+        sb.AppendLine("- Are any steps identical (invalid)?");
+        sb.AppendLine("- Are any steps incomplete?");
+        sb.AppendLine("- Does the plan actually address the user's request?");
+        sb.AppendLine();
+        sb.AppendLine("Respond with a single JSON object:");
+        sb.AppendLine("{\"valid\": true}  or  {\"valid\": false, \"reason\": \"short explanation of what's wrong\"}");
+        sb.AppendLine();
+        sb.AppendLine("### USER REQUEST ###");
+        sb.AppendLine(userPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### PLAN ###");
+        sb.AppendLine(JsonSerializer.Serialize(plan.Plan, new JsonSerializerOptions { WriteIndented = true }));
+
+        var (raw, _, err) = await CallLlmRaw(
+            "You validate code-change plans. Output ONLY a JSON object with a \"valid\" boolean and optional \"reason\". No extra text, no markdown fences.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(30), maxTokens: 256);
+
+        if (!string.IsNullOrWhiteSpace(err) || string.IsNullOrWhiteSpace(raw))
+            return null; // validation inconclusive — proceed anyway
+
+        var cleaned = raw.Trim();
+        if (cleaned.StartsWith('{') == false)
+        {
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+        }
+
+        try
+        {
+            using var jDoc = JsonDocument.Parse(cleaned);
+            var root = jDoc.RootElement;
+            if (root.TryGetProperty("valid", out var valid) && valid.ValueKind == JsonValueKind.False)
+            {
+                var reason = root.TryGetProperty("reason", out var r) ? r.GetString() : "Plan validation failed";
+                return reason;
+            }
+        }
+        catch { /* parse error — proceed anyway */ }
+
+        return null; // valid or inconclusive
+    }
 
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
@@ -879,6 +1371,9 @@ public class AgentController : ControllerBase
         userPrompt.AppendLine(projectRoot);
         userPrompt.AppendLine("### DISCOVERY CONTEXT (only use paths listed here) ###");
         userPrompt.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
+        
+
+        Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
 
         var (raw, _, llmError) = await CallLlmRawStreaming(
             planningPrompt, userPrompt.ToString(), emitSse, ct,
@@ -937,6 +1432,15 @@ public class AgentController : ControllerBase
         return Regex.Matches(lastLine, @"(?<!\\)""").Count % 2 != 0;
     }
 
+    /// <summary>Check if file content looks truncated (unbalanced braces = LLM hit token limit).</summary>
+    private static bool IsFullFileTruncated(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        var opens = content.Count(c => c == '{');
+        var closes = content.Count(c => c == '}');
+        return opens > closes;
+    }
+
     private async Task<(AgentPlan? plan, string? error)> ParseAndScore(
         string raw, bool emitSse, CancellationToken ct)
     {
@@ -990,8 +1494,8 @@ public class AgentController : ControllerBase
     private static string BuildPlannerDiscoveryContext(string fullDiscovery)
     {
         if (string.IsNullOrWhiteSpace(fullDiscovery)) return fullDiscovery;
-        const int MaxLinesPerFile = 60;
-        const int MaxFiles = 4;
+        const int MaxLinesPerFile = 200;
+        const int MaxFiles = 20;
         var result = new StringBuilder();
         var sections = Regex.Split(fullDiscovery, @"(?=### \S)");
         var fileCount = 0;
@@ -1030,32 +1534,96 @@ public class AgentController : ControllerBase
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task<(string discoveryText, List<object> steps)> RunLightBootstrap(
-        List<string> attachedFiles, string projectRoot, bool emitSse)
+        List<string> attachedFiles, string projectRoot, bool emitSse, CancellationToken ct = default)
     {
         await EmitLog(emitSse, "info", "Fast-path bootstrap: reading attached files only");
-        var plan = (attachedFiles ?? new List<string>())
+
+        var files = (attachedFiles ?? new List<string>())
             .Where(f => !string.IsNullOrWhiteSpace(f))
-            .Select((f, i) => new AgentStep
-            {
-                Index = i,
-                Type = "read",
-                Path = f.Replace('\\', '/'),
-                Description = $"Read attached {f}"
-            }).ToList();
+            .ToList();
 
-        if (plan.Count == 0) return ("", new List<object>());
+        if (files.Count == 0) return ("", new List<object>());
 
-        var steps = await ExecuteSteps(plan, projectRoot, 0, emitSse);
+        // Phase 1: Read ALL files reliably — no SSE interleaved
         var sb = new StringBuilder();
         sb.AppendLine("Attached files (edit these paths only):");
-        foreach (var f in attachedFiles ?? new List<string>())
+        foreach (var f in files)
             sb.AppendLine($"  - {f.Replace('\\', '/')}");
-        foreach (var item in steps)
+
+        var allResults = new List<object>();
+        foreach (var f in files)
         {
-            if (item is Dictionary<string, object?> r && r.TryGetValue("output", out var o) && o != null)
-                sb.AppendLine($"\n### {r.GetValueOrDefault("path")}\n{o}");
+            ct.ThrowIfCancellationRequested();
+            var relPath = f.Replace('\\', '/');
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+            var result = new Dictionary<string, object?>
+            {
+                ["index"] = allResults.Count,
+                ["type"] = "read",
+                ["description"] = $"Read attached {f}",
+                ["status"] = "running"
+            };
+
+            try
+            {
+                if (!AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
+                {
+                    result["status"] = "error";
+                    result["error"] = "Path outside root";
+                }
+                else if (!System.IO.File.Exists(fullPath))
+                {
+                    result["status"] = "error";
+                    result["error"] = "File not found";
+                }
+                else
+                {
+                    result["path"] = relPath;
+                    result["output"] = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                    result["status"] = "done";
+                    sb.AppendLine($"\n### {relPath}\n```\n{result["output"]}\n```");
+                }
+            }
+            catch (Exception ex)
+            {
+                result["status"] = "error";
+                result["error"] = ex.Message;
+            }
+
+            result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
+            allResults.Add(result);
         }
-        return (sb.ToString(), steps);
+
+        // Phase 2: Emit a single log + batch SSE event (no per-file events —
+        // rapid-fire SSE writes silently drop events on certain ASP.NET Core builds)
+        if (emitSse)
+        {
+            var succeeded = allResults.Count(r =>
+                r is Dictionary<string, object?> d &&
+                d.GetValueOrDefault("status")?.ToString() == "done");
+            var total = allResults.Count;
+
+            await EmitLog(emitSse, "info",
+                $"Read {total} attached file(s), {succeeded} succeeded");
+
+            var fileList = allResults
+                .Select(r => r is Dictionary<string, object?> d
+                    ? new { index = d.GetValueOrDefault("index"), path = d.GetValueOrDefault("path"), status = d.GetValueOrDefault("status") }
+                    : null)
+                .Where(x => x != null)
+                .ToList();
+
+            await SendSse(Response, "batch-read", new
+            {
+                total,
+                succeeded,
+                files = fileList
+            }, ct);
+        }
+
+        return (sb.ToString(), allResults);
     }
 
     private async Task<(string discoveryText, List<object> steps)> RunBootstrapDiscovery(
@@ -1063,7 +1631,7 @@ public class AgentController : ControllerBase
         List<string>? attachedFiles = null, CancellationToken ct = default)
     {
         if (attachedFiles != null && attachedFiles.Count > 0)
-            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse);
+            return await RunLightBootstrap(attachedFiles, projectRoot, emitSse, ct);
 
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER: enumerating project files…", ct: ct);
         var allSteps = new List<object>();
@@ -1369,8 +1937,7 @@ public class AgentController : ControllerBase
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
             var doneCount = completedStepIndices?.Count ?? 0;
-            await EmitLog(emitSse, "info",
-                $"Using existing plan — {existingPlan.Plan.Count} step(s), {doneCount} already done", ct: ct);
+            await EmitLog(emitSse, "info", $"Using existing plan — {existingPlan.Plan.Count} step(s), {doneCount} already done", existingPlan, ct: ct);
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { thinking = existingPlan.Thinking, summary = existingPlan.Summary,
@@ -1615,7 +2182,7 @@ public class AgentController : ControllerBase
             sb.AppendLine();
         }
 
-        sb.AppendLine("Add at most 2-3 new steps to fix ONLY the issues identified. If everything is done, return an EMPTY plan with no steps.");
+        sb.AppendLine("Add at most 1-2 new steps to fix ONLY the issues identified. If everything is done, return an EMPTY plan with no steps.");
         return sb.ToString();
     }
 
@@ -1654,7 +2221,7 @@ public class AgentController : ControllerBase
             steeringContext, existingPlan, executedSteps, qualityCheckReason, fileContents.ToString());
 
         var (raw, _, llmError) = await CallLlmRaw(
-            "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 3 steps. Empty array if all done.",
+            "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 1-2 steps. Empty array if all done.",
             replanPrompt, ct, TimeSpan.FromSeconds(30));
 
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -1716,7 +2283,7 @@ public class AgentController : ControllerBase
         var allSteps = new List<object>();
 
         // Phase 1: Discover
-        await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", ct: ct);
+        await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
 
@@ -1728,7 +2295,7 @@ public class AgentController : ControllerBase
         await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
         if (emitSse)
             await SendSse(Response, "phase",
-                new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length }, ct);
+                new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
 
         var plan = await AnalyzePromptAndPlanCodeChanges(
             prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
@@ -1774,6 +2341,25 @@ public class AgentController : ControllerBase
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+        }
+
+        // Phase 2.75: Plan validation
+        var validationReason = await ValidatePlanAsync(prompt, plan, ct);
+        if (validationReason != null)
+        {
+            await EmitLog(emitSse, "warn",
+                $"Plan validation failed: {validationReason} — replanning…", ct: ct);
+            var replan = await AnalyzePromptAndPlanCodeChanges(
+                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+            if (replan != null && replan.Plan.Count > 0)
+            {
+                plan = MergePlans(plan, replan);
+                if (emitSse)
+                    await SendSse(Response, "plan",
+                        new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+            }
+        } else {
+            await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
         }
 
         // Phase 3: Execute
@@ -1922,6 +2508,30 @@ public class AgentController : ControllerBase
                 stepIndex++;
                 continue;
             }
+
+            // Skip steps cancelled by user
+            if (!string.IsNullOrWhiteSpace(cardId) && _cancelledSteps.TryGetValue(cardId, out var cancelled))
+            {
+                bool isCancelled;
+                lock (cancelled) { isCancelled = cancelled.Contains(itemIdx); }
+                if (isCancelled)
+                {
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = stepIndex,
+                            type = "plan",
+                            description = item.Change,
+                            path = item.File,
+                            status = "skipped",
+                            planItemIndex = itemIdx,
+                            message = "Cancelled by user"
+                        }, ct);
+                    stepIndex++;
+                    continue;
+                }
+            }
+
             var planFile = item.File;
             var changeDesc = item.Change;
 
@@ -2265,7 +2875,10 @@ public class AgentController : ControllerBase
 
         // oldString should not appear as-frequently in the result
         // (it was supposed to be replaced). Only check this for non-trivial oldStrings.
-        if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10)
+        // Skip if oldString is contained inside newString — that means this is an
+        // additive insert (insertAfter, append), not a replacement, so oldString
+        // should still be present.
+        if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10 && !normNew.Contains(normOld))
         {
             // Strip leading whitespace from each line for indentation-aware comparison
             var strippedOld = StripLineLeadingWhitespace(normOld);
@@ -2808,7 +3421,13 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             await SendSse(Response, "error", new { message = ex.Message });
             await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
         }
-        finally { keepaliveCts.Cancel(); try { await keepaliveTask; } catch { } }
+        finally
+        {
+            keepaliveCts.Cancel(); try { await keepaliveTask; } catch { }
+            // Clean up cancelled steps tracking for this card
+            if (!string.IsNullOrWhiteSpace(req.CardId))
+                _cancelledSteps.TryRemove(req.CardId, out _);
+        }
     }
 
     [HttpGet("questions/pending")]
@@ -2835,6 +3454,16 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             return NotFound("Context review not found or already answered");
         pending.Answer.TrySetResult(req.Files ?? pending.Files);
         return Ok(new { status = "confirmed" });
+    }
+
+    [HttpPost("cancel-step")]
+    public IActionResult CancelPlanStep([FromBody] CancelStepRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.CardId))
+            return BadRequest("cardId is required");
+        var steps = _cancelledSteps.GetOrAdd(req.CardId, _ => new HashSet<int>());
+        lock (steps) { steps.Add(req.StepIndex); }
+        return Ok(new { status = "cancelled", cardId = req.CardId, stepIndex = req.StepIndex });
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3320,10 +3949,11 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 modifiedSet.Add(p.Replace('\\', '/'));
         }
 
-        // Attached files that were NOT modified: show their current content as "original context"
+        // Attached files that were NOT modified: show their current content
+        // The LLM must check whether each one still needs changes for the task
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
-            sb.AppendLine("## Original attached files");
+            sb.AppendLine("## Unmodified attached files (check each one — does it still need changes to complete the task?)");
             foreach (var relPath in attachedFiles)
             {
                 var normalized = relPath.Replace('\\', '/');
@@ -3357,6 +3987,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 1. Does the code solve the original task completely?
 2. Are there any bugs, syntax errors, or logic issues in the modified files?
 3. Are there any missing pieces or regressions?
+4. Check every file in ""Unmodified attached files"" — does any of them need changes to satisfy the task? If yes, the task is NOT complete.
+5. If the planned steps covered only part of the task (e.g. only backend but not frontend), report it as incomplete.
 
 Respond with JSON only:
 ```json
@@ -3367,7 +3999,7 @@ Respond with JSON only:
 }
 ```");
 
-        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, syntax mistakes, and whether the task requirements are fully met. Output ONLY valid JSON in the format specified.";
+        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, syntax mistakes, and whether the task requirements are fully met. Pay special attention to files that were NOT modified — if any of them need changes to complete the task, mark complete=false. Output ONLY valid JSON in the format specified.";
 
         var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(30));
         if (string.IsNullOrWhiteSpace(raw)) return (failed.Count == 0, "Assessment timed out");
@@ -3649,6 +4281,10 @@ Respond with JSON only:
         if (string.IsNullOrEmpty(oldString))
             return (false, content, "oldString is empty", null);
 
+        var fileLines = content.Split('\n');
+        var oldLines = oldString.Split('\n');
+        if (oldLines.Length == 0) return (false, content, "oldString is empty", null);
+
         // ── S1: Exact ordinal match ─────────────────────────────────────────
         var idx = content.IndexOf(oldString, StringComparison.Ordinal);
         if (idx >= 0)
@@ -3656,12 +4292,10 @@ Respond with JSON only:
             var sec = content.IndexOf(oldString, idx + oldString.Length, StringComparison.Ordinal);
             if (sec >= 0) return (false, content,
                 "oldString appears more than once — use a longer unique anchor", null);
-            return (true, content[..idx] + newString + content[(idx + oldString.Length)..], null, null);
+            // Use ReplaceLineBlock to apply indentation correction (AutoIndentFromFile)
+            var startLine = content[..idx].Count(c => c == '\n');
+            return (true, ReplaceLineBlock(fileLines, startLine, oldLines.Length, newString), null, null);
         }
-
-        var fileLines = content.Split('\n');
-        var oldLines = oldString.Split('\n');
-        if (oldLines.Length == 0) return (false, content, "oldString is empty", null);
 
         // ── S2: Trailing-whitespace-trimmed exact match ────────────────────
         var trimmedOld = oldLines.Select(l => l.TrimEnd()).ToArray();
@@ -3860,10 +4494,14 @@ Respond with JSON only:
             return replacement;
 
         var replLines = replacement.Split('\n');
-        var replBaseIndent = replLines.Where(l => l.Length > 0).Select(GetLeadingWhitespace).FirstOrDefault();
+        var replBaseIndent = replLines.Where(l => l.Length > 0)
+                                      .Select(GetLeadingWhitespace)
+                                      .FirstOrDefault();
 
+        var baseShifted = false;
         if (replBaseIndent != null && replBaseIndent != fileIndent)
         {
+            baseShifted = true;
             for (var i = 0; i < replLines.Length; i++)
             {
                 if (replLines[i].Length == 0) continue;
@@ -3880,8 +4518,7 @@ Respond with JSON only:
             }
         }
 
-        // HTML/template files use tag-based nesting — AutoIndentFromFile only tracks { }
-        // and collapses everything to depth-0. Use HTML-aware indentation instead.
+        // HTML/template files use tag-based nesting
         if (IsHtmlLikeContent(replacement))
             return AutoIndentHtml(string.Join("\n", replLines), fileIndent);
 
@@ -3987,8 +4624,9 @@ Respond with JSON only:
                 deltas.Add(delta);
         }
         if (deltas.Count == 0) return 2; // default
-        // Return the most common delta (or the average rounded)
-        return (int)Math.Round(deltas.Average());
+        // Use mode (most common delta) — more reliable than average for mixed indentation
+        var mode = deltas.GroupBy(d => d).OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).First().Key;
+        return mode < 2 ? 2 : mode > 4 ? 4 : mode;
     }
 
     private static string GetLeadingWhitespace(string s)
@@ -3998,7 +4636,152 @@ Respond with JSON only:
         return s[..i];
     }
 
-    // ── Individual step executors ──────────────────────────────────────────
+    /// <summary>Apply brace-depth indentation to a full-file replacement using the original file's indent style.</summary>
+    private static string AutoIndentFullFile(string fullContent, string[] originalLines)
+    {
+        var indentSize = InferIndentSize(originalLines, 0);
+        if (indentSize <= 0) return fullContent;
+
+        var lines = fullContent.Split('\n');
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Trim().Length == 0) continue;
+
+            var trimmed = lines[i].TrimStart();
+            var lineDepth = depth;
+            if (trimmed.StartsWith("}"))
+                lineDepth = Math.Max(0, lineDepth - 1);
+
+            var expectedIndent = new string(' ', lineDepth * indentSize);
+            var lineIndent = GetLeadingWhitespace(lines[i]);
+            if (lineIndent != expectedIndent)
+                lines[i] = expectedIndent + trimmed;
+
+            foreach (var c in trimmed)
+            {
+                if (c == '{') depth++;
+                if (c == '}') depth = Math.Max(0, depth - 1);
+            }
+        }
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Multi-pass continuation for fullFile replacements that exceed the LLM's token limit.
+    /// Detects truncation (unbalanced braces) and re-invokes the LLM to continue.
+    /// </summary>
+    private async Task<string> EnsureCompleteFullFile(string partialContent, PlanStep step,
+        string fullPath, string projectRoot, bool emitSse, CancellationToken ct,
+        List<(string old, string @new, string error)>? history = null)
+    {
+        if (!IsFullFileTruncated(partialContent))
+            return partialContent;
+
+        var accumulated = partialContent;
+        var relPath = step.File.Replace('\\', '/');
+        var maxPasses = 5;
+
+        for (var pass = 0; pass < maxPasses; pass++)
+        {
+            var sb = new StringBuilder();
+
+            sb.AppendLine($"You are continuing a full-file replacement that was interrupted (token limit reached).");
+            sb.AppendLine();
+            sb.AppendLine($"FILE: {relPath}");
+            sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
+            sb.AppendLine();
+            sb.AppendLine("Here is the PARTIAL output you have generated so far (starting from the last complete brace-balanced point):");
+            sb.AppendLine("```");
+            // Find the last complete brace-balanced prefix for context
+            var continuationStart = FindLastBalancedPrefix(accumulated);
+            sb.AppendLine(continuationStart.Length > 2000
+                ? continuationStart[^2000..] + "\n... (truncated view — the partial file is already written to disk)"
+                : continuationStart);
+            sb.AppendLine("```");
+            sb.AppendLine();
+            sb.AppendLine("Continue from where you left off. Output ONLY the REMAINING content — do NOT repeat any already-generated lines.");
+            sb.AppendLine("The complete file must have balanced braces (equal number of { and }).");
+            sb.AppendLine();
+            sb.AppendLine("Output the continuation now (as raw text, no JSON, no markdown fences):");
+
+            var continuationPrompt = sb.ToString();
+            var continuationSystem =
+                "You are a code completion assistant. Continue the partial file from where it was interrupted. " +
+                "Output ONLY the remaining lines needed to complete the file. " +
+                "Do NOT repeat any already-output content. The file uses brace-based indentation (C#/JS/TS style).";
+
+            var (raw, _, _) = await CallLlmRaw(continuationSystem, continuationPrompt, ct,
+                TimeSpan.FromSeconds(45), maxTokens: 8192);
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Full-file continuation pass {pass + 1} returned empty — stopping", ct: ct);
+                break;
+            }
+
+            // Strip any leading markdown fences or JSON wrapper the LLM might add
+            raw = StripFullFileFence(raw);
+
+            accumulated += "\n" + raw;
+
+            if (!IsFullFileTruncated(accumulated))
+            {
+                await EmitLog(emitSse, "info",
+                    $"Full-file complete after {pass + 2} pass(es) ({accumulated.Length} chars)", ct: ct);
+                return accumulated;
+            }
+        }
+
+        await EmitLog(emitSse, "warn",
+            $"Full-file may still be truncated after {maxPasses} continuation passes — brace count: " +
+            $"{accumulated.Count(c => c == '{')} / {accumulated.Count(c => c == '}')}", ct: ct);
+        return accumulated;
+    }
+
+    /// <summary>Find the last position where braces are balanced in partial content.</summary>
+    private static string FindLastBalancedPrefix(string content)
+    {
+        var depth = 0;
+        var lastBalanced = 0;
+        for (var i = 0; i < content.Length; i++)
+        {
+            if (content[i] == '{') depth++;
+            if (content[i] == '}') depth = Math.Max(0, depth - 1);
+            if (depth == 0) lastBalanced = i + 1;
+        }
+        return content[..Math.Max(lastBalanced, content.Length / 2)];
+    }
+
+    /// <summary>Apply a fullFile replacement: continuation, indent correction, write, and SSE. Only for NEW files.</summary>
+    private async Task<int> ApplyFullFile(string fullContent, PlanStep step, string fullPath, string relPath,
+        string projectRoot, int stepIndex, int planItemIndex, string? cardId, bool emitSse, CancellationToken ct,
+        List<object> allResults)
+    {
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+
+        fullContent = await EnsureCompleteFullFile(fullContent, step, fullPath, projectRoot, emitSse, ct);
+
+        var existingLines = System.IO.File.Exists(fullPath)
+            ? await System.IO.File.ReadAllLinesAsync(fullPath, Encoding.UTF8, ct)
+            : null;
+        if (existingLines != null && existingLines.Length > 0)
+            fullContent = AutoIndentFullFile(fullContent, existingLines);
+
+        await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
+        await EmitLog(emitSse, "success", $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
+        var r = new Dictionary<string, object?>();
+        PopulateEditResult(r, "modified", relPath, null, fullContent, "");
+        r["index"] = stepIndex;
+        r["planItemIndex"] = planItemIndex;
+        if (emitSse) await SendSse(Response, "step", r, ct);
+        allResults.Add(r);
+        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+        return stepIndex + 1;
+    }
 
     private async Task ExecuteCommandStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
     {

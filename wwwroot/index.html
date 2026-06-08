@@ -373,8 +373,21 @@
                   ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
                   <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                     '⬜'}}</span>
-                  <span class="plan-item-file" title="{{item.file}}">{{item.file}}</span>
-                  <span class="plan-item-change" title="{{item.change}}">{{item.change}}</span>
+                  <div class="plan-item-body" style="flex:1;min-width:0;">
+                    <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span ng-if="item.oldString || item.newString"
+                        ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                        style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                        {{item._showDetail ? '▲' : '▼'}}
+                      </span>
+                    </div>
+                    <div ng-if="item._showDetail" class="plan-item-detail" style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ? item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ? item.newString.slice(0,200) + '…' : item.newString}}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </details>

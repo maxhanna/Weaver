@@ -425,7 +425,7 @@ public static class AgentUtilities
                 if (r.TryGetValue("output", out var output) && output != null)
                 {
                     sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
-                    sb.AppendLine(output.ToString() ?? string.Empty);
+                    sb.AppendLine($"```\n{output}\n```");
                     sb.AppendLine();
                 }
             }
@@ -439,7 +439,7 @@ public static class AgentUtilities
                     if (!string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(newContent))
                     {
                         sb.AppendLine($"### edited {path} (current content)");
-                        sb.AppendLine(newContent);
+                        sb.AppendLine($"```\n{newContent}\n```");
                         sb.AppendLine();
                     }
                 }
@@ -458,7 +458,7 @@ public static class AgentUtilities
             if (item is not Dictionary<string, object?> r) continue;
             if (!r.TryGetValue("output", out var output) || output == null || string.IsNullOrEmpty(output.ToString())) continue;
             sb.AppendLine($"### {r.GetValueOrDefault("type")} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
-            sb.AppendLine(output.ToString());
+            sb.AppendLine($"```\n{output}\n```");
             sb.AppendLine();
         }
         return sb.ToString();

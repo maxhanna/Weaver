@@ -2230,19 +2230,27 @@ h3 .small.ghost:hover {
 	margin-top: 8px;
 	border-top: 1px solid var(--border, #eee);
 	padding-top: 6px;
+	text-overflow: ellipsis;
+	overflow: hidden;
+	max-width: calc(100% - 50px);
 }
 
 .plan-item-row {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: flex-start;
 	gap: 6px;
 	padding: 2px 4px;
 	font-size: 12px;
-    overflow: hidden;
 }
 
 .plan-item-row.plan-done {
 	opacity: 0.7;
+}
+
+.plan-item-row.plan-cancelled {
+	opacity: 0.5;
+	text-decoration: line-through;
 }
 
 .plan-item-icon {
@@ -2253,15 +2261,19 @@ h3 .small.ghost:hover {
 .plan-item-file {
 	font-family: ui-monospace, monospace;
 	color: var(--accent);
-	flex-shrink: 0;
-	max-width: calc(100% - 20px);
+	flex-shrink: 0; 
+	max-width: calc(100% - 50px);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: break-spaces;
+	break-after: inherit;
 }
 
 .plan-item-change {
 	color: var(--text, #333);
-	overflow: hidden;
+	/* overflow: hidden;
 	text-overflow: ellipsis;
-	white-space: nowrap;
+	white-space: nowrap; */
 }
 
 .agent-steps .step .step-path {
