@@ -27,6 +27,7 @@ public class AgentController : ControllerBase
     private const int MAX_COMMAND_ITERATIONS = 30;
     private const int MaxFullFileTokens = 4096; // 8192 max / 2 — fullFile must not exceed half the LLM's token limit
     private bool _lastConnectionCheckResult = true;
+    private bool _gracefulStop;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
@@ -1561,7 +1562,7 @@ public class AgentController : ControllerBase
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
         "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
-        "  \"_command\"            — Run a terminal command; put the full command in \"change\"\n" +
+        "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations (fetching data, creating files outside the project). NEVER use mkdir/rmdir/del for project files — use edit steps instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
         "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
         "  \"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"\n" +
@@ -1598,6 +1599,42 @@ public class AgentController : ControllerBase
     /// <summary>Quick LLM validation of plan steps before execution. Returns null if valid, or a reason string if invalid.</summary>
     private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
     {
+        // Safety check: ask user to confirm _command steps that modify project structure
+        if (plan?.Plan != null)
+        {
+            foreach (var step in plan.Plan)
+            {
+                if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(step.Change))
+                {
+                    var cmd = step.Change.ToLowerInvariant();
+                    if (cmd.Contains("mkdir") || cmd.Contains("rmdir") || cmd.Contains("rm -rf") ||
+                        cmd.Contains("del /") || cmd.Contains("rd /"))
+                    {
+                        if (!cmd.Contains("desktop") && !cmd.Contains("temp") && !cmd.Contains("tmp") &&
+                            !cmd.Contains("download") && !cmd.Contains("$home") && !cmd.Contains("~"))
+                        {
+                            var answer = await AskUserAsync(
+                                $"The plan includes a potentially unsafe command:\n\n`{step.Change}`\n\nThis could modify project structure. Allow it?",
+                                new List<QuestionField>
+                                {
+                                    new() { Key = "confirm", Label = "Allow this command?", Type = "select", DefaultValue = "no" }
+                                }, ct);
+                            if (answer.Count == 0) // timeout — user didn't respond
+                            {
+                                _gracefulStop = true;
+                                return null; // skip this card gracefully
+                            }
+                            var confirmed = answer.TryGetValue("confirm", out var val) &&
+                                           val?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
+                            if (!confirmed)
+                                return $"_command step uses '{cmd.Split(' ')[0]}' which may modify project structure — user rejected the command. Replanning.";
+                        }
+                    }
+                }
+            }
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("You are validating a code-change plan. Determine if the plan makes sense and is complete given the user's request.");
         sb.AppendLine("Check each step for:");
@@ -2218,6 +2255,8 @@ public class AgentController : ControllerBase
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
         string? cardId = null)
     {
+        _gracefulStop = false;
+
         if (!await CheckLlmConnectivity(projectRoot, emitSse, ct))
             throw new InvalidOperationException("LLM connectivity check failed.");
 
@@ -2261,12 +2300,23 @@ public class AgentController : ControllerBase
                 steeringContext: steeringContext, cardId: cardId)
         };
 
+        if (_gracefulStop)
+        {
+            _gracefulStop = false;
+            return (allSteps, plan, false);
+        }
+
         // ── Quality check ─────────────────────────────────────────────────
         bool complete = true;
         if (!skipQualityCheck && allSteps.Count > 0)
         {
             var hasDone = allSteps.OfType<Dictionary<string, object?>>()
                 .Any(s => s.TryGetValue("type", out var t) && t?.ToString() == "done_signal");
+            // If PostExecuteVerify already confirmed task completion, skip redundant quality check
+            var verified = allSteps.OfType<Dictionary<string, object?>>()
+                .Any(s => s.TryGetValue("type", out var t) && t?.ToString() == "verified_complete");
+
+            if (verified) hasDone = true;
 
             if (!hasDone)
             {
@@ -2374,8 +2424,9 @@ public class AgentController : ControllerBase
             }
         }
 
+        bool isEdited = allSteps.OfType<Dictionary<string, object?>>().Any(s => s.GetValueOrDefault("type")?.ToString() == "edit"); 
         // ── Build check ───────────────────────────────────────────────────
-        if (allSteps.Count > 0)
+        if (allSteps.Count > 0 && isEdited)
         {
             var cfg = await _configFile.LoadConfigAsync();
             var cmds = ParseBuildCommands(cfg.buildCommands);
@@ -2641,6 +2692,11 @@ public class AgentController : ControllerBase
 
         // Phase 2.75: Plan validation
         var validationReason = await ValidatePlanAsync(prompt, plan, ct);
+        if (_gracefulStop)
+        {
+            await EmitLog(emitSse, "warn", "User did not respond to command confirmation — skipping card.", ct: ct);
+            return (allSteps, plan);
+        }
         if (validationReason != null)
         {
             await EmitLog(emitSse, "warn",
@@ -2688,9 +2744,42 @@ public class AgentController : ControllerBase
         else
         {
             await EmitLog(emitSse, "success", "Post-execution verification: task is 100% complete.", ct: ct);
+            // Signal to Orchestrate that PostExecuteVerify already confirmed completion,
+            // so it can skip the redundant AssessCompletion check.
+            allSteps.Add(new Dictionary<string, object?> { ["type"] = "verified_complete", ["status"] = "done" });
         }
 
         return (allSteps, plan);
+    }
+
+    private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default)
+    {
+        var qId = Guid.NewGuid().ToString();
+        var pending = new PendingQuestion
+        {
+            Id = qId,
+            Question = question,
+            Fields = fields ?? new List<QuestionField>(),
+            CreatedUtc = DateTime.UtcNow,
+            Answer = new TaskCompletionSource<Dictionary<string, string>>()
+        };
+        _pendingQuestions[qId] = pending;
+
+        await SendSse(Response, "ask-question", new
+        {
+            id = qId,
+            question = pending.Question,
+            fields = pending.Fields.Select(f => new { f.Key, f.Label, f.Type, f.DefaultValue }).ToList()
+        }, ct);
+
+        try
+        {
+            var answers = await pending.Answer.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+            return answers;
+        }
+        catch (TimeoutException) { return new Dictionary<string, string>(); }
+        catch (OperationCanceledException) { return new Dictionary<string, string>(); }
+        finally { _pendingQuestions.TryRemove(qId, out _); }
     }
 
     private async Task<string> RunContextReview(
@@ -3603,14 +3692,28 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         conversation.AppendLine("You are a terminal automation agent. You have full terminal access.");
         conversation.AppendLine($"You are running on {shellName} ({Environment.OSVersion}).");
         conversation.AppendLine("Output ONLY valid JSON. Options:");
-        conversation.AppendLine("  {\"cmd\": \"the full command\"}");
-        conversation.AppendLine("  {\"web_search\": \"query\"}");
-        conversation.AppendLine("  {\"web_fetch\": \"url\"}");
+        conversation.AppendLine("  {\"cmd\": \"the full command\"}        # PREFERRED — use curl/Invoke-WebRequest for API calls");
+        conversation.AppendLine("  {\"web_fetch\": \"url\"}               # PREFERRED — fetch a known URL directly");
+        conversation.AppendLine("  {\"web_search\": \"query\"}            # LAST RESORT — only if you don't know the URL");
         conversation.AppendLine("  {\"message\": \"answer for user\"}");
         conversation.AppendLine("  {\"done\": true, \"summary\": \"what was accomplished\"}");
         conversation.AppendLine($"Desktop: {desktopPath}");
+        conversation.AppendLine($"Project: {projectRoot}");
         conversation.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
         conversation.AppendLine("NEVER use cd/Set-Location — use absolute paths");
+        conversation.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        if (isWindows)
+        {
+            conversation.AppendLine("You are on WINDOWS PowerShell. Platform differences:");
+            conversation.AppendLine("  - Use `Invoke-RestMethod <url>` NOT curl (curl is an alias for Invoke-WebRequest in PowerShell)");
+            conversation.AppendLine("  - Use `ConvertFrom-Json` NOT jq (jq is not installed)");
+            conversation.AppendLine("  - Use `| Set-Content -Path <file>` or `| Out-File -FilePath <file>` NOT > redirect");
+            conversation.AppendLine("  - Example: Invoke-RestMethod https://pokeapi.co/api/v2/pokemon?limit=1000 | ConvertFrom-Json | Select-Object -ExpandProperty results | ForEach-Object { $_.name } | Set-Content C:\\Users\\Saint\\Desktop\\pokemon.csv");
+        }
+        else
+        {
+            conversation.AppendLine("You are on LINUX/MAC Bash. Use curl + jq.");
+        }
         if (!string.IsNullOrWhiteSpace(steeringContext)) { conversation.AppendLine("### Steering ###"); conversation.AppendLine(steeringContext); }
         conversation.AppendLine($"Task: {prompt}");
 

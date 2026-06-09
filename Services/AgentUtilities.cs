@@ -32,6 +32,9 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
             cmdScore += 60;
 
+        if (Regex.IsMatch(lower, @"\b(put|place|write|save|download)\s+(a\s+)?(file|data|content|result)\s+(on|to|at|in)\s+(the\s+)?(desktop|downloads|documents|home)\b"))
+            cmdScore += 80;
+
         if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree)\b"))
             cmdScore += 60;
         // "list" alone is ambiguous (data list vs file listing) — use lower weight
@@ -57,13 +60,17 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
             cmdScore += 60;
 
+        // Writing files outside the project (desktop, external paths) = terminal operation
+        if (Regex.IsMatch(lower, @"\b(desktop|downloads?|documents?)\b"))
+            cmdScore += 55;
+
         if (Regex.IsMatch(lower, @"\b(what\s+version|is\s+installed|which\s+(port|process|version|branch)|disk\s+(usage|space)|how\s+much\s+(memory|disk)|running\s+process|environment\s+variable|current\s+(directory|path|time|date)|whoami|uptime)\b"))
             cmdScore += 55;
 
         if (Regex.IsMatch(lower, @"\b(computers?\s+on\s+network|network\s+(scan|devices)|scan\s+(network|ports)|find\s+(devices|computers|hosts)|connected\s+devices)\b"))
             cmdScore += 55;
 
-        if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the))\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
+        if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the)|fetch)\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
             cmdScore += 50;
 
         // ── CodeEdit signals ─────────────────────────────────────────────────
