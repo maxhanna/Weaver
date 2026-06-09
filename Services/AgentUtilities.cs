@@ -95,7 +95,10 @@ public static class AgentUtilities
             editScore += 30;
 
         // Programmatic assignment — "set X to Y" is a code-edit pattern
-        if (Regex.IsMatch(lower, @"\bset\b.{0,40}\bto\b"))
+        // Suppress when prompt is about reading/processing data from a file (false positive:
+        // "set of skills, and write it down next to the pokemon's name" should not trigger)
+        var isDataProcessing = Regex.IsMatch(lower, @"\b(row|column|csv|tsv|json|each\s+(row|line)|file.*data|read.*file|fetch.*(from|data|api|endpoint))\b");
+        if (!isDataProcessing && Regex.IsMatch(lower, @"\bset\b.{0,40}\bto\b"))
             editScore += 40;
 
         // Style/design keywords
@@ -103,7 +106,8 @@ public static class AgentUtilities
             editScore += 30;
 
         // File path mentioned — likely editing a specific file
-        if (Regex.IsMatch(lower, @"\b[\w./\\-]+\.\w{2,4}\b"))
+        // Suppress for data-processing contexts (reading CSV/TSV/JSON, not editing code)
+        if (!isDataProcessing && Regex.IsMatch(lower, @"\b[\w./\\-]+\.\w{2,4}\b"))
             editScore += 20;
 
         // Display/show/preview — likely a UI code change, not a terminal command

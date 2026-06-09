@@ -1477,6 +1477,45 @@ public class AgentController : ControllerBase
         }
     }
 
+    private async Task AttachFilesToCardAsync(string? cardId, List<string> filePaths, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || filePaths == null || filePaths.Count == 0)
+            return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+                    var attached = cardObj["attached"] as JsonArray ?? new JsonArray();
+                    foreach (var fp in filePaths)
+                        if (!attached.Any(a => a?.GetValue<string>() == fp))
+                            attached.Add(JsonValue.Create(fp));
+                    cardObj["attached"] = attached;
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                        await SendSse(Response, "refresh", new { target = "boarddata", reason = "files-attached", cardId }, ct);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to attach files to card", new { cardId, error = ex.Message });
+        }
+    }
+
     private async Task<(AgentPlan? plan, HashSet<int>? completedIndices)> LoadPlanFromBoardDataAsync(string? cardId)
     {
         if (string.IsNullOrWhiteSpace(cardId))
@@ -2268,6 +2307,30 @@ public class AgentController : ControllerBase
             return (steps, fastPlan, true);
         }
 
+        // ── Fast-path: "fix the build" — skip discovery, go straight to repair ─
+        var fixBuildMatch = Regex.Match(prompt.ToLowerInvariant(),
+            @"fix\s+(all\s+)?(the\s+)?build\s+(errors?|warnings?|issues?)");
+        if (fixBuildMatch.Success)
+        {
+            await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);
+            var cfg = await _configFile.LoadConfigAsync();
+            var cmds = ParseBuildCommands(cfg.buildCommands);
+            string? buildOutput = null;
+            if (cmds.Count > 0)
+            {
+                _terminal.Start();
+                foreach (var cmd in cmds)
+                {
+                    await _terminal.SendCommandAsync(cmd, projectRoot);
+                    await Task.Delay(3000);
+                }
+                buildOutput = _terminal.ReadAll();
+            }
+            var resultSteps = new List<object>();
+            await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
+            return (resultSteps, null, true);
+        }
+
         // ── Resume from existing plan (skip replanning) ─────────────────────
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
@@ -2291,14 +2354,134 @@ public class AgentController : ControllerBase
             $"Router → {pipelineType}",
             new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
 
-        var (allSteps, plan) = pipelineType switch
+        // ── LLM verification of pipeline choice ────────────────────────────
+        var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: terminal commands, web fetches, create/modify files on filesystem (no code editing)\n- UnifiedPipeline: code editing, project source changes\n\nIs this routing correct? If the task has BOTH a data-fetching/filesystem component AND a code-editing component, suggest chaining (CommandExecution first to fetch data and save temp files inside the project, then UnifiedPipeline to edit code using those files).\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
+
+        var (vRaw, _, vErr) = await CallLlmRaw(
+            "You verify task routing. Output only JSON.",
+            verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+
+        PipelineType? chainedNext = null;
+        List<(PipelineType Pipeline, string Summary)>? stages = null;
+
+        if (!string.IsNullOrWhiteSpace(vRaw))
         {
-            PipelineType.CommandExecution =>
-                await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct, steeringContext: steeringContext),
-            _ => await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
+            var vClean = vRaw.Trim();
+            if (vClean.StartsWith("```")) { var m = Regex.Match(vClean, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) vClean = m.Groups[1].Value.Trim(); }
+            try
+            {
+                using var vDoc = JsonDocument.Parse(vClean, new JsonDocumentOptions { AllowTrailingCommas = true });
+                var vRoot = vDoc.RootElement;
+                var decision = vRoot.TryGetProperty("decision", out var d) ? d.GetString() : null;
+                if (decision == "override" && vRoot.TryGetProperty("pipeline", out var ov))
+                {
+                    var overridePipeline = ov.GetString();
+                    pipelineType = overridePipeline.ToLowerInvariant() switch
+                    {
+                        "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
+                        "commandexecution" or "command" => PipelineType.CommandExecution,
+                        _ => pipelineType
+                    };
+                    if (pipelineType != (AgentUtilities.ClassifyTask(prompt).Type))
+                        await EmitLog(emitSse, "info", $"LLM override → {pipelineType}", ct: ct);
+                }
+                else if (decision == "chain" && vRoot.TryGetProperty("stages", out var stArr) && stArr.ValueKind == JsonValueKind.Array)
+                {
+                    stages = new List<(PipelineType, string)>();
+                    foreach (var st in stArr.EnumerateArray())
+                    {
+                        var stP = st.TryGetProperty("pipeline", out var sp) ? sp.GetString() : null;
+                        var stSum = st.TryGetProperty("summary", out var ss) ? ss.GetString() : "";
+                        PipelineType? parsed = stP?.ToLowerInvariant() switch
+                        {
+                            "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
+                            "commandexecution" or "command" => PipelineType.CommandExecution,
+                            _ => null
+                        };
+                        if (parsed.HasValue) stages.Add((parsed.Value, stSum ?? ""));
+                    }
+                    if (stages.Count >= 2)
+                    {
+                        pipelineType = stages[0].Pipeline;
+                        chainedNext = stages[1].Pipeline;
+                        await EmitLog(emitSse, "info", $"LLM chain: {stages[0].Pipeline} → {stages[1].Pipeline}", ct: ct);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // ── Run pipeline(s) ────────────────────────────────────────────────
+        List<object> allSteps = new();
+        AgentPlan? plan = null;
+
+        if (pipelineType == PipelineType.CommandExecution)
+        {
+            var result = await CommandExecutionPipeline(prompt, projectRoot, emitSse, ct,
+                steeringContext: steeringContext, cardId: cardId);
+            allSteps = result.steps;
+            plan = result.plan;
+
+            // If chaining to CodeEdit (UnifiedPipeline), collect created files and attach to card
+            if (chainedNext == PipelineType.CodeEdit)
+            {
+                // Collect file paths from plan steps and command outputs
+                var createdFiles = new List<string>();
+                if (plan?.Plan?.Count > 0)
+                {
+                    foreach (var p in plan.Plan)
+                    {
+                        if (string.IsNullOrWhiteSpace(p.File) || p.File.StartsWith("_")) continue;
+                        var resolved = System.IO.File.Exists(p.File)
+                            ? p.File
+                            : System.IO.File.Exists(Path.GetFullPath(Path.Combine(projectRoot, p.File.Replace('/', Path.DirectorySeparatorChar))))
+                                ? Path.GetFullPath(Path.Combine(projectRoot, p.File.Replace('/', Path.DirectorySeparatorChar)))
+                                : null;
+                        if (resolved != null) createdFiles.Add(resolved);
+                    }
+                }
+                // Also scan step results for file creation commands
+                foreach (var s in allSteps.OfType<Dictionary<string, object?>>())
+                {
+                    var cmd = s.GetValueOrDefault("command")?.ToString() ?? "";
+                    if (string.IsNullOrWhiteSpace(cmd)) continue;
+                    var pathMatch = Regex.Match(cmd, @"(?:Set-Content|Out-File|>)\s+['""]?([\w./\\:-]+\.\w+)['""]?");
+                    if (pathMatch.Success)
+                    {
+                        var fp = pathMatch.Groups[1].Value;
+                        if (!createdFiles.Contains(fp) && (System.IO.File.Exists(fp) || System.IO.File.Exists(Path.Combine(projectRoot, fp))))
+                            createdFiles.Add(System.IO.File.Exists(fp) ? fp : Path.GetFullPath(Path.Combine(projectRoot, fp)));
+                    }
+                }
+
+                if (createdFiles.Count > 0)
+                {
+                    await EmitLog(emitSse, "info", $"Chaining: {createdFiles.Count} file(s) from CommandExecution → UnifiedPipeline", ct: ct);
+                    // Attach to card
+                    await AttachFilesToCardAsync(cardId, createdFiles, emitSse, ct);
+                    // Append to attachedFiles
+                    var combinedAttachments = (attachedFiles ?? new List<string>())
+                        .Concat(createdFiles)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    var chainResult = await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
+                        attachedFiles: combinedAttachments, skipContextReview: skipContextReview,
+                        steeringContext: $"Previous stage created files: {string.Join(", ", createdFiles)}. Task: {prompt}",
+                        cardId: cardId);
+                    allSteps.AddRange(chainResult.steps);
+                    plan = chainResult.plan ?? plan;
+                }
+            }
+        }
+        else
+        {
+            var (unifiedSteps, unifiedPlan) = await UnifiedPipeline(prompt, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, skipContextReview: skipContextReview,
-                steeringContext: steeringContext, cardId: cardId)
-        };
+                steeringContext: steeringContext, cardId: cardId);
+            allSteps = unifiedSteps;
+            plan = unifiedPlan;
+        }
 
         if (_gracefulStop)
         {
@@ -2426,6 +2609,7 @@ public class AgentController : ControllerBase
 
         bool isEdited = allSteps.OfType<Dictionary<string, object?>>().Any(s => s.GetValueOrDefault("type")?.ToString() == "edit"); 
         // ── Build check ───────────────────────────────────────────────────
+        bool buildOk = true;
         if (allSteps.Count > 0 && isEdited)
         {
             var cfg = await _configFile.LoadConfigAsync();
@@ -2436,8 +2620,27 @@ public class AgentController : ControllerBase
                     await SendSse(Response, "phase",
                         new { phase = "build", message = $"Running {cmds.Count} build command(s)" }, ct);
                 foreach (var cmd in cmds)
-                    await RunSmartBuildCheck(projectRoot, cmd, emitSse, ct);
+                {
+                    var ok = await RunSmartBuildCheck(projectRoot, cmd, emitSse, ct);
+                    if (!ok) { buildOk = false; }
+                }
             }
+        }
+
+        // ── Repair pipeline ──────────────────────────────────────────────
+        if (!buildOk && isEdited)
+        {
+            var answer = await AskUserAsync(
+                "Build errors detected. Would you like the AI to analyze and attempt to fix them?",
+                new List<QuestionField>
+                {
+                    new() { Key = "confirm", Label = "Auto-repair build errors?", Type = "select", DefaultValue = "no" }
+                }, ct);
+            var wantsRepair = answer.Count > 0 &&
+                answer.TryGetValue("confirm", out var val) &&
+                val?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
+            if (wantsRepair)
+                await RepairPipeline(projectRoot, emitSse, ct, prompt, steeringContext);
         }
 
         return (allSteps, plan, complete);
@@ -3669,7 +3872,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
     private async Task<(List<object> steps, AgentPlan? plan)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
-        string? steeringContext = null)
+        string? steeringContext = null, string? cardId = null)
     {
         var steps = new List<object>();
         var fastPlan = AgentUtilities.TryDetectSimpleIntent(prompt);
@@ -3688,42 +3891,141 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         var shellName = isWindows ? "PowerShell" : "Bash";
         var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
 
-        var conversation = new StringBuilder();
-        conversation.AppendLine("You are a terminal automation agent. You have full terminal access.");
-        conversation.AppendLine($"You are running on {shellName} ({Environment.OSVersion}).");
-        conversation.AppendLine("Output ONLY valid JSON. Options:");
-        conversation.AppendLine("  {\"cmd\": \"the full command\"}        # PREFERRED — use curl/Invoke-WebRequest for API calls");
-        conversation.AppendLine("  {\"web_fetch\": \"url\"}               # PREFERRED — fetch a known URL directly");
-        conversation.AppendLine("  {\"web_search\": \"query\"}            # LAST RESORT — only if you don't know the URL");
-        conversation.AppendLine("  {\"message\": \"answer for user\"}");
-        conversation.AppendLine("  {\"done\": true, \"summary\": \"what was accomplished\"}");
-        conversation.AppendLine($"Desktop: {desktopPath}");
-        conversation.AppendLine($"Project: {projectRoot}");
-        conversation.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
-        conversation.AppendLine("NEVER use cd/Set-Location — use absolute paths");
-        conversation.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        var baseInstructions = new StringBuilder();
+        baseInstructions.AppendLine("You are a terminal automation agent. You have full terminal access.");
+        baseInstructions.AppendLine($"You are running on {shellName} ({Environment.OSVersion}).");
+        baseInstructions.AppendLine("Output ONLY valid JSON. Options:");
+        baseInstructions.AppendLine("  {\"cmd\": \"the full command\"}        # PREFERRED — use curl/Invoke-WebRequest for API calls");
+        baseInstructions.AppendLine("  {\"web_fetch\": \"url\"}               # PREFERRED — fetch a known URL directly");
+        baseInstructions.AppendLine("  {\"web_search\": \"query\"}            # LAST RESORT — only if you don't know the URL");
+        baseInstructions.AppendLine("  {\"message\": \"answer for user\"}");
+        baseInstructions.AppendLine("  {\"plan\": [{\"file\": \"command/web_search/web_fetch\", \"change\": \"description\"}]}  # First: create a plan of steps");
+        baseInstructions.AppendLine("  {\"done\": true, \"summary\": \"what was accomplished\"}");
+        baseInstructions.AppendLine($"Desktop: {desktopPath}");
+        baseInstructions.AppendLine($"Project: {projectRoot}");
+        baseInstructions.AppendLine("CRITICAL: Each cmd runs in a separate PowerShell session — state does NOT persist between commands. If you read data in one cmd and need it in the next, save to a temp file: Get-Content ... | Set-Content _temp_step1.txt");
+        baseInstructions.AppendLine("If this task's results will feed into a subsequent code-editing step, save output files INSIDE the project directory (use a temp path like \"_temp_data.json\") so the next pipeline can read them. The file will be attached to the card automatically.");
+        baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
+        baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
+        baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
         if (isWindows)
         {
-            conversation.AppendLine("You are on WINDOWS PowerShell. Platform differences:");
-            conversation.AppendLine("  - Use `Invoke-RestMethod <url>` NOT curl (curl is an alias for Invoke-WebRequest in PowerShell)");
-            conversation.AppendLine("  - Use `ConvertFrom-Json` NOT jq (jq is not installed)");
-            conversation.AppendLine("  - Use `| Set-Content -Path <file>` or `| Out-File -FilePath <file>` NOT > redirect");
-            conversation.AppendLine("  - Example: Invoke-RestMethod https://pokeapi.co/api/v2/pokemon?limit=1000 | ConvertFrom-Json | Select-Object -ExpandProperty results | ForEach-Object { $_.name } | Set-Content C:\\Users\\Saint\\Desktop\\pokemon.csv");
+            baseInstructions.AppendLine("You are on WINDOWS PowerShell. Platform differences:");
+            baseInstructions.AppendLine("  - Use `Invoke-RestMethod <url>` NOT curl (curl is an alias for Invoke-WebRequest in PowerShell)");
+            baseInstructions.AppendLine("  - Use `ConvertFrom-Json` ONLY with curl/Invoke-WebRequest (raw JSON). Invoke-RestMethod already parses JSON — do NOT pipe it to ConvertFrom-Json.");
+            baseInstructions.AppendLine("  - Use `| Set-Content -Path <file>` or `| Out-File -FilePath <file>` NOT > redirect");
+            baseInstructions.AppendLine("  - Working example: Invoke-RestMethod https://pokeapi.co/api/v2/pokemon?limit=1000 | Select-Object -ExpandProperty results | ForEach-Object { $_.name } | Set-Content C:\\Users\\Saint\\Desktop\\pokemon.csv");
         }
         else
         {
-            conversation.AppendLine("You are on LINUX/MAC Bash. Use curl + jq.");
+            baseInstructions.AppendLine("You are on LINUX/MAC Bash. Use curl + jq.");
         }
-        if (!string.IsNullOrWhiteSpace(steeringContext)) { conversation.AppendLine("### Steering ###"); conversation.AppendLine(steeringContext); }
-        conversation.AppendLine($"Task: {prompt}");
+        if (!string.IsNullOrWhiteSpace(steeringContext)) { baseInstructions.AppendLine("### Steering ###"); baseInstructions.AppendLine(steeringContext); }
+        baseInstructions.AppendLine($"Task: {prompt}");
 
+        // ── Phase 1: Plan ──────────────────────────────────────────────────
+        var planPrompt = new StringBuilder();
+        planPrompt.Append(baseInstructions);
+        planPrompt.AppendLine("\nFIRST, output a plan as {\"plan\": [...]} listing each step you will take. Then you will execute each step one by one. When all steps are done, output {\"done\": true}.");
+
+        var (planRaw, _, planErr) = await CallLlmRaw(
+            "You are a terminal agent. Output only JSON.",
+            planPrompt.ToString(), ct, TimeSpan.FromSeconds(30));
+
+        List<PlanStep>? planSteps = null;
+        if (!string.IsNullOrWhiteSpace(planRaw))
+        {
+            var cleaned = planRaw.Trim();
+            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
+            foreach (var candidate in new[] { cleaned }.Concat(AgentUtilities.ExtractJsonBlocks(cleaned)))
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("plan", out var pArr) && pArr.ValueKind == JsonValueKind.Array && pArr.GetArrayLength() > 0)
+                    {
+                        planSteps = new List<PlanStep>();
+                        foreach (var item in pArr.EnumerateArray())
+                            planSteps.Add(new PlanStep
+                            {
+                                File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
+                                Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
+                            });
+                        break;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        if (planSteps != null && planSteps.Count > 0)
+        {
+            await EmitLog(emitSse, "info", $"Plan: {planSteps.Count} step(s) — {string.Join(", ", planSteps.Select(p => p.File))}", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "plan", new
+                {
+                    thinking = "Planned steps",
+                    summary = string.Join(" → ", planSteps.Select(p => p.Change)),
+                    items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
+                }, ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "warn", "No plan produced — proceeding with reactive loop.", ct: ct);
+        }
+
+        // ── Phase 2: Execute ──────────────────────────────────────────────
         const int maxIter = MAX_COMMAND_ITERATIONS;
         var stepIndex = 0; string? summary = null;
         var usedSearchQueries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var completedPlanSteps = new HashSet<int>();
+        var totalPlanSteps = planSteps?.Count ?? 0;
 
-        for (var i = 0; i < maxIter; i++)
+        var conversation = new StringBuilder();
+        conversation.Append(baseInstructions);
+        if (planSteps != null && planSteps.Count > 0)
         {
+            conversation.AppendLine("\n### PLAN ###");
+            for (var pi = 0; pi < planSteps.Count; pi++)
+                conversation.AppendLine($"  Step {pi + 1}: [{planSteps[pi].File}] {planSteps[pi].Change}");
+            conversation.AppendLine("### END PLAN ###");
+            conversation.AppendLine("\nExecute steps in order. After each step succeeds, output {\"step\": N} to mark it done.");
+            conversation.AppendLine("When all steps are done, output {\"done\": true}.");
+        }
+
+        const int maxReplan = 3;
+        var replanCount = 0;
+        var consecutiveErrors = 0;
+
+        // Outer replan loop: execute → verify → replan if needed
+        while (replanCount <= maxReplan)
+        {
+            var executionDone = false;
+            for (var i = 0; i < MAX_COMMAND_ITERATIONS && !executionDone; i++)
+            {
             ct.ThrowIfCancellationRequested();
+
+            if (totalPlanSteps > 0)
+            {
+                var next = completedPlanSteps.Count;
+                if (next < totalPlanSteps)
+                {
+                    if (consecutiveErrors >= 3)
+                    {
+                        conversation.AppendLine($"\n[Step {next + 1}/{totalPlanSteps} keeps failing — skip to next step or use a different approach]");
+                        consecutiveErrors = 0;
+                    }
+                    else
+                    {
+                        conversation.AppendLine($"\n[Current: Step {next + 1}/{totalPlanSteps} — {planSteps![next].Change}]");
+                    }
+                }
+                else
+                    conversation.AppendLine($"\n[All {totalPlanSteps} steps completed — output done]");
+            }
+
             AgentUtilities.CompactConversation(conversation);
 
             var (raw, _, err) = await CallLlmRaw(
@@ -3746,6 +4048,18 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             {
                 using var doc = JsonDocument.Parse(jsonToParse, jsonOpts);
                 var root = doc.RootElement;
+
+                if (root.TryGetProperty("step", out var stepEl) && stepEl.ValueKind == JsonValueKind.Number)
+                {
+                    var stepNum = stepEl.GetInt32();
+                    if (stepNum >= 1 && stepNum <= totalPlanSteps && completedPlanSteps.Add(stepNum - 1))
+                    {
+                        conversation.AppendLine($"→ Step {stepNum} marked done.");
+                        if (emitSse)
+                            await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum - 1, status = "done" }, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, stepNum - 1, emitSse, ct);
+                    }
+                }
 
                 if (root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True)
                 { summary = root.TryGetProperty("summary", out var s) ? s.GetString() : "Task complete"; break; }
@@ -3786,6 +4100,12 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     conversation.AppendLine($"Command [{i + 1}]: {cmd}");
                     conversation.AppendLine(isError ? "⚠ Error:" : "Output:");
                     conversation.AppendLine(freshOut);
+                    if (isError && freshOut.Contains("ConvertFrom-Json"))
+                        conversation.AppendLine("💡 Hint: Invoke-RestMethod already parses JSON — remove ConvertFrom-Json from the pipeline.");
+                    if (isError && freshOut.Contains("already exists"))
+                        conversation.AppendLine("💡 Hint: The file already exists. Use -Force flag or a different path.");
+                    if (isError) consecutiveErrors++;
+                    else await AdvanceStepAsync();
                     continue;
                 }
 
@@ -3798,6 +4118,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
                     steps.Add(wr); if (emitSse) await SendSse(Response, "step", wr, ct);
                     conversation.AppendLine($"Web search [{i + 1}]: {query}\nResults:\n{searchOut}");
+                    await AdvanceStepAsync();
                     continue;
                 }
 
@@ -3805,10 +4126,29 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 {
                     var url = fetchEl.GetString() ?? "";
                     if (string.IsNullOrWhiteSpace(url)) { conversation.AppendLine("Empty URL."); continue; }
-                    var (fetchOut, _) = await WebFetchAsync(url, ct);
-                    var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = "done", ["output"] = fetchOut };
+                    // Validate URL format
+                    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                        (uri.Scheme != "http" && uri.Scheme != "https"))
+                    {
+                        conversation.AppendLine($"Invalid URL: \"{url}\" — must be http/https. Provide a real URL.");
+                        consecutiveErrors++;
+                        continue;
+                    }
+                    var (fetchOut, fetchErr) = await WebFetchAsync(url, ct);
+                    var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
+                        (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
+                    var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
                     steps.Add(fr); if (emitSse) await SendSse(Response, "step", fr, ct);
-                    conversation.AppendLine($"Fetch [{i + 1}]: {url}\n{fetchOut}");
+                    if (isFetchError)
+                    {
+                        conversation.AppendLine($"⚠ Fetch error [{i + 1}]: {url}\n{fetchOut}");
+                        consecutiveErrors++;
+                    }
+                    else
+                    {
+                        conversation.AppendLine($"Fetch [{i + 1}]: {url}\n{fetchOut}");
+                        await AdvanceStepAsync();
+                    }
                     continue;
                 }
 
@@ -3821,8 +4161,25 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     continue;
                 }
 
-                conversation.AppendLine("Unrecognized JSON — use cmd, web_search, web_fetch, message, or done.");
+                conversation.AppendLine("Unrecognized JSON — use cmd, web_search, web_fetch, message, done, or plan.");
                 continue;
+            }
+
+            // Helper: advance plan step if current step not yet marked done
+            async Task AdvanceStepAsync()
+            {
+                if (totalPlanSteps > 0 && completedPlanSteps.Count < totalPlanSteps)
+                {
+                    var stepNum = completedPlanSteps.Count;
+                    if (completedPlanSteps.Add(stepNum))
+                    {
+                        conversation.AppendLine($"→ Step {stepNum + 1} completed.");
+                        if (emitSse)
+                            await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum, status = "done" }, ct);
+                        await PersistBoardDataPlanStepAsync(cardId, stepNum, emitSse, ct);
+                    }
+                }
+                consecutiveErrors = 0;
             }
 
             var fallback = cleaned.Trim().Trim('"');
@@ -3838,11 +4195,118 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 continue;
             }
             conversation.AppendLine("Could not parse — use valid JSON.");
-        }
+        } // end of execution for-loop
+
+            // ── Verify completion (inside while loop) ──────────────────────
+            if (steps.Count == 0) break;
+
+            var verifyPrompt = $"Task: {prompt}\n\nSteps executed ({steps.Count} total):\n";
+            foreach (var s in steps.OfType<Dictionary<string, object?>>())
+                verifyPrompt += $"  [{s.GetValueOrDefault("type")}] {s.GetValueOrDefault("command") ?? s.GetValueOrDefault("query") ?? s.GetValueOrDefault("url") ?? ""}: {s.GetValueOrDefault("status")}\n";
+            verifyPrompt += "\nIs the task fully complete? Reply ONLY: {\"complete\": true} or {\"complete\": false, \"reason\": \"what's missing\"}";
+
+            var (vRaw, _, vErr) = await CallLlmRaw(
+                "You verify task completion. Output only JSON.",
+                verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+
+            var taskComplete = true;
+            if (!string.IsNullOrWhiteSpace(vRaw))
+            {
+                try
+                {
+                    using var vDoc = JsonDocument.Parse(vRaw.Trim(), new JsonDocumentOptions { AllowTrailingCommas = true });
+                    var vRoot = vDoc.RootElement;
+                    if (vRoot.TryGetProperty("complete", out var vc) && vc.ValueKind == JsonValueKind.False)
+                    {
+                        taskComplete = false;
+                        var reason = vRoot.TryGetProperty("reason", out var vr) ? vr.GetString() : "unknown";
+                        await EmitLog(emitSse, "warn", $"Task verification: incomplete — {reason}", ct: ct);
+
+                        if (replanCount >= maxReplan)
+                        {
+                            await EmitLog(emitSse, "warn", $"Max replans ({maxReplan}) reached — stopping.", ct: ct);
+                            break;
+                        }
+                        replanCount++;
+
+                        var replanPrompt = $"Original task: {prompt}\nVerification says: {reason}\n\nGenerate NEW plan steps. Output ONLY: {{\"plan\": [{{\"file\": \"command/web_search/web_fetch\", \"change\": \"what to do\"}}]}}";
+                        var (rRaw, _, rErr) = await CallLlmRaw(
+                            "You generate additional plan steps. Output only JSON.",
+                            replanPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 1024);
+
+                        List<PlanStep>? extraSteps = null;
+                        if (!string.IsNullOrWhiteSpace(rRaw))
+                        {
+                            var rCleaned = rRaw.Trim();
+                            if (rCleaned.StartsWith("```")) { var m = Regex.Match(rCleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) rCleaned = m.Groups[1].Value.Trim(); }
+                            foreach (var candidate in new[] { rCleaned }.Concat(AgentUtilities.ExtractJsonBlocks(rCleaned)))
+                            {
+                                if (string.IsNullOrWhiteSpace(candidate)) continue;
+                                try
+                                {
+                                    using var rDoc = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
+                                    if (rDoc.RootElement.TryGetProperty("plan", out var rpArr) && rpArr.ValueKind == JsonValueKind.Array)
+                                    {
+                                        extraSteps = new List<PlanStep>();
+                                        foreach (var item in rpArr.EnumerateArray())
+                                            extraSteps.Add(new PlanStep
+                                            {
+                                                File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
+                                                Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
+                                            });
+                                        break;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+
+                        if (extraSteps != null && extraSteps.Count > 0)
+                        {
+                            await EmitLog(emitSse, "info", $"Replan #{replanCount}: {extraSteps.Count} additional step(s)", ct: ct);
+                            planSteps ??= new List<PlanStep>();
+                            planSteps.AddRange(extraSteps);
+                            totalPlanSteps = planSteps.Count;
+
+                            if (emitSse)
+                                await SendSse(Response, "plan", new
+                                {
+                                    thinking = "Replanned steps",
+                                    summary = string.Join(" → ", planSteps.Select(p => p.Change)),
+                                    items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
+                                }, ct);
+
+                            conversation.AppendLine($"\n### ADDITIONAL STEPS ({extraSteps.Count}) ###");
+                            for (var pi = 0; pi < extraSteps.Count; pi++)
+                                conversation.AppendLine($"  Step {totalPlanSteps - extraSteps.Count + pi + 1}: [{extraSteps[pi].File}] {extraSteps[pi].Change}");
+                            conversation.AppendLine("### END ADDITIONAL STEPS ###");
+                            conversation.AppendLine("Execute only the NEW steps above, then output done.");
+                            continue; // restart outer while loop (re-execute)
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (taskComplete)
+            {
+                await EmitLog(emitSse, "success", "Task verification: complete.", ct: ct);
+                break;
+            }
+            break; // replan didn't produce steps — stop
+        } // end of while (replan loop)
 
         summary ??= $"Command execution completed ({steps.Count} steps)";
         await EmitLog(emitSse, "info", summary, steps, ct: ct);
-        return (steps, null);
+
+        // Add done_signal so Orchestrate's quality check skips
+        steps.Add(new Dictionary<string, object?> { ["type"] = "done_signal", ["status"] = "done" });
+
+        // Return the actual plan so the frontend can match steps to plan items
+        var agentPlan = planSteps != null && planSteps.Count > 0
+            ? new AgentPlan { Plan = planSteps, Summary = summary, Thinking = "Command execution plan" }
+            : null;
+        return (steps, agentPlan);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -5629,6 +6093,14 @@ Respond with JSON only:
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
     }
 
+    private static void AppendPlanToConversation(StringBuilder conversation, List<PlanStep> steps, int startIndex, int totalCount)
+    {
+        conversation.AppendLine("\n### PLAN ###");
+        for (var pi = 0; pi < steps.Count; pi++)
+            conversation.AppendLine($"  Step {startIndex + pi}: [{steps[pi].File}] {steps[pi].Change}");
+        conversation.AppendLine("### END PLAN ###");
+    }
+
     private async Task<List<EditResult>> ApplyEditsDirect(List<EditAction> edits, string projectRoot)
     {
         var results = new List<EditResult>();
@@ -5713,7 +6185,8 @@ Respond with JSON only:
     //  BUILD CHECK + SELF-IMPROVING
     // ═══════════════════════════════════════════════════════════════════════
 
-    private async Task RunSmartBuildCheck(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
+    /// <returns>true if build passed, false if build still has issues</returns>
+    private async Task<bool> RunSmartBuildCheck(string projectRoot, string buildCmd, bool emitSse, CancellationToken ct)
     {
         const string systemPrompt = @"You are a build checker. Analyze the build output.
 Output ONLY valid JSON (no markdown):
@@ -5743,18 +6216,23 @@ done = build OK; command = run this to fix; ask_user = need input";
 
             switch (decision.Decision)
             {
-                case "done": await EmitLog(emitSse, "success", $"Build OK: {decision.Summary}", ct: ct); return;
+                case "done": await EmitLog(emitSse, "success", $"Build OK: {decision.Summary}", ct: ct); return true;
                 case "command":
                     if (!string.IsNullOrWhiteSpace(decision.Command))
-                    { await EmitLog(emitSse, "info", $"Build fix: {decision.Command}", ct: ct); await _terminal.SendCommandAsync(decision.Command, projectRoot); await Task.Delay(2000); }
+                    {
+                        await EmitLog(emitSse, "info", $"Build fix: {decision.Command}", ct: ct); 
+                        await _terminal.SendCommandAsync(decision.Command, projectRoot); 
+                        await Task.Delay(2000); 
+                    }
                     continue;
                 case "ask_user":
                     await EmitLog(emitSse, "info", $"Build needs user input: {decision.Summary}", ct: ct);
-                    return;
-                default: return;
+                    return false;
+                default: return false;
             }
         }
         await EmitLog(emitSse, "warn", $"Build check inconclusive after {maxIter} iterations", ct: ct);
+        return false;
     }
 
     private static BuildCheckDecision? ParseBuildCheckResponse(string raw)
@@ -5771,6 +6249,62 @@ done = build OK; command = run this to fix; ask_user = need input";
                 catch { }
         }
         return null;
+    }
+
+    private async Task RepairPipeline(
+        string projectRoot, bool emitSse, CancellationToken ct,
+        string originalPrompt, string? steeringContext)
+    {
+        var buildOutput = _terminal.ReadAll();
+        var resultSteps = new List<object>();
+        await RunRepairPlan(projectRoot, emitSse, ct, originalPrompt, buildOutput, resultSteps, steeringContext);
+
+        var cfg = await _configFile.LoadConfigAsync();
+        var cmds = ParseBuildCommands(cfg.buildCommands);
+        bool repairOk = true;
+        foreach (var cmd in cmds)
+        {
+            var ok = await RunSmartBuildCheck(projectRoot, cmd, emitSse, ct);
+            if (!ok) { repairOk = false; }
+        }
+
+        if (repairOk)
+            await EmitLog(emitSse, "success", "RepairPipeline: build fixed successfully.", ct: ct);
+        else
+            await EmitLog(emitSse, "warn", "RepairPipeline: build still has errors after repair attempt.", ct: ct);
+
+        if (emitSse)
+            await SendSse(Response, "done_signal", new { message = "Build repair completed" }, ct);
+    }
+
+    private async Task RunRepairPlan(
+        string projectRoot, bool emitSse, CancellationToken ct,
+        string prompt, string buildOutput, List<object> resultSteps,
+        string? steeringContext = null)
+    {
+        await EmitLog(emitSse, "info", "RunRepairPlan: analyzing build errors…", ct: ct);
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "repair", message = "Analyzing build errors and planning fixes…" }, ct);
+
+        var tail = buildOutput.Length > 8000 ? buildOutput[^8000..] : buildOutput;
+        var repairPrompt = $"BUILD OUTPUT:\n```\n{tail}\n```\n\nAnalyze the build output above, identify compilation errors, and fix them by editing the source files. Do not add new features — only fix compilation errors/warnings.";
+        var repairSteering = $"BUILD REPAIR: Fix the compilation errors shown in the build output. {(string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\nOriginal task: {steeringContext}")}";
+
+        var plan = await AnalyzePromptAndPlanCodeChanges(
+            repairPrompt, tail, projectRoot, emitSse, ct, repairSteering);
+
+        if (plan == null || plan.Plan.Count == 0)
+        {
+            await EmitLog(emitSse, "warn", "RunRepairPlan: no repair plan generated.", ct: ct);
+            return;
+        }
+
+        if (emitSse)
+            await SendSse(Response, "plan",
+                new { thinking = plan.Thinking, summary = $"Build repair: {plan.Summary}", items = plan.Plan }, ct);
+
+        await ExecutePlan(repairPrompt, projectRoot, emitSse, tail, plan, ct, resultSteps,
+            steeringContext: repairSteering);
     }
 
     private async Task RunSelfImprovingPipeline(
