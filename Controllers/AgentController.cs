@@ -594,10 +594,12 @@ public class AgentController : ControllerBase
     /// Makes a focused LLM call to resolve the exact edit for a single plan step.
     /// The LLM sees the real file content and outputs delimiter-format diff.
     /// </summary>
-    private async Task<(string? oldStr, string? newStr, bool fullFile, string? fullContent,
-        bool alreadyDone, string? error)>
-        ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse, CancellationToken ct,
-            List<(string old, string @new, string error)>? history = null)
+      private async Task<(string? oldStr, string? newStr, bool fullFile,
+         string? fullContent, bool alreadyDone, string? error)>
+         ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
+             CancellationToken ct,
+             List<(string old, string @new, string error)>? history = null,
+             string? explorationContext = null)
     {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
@@ -636,7 +638,22 @@ public class AgentController : ControllerBase
                           "(typically 4 or 8 spaces), method body indented 4 spaces more, nested blocks (try/catch/using/if/for) " +
                           "each indented 4 spaces more than their parent. Copy the file's existing indentation pattern.");
         sb.AppendLine();
-         
+
+        //  Include exploration context if available — this is the most important
+        //  signal the editor gets; the LLM should read it before the file content
+        if (!string.IsNullOrWhiteSpace(explorationContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## EXPLORATION CONTEXT");
+            sb.AppendLine("The following files were read during the exploration phase to " +
+                          "understand exactly what needs to change. Use this context " +
+                          "to locate the precise edit target:");
+            var ctxPreview = explorationContext.Length > 14_000
+                ? explorationContext[..14_000] + "\n... [exploration context truncated]"
+                : explorationContext;
+            sb.AppendLine(ctxPreview);
+            sb.AppendLine();
+        }
 
         if (!fileExists)
         {
@@ -1104,21 +1121,571 @@ public class AgentController : ControllerBase
         return result.Distinct().ToList();
     }
 
+ 
+/// <summary>
+/// Holds the result of the per-step exploration loop: an enriched step
+/// (with a precise change description), accumulated file context, and
+/// metadata about what was discovered.
+/// </summary>
+private sealed class StepExplorationResult
+    {
+        public PlanStep EnrichedStep { get; init; } = new();
+        public string ExplorationContext { get; init; } = "";
+        public List<string> FilesRead { get; init; } = new();
+        public string RefinedChange { get; init; } = "";
+        public string? TargetSymbol { get; init; }
+        public string? EstimatedLineRange { get; init; }
+        public int Confidence { get; init; }
+        public int RoundsCompleted { get; init; }
+    }
+
     /// <summary>
-    /// Resolves and applies a single file edit step.  Up to 3 resolve attempts
-    /// before giving up and moving on.  Each failure re-feeds the bad anchor back
-    /// to the LLM so it can correct itself.
+    /// Lightweight DTO for parsing the exploration LLM's JSON response.
     /// </summary>
+    private sealed class StepExplorationResponse
+    {
+        public bool Ready { get; init; }
+        public List<string> FilesToRead { get; init; } = new();
+        public string? RefinedChange { get; init; }
+        public string? TargetSymbol { get; init; }
+        public string? LineRange { get; init; }
+        public int Confidence { get; init; }
+    }
+
+    /// <summary>
+    /// Runs an iterative exploration loop for one plan step before the edit is
+    /// applied. Mimics OpenCode's behavior: read the target file, ask the LLM
+    /// what related files are needed, read them, repeat until the LLM is
+    /// confident it can describe the change precisely. Returns an enriched step
+    /// (refined change description + optional AST-resolved oldString) and the
+    /// accumulated multi-file context to pass to ResolveEditForStep.
+    /// </summary>
+    private async Task<StepExplorationResult> RunStepExplorationLoop(
+        PlanStep step,
+        string projectRoot,
+        string originalPrompt,
+        AgentPlan? fullPlan,
+        int planItemIndex,
+        bool emitSse,
+        CancellationToken ct,
+        string? cardId = null)
+    {
+        // ── Guard: skip if the plan already has precise edit info ─────────
+        if (!string.IsNullOrWhiteSpace(step.OldString) &&
+            !string.IsNullOrWhiteSpace(step.NewString))
+        {
+            return new StepExplorationResult
+            {
+                EnrichedStep = step,
+                FilesRead = new List<string>(),
+                RefinedChange = step.Change,
+                Confidence = 100
+            };
+        }
+
+        const int MaxRounds = 4;
+        const int MaxContextChars = 22_000;
+        const int ConfidenceThreshold = 80; // stop early once the LLM is this confident
+
+        var relPath = step.File.Replace('\\', '/');
+        var fullPath = Path.GetFullPath(
+            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        var ctx = new StringBuilder();
+        var filesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var refinedChange = step.Change;
+        string? targetSymbol = null;
+        string? lineRange = null;
+        var confidence = 0;
+        var roundsCompleted = 0;
+
+        await EmitLog(emitSse, "info", $"🔍 Exploring: {relPath}", ct: ct);
+
+        // Signal "exploring" to the frontend immediately so the step card updates
+        if (emitSse)
+            await SendSse(Response, "step", new
+            {
+                index = planItemIndex,
+                type = "edit",
+                status = "exploring",
+                path = relPath,
+                description = step.Change,
+                planItemIndex
+            }, ct);
+
+        await PersistStepStatusAsync(cardId, planItemIndex, "exploring", emitSse, ct);
+
+        // ── Step 1: Always read the target file first ─────────────────────
+        if (System.IO.File.Exists(fullPath) &&
+            AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
+        {
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            // For large files use the relevance-focused excerpt so context is targeted
+            var excerpt = content.Length > 5_000
+                ? ExtractRelevantExcerpt(content, step.Change, step.OldString)
+                : content;
+
+            ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
+            ctx.AppendLine("```");
+            ctx.AppendLine(excerpt);
+            ctx.AppendLine("```");
+            ctx.AppendLine();
+            filesRead.Add(relPath);
+            await EmitLog(emitSse, "info", $"  📄 {relPath}", ct: ct);
+        }
+
+        // ── Step 2: Iterative exploration rounds ─────────────────────────
+        for (var round = 0; round < MaxRounds; round++)
+        {
+            ct.ThrowIfCancellationRequested();
+            roundsCompleted = round + 1;
+
+            if (emitSse)
+                await SendSse(Response, "step-explore", new
+                {
+                    planItemIndex,
+                    round,
+                    filesRead = filesRead.ToList(),
+                    message = $"Exploration round {round + 1}/{MaxRounds}"
+                }, ct);
+
+            var (raw, _, _) = await CallLlmRaw(
+                BuildStepExplorationSystemPrompt(),
+                BuildStepExplorationPrompt(
+                    step, originalPrompt, fullPlan, planItemIndex,
+                    ctx.ToString(), filesRead, round),
+                ct, TimeSpan.FromSeconds(35), maxTokens: 1024);
+
+            if (string.IsNullOrWhiteSpace(raw)) break;
+
+            var parsed = ParseStepExplorationResponse(raw);
+
+            // Capture refined description whenever the LLM produces one
+            if (!string.IsNullOrWhiteSpace(parsed.RefinedChange))
+            {
+                refinedChange = parsed.RefinedChange;
+                targetSymbol = parsed.TargetSymbol;
+                lineRange = parsed.LineRange;
+                confidence = parsed.Confidence;
+            }
+
+            // Stop early when the LLM is confident or has nothing new to request
+            if (parsed.Ready || parsed.Confidence >= ConfidenceThreshold)
+            {
+                await EmitLog(emitSse, "info",
+                    $"  ✓ Ready — round {round + 1}, confidence {parsed.Confidence}%", ct: ct);
+                break;
+            }
+            if (parsed.FilesToRead.Count == 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"  ✓ No more files requested (round {round + 1})", ct: ct);
+                break;
+            }
+
+            // ── Read the files the LLM requested (max 3 per round) ───────
+            var newlyRead = 0;
+            foreach (var requested in parsed.FilesToRead.Take(3))
+            {
+                if (filesRead.Contains(requested)) continue;
+
+                var fp = Path.GetFullPath(
+                    Path.Combine(projectRoot, requested.Replace('/', Path.DirectorySeparatorChar)));
+
+                if (!System.IO.File.Exists(fp) ||
+                    !AgentUtilities.IsPathUnderRoot(fp, projectRoot))
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"  ⚠ Not found: {requested}", ct: ct);
+                    continue;
+                }
+
+                var fc = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                var excerpt = fc.Length > 3_500
+                    ? ExtractRelevantExcerpt(fc, step.Change, step.OldString)
+                    : fc;
+
+                // Guard total context size so we don't overflow the LLM window
+                if (ctx.Length + excerpt.Length > MaxContextChars)
+                {
+                    var budget = MaxContextChars - ctx.Length;
+                    if (budget < 400)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "  Context budget exhausted", ct: ct);
+                        goto ExplorationComplete;
+                    }
+                    excerpt = excerpt[..budget] + "\n... [context limit]";
+                }
+
+                ctx.AppendLine($"### {requested}");
+                ctx.AppendLine("```");
+                ctx.AppendLine(excerpt);
+                ctx.AppendLine("```");
+                ctx.AppendLine();
+                filesRead.Add(requested);
+                newlyRead++;
+                await EmitLog(emitSse, "info", $"  📄 {requested}", ct: ct);
+            }
+
+            if (newlyRead == 0) break;
+        }
+
+    ExplorationComplete:
+
+        // ── Step 3: If a specific symbol was identified, resolve it via ───
+        //    AST so the editor gets the exact current source as oldString.
+        string? astOldStringHint = null;
+        if (!string.IsNullOrWhiteSpace(targetSymbol) &&
+            System.IO.File.Exists(fullPath))
+        {
+            var ext = Path.GetExtension(relPath).ToLowerInvariant();
+            // Supported for .cs (Roslyn) and .ts/.js (regex)
+            var supportedExt = ext is ".cs" or ".ts" or ".js" or ".tsx" or ".jsx";
+            if (supportedExt)
+            {
+                var (astOld, astErr) = AstResolveEdit(fullPath, "method", targetSymbol);
+                if (astOld != null)
+                {
+                    astOldStringHint = astOld;
+                    await EmitLog(emitSse, "info",
+                        $"  🎯 AST resolved '{targetSymbol}' " +
+                        $"({astOld.Split('\n').Length} lines)", ct: ct);
+                }
+                else if (!string.IsNullOrWhiteSpace(astErr))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"  AST hint failed ({astErr}) — will use text matching", ct: ct);
+                }
+            }
+        }
+
+        // ── Step 4: Build the enriched step ──────────────────────────────
+        var enrichedStep = new PlanStep
+        {
+            File = step.File,
+            Change = string.IsNullOrWhiteSpace(refinedChange) ? step.Change : refinedChange,
+            Priority = step.Priority,
+            OldString = astOldStringHint ?? step.OldString ?? "",
+            NewString = step.NewString ?? ""
+        };
+
+        // ── Step 5: Persist all exploration details to boarddata ──────────
+        await PersistStepExplorationAsync(cardId, planItemIndex, new
+        {
+            status = "ready",
+            filesRead = filesRead.ToList(),
+            rounds = roundsCompleted,
+            refinedChange,
+            originalChange = step.Change,
+            targetSymbol,
+            estimatedLineRange = lineRange,
+            confidence,
+            astResolved = astOldStringHint != null
+        }, emitSse, ct);
+
+        await EmitLog(emitSse, "info",
+            $"  ✅ Exploration done — {filesRead.Count} file(s), confidence {confidence}%",
+            ct: ct);
+
+        return new StepExplorationResult
+        {
+            EnrichedStep = enrichedStep,
+            ExplorationContext = ctx.ToString(),
+            FilesRead = filesRead.ToList(),
+            RefinedChange = refinedChange,
+            TargetSymbol = targetSymbol,
+            EstimatedLineRange = lineRange,
+            Confidence = confidence,
+            RoundsCompleted = roundsCompleted
+        };
+    }
+
+    // ── Exploration prompt builders ───────────────────────────────────────
+
+    private static string BuildStepExplorationSystemPrompt() =>
+        "You are a surgical code exploration agent. Before a code change is applied, " +
+        "your job is to understand exactly what needs to change and precisely where.\n\n" +
+        "You are given the original task, the full plan (so you understand what came before " +
+        "and after), the specific step, and the files already read.\n\n" +
+        "Output ONLY valid JSON — exactly one of these two forms:\n\n" +
+        "NEED MORE CONTEXT:\n" +
+        "{\n" +
+        "  \"ready\": false,\n" +
+        "  \"filesToRead\": [\"relative/path/file.ext\"],\n" +
+        "  \"reasoning\": \"I need to see X to understand how Y is wired\"\n" +
+        "}\n\n" +
+        "READY TO EDIT:\n" +
+        "{\n" +
+        "  \"ready\": true,\n" +
+        "  \"refinedChange\": \"In [MethodName] (around line N): replace [exact old code description] " +
+        "with [exact new code description]. [Full explanation of the change]\",\n" +
+        "  \"targetSymbol\": \"methodOrFunctionName\",\n" +
+        "  \"estimatedLineRange\": \"~150-175\",\n" +
+        "  \"confidence\": 90\n" +
+        "}\n\n" +
+        "RULES:\n" +
+        "1. filesToRead: only files DIRECTLY needed for THIS step — no tangential reads\n" +
+        "2. Never request a file already listed under 'files already read'\n" +
+        "3. Max 3 files per request; prefer the most likely to contain the relevant code\n" +
+        "4. refinedChange MUST: name the exact method/function/component, describe the " +
+        "exact code block being replaced, describe the replacement code — zero ambiguity\n" +
+        "5. targetSymbol: the identifier of the specific method/function/class being changed\n" +
+        "6. confidence 0-100: if < 70, request more files rather than guessing\n" +
+        "7. If the target file already has enough context (small file, obvious location), " +
+        "go ready=true on round 1 with a precise refinedChange";
+
+    private static string BuildStepExplorationPrompt(
+        PlanStep step,
+        string originalPrompt,
+        AgentPlan? fullPlan,
+        int stepIdx,
+        string explorationContext,
+        HashSet<string> alreadyRead,
+        int round)
+    {
+        var sb = new StringBuilder();
+
+        sb.AppendLine("## ORIGINAL TASK");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+
+        // Full plan gives the LLM critical "what came before / what comes next" context
+        if (fullPlan?.Plan?.Count > 0)
+        {
+            sb.AppendLine("## FULL PLAN");
+            for (var i = 0; i < fullPlan.Plan.Count; i++)
+            {
+                var p = fullPlan.Plan[i];
+                var marker = i == stepIdx ? "→ [CURRENT]"
+                           : i < stepIdx ? "✓ [DONE]"
+                                         : "  [PENDING]";
+                sb.AppendLine($"  {marker} Step {i + 1}: {p.File} — {p.Change}");
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("## STEP TO IMPLEMENT");
+        sb.AppendLine($"File:   {step.File}");
+        sb.AppendLine($"Change: {step.Change}");
+        sb.AppendLine();
+
+        sb.AppendLine("## FILES ALREADY READ");
+        if (alreadyRead.Count > 0)
+            foreach (var f in alreadyRead) sb.AppendLine($"  - {f}");
+        else
+            sb.AppendLine("  (none yet)");
+        sb.AppendLine();
+
+        sb.AppendLine("## FILE CONTENTS");
+        sb.AppendLine(string.IsNullOrWhiteSpace(explorationContext)
+            ? "(no files read yet)"
+            : explorationContext);
+
+        sb.AppendLine();
+        if (round == 0)
+        {
+            sb.AppendLine("ROUND 1 — you have read the target file.");
+            sb.AppendLine("Question: can you precisely describe the edit from this file alone?");
+            sb.AppendLine("  YES → ready=true + detailed refinedChange + targetSymbol");
+            sb.AppendLine("  NO  → ready=false + list the specific related files needed " +
+                          "(services, interfaces, imports, component class, etc.)");
+        }
+        else
+        {
+            sb.AppendLine($"ROUND {round + 1} — you have read {alreadyRead.Count} file(s).");
+            sb.AppendLine("Do you now have enough context to produce an unambiguous edit description?");
+            sb.AppendLine("  YES → ready=true + refinedChange naming the exact method and code change");
+            sb.AppendLine("  NO  → ready=false + list remaining files (max 3, must not repeat)");
+        }
+
+        return sb.ToString();
+    }
+
+    private static StepExplorationResponse ParseStepExplorationResponse(string raw)
+    {
+        var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
+        if (string.IsNullOrWhiteSpace(raw)) return empty;
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```",
+                    RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned,
+                new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+
+            var ready = root.TryGetProperty("ready", out var rEl) && rEl.GetBoolean();
+
+            var files = new List<string>();
+            if (root.TryGetProperty("filesToRead", out var fArr) &&
+                fArr.ValueKind == JsonValueKind.Array)
+                foreach (var f in fArr.EnumerateArray())
+                {
+                    var s = f.GetString();
+                    if (!string.IsNullOrWhiteSpace(s))
+                        files.Add(s.Replace('\\', '/'));
+                }
+
+            var refined = root.TryGetProperty("refinedChange",
+                out var rcEl) ? rcEl.GetString() : null;
+            var symbol = root.TryGetProperty("targetSymbol",
+                out var tsEl) ? tsEl.GetString() : null;
+            var range = root.TryGetProperty("estimatedLineRange",
+                out var lrEl) ? lrEl.GetString() : null;
+            var conf = root.TryGetProperty("confidence", out var cEl) &&
+                          cEl.ValueKind == JsonValueKind.Number ? cEl.GetInt32() : 0;
+
+            return new StepExplorationResponse
+            {
+                Ready = ready,
+                FilesToRead = files,
+                RefinedChange = refined,
+                TargetSymbol = symbol,
+                LineRange = range,
+                Confidence = conf
+            };
+        }
+        catch { return empty; }
+    }
+
+    // ── Boarddata persistence helpers ─────────────────────────────────────
+
+    /// <summary>
+    /// Writes full exploration data (filesRead, refinedChange, targetSymbol, etc.)
+    /// to the boarddata step object so the frontend can display exploration details.
+    /// </summary>
+    private async Task PersistStepExplorationAsync(
+        string? cardId, int planItemIndex, object explorationData,
+        bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || planItemIndex < 0) return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            foreach (var column in new[] { "todo", "doing", "done", "selfImproving" })
+            {
+                if (!root.TryGetPropertyValue(column, out var colNode) ||
+                    colNode is not JsonArray colItems) continue;
+
+                foreach (var item in colItems)
+                {
+                    if (item is not JsonObject card ||
+                        card["id"]?.GetValue<string>() != cardId) continue;
+                    if (card["_plan"] is not JsonObject plan ||
+                        plan["items"] is not JsonArray items) continue;
+
+                    var target = items.FirstOrDefault(i =>
+                        i is JsonObject o &&
+                        o["index"]?.GetValue<int>() == planItemIndex);
+                    if (target is not JsonObject stepObj) continue;
+
+                    stepObj["exploration"] = JsonNode.Parse(
+                        JsonSerializer.Serialize(explorationData));
+                    stepObj["status"] = "ready";
+
+                    await _boardData.SaveRawAsync(
+                        root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                    if (emitSse)
+                        await SendSse(Response, "refresh", new
+                        {
+                            target = "boarddata",
+                            reason = "step-exploration-complete",
+                            cardId,
+                            planItemIndex
+                        }, ct);
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist step exploration",
+                new { cardId, planItemIndex, error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Lightweight status-only update for a boarddata step (e.g. "exploring",
+    /// "applying") without rewriting the full exploration data blob.
+    /// </summary>
+    private async Task PersistStepStatusAsync(
+        string? cardId, int planItemIndex, string status,
+        bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || planItemIndex < 0) return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            foreach (var column in new[] { "todo", "doing", "done", "selfImproving" })
+            {
+                if (!root.TryGetPropertyValue(column, out var colNode) ||
+                    colNode is not JsonArray colItems) continue;
+                foreach (var item in colItems)
+                {
+                    if (item is not JsonObject card ||
+                        card["id"]?.GetValue<string>() != cardId) continue;
+                    if (card["_plan"] is not JsonObject plan ||
+                        plan["items"] is not JsonArray items) continue;
+                    var target = items.FirstOrDefault(i =>
+                        i is JsonObject o && o["index"]?.GetValue<int>() == planItemIndex);
+                    if (target is not JsonObject stepObj) continue;
+                    stepObj["status"] = status;
+                    await _boardData.SaveRawAsync(
+                        root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                    if (emitSse)
+                        await SendSse(Response, "refresh", new
+                        {
+                            target = "boarddata",
+                            reason = "step-status-update",
+                            cardId,
+                            planItemIndex,
+                            status
+                        }, ct);
+                    return;
+                }
+            }
+        }
+        catch { /* non-critical */ }
+    }
+
+
     private async Task<int> ResolveAndApplyEdit(
-        PlanStep step, string projectRoot, bool emitSse, CancellationToken ct,
-        List<object> allResults, int stepIndex, int planItemIndex = -1,
+        PlanStep step,
+        string projectRoot,
+        bool emitSse,
+        CancellationToken ct,
+        List<object> allResults,
+        int stepIndex,
+        string? prompt = null,   // NEW — original task prompt
+        AgentPlan? plan = null,   // NEW — full plan for context
+        int planItemIndex = -1,
         string? cardId = null)
     {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
 
-        await EmitLog(emitSse, "info", $"▶ Resolving: {relPath} — {step.Change}", ct: ct);
+        await EmitLog(emitSse, "info",
+            $"▶ Resolving: {relPath} — {step.Change}", ct: ct);
 
         if (emitSse)
             await SendSse(Response, "step", new
@@ -1131,14 +1698,16 @@ public class AgentController : ControllerBase
                 planItemIndex
             }, ct);
 
-        // ── Pre-edit validation: check if edit is still relevant before calling LLM ──
+        // ── Pre-edit validation ───────────────────────────────────────────
         if (System.IO.File.Exists(fullPath))
         {
-            var currentContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var currentContent = await System.IO.File.ReadAllTextAsync(
+                fullPath, Encoding.UTF8, ct);
             var (verdict, reason) = PreEditValidation(currentContent, step);
             if (verdict == PreEditVerdict.AlreadyDone)
             {
-                await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — {reason}", ct: ct);
+                await EmitLog(emitSse, "info",
+                    $"✓ Already done: {relPath} — {reason}", ct: ct);
                 var r = new Dictionary<string, object?>
                 {
                     ["index"] = stepIndex,
@@ -1155,7 +1724,8 @@ public class AgentController : ControllerBase
             }
             if (verdict == PreEditVerdict.Irrelevant)
             {
-                await EmitLog(emitSse, "warn", $"⏭ Skipping {relPath} — {reason}", ct: ct);
+                await EmitLog(emitSse, "warn",
+                    $"⏭ Skipping {relPath} — {reason}", ct: ct);
                 var r = new Dictionary<string, object?>
                 {
                     ["index"] = stepIndex,
@@ -1171,8 +1741,24 @@ public class AgentController : ControllerBase
             }
         }
 
+        // ── EXPLORATION LOOP (NEW) ────────────────────────────────────────
+        // Build rich context iteratively before attempting the edit.
+        // The enriched step has a precise change description; if a target
+        // symbol was found via AST its source becomes the planOldStr hint.
+        var exploration = await RunStepExplorationLoop(
+            step, projectRoot,
+            prompt ?? step.Change,   // fall back to the step's own description
+            plan, planItemIndex, emitSse, ct, cardId);
+
+        step = exploration.EnrichedStep;
+        var explorationContext = exploration.ExplorationContext;
+
+        // Signal "applying" now that exploration is complete
+        await PersistStepStatusAsync(cardId, planItemIndex, "applying", emitSse, ct);
+
+        // ── Resolve + apply loop (existing logic, now fed richer context) ─
         var history = new List<(string old, string @new, string error)>();
-        var planOldStr = step.OldString;
+        var planOldStr = step.OldString;   // may be AST-resolved by exploration
         var planNewStr = step.NewString;
         var planOldTried = false;
         var stuckCount = 0;
@@ -1187,7 +1773,7 @@ public class AgentController : ControllerBase
             bool fullFile = false, alreadyDone = false;
             string? fullContent = null;
 
-            // Attempt 0: use plan-provided oldString/newString directly if available
+            // Attempt 0: use plan-provided (or AST-resolved) oldString directly
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
                 planOldTried = true;
@@ -1200,27 +1786,31 @@ public class AgentController : ControllerBase
             {
                 if (attempt > 0)
                     await EmitLog(emitSse, "warn",
-                        $"Resolve retry {attempt + 1} for {relPath}", new { step, projectRoot }, ct: ct);
+                        $"Resolve retry {attempt + 1} for {relPath}",
+                        new { step, projectRoot }, ct: ct);
 
+                // Pass the rich exploration context so the edit-resolve LLM
+                // has far better information than just the file excerpt
                 (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
-                    await ResolveEditForStep(step, projectRoot, emitSse, ct, history);
+                    await ResolveEditForStep(
+                        step, projectRoot, emitSse, ct, history,
+                        explorationContext: explorationContext);
             }
 
             if (resolveError != null)
             {
                 await EmitLog(emitSse, "warn",
-                    $"Resolve attempt {attempt + 1}/{MaxAttempts}: {resolveError}", new {resolveError, fullContent}, ct: ct);
+                    $"Resolve attempt {attempt + 1}/{MaxAttempts}: {resolveError}",
+                    new { resolveError, fullContent }, ct: ct);
                 history.Add((step.OldString ?? "", step.NewString ?? "", resolveError));
 
-                // Detect stuck: 3+ consecutive resolve errors (LLM not outputting valid format)
-                if (resolveError == lastResolveError)
-                    resolveStuckCount++;
-                else
-                { resolveStuckCount = 0; lastResolveError = resolveError; }
+                if (resolveError == lastResolveError) resolveStuckCount++;
+                else { resolveStuckCount = 0; lastResolveError = resolveError; }
                 if (resolveStuckCount >= 3)
                 {
                     await EmitLog(emitSse, "error",
-                        $"LLM keeps failing to produce valid edit output — aborting {relPath}", ct: ct);
+                        $"LLM keeps failing to produce valid edit output — aborting {relPath}",
+                        ct: ct);
                     goto RecordFailure;
                 }
                 continue;
@@ -1243,30 +1833,32 @@ public class AgentController : ControllerBase
                 return stepIndex + 1;
             }
 
-            // ── Full file replacement ─────────────────────────────────────
+            // ── Full file replacement ─────────────────────────────────
             if (fullFile && fullContent != null)
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
                 if (fileAlreadyExists)
                 {
-                    // fullFile on an existing file is never correct — log and fail
-                    var e = "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
+                    var e = "LLM incorrectly used fullFile for existing file — " +
+                            "use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
                     continue;
                 }
-                if (fullContent.Length > MaxFullFileTokens * 4) // rough char→token ratio
+                if (fullContent.Length > MaxFullFileTokens * 4)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"fullFile too large ({fullContent.Length} chars, max {MaxFullFileTokens * 4}) — skipping, will be picked up in next plan pass", ct: ct);
+                        $"fullFile too large ({fullContent.Length} chars) — skipping",
+                        ct: ct);
                     continue;
                 }
-                stepIndex = await ApplyFullFile(fullContent, step, fullPath, relPath,
+                stepIndex = await ApplyFullFile(
+                    fullContent, step, fullPath, relPath,
                     projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
                 return stepIndex;
             }
 
-            // ── Targeted replacement ──────────────────────────────────────
+            // ── Targeted replacement ──────────────────────────────────
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
@@ -1279,32 +1871,36 @@ public class AgentController : ControllerBase
                 var err = matchError ?? "oldString not found verbatim";
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
                 await EmitLog(emitSse, "warn",
-                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}",
+                    ct: ct);
 
-                // Self-heal: if the oldString doesn't match but fuzzy location is found,
-                // extract the exact file lines and retry immediately
+                // Self-heal: extract verbatim file lines at the fuzzy match location
                 var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
                     await EmitLog(emitSse, "info",
-                        $"Self-healing: extracted exact oldString from file ({correctedBlock.Length} chars)", ct: ct);
+                        $"Self-healing: exact block from file ({correctedBlock.Length} chars)",
+                        ct: ct);
                     var (replaced2, newContent2, _, _) =
                         TryReplaceSafe(fileContent, correctedBlock, newStr ?? string.Empty);
                     if (replaced2)
                     {
-                        var (approved2, verifyReason2, _) =
+                        var (approved2, _, _) =
                             VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2);
                         if (approved2)
                         {
-                            await System.IO.File.WriteAllTextAsync(fullPath, newContent2, Encoding.UTF8, ct);
-                            await EmitLog(emitSse, "success", $"✓ Edited {relPath} (self-healed)", ct: ct);
-                            var r = new Dictionary<string, object?>();
-                            PopulateEditResult(r, "modified", relPath, correctedBlock, newStr ?? "", "self-healed");
-                            r["index"] = stepIndex;
-                            r["planItemIndex"] = planItemIndex;
-                            if (emitSse) await SendSse(Response, "step", r, ct);
-                            allResults.Add(r);
-                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                            await System.IO.File.WriteAllTextAsync(
+                                fullPath, newContent2, Encoding.UTF8, ct);
+                            await EmitLog(emitSse, "success",
+                                $"✓ Edited {relPath} (self-healed)", ct: ct);
+                            var r2 = new Dictionary<string, object?>();
+                            PopulateEditResult(r2, "modified", relPath,
+                                correctedBlock, newStr ?? "", "self-healed");
+                            r2["index"] = stepIndex; r2["planItemIndex"] = planItemIndex;
+                            if (emitSse) await SendSse(Response, "step", r2, ct);
+                            allResults.Add(r2);
+                            await PersistBoardDataPlanStepAsync(
+                                cardId, planItemIndex, emitSse, ct);
                             return stepIndex + 1;
                         }
                     }
@@ -1312,16 +1908,13 @@ public class AgentController : ControllerBase
 
                 history.Add((oldStr!, newStr ?? "", err));
 
-
-                // Detect stuck: same oldString repeated 3+ times
-                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal))
-                    stuckCount++;
-                else
-                { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = oldStr ?? ""; }
                 if (stuckCount >= 3)
                 {
                     await EmitLog(emitSse, "error",
-                        $"LLM keeps producing the same oldString — aborting {relPath}", ct: ct);
+                        $"LLM keeps producing the same oldString — aborting {relPath}",
+                        ct: ct);
                     goto RecordFailure;
                 }
                 continue;
@@ -1334,70 +1927,61 @@ public class AgentController : ControllerBase
                 await EmitLog(emitSse, "warn",
                     $"Verify failed for {relPath}: {verifyReason}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", verifyReason));
-
-                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal))
-                    stuckCount++;
-                else
-                { stuckCount = 0; lastOld = oldStr ?? ""; }
-                if (stuckCount >= 3)
-                {
-                    await EmitLog(emitSse, "error",
-                        $"LLM keeps producing the same oldString — aborting {relPath}", ct: ct);
-                    goto RecordFailure;
-                }
+                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (stuckCount >= 3) goto RecordFailure;
                 continue;
             }
 
-            // Verify replacement: the new string should be present in the result
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 !newContent.Contains(newStr, StringComparison.Ordinal))
             {
-                // Indentation may have been adjusted — retry with leading whitespace stripped
                 var strippedNew = StripLineLeadingWhitespace(newStr);
                 var strippedContent = StripLineLeadingWhitespace(newContent);
                 if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
                 {
-                    var verr = "Replacement produced mismatched content — oldString matched wrong location";
-                    await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verr}", ct: ct);
+                    var verr = "Replacement produced mismatched content — " +
+                               "oldString matched wrong location";
+                    await EmitLog(emitSse, "warn",
+                        $"Verify failed for {relPath}: {verr}", ct: ct);
                     history.Add((oldStr!, newStr, verr));
                     continue;
                 }
             }
 
-            // ── Auto-format C# files before write ─────────────────────────
+            // Auto-format C# before writing
             var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
             if (fileExt == ".cs")
             {
                 try
                 {
                     var fmtTree = CSharpSyntaxTree.ParseText(newContent);
-                    var fmtRoot = fmtTree.GetRoot();
-                    newContent = fmtRoot.NormalizeWhitespace().ToFullString();
+                    newContent = fmtTree.GetRoot().NormalizeWhitespace().ToFullString();
                 }
-                catch { /* non-critical — use unformatted content */ }
+                catch { /* non-critical */ }
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
 
-            // ── Post-edit: scan for missing types referenced in the edit ────
+            // Post-edit: append stubs for any missing C# types referenced in the edit
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
             {
                 var missing = ScanMissingTypes(newContent, newStr);
                 if (missing.Count > 0)
                 {
-                    newContent += "\n" + string.Join("\n\n", missing.Select(t => $"public class {t}\n{{\n}}"));
-                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    newContent += "\n" + string.Join("\n\n",
+                        missing.Select(t => $"public class {t}\n{{\n}}"));
+                    await System.IO.File.WriteAllTextAsync(
+                        fullPath, newContent, Encoding.UTF8, ct);
                     await EmitLog(emitSse, "info",
                         $"Appended missing type(s): {string.Join(", ", missing)}", ct: ct);
                 }
             }
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
-
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
-            result["index"] = stepIndex;
-            result["planItemIndex"] = planItemIndex;
+            result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
             await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
@@ -3422,7 +4006,10 @@ public class AgentController : ControllerBase
             {
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
                 var prevCount = allResults.Count;
-                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse, ct, allResults, stepIndex, itemIdx, cardId);
+                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
+                    ct, allResults, stepIndex,
+                    prompt, plan,     
+                    itemIdx, cardId);
 
                 if (allResults.Count > prevCount &&
                     allResults[^1] is Dictionary<string, object?> lastDict &&
