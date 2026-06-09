@@ -183,47 +183,114 @@ public class AgentController : ControllerBase
         const int RadiusLines = 60;
         var lines = fileContent.Split('\n');
 
+        // ── Step 1: Always include structural header (imports + declaration) ──
+        // Collect import lines (import/using/require) and the @Component/@Injectable/class line
+        var structEnd = 0;
+        var foundClassLine = -1;
+        for (var i = 0; i < Math.Min(lines.Length, 80); i++)
+        {
+            var trimmed = lines[i].TrimStart();
+            if (trimmed.StartsWith("import ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("using ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("require(", StringComparison.Ordinal) ||
+                trimmed.StartsWith("const ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("var ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("let ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("#include", StringComparison.Ordinal) ||
+                trimmed.StartsWith("from ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("export ", StringComparison.Ordinal) ||
+                trimmed == "")
+                structEnd = i + 1;
+            else if (trimmed.StartsWith("@Component", StringComparison.Ordinal) ||
+                     trimmed.StartsWith("@Injectable", StringComparison.Ordinal) ||
+                     trimmed.StartsWith("@Directive", StringComparison.Ordinal) ||
+                     trimmed.StartsWith("@Pipe", StringComparison.Ordinal) ||
+                     trimmed.StartsWith("@NgModule", StringComparison.Ordinal) ||
+                     trimmed.StartsWith("public ") || trimmed.StartsWith("internal ") ||
+                     trimmed.StartsWith("abstract class") || trimmed.StartsWith("class ") ||
+                     trimmed.StartsWith("interface ") || trimmed.StartsWith("enum ") ||
+                     trimmed.StartsWith("struct ") || trimmed.StartsWith("record ") ||
+                     trimmed.StartsWith("function ") || trimmed.StartsWith("export function"))
+            {
+                foundClassLine = i;
+                // Include the decorator line (i-1) if it starts with @
+                if (i > 0 && lines[i - 1].TrimStart().StartsWith("@"))
+                    structEnd = i + 1;
+                else
+                    structEnd = i + 1;
+                // Don't break — keep looking for a class line if there's only a function/interface
+            }
+        }
+        // If we found a real class/interface/enum/struct line, use it; else fall through
+        if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
+
+        // ── Step 2: Find the target region ──
+        var targetStart = -1;
+        var targetEnd = -1;
+
         // Strategy A: anchor on the first long line of planOldString
-        if (!string.IsNullOrWhiteSpace(planOldString))
+        if (targetStart < 0 && !string.IsNullOrWhiteSpace(planOldString))
         {
             var anchor = planOldString.Split('\n')
                 .Select(l => l.Trim())
                 .FirstOrDefault(l => l.Length >= 8);
-
             if (anchor != null)
             {
-                for (var i = 0; i < lines.Length; i++)
+                for (var i = structEnd; i < lines.Length; i++)
                 {
                     if (!lines[i].Contains(anchor, StringComparison.OrdinalIgnoreCase)) continue;
-                    var s = Math.Max(0, i - 10);
-                    var e = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
-                    var prefix = s > 0 ? $"... [lines 1–{s} omitted]\n" : "";
-                    var suffix = e < lines.Length ? $"\n... [lines {e + 1}–{lines.Length} omitted]" : "";
-                    return prefix + string.Join('\n', lines.Skip(s).Take(e - s)) + suffix;
+                    targetStart = Math.Max(structEnd, i - 10);
+                    targetEnd = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
+                    break;
                 }
             }
         }
 
         // Strategy B: keyword scan on the change description
-        var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
-                                     .Where(kw => kw.Length >= 5).ToList();
-        if (keywords.Count > 0)
+        if (targetStart < 0)
         {
-            for (var i = 0; i < lines.Length; i++)
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
+                                         .Where(kw => kw.Length >= 5).ToList();
+            if (keywords.Count > 0)
             {
-                if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
-                var s = Math.Max(0, i - 20);
-                var e = Math.Min(lines.Length, i + RadiusLines);
-                var prefix = s > 0 ? $"... [lines 1–{s} omitted]\n" : "";
-                var suffix = e < lines.Length ? $"\n... [lines {e + 1}–{lines.Length} omitted]" : "";
-                return prefix + string.Join('\n', lines.Skip(s).Take(e - s)) + suffix;
+                for (var i = structEnd; i < lines.Length; i++)
+                {
+                    if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
+                    targetStart = Math.Max(structEnd, i - 20);
+                    targetEnd = Math.Min(lines.Length, i + RadiusLines);
+                    break;
+                }
             }
         }
 
-        // Fallback: head + tail
-        return fileContent.Length > 12000
-            ? fileContent[..6000] + "\n\n... [middle omitted] ...\n\n" + fileContent[^4000..]
-            : fileContent;
+        // If no target found, include file from structEnd onwards
+        if (targetStart < 0)
+        {
+            var hdr = lines.Take(structEnd).ToList();
+            var body = string.Join('\n', lines.Skip(structEnd));
+            if (body.Length > 8000)
+                body = body[..8000] + $"\n... [lines {structEnd + 600}–{lines.Length} omitted]";
+            return string.Join('\n', hdr) + "\n" + body;
+        }
+
+        // ── Step 3: Assemble ──
+        var headLines = lines.Take(structEnd).ToList();
+        var bodyLines = lines.Skip(structEnd).ToArray();
+
+        // Map body-relative indices back to absolute
+        var absStart = targetStart;
+        var absEnd = targetEnd;
+
+        var excerpt = string.Join('\n', lines.Skip(absStart).Take(absEnd - absStart));
+        var header = string.Join('\n', headLines);
+
+        var gapLines = absStart - structEnd;
+        if (gapLines > 3)
+            return header + $"\n... [lines {structEnd + 1}–{absStart} omitted]\n" + excerpt;
+        else if (gapLines > 0)
+            return header + "\n" + string.Join('\n', lines.Skip(structEnd).Take(gapLines)) + "\n" + excerpt;
+
+        return header + "\n" + excerpt;
     }
 
     /// <summary>Use Roslyn to find a C# AST node and return its exact source text as oldString.</summary>
@@ -450,6 +517,69 @@ public class AgentController : ControllerBase
                 result.Add(baseIndent + trimmed);
             }
         }
+        var shifted = string.Join("\n", result);
+
+        // If the shifted code has no relative nesting (all non-empty lines at the same
+        // indent level), the LLM flattened the structure. Re-indent by brace depth.
+        var shiftedLines = shifted.Split('\n');
+        var distinctIndents = shiftedLines
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
+            .Distinct()
+            .ToList();
+        if (distinctIndents.Count <= 1)
+            return ReindentByBraceDepth(shifted, baseIndent);
+
+        return shifted;
+    }
+
+    /// <summary>
+    /// Re-indents code by tracking brace depth, using baseIndent as the starting
+    /// indentation. Accounts for strings and comments to avoid false brace matches.
+    /// </summary>
+    private static string ReindentByBraceDepth(string code, string baseIndent, int indentSize = 2)
+    {
+        var lines = code.Split('\n');
+        var result = new List<string>();
+        var depth = 0;
+        var inSQ = false;
+        var inDQ = false;
+        var inTmpl = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                result.Add(line);
+                continue;
+            }
+
+            // If line starts with closing brace, the content is at one less depth
+            var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
+            if (effectiveDepth < 0) effectiveDepth = 0;
+
+            var indent = baseIndent + new string(' ', effectiveDepth * indentSize);
+            result.Add(indent + trimmed);
+
+            // Count braces on this line, tracking string/comment state
+            for (var i = 0; i < trimmed.Length; i++)
+            {
+                var c = trimmed[i];
+                var p = i > 0 ? trimmed[i - 1] : '\0';
+
+                if (c == '\\') { i++; continue; }
+                if (c == '\'' && !inDQ && !inTmpl) { inSQ = !inSQ; continue; }
+                if (c == '"' && !inSQ && !inTmpl) { inDQ = !inDQ; continue; }
+                if (c == '`' && !inSQ && !inDQ) { inTmpl = !inTmpl; continue; }
+                if (c == '/' && p == '/' && !inSQ && !inDQ && !inTmpl) break;
+                if (inSQ || inDQ || inTmpl) continue;
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+            }
+            if (depth < 0) depth = 0;
+        }
+
         return string.Join("\n", result);
     }
 
@@ -740,6 +870,96 @@ public class AgentController : ControllerBase
                 var body = raw[(ffS + D_FULL.Length)..ffE];
                 body = StripFullFileFence(body);
                 return (null, null, true, body, false, null);
+            }
+
+            // Regex fallback: try to extract oldString/newString from malformed JSON
+            // where unescaped quotes break JSON parsing (common with HTML attributes).
+            var osMatch = Regex.Match(raw,
+                @"""oldString""\s*:\s*\[([\s\S]*?)\]\s*,\s*""newString""\s*:\s*\[([\s\S]*?)\]",
+                RegexOptions.IgnoreCase);
+            if (osMatch.Success)
+            {
+                var oldRaw = osMatch.Groups[1].Value;
+                var newRaw = osMatch.Groups[2].Value;
+                var oldLines = ExtractQuotedStrings(oldRaw);
+                var newLines = ExtractQuotedStrings(newRaw);
+                if (oldLines.Count > 0)
+                {
+                    oldStr = string.Join("\n", oldLines);
+                    newStr = string.Join("\n", newLines);
+                    return (oldStr, newStr ?? "", false, null, false, null);
+                }
+            }
+
+            // Also try non-array (string value) format
+            var osStrMatch = Regex.Match(raw,
+                @"""oldString""\s*:\s*""([\s\S]*?)""\s*,\s*""newString""\s*:\s*""([\s\S]*?)""",
+                RegexOptions.IgnoreCase);
+            if (osStrMatch.Success)
+            {
+                oldStr = osStrMatch.Groups[1].Value;
+                newStr = osStrMatch.Groups[2].Value;
+                return (oldStr, newStr ?? "", false, null, false, null);
+            }
+
+            // FORMAT C fallback: extract targetType/targetName/newCode from malformed JSON
+            var ttMatch = Regex.Match(raw,
+                @"""targetType""\s*:\s*""(\w+)""", RegexOptions.IgnoreCase);
+            var tnMatch = Regex.Match(raw,
+                @"""targetName""\s*:\s*""([^""]+)""", RegexOptions.IgnoreCase);
+            if (ttMatch.Success && tnMatch.Success)
+            {
+                var tt = ttMatch.Groups[1].Value;
+                var tn = tnMatch.Groups[2].Value;
+                var ncIdx = raw.IndexOf("\"newCode\"", StringComparison.OrdinalIgnoreCase);
+                if (ncIdx >= 0)
+                {
+                    var afterKey = raw[(ncIdx + "\"newCode\"".Length)..].TrimStart();
+                    if (afterKey.StartsWith(":"))
+                        afterKey = afterKey[1..].TrimStart();
+
+                    string? newCodeStr = null;
+                    if (afterKey.StartsWith("["))
+                    {
+                        // Array format: find matching ]
+                        var depth = 0;
+                        for (var i = 0; i < afterKey.Length; i++)
+                        {
+                            if (afterKey[i] == '[') depth++;
+                            else if (afterKey[i] == ']') { depth--; if (depth == 0) { var lines = ExtractQuotedStrings(afterKey[1..i]); if (lines.Count > 0) newCodeStr = string.Join("\n", lines); break; } }
+                        }
+                    }
+                    else if (afterKey.StartsWith("\""))
+                    {
+                        // String format: find closing " before , or } or \n
+                        var content = afterKey[1..];
+                        for (var i = 0; i < content.Length; i++)
+                        {
+                            if (content[i] == '\\' && i + 1 < content.Length && content[i + 1] == '"') { i++; continue; }
+                            if (content[i] == '"')
+                            {
+                                var nxt = i + 1 < content.Length ? content[i + 1] : '\0';
+                                if (nxt == ',' || nxt == '}' || nxt == '\n' || nxt == '\r' || nxt == ' ' || nxt == '\0')
+                                { newCodeStr = content[..i]; break; }
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(tt) && !string.IsNullOrWhiteSpace(tn) && newCodeStr != null)
+                    {
+                        var insertAfter = Regex.Match(raw, @"""insertAfter""\s*:\s*true", RegexOptions.IgnoreCase).Success;
+                        if (insertAfter)
+                        {
+                            var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
+                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
+                        }
+                        else
+                        {
+                            var (astOldStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
+                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr); return (astOldStr, indented, false, null, false, null); }
+                        }
+                    }
+                }
             }
 
             var oS = raw.IndexOf(D_OLD, StringComparison.OrdinalIgnoreCase);
@@ -2845,6 +3065,25 @@ public class AgentController : ControllerBase
                     await EmitLog(emitSse, "error",
                         $"✗ Step permanently failed for {planFile} — {lastDict.GetValueOrDefault("error")}", ct: ct);
                 }
+                else if (allResults.Count > prevCount)
+                {
+                    // Edit succeeded — check if more work from the original prompt remains
+                    // by re-running the planner against current file state.
+                    var remainingSteps = planItems.Skip(itemIdx + 1)
+                        .Where(p => !string.IsNullOrWhiteSpace(p.File)).ToList();
+                    if (remainingSteps.Count == 0)
+                    {
+                        var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
+                            steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
+                        if (moreSteps != null && moreSteps.Count > 0)
+                        {
+                            planItems = MergePlanSteps(planItems, moreSteps);
+                            if (emitSse)
+                                await SendSse(Response, "plan",
+                                    new { summary = $"Added {moreSteps.Count} step(s) after verifying prompt", items = planItems }, ct);
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -4308,8 +4547,9 @@ Respond with JSON only:
 
     private static string RepairJsonNewlines(string json)
     {
-        // The LLM often outputs literal newlines inside JSON string values instead of \n.
-        // We try to repair this by scanning inside string boundaries and escaping raw newlines.
+        // The LLM often outputs literal newlines inside JSON string values instead of \n,
+        // or unescaped double quotes (especially in HTML attributes like *ngFor="...").
+        // Walk through character by character tracking string state to fix both issues.
         var sb = new StringBuilder(json.Length);
         var inString = false;
         var escaped = false;
@@ -4318,7 +4558,26 @@ Respond with JSON only:
             var c = json[i];
             if (escaped) { sb.Append(c); escaped = false; continue; }
             if (c == '\\' && inString) { sb.Append(c); escaped = true; continue; }
-            if (c == '"' && !escaped) { inString = !inString; sb.Append(c); continue; }
+            if (c == '"' && !escaped)
+            {
+                // A " outside a string always toggles inString (valid delimiter).
+                if (!inString) { inString = true; sb.Append(c); continue; }
+                // Inside a string: this " could be an unescaped content quote (HTML attr)
+                // or the closing delimiter. Peek ahead: if followed by , ] } : \s or EOF within
+                // a short window, treat as delimiter; otherwise escape it.
+                var lookahead = json.Length > i + 1 ? json[i + 1] : '\0';
+                if (lookahead == ',' || lookahead == ']' || lookahead == '}' ||
+                    lookahead == ':' || lookahead == '\t' ||
+                    lookahead == '\n' || lookahead == '\r' || lookahead == ' ')
+                {
+                    inString = false; sb.Append(c);
+                }
+                else
+                {
+                    sb.Append("\\\""); // escape it
+                }
+                continue;
+            }
             if (inString && (c == '\n' || c == '\r'))
             {
                 sb.Append("\\n");
@@ -4328,6 +4587,20 @@ Respond with JSON only:
             sb.Append(c);
         }
         return sb.ToString();
+    }
+
+    private static List<string> ExtractQuotedStrings(string raw)
+    {
+        var result = new List<string>();
+        foreach (var line in raw.Split('\n'))
+        {
+            var trimmed = line.Trim().TrimEnd(',');
+            if (trimmed.Length < 2 || !trimmed.StartsWith("\"")) continue;
+            var lastQuote = trimmed.LastIndexOf('"');
+            if (lastQuote <= 0) continue;
+            result.Add(trimmed.Substring(1, lastQuote - 1).Replace("\\\"", "\""));
+        }
+        return result;
     }
 
     private static string CollapseWhitespace(string s) =>

@@ -32,8 +32,12 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
             cmdScore += 60;
 
-        if (Regex.IsMatch(lower, @"\b(list|what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree)\b"))
+        if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree)\b"))
             cmdScore += 60;
+        // "list" alone is ambiguous (data list vs file listing) — use lower weight
+        if (Regex.IsMatch(lower, @"\b(list)\b") &&
+            !Regex.IsMatch(lower, @"\b(list\s+of\s+\w+)\b")) // "list of plants" is data, not filesystem
+            cmdScore += 20;
 
         if (Regex.IsMatch(lower, @"\b(inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email|read\s+mail|check\s+mail)\b"))
             cmdScore += 85;
@@ -94,6 +98,14 @@ public static class AgentUtilities
         // File path mentioned — likely editing a specific file
         if (Regex.IsMatch(lower, @"\b[\w./\\-]+\.\w{2,4}\b"))
             editScore += 20;
+
+        // Display/show/preview — likely a UI code change, not a terminal command
+        if (Regex.IsMatch(lower, @"\b(show|display|render|preview|view)\b"))
+            editScore += 15;
+
+        // Visual media — images, photos, thumbnails in UI context
+        if (Regex.IsMatch(lower, @"\b(picture|image|photo|thumbnail)\b"))
+            editScore += 12;
 
         // ── Hybrid signal: "email" in editing context vs reading context ─────
         bool emailForReading = Regex.IsMatch(lower,
