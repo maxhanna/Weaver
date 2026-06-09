@@ -1618,7 +1618,7 @@ public class AgentController : ControllerBase
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
         "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
-        "7. Each step must be ONE focused change — do not combine unrelated edits.\n" +
+        "7. Each step must be ONE focused change — do not combine unrelated edits. The change field must be extremely precise. No broad explanations It should detail exactly how to solve that part of the plan exactly. \n" +
         "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
         "10. The exact edit content (oldString/newString) will be resolved later when the file content is available — just describe what to change in the \"change\" field.\n\n" +
