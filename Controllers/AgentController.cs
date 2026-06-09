@@ -111,9 +111,10 @@ public class AgentController : ControllerBase
         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
          "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-          "12. FORMAT C (targetType/targetName/newCode) works for ALL languages. " +
-               "For non-C# files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
-               "For C# files, only FORMAT C is supported — oldString/newString will fail for C#.\n" +
+           "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
+                "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
+                "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
+                "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
          "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
          "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
          "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.";
@@ -317,7 +318,12 @@ public class AgentController : ControllerBase
             var pattern = $@"^\s*(?:(?:async|export)\s+)?(?:(?:public|private|protected|internal)\s+)?(?:(?:static|readonly)\s+)?(?:\w+\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)";
             var match = Regex.Match(sourceText, pattern, RegexOptions.Multiline);
             if (!match.Success)
-                return (null, $"Method/function '{targetName}' not found in {ext} file");
+            {
+                var hint = ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".json" or ".css" or ".svg"
+                    ? $" {ext} files don't contain methods — use oldString/newString format instead of targetType/targetName/newCode"
+                    : "";
+                return (null, $"Method/function '{targetName}' not found in {ext} file.{hint}");
+            }
 
             var startIdx = match.Index;
             // Advance past any => to find the opening brace
@@ -646,8 +652,8 @@ public class AgentController : ControllerBase
                 sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
                 sb.AppendLine("```");
                 sb.AppendLine();
-                sb.AppendLine("⚠ Do NOT output the full file. PREFER FORMAT C (targetType/targetName/newCode) — it works for ALL languages. " +
-                              "Fall back to oldString/newString only if FORMAT C is not applicable (e.g. replacing non-method blocks).");
+                sb.AppendLine("⚠ Do NOT output the full file. Use FORMAT C (targetType/targetName/newCode) for CODE files (.cs, .ts, .js, .tsx, .jsx). " +
+                              "For HTML, CSS, JSON, and other markup/data files, use oldString/newString instead — those files don't have methods/classes to target with FORMAT C.");
             }
             else
             {
@@ -661,7 +667,8 @@ public class AgentController : ControllerBase
         // Always encourage small, focused oldStrings
         sb.AppendLine();
         sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
-        sb.AppendLine("PREFER FORMAT C (targetType/targetName/newCode) — it works for ALL languages and avoids text-matching issues.");
+        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) to avoid text-matching issues.");
+        sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
         sb.AppendLine("To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
         sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
         sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
@@ -2661,18 +2668,21 @@ public class AgentController : ControllerBase
             cardId: cardId);
 
         // ── Post-execution verification: re-check with LLM that task is 100% complete ──
-        var taskComplete = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+        var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
         if (!taskComplete)
         {
-            await EmitLog(emitSse, "warn", "Post-execution verification indicates task may not be fully complete. Re-planning...", ct: ct);
-            // Re-read modified files and re-plan
+            await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
             var freshContext = AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
+            // Include verification failures as steering so the LLM knows what to fix
+            var verifySteering = steeringContext;
+            if (!string.IsNullOrWhiteSpace(verificationDetails))
+                verifySteering = $"Fix these issues:\n{verificationDetails}\n\n{(string.IsNullOrWhiteSpace(steeringContext) ? "" : steeringContext)}";
             var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, freshContext, projectRoot, emitSse, ct, steeringContext);
+                prompt, freshContext, projectRoot, emitSse, ct, verifySteering);
             if (replan != null && replan.Plan.Count > 0)
             {
                 await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
-                    steeringContext: steeringContext, cardId: cardId);
+                    steeringContext: verifySteering, cardId: cardId);
             }
         }
         else
@@ -2781,7 +2791,7 @@ public class AgentController : ControllerBase
     /// to verify whether the original task is 100% complete. Returns false if
     /// the LLM identifies remaining work.
     /// </summary>
-    private async Task<bool> PostExecuteVerify(
+    private async Task<(bool complete, string details)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct)
     {
@@ -2794,13 +2804,16 @@ public class AgentController : ControllerBase
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (modifiedPaths.Count == 0) return true; // nothing to verify
+        if (modifiedPaths.Count == 0) return (true, ""); // nothing to verify
 
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
         sb.AppendLine("### CURRENT STATE OF MODIFIED FILES ###");
+
+        // Track related type definition files to include for type-consistency checks
+        var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var relPath in modifiedPaths)
         {
@@ -2813,26 +2826,83 @@ public class AgentController : ControllerBase
                 sb.AppendLine("```");
                 sb.AppendLine(content);
                 sb.AppendLine("```");
+
+                // Resolve local imports to find related type definitions
+                var ext = Path.GetExtension(relPath).ToLowerInvariant();
+                if (ext is ".ts" or ".tsx")
+                {
+                    foreach (var importLine in content.Split('\n')
+                        .Where(l => l.TrimStart().StartsWith("import ", StringComparison.Ordinal)))
+                    {
+                        var m = Regex.Match(importLine, @"from\s+['""]([^'""]+)['""]");
+                        if (!m.Success) continue;
+                        var importPath = m.Groups[1].Value;
+                        if (importPath.StartsWith("."))
+                        {
+                            // Resolve relative import to file path
+                            var baseDir = Path.GetDirectoryName(fullPath) ?? "";
+                            var resolved = Path.GetFullPath(Path.Combine(baseDir, importPath));
+                            // Try .ts, .tsx, /index.ts, /index.tsx
+                            foreach (var suffix in new[] { ".ts", ".tsx", "/index.ts", "/index.tsx" })
+                            {
+                                var candidate = resolved + suffix;
+                                if (System.IO.File.Exists(candidate))
+                                {
+                                    typeFilesToInclude.Add(candidate);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        sb.AppendLine();
-        sb.AppendLine("Based on the original task above and the current state of all modified files,");
-        sb.AppendLine("answer with a single JSON object:");
-        sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\" }");
-        sb.AppendLine("Set complete=true only if the original task is fully implemented with no missing pieces.");
-        sb.AppendLine("Set complete=false if anything is still missing, incomplete, or broken.");
+        // Include resolved type definition files (limit to 5 to avoid context overload)
+        if (typeFilesToInclude.Count > 0)
+        {
+            sb.AppendLine("\n### RELATED TYPE DEFINITIONS ###");
+            var count = 0;
+            foreach (var typeFullPath in typeFilesToInclude.Take(5))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(typeFullPath, Encoding.UTF8, ct);
+                var rel = Path.GetRelativePath(projectRoot, typeFullPath).Replace('\\', '/');
+                sb.AppendLine($"\n### {rel}");
+                sb.AppendLine("```");
+                sb.AppendLine(content);
+                sb.AppendLine("```");
+                count++;
+            }
+            if (typeFilesToInclude.Count > count)
+                sb.AppendLine($"\n... and {typeFilesToInclude.Count - count} more type files (omitted)");
+        }
 
-        var verifySystemPrompt = "You are a QA verifier. Check whether a programming task is 100% complete. Output ONLY a JSON object with 'complete' (bool) and 'reason' (string). Be strict — if any part of the task is missing, return false.";
+        sb.AppendLine();
+        sb.AppendLine("Based on the original task above and the current state of all modified files and their type definitions,");
+        sb.AppendLine("check for ALL of the following:");
+        sb.AppendLine("1. Is the original task fully implemented?");
+        sb.AppendLine("2. Do ALL property accesses in the code exist on their respective types/interfaces?");
+        sb.AppendLine("   (e.g. obj.someProperty — does 'someProperty' exist in the type of 'obj'?)");
+        sb.AppendLine("3. Are ALL referenced methods, functions, and classes defined or imported?");
+        sb.AppendLine("4. Are ALL imports present for every type used?");
+        sb.AppendLine("5. Would the code compile without errors?");
+        sb.AppendLine();
+        sb.AppendLine("Answer with a single JSON object:");
+        sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\", \"issues\": [\"issue1\", \"issue2\"] }");
+        sb.AppendLine("Set complete=true only if the task is fully implemented AND the code would compile.");
+        sb.AppendLine("Set complete=false if anything is missing, broken, or would cause compilation errors.");
+        sb.AppendLine("Include a brief list of specific issues in the 'issues' array when complete=false.");
+
+        var verifySystemPrompt = "You are a strict QA verifier for TypeScript/C# code. Check whether a programming task is 100% complete AND whether the code would compile. Pay special attention to properties accessed on typed objects — verify each one exists in the type definition. Output ONLY a JSON object with 'complete' (bool), 'reason' (string), and 'issues' (array of strings).";
 
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 256);
+            requestTimeout: TimeSpan.FromMinutes(3), maxTokens: 512);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
-            return true; // can't verify — assume ok
+            return (true, ""); // can't verify — assume ok
         }
 
         try
@@ -2851,15 +2921,19 @@ public class AgentController : ControllerBase
             if (doc.RootElement.TryGetProperty("complete", out var completeEl))
             {
                 var isComplete = completeEl.GetBoolean();
-                if (doc.RootElement.TryGetProperty("reason", out var reasonEl))
-                    await EmitLog(emitSse, isComplete ? "info" : "warn",
-                        $"Verification: complete={isComplete}, reason={reasonEl.GetString()}", ct: ct);
-                return isComplete;
+                var reason = doc.RootElement.TryGetProperty("reason", out var rEl) ? rEl.GetString() : "";
+                var issues = doc.RootElement.TryGetProperty("issues", out var iEl) && iEl.ValueKind == JsonValueKind.Array
+                    ? string.Join("; ", iEl.EnumerateArray().Select(e => e.GetString() ?? ""))
+                    : "";
+                var details = reason + (string.IsNullOrWhiteSpace(issues) ? "" : $"\nIssues: {issues}");
+                await EmitLog(emitSse, isComplete ? "info" : "warn",
+                    $"Verification: complete={isComplete}, reason={reason}{(string.IsNullOrWhiteSpace(issues) ? "" : $", issues=[{issues}]")}", ct: ct);
+                return (isComplete, details);
             }
         }
         catch { }
 
-        return true; // parse failure — assume ok
+        return (true, ""); // parse failure — assume ok
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3270,6 +3344,16 @@ public class AgentController : ControllerBase
         string oldString, string newString, string oldContent, string newContent)
     {
         if (oldContent == newContent) return (false, "Edit produced no change", 3);
+
+        // Guard: never write empty content when the original was non-empty
+        if (!string.IsNullOrWhiteSpace(oldContent) && string.IsNullOrWhiteSpace(newContent))
+            return (false, "Edit would produce empty file — rejected to prevent data loss", 1);
+
+        // Guard: if the result is less than 10% of the original size, the edit likely
+        // matched too broadly (e.g. oldString matched the entire file by accident).
+        if (oldContent.Length > 200 && newContent.Length > 0 &&
+            newContent.Length < oldContent.Length * 0.10)
+            return (false, $"Edit would reduce file by {100 - (int)(newContent.Length * 100.0 / oldContent.Length)}% — suspicious content loss", 1);
 
         var normOld = AgentUtilities.NormalizeLineEndings(oldString);
         var normNew = AgentUtilities.NormalizeLineEndings(newString);
