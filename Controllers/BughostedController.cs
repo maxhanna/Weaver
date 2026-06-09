@@ -239,6 +239,7 @@ public class BughostedController : ControllerBase
             };
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
+            Console.WriteLine("====== SENDING HEARTBEAT ========" + session.Url + "/weaver/heartbeat");
             return Ok(new { remoteStatus = (int)httpRes.StatusCode, remoteBody = body });
         }
         catch (Exception ex)

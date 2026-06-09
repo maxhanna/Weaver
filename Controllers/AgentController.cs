@@ -66,7 +66,7 @@ public class AgentController : ControllerBase
 "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
 "  \"newString\": \"replacement line 1\\nreplacement line 2\"\n" +
 "}\n\n" +
-"FORMAT C — AST-based (for C# files — safest, no text matching needed):\n" +
+"FORMAT C — AST-based (for any file — safest, system auto-extracts oldString from file):\n" +
 "{\n" +
 "  \"targetType\": \"method\",\n" +
 "  \"targetName\": \"CalculateTotal\",\n" +
@@ -111,7 +111,9 @@ public class AgentController : ControllerBase
         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
          "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-         "12. FOR C# FILES: ONLY FORMAT C (targetType/targetName/newCode) is supported. oldString/newString will fail for C# files.\n" +
+          "12. FORMAT C (targetType/targetName/newCode) works for ALL languages. " +
+               "For non-C# files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
+               "For C# files, only FORMAT C is supported — oldString/newString will fail for C#.\n" +
          "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
          "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
          "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.";
@@ -231,13 +233,86 @@ public class AgentController : ControllerBase
             return (null, "File not found for AST edit");
 
         var ext = Path.GetExtension(fullPath).ToLowerInvariant();
-        if (ext != ".cs")
-            return (null, $"AST editing not supported for {ext} files");
-
         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
         if (string.IsNullOrWhiteSpace(sourceText))
             return (null, "File is empty");
 
+        // ── Non-C#: regex-based resolution (TypeScript, JS, etc.) ─────
+        if (ext != ".cs")
+        {
+            if (!string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
+                return (null, $"For {ext} files, only targetType 'method'/'function' is supported. Got '{targetType}'.");
+
+            // Must be a proper method declaration at line start (not inside a method body,
+            // not an object property, not a variable assignment).
+            // Pattern: line start + optional indent + optional modifiers + methodName(params) { or => {
+            var pattern = $@"^\s*(?:(?:async|export)\s+)?(?:(?:public|private|protected|internal)\s+)?(?:(?:static|readonly)\s+)?(?:\w+\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)";
+            var match = Regex.Match(sourceText, pattern, RegexOptions.Multiline);
+            if (!match.Success)
+                return (null, $"Method/function '{targetName}' not found in {ext} file");
+
+            var startIdx = match.Index;
+            // Advance past any => to find the opening brace
+            var openBraceIdx = sourceText.IndexOf('{', startIdx);
+            if (openBraceIdx < 0)
+                return (null, $"Method '{targetName}' has no opening brace");
+
+            // Find the matching closing brace, skipping braces inside strings and comments
+            var braceDepth = 0;
+            var inSingleQuote = false;
+            var inDoubleQuote = false;
+            var inTemplate = false;
+            var inLineComment = false;
+            var inBlockComment = false;
+            var endIdx = -1;
+            for (var i = openBraceIdx; i < sourceText.Length; i++)
+            {
+                var c = sourceText[i];
+                var p = i > 0 ? sourceText[i - 1] : '\0';
+
+                // Track string/comment state
+                if (!inBlockComment && !inLineComment && !inTemplate)
+                {
+                    if (c == '\'' && !inDoubleQuote) { inSingleQuote = !inSingleQuote; continue; }
+                    if (c == '"' && !inSingleQuote) { inDoubleQuote = !inDoubleQuote; continue; }
+                }
+                if (!inBlockComment && !inLineComment && !inSingleQuote && !inDoubleQuote)
+                {
+                    if (c == '`') { inTemplate = !inTemplate; continue; }
+                }
+                if (!inBlockComment && !inSingleQuote && !inDoubleQuote && !inTemplate)
+                {
+                    if (c == '/' && p == '/') { inLineComment = true; continue; }
+                    if (c == '*' && p == '/') { inBlockComment = true; continue; }
+                }
+                if (inLineComment && c == '\n') { inLineComment = false; continue; }
+                if (inBlockComment && c == '/' && p == '*') { inBlockComment = false; continue; }
+                if (inLineComment || inBlockComment || inSingleQuote || inDoubleQuote || inTemplate) continue;
+
+                if (c == '{') braceDepth++;
+                else if (c == '}')
+                {
+                    braceDepth--;
+                    if (braceDepth == 0) { endIdx = i; break; }
+                }
+            }
+            if (endIdx < 0)
+                return (null, $"Could not find closing brace for method '{targetName}'");
+
+            var resolved = sourceText[startIdx..(endIdx + 1)].Replace("\r\n", "\n").Replace("\r", "\n");
+
+            if (returnTail)
+            {
+                var lines = resolved.Split('\n');
+                var tailCount = Math.Min(3, lines.Length);
+                return (string.Join("\n", lines[^tailCount..]), null);
+            }
+
+            return (resolved, null);
+        }
+
+        // ── C#: Roslyn-based resolution ───────────────────────────────
         SyntaxTree tree;
         try { tree = CSharpSyntaxTree.ParseText(sourceText); }
         catch (Exception ex)
@@ -314,9 +389,6 @@ public class AgentController : ControllerBase
 
         if (returnTail)
         {
-            // Return only the closing lines (last 2-3 lines) of the target node.
-            // This is used for "insert after" — the LLM's newCode gets inserted
-            // right before these closing lines.
             var nodeBody = targetNode.ToString();
             var lines = nodeBody.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
             var tailCount = Math.Min(3, lines.Length);
@@ -324,12 +396,9 @@ public class AgentController : ControllerBase
             return (tail, null);
         }
 
-        // Include leading trivia (comments, attributes) but not trailing whitespace
         var leading = targetNode.GetLeadingTrivia().ToFullString();
         var body = targetNode.ToString();
         var oldStr = leading + body;
-
-        // Normalize line endings
         oldStr = oldStr.Replace("\r\n", "\n").Replace("\r", "\n");
 
         return (oldStr, null);
@@ -447,8 +516,8 @@ public class AgentController : ControllerBase
                 sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
                 sb.AppendLine("```");
                 sb.AppendLine();
-                sb.AppendLine("⚠ Do NOT output the full file. Use FORMAT C (targetType/targetName/newCode) for C# files, " +
-                              "or a small oldString (≤10 lines) anchored around the exact change location.");
+                sb.AppendLine("⚠ Do NOT output the full file. PREFER FORMAT C (targetType/targetName/newCode) — it works for ALL languages. " +
+                              "Fall back to oldString/newString only if FORMAT C is not applicable (e.g. replacing non-method blocks).");
             }
             else
             {
@@ -462,9 +531,9 @@ public class AgentController : ControllerBase
         // Always encourage small, focused oldStrings
         sb.AppendLine();
         sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
-        sb.AppendLine("For C# files: use FORMAT C (targetType/targetName/newCode) — no oldString needed.");
-        sb.AppendLine("To ADD a new method to a C# file: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
-        sb.AppendLine("To REPLACE a C# method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
+        sb.AppendLine("PREFER FORMAT C (targetType/targetName/newCode) — it works for ALL languages and avoids text-matching issues.");
+        sb.AppendLine("To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
+        sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
         sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
 
         if (history?.Count > 0)
@@ -2371,6 +2440,26 @@ public class AgentController : ControllerBase
             steeringContext: steeringContext, attachedFiles: attachedFiles,
             cardId: cardId);
 
+        // ── Post-execution verification: re-check with LLM that task is 100% complete ──
+        var taskComplete = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+        if (!taskComplete)
+        {
+            await EmitLog(emitSse, "warn", "Post-execution verification indicates task may not be fully complete. Re-planning...", ct: ct);
+            // Re-read modified files and re-plan
+            var freshContext = AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
+            var replan = await AnalyzePromptAndPlanCodeChanges(
+                prompt, freshContext, projectRoot, emitSse, ct, steeringContext);
+            if (replan != null && replan.Plan.Count > 0)
+            {
+                await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
+                    steeringContext: steeringContext, cardId: cardId);
+            }
+        }
+        else
+        {
+            await EmitLog(emitSse, "success", "Post-execution verification: task is 100% complete.", ct: ct);
+        }
+
         return (allSteps, plan);
     }
 
@@ -2465,6 +2554,92 @@ public class AgentController : ControllerBase
             }
         }
         return enriched.ToString();
+    }
+
+    /// <summary>
+    /// After all plan steps execute, re-reads modified files and asks the LLM
+    /// to verify whether the original task is 100% complete. Returns false if
+    /// the LLM identifies remaining work.
+    /// </summary>
+    private async Task<bool> PostExecuteVerify(
+        string originalPrompt, string projectRoot, bool emitSse,
+        List<object> allResults, CancellationToken ct)
+    {
+        // Collect all files that were modified/skipped by the plan
+        var modifiedPaths = allResults
+            .OfType<Dictionary<string, object?>>()
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit")
+            .Select(r => r.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (modifiedPaths.Count == 0) return true; // nothing to verify
+
+        var sb = new StringBuilder();
+        sb.AppendLine("### ORIGINAL TASK ###");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### CURRENT STATE OF MODIFIED FILES ###");
+
+        foreach (var relPath in modifiedPaths)
+        {
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (System.IO.File.Exists(fullPath))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                sb.AppendLine($"\n### {relPath}");
+                sb.AppendLine("```");
+                sb.AppendLine(content);
+                sb.AppendLine("```");
+            }
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("Based on the original task above and the current state of all modified files,");
+        sb.AppendLine("answer with a single JSON object:");
+        sb.AppendLine("{ \"complete\": true|false, \"reason\": \"short explanation\" }");
+        sb.AppendLine("Set complete=true only if the original task is fully implemented with no missing pieces.");
+        sb.AppendLine("Set complete=false if anything is still missing, incomplete, or broken.");
+
+        var verifySystemPrompt = "You are a QA verifier. Check whether a programming task is 100% complete. Output ONLY a JSON object with 'complete' (bool) and 'reason' (string). Be strict — if any part of the task is missing, return false.";
+
+        var (raw, _, error) = await CallLlmRawStreaming(
+            verifySystemPrompt, sb.ToString(), emitSse, ct,
+            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 256);
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
+            return true; // can't verify — assume ok
+        }
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            if (doc.RootElement.TryGetProperty("complete", out var completeEl))
+            {
+                var isComplete = completeEl.GetBoolean();
+                if (doc.RootElement.TryGetProperty("reason", out var reasonEl))
+                    await EmitLog(emitSse, isComplete ? "info" : "warn",
+                        $"Verification: complete={isComplete}, reason={reasonEl.GetString()}", ct: ct);
+                return isComplete;
+            }
+        }
+        catch { }
+
+        return true; // parse failure — assume ok
     }
 
     // ═══════════════════════════════════════════════════════════════════════

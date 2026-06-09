@@ -774,6 +774,7 @@
     }
 
     vm.syncEditorState = function () {
+      console.log("Sync editor state")
       if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
       var curState = vm.ide && vm.ide.currentFile ? {
         currentFile: vm.ide.currentFile,
@@ -803,26 +804,25 @@
     };
 
     function startBughostedHeartbeat() {
-      stopBughostedHeartbeat(); 
+      stopBughostedHeartbeat();
+      console.log("starting heartbeat");
       // Full state sync every30 seconds (kanban, agent, etc.)
       _bhHeartbeatTimer = $interval(function () {
-        if (_isBhHearting) return;
-        _isBhHearting = true;
+        console.log("heartbeat interval"); 
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
         _lastSyncedEditorState = null;
         var data = buildHeartbeatPayload();
         $http.post('/api/bughosted/heartbeat', data, { signal: vm.abortController.signal }).then(function () {
           _bhHeartbeatFailCount = 0;
-          vm.bughostedStatus = 'connected';
-          _isBhHearting = false;
+          vm.bughostedStatus = 'connected'; 
         }, function () {
+          console.log("heartbeat failed");
           _bhHeartbeatFailCount++;
           if (_bhHeartbeatFailCount >= 3) {
-            vm.bughostedStatus = 'error';
-            _isBhHearting = false;
+            vm.bughostedStatus = 'error'; 
           }
         });
-      }, 60000, 0, false);
+      }, 30000, 0, false);
       // Rapid editor state sync every 3 seconds
       _bhEditorSyncTimer = $interval(function () {
         if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
@@ -830,6 +830,7 @@
       }, 3000, 0, false);
     }
     function stopBughostedHeartbeat() {
+      console.log("stopping heartbeat");
       if (_bhHeartbeatTimer) { $interval.cancel(_bhHeartbeatTimer); _bhHeartbeatTimer = null; }
       if (_bhEditorSyncTimer) { $interval.cancel(_bhEditorSyncTimer); _bhEditorSyncTimer = null; }
     }
@@ -850,6 +851,7 @@
           _bhTimerRunning = true;
           $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
             .then(function (resp) {
+              _bhTimerRunning = false;
               if (resp && resp.data) {
                 console.log("GOT COMMAND : ", resp);
                 try {
@@ -873,9 +875,8 @@
                   console.log("trying to absorb the infidigs", e);
                 }
               }
-            }).finally(res => {
-              _bhTimerRunning = false;
             }).catch(e => {
+              _bhTimerRunning = false;
               console.log("trying to ignore the infidigs", e);
             });
         }, 15000, 0, false);
