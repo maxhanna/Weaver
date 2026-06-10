@@ -563,6 +563,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       };
 
       vm.moveCardToDone = function (card) {
+        var cardId = card.id || card._id;
         targetCol = card.selfImproving ? 'selfImproving' : 'done';
         console.log("Moving card to " + targetCol);
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
@@ -570,10 +571,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           console.log("ERROR: Could not find card in doing column");
           return;
         }
-        var card = vm.state.doing.splice(idx, 1)[0];
-        if (card) {
+        var moved = vm.state.doing.splice(idx, 1)[0];
+        if (moved) {
           console.log("Found card in doing, moving to " + targetCol);
-          vm.state[targetCol].push(card);
+          vm.state[targetCol].push(moved);
           console.log("card added to " + targetCol + " setting active card to null");
           vm.activeCardId = null;
           if (!vm.activeCardIds) vm.activeCardIds = new Set();

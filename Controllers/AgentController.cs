@@ -567,6 +567,36 @@ public class AgentController : ControllerBase
         return string.Join("\n", lines);
     }
 
+    /// <summary>Removes the class declaration wrapper (e.g. "export class Foo {") 
+    /// and trailing "}" from partial class snippets so only body content remains.</summary>
+    private static string StripClassWrapper(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return code;
+        var lines = code.Split('\n').ToList();
+        // Remove leading "export class X {" or "class X {" lines
+        while (lines.Count > 0)
+        {
+            var trimmed = lines[0].Trim();
+            if (trimmed.Length == 0 ||
+                Regex.IsMatch(trimmed, @"^(export\s+)?(default\s+)?(abstract\s+)?class\s+\w+"))
+            {
+                lines.RemoveAt(0);
+            }
+            else break;
+        }
+        // Remove trailing closing braces and blank lines
+        while (lines.Count > 0)
+        {
+            var trimmed = lines[^1].Trim();
+            if (trimmed == "}" || trimmed.Length == 0)
+            {
+                lines.RemoveAt(lines.Count - 1);
+            }
+            else break;
+        }
+        return string.Join("\n", lines);
+    }
+
     private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
     {
         var oldLines = oldSource.Split('\n');
@@ -924,7 +954,9 @@ public class AgentController : ControllerBase
                         {
                             // For classes, insert new members inside the body (before closing })
                             var unit = DetectIndentUnit(fullStr);
-                            var bodyIndented = ReindentToLevel(newCodeStr, unit);
+                            var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
+                            var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
+                            var bodyIndented = ReindentToLevel(body, unit);
                             var lastBrace = fullStr.LastIndexOf('}');
                             if (lastBrace >= 0)
                             {
@@ -943,21 +975,27 @@ public class AgentController : ControllerBase
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
-                            // Safety check: when targeting a class and newCode doesn't contain
-                            // a full class declaration, the LLM likely meant insert mode —
-                            // auto-switch to inserting members inside the class body.
+                            // Class target always uses insert mode: strip the class
+                            // declaration wrapper if present and insert body content
+                            // before the closing brace. Full-class replacements must
+                            // use oldString/newString instead.
                             var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
                             var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
-                            var isPartialClass = hasClassDecl && newCodeStr.Split('\n').Length < astOldStr.Split('\n').Length * 0.8;
-                            if (isClassTarget && (!hasClassDecl || isPartialClass))
+                            if (isClassTarget)
                             {
-                                var unit = DetectIndentUnit(astOldStr);
-                                var bodyIndented = ReindentToLevel(newCodeStr, unit);
-                                var lastBrace = astOldStr.LastIndexOf('}');
-                                if (lastBrace >= 0)
+                                // Strip the "export class Foo {" wrapper if present so only
+                                // body content (properties, constructor, etc.) is inserted.
+                                var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
+                                if (!string.IsNullOrWhiteSpace(body))
                                 {
-                                    var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
-                                    return (astOldStr, mergedStr, false, null, false, null);
+                                    var unit = DetectIndentUnit(astOldStr);
+                                    var bodyIndented = ReindentToLevel(body, unit);
+                                    var lastBrace = astOldStr.LastIndexOf('}');
+                                    if (lastBrace >= 0)
+                                    {
+                                        var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
+                                        return (astOldStr, mergedStr, false, null, false, null);
+                                    }
                                 }
                             }
 
@@ -2371,6 +2409,7 @@ private sealed class StepExplorationResult
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
         "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
+        "  \"_explore\"            — Read a file for REFERENCE only (no edits). Put the file path in \"change\". Use this when you need to understand how existing code works before editing a different file.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations (fetching data, creating files outside the project). NEVER use mkdir/rmdir/del for project files — use edit steps instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
         "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
@@ -4294,6 +4333,63 @@ private sealed class StepExplorationResult
             // ── File edit: resolve then apply ─────────────────────────────
             if (AgentUtilities.IsRelativePath(planFile))
             {
+                // Safeguard: detect read-only intent (e.g. "Look at", "Read", "Examine")
+                // when the LLM used a regular file path instead of _explore.
+                // Treat as exploration (read + add result) rather than an edit.
+                var readOnlyPrefixes = new[] { "read", "look at", "examine", "inspect", "review", "understand",
+                    "study", "browse", "view", "check how", "see how", "get familiar", "explore" };
+                var changeLower = (item.Change ?? "").Trim().ToLowerInvariant();
+                if (readOnlyPrefixes.Any(p => changeLower.StartsWith(p)))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"⏭ Read-only step (change starts with '{changeLower.Split(' ')[0]}') — exploring instead of editing", ct: ct);
+                    var fp = Path.GetFullPath(Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
+                    var relPath = planFile.Replace('\\', '/');
+                    if (System.IO.File.Exists(fp) && AgentUtilities.IsPathUnderRoot(fp, projectRoot))
+                    {
+                        if (emitSse)
+                            await SendSse(Response, "step", new
+                            {
+                                index = stepIndex,
+                                type = "read",
+                                status = "done",
+                                path = relPath,
+                                description = item.Change,
+                                planItemIndex = itemIdx
+                            }, ct);
+                        allResults.Add(new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "read", ["status"] = "done",
+                            ["path"] = relPath, ["description"] = item.Change,
+                            ["planItemIndex"] = itemIdx
+                        });
+                    }
+                    else
+                    {
+                        if (emitSse)
+                            await SendSse(Response, "step", new
+                            {
+                                index = stepIndex,
+                                type = "read",
+                                status = "error",
+                                path = relPath,
+                                error = "File not found",
+                                planItemIndex = itemIdx
+                            }, ct);
+                        allResults.Add(new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "read", ["status"] = "error",
+                            ["path"] = relPath, ["error"] = "File not found",
+                            ["planItemIndex"] = itemIdx
+                        });
+                    }
+                    await PersistStepStatusAsync(cardId, itemIdx, "done", emitSse, ct);
+                    stepIndex++;
+                    continue;
+                }
+
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
                 var prevCount = allResults.Count;
                 stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,

@@ -1846,6 +1846,7 @@
           vm.streamingSummary = '';
           vm.streamingPhase = '';
           vm.streamingContextSize = 0;
+          vm.streamingTokenBuffer = '';
           vm.streamingSteps = [];
           vm.streamingFilesEdited = [];
           vm.planItems = [];
@@ -2509,9 +2510,11 @@
       console.log("Stopping agent.");
       if (vm.abortController) {
         console.log("abort signal launched");
-        vm.abortController.abort(); 
+        vm.abortController.abort();
       }
+      vm.abortController = new AbortController();
       vm.streamingActive = false;
+      vm.streamingTokenBuffer = '';
       vm.agentResult = { warning: 'Agent stopped by user.' };
       pushAgentLog('warn', 'Agent stopped by user');
       if (card) {
