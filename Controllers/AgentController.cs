@@ -3404,6 +3404,120 @@ private sealed class StepExplorationResult
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  PLANNING CONVERGENCE LOOP
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Minimum planner self-confidence (0-100) required to stop iterating and execute.</summary>
+    private const int PlanScoreThreshold = 75;
+    /// <summary>Upper bound on planning iterations so a low-scoring/exploring model still terminates.</summary>
+    private const int MaxPlanningIterations = 4;
+
+    /// <summary>
+    /// Iterates planning until the planner is confident (score ≥ threshold) or the iteration
+    /// budget is exhausted, gathering more context via _explore steps in between. This replaces
+    /// the old single-shot Plan → Explore → Replan sequence: the number of loops is now data-driven
+    /// off the planner's own score, so confident plans stop early and uncertain ones gather more
+    /// context before committing — without an open-ended "invent more work" path.
+    /// </summary>
+    private async Task<(AgentPlan plan, string discoveryContext)> RunPlanningConvergenceLoop(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        CancellationToken ct, string? steeringContext)
+    {
+        AgentPlan? best = null;
+        var steering = steeringContext;
+
+        for (var iter = 1; iter <= MaxPlanningIterations; iter++)
+        {
+            var plan = await AnalyzePromptAndPlanCodeChanges(
+                prompt, discoveryContext, projectRoot, emitSse, ct, steering);
+
+            if (plan == null || plan.Plan.Count == 0)
+            {
+                if (best != null) break; // reuse the last good plan rather than failing
+                throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
+            }
+
+            // If the planner asked to read more files, gather that context and replan.
+            // Exploration rounds never count as a converged plan, so _explore steps can
+            // never leak into the executable plan.
+            var exploreSteps = plan.Plan
+                .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (exploreSteps.Count > 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Planning {iter}/{MaxPlanningIterations}: planner requested {exploreSteps.Count} exploration target(s) — gathering context…", ct: ct);
+                discoveryContext = await ExplorationPipeline(exploreSteps, discoveryContext, projectRoot, emitSse, ct);
+                if (iter == MaxPlanningIterations)
+                    steering = AppendExploreSteering(steeringContext); // last shot: force a real plan
+                continue;
+            }
+
+            if (best == null || plan.Score > best.Score) best = plan;
+
+            await EmitLog(emitSse, "info",
+                $"Planning {iter}/{MaxPlanningIterations} — score {plan.Score}/100 ({plan.Plan.Count} step(s))",
+                new { plan.Score }, ct: ct);
+
+            if (plan.Score >= PlanScoreThreshold)
+            {
+                await EmitLog(emitSse, "success",
+                    $"Plan converged: score {plan.Score} ≥ {PlanScoreThreshold}.", ct: ct);
+                best = plan;
+                break;
+            }
+
+            if (iter < MaxPlanningIterations)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Plan score {plan.Score} below {PlanScoreThreshold} — refining…", ct: ct);
+                steering = BuildLowScoreSteering(plan, steeringContext);
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Planning budget exhausted at score {best!.Score} — proceeding with best plan.", ct: ct);
+            }
+        }
+
+        // Only-ever-explored fallback: force one final plan with no further exploration.
+        if (best == null)
+        {
+            var forced = await AnalyzePromptAndPlanCodeChanges(
+                prompt, discoveryContext, projectRoot, emitSse, ct, AppendExploreSteering(steeringContext));
+            best = forced?.Plan.Count > 0
+                ? forced
+                : throw new InvalidOperationException("Planner did not produce an actionable plan after exploration.");
+            best.Plan = best.Plan
+                .Where(p => !p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+
+        return (best, discoveryContext);
+    }
+
+    /// <summary>Steering that nudges a low-confidence planner to gather context or sharpen steps — never to invent extra work.</summary>
+    private static string BuildLowScoreSteering(AgentPlan plan, string? prior)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PlanScoreThreshold}.");
+        sb.AppendLine("Raise your confidence by EITHER:");
+        sb.AppendLine("  • Emitting _explore steps (a file path or glob in \"change\") to read files you are unsure about, OR");
+        sb.AppendLine("  • Making each step more precise so you are confident it fully solves the task.");
+        sb.AppendLine("Plan ONLY what the user's request requires — do not invent extra files, features, or refactors.");
+        if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
+        return sb.ToString();
+    }
+
+    /// <summary>Steering that forces the planner to stop exploring and emit the final edit plan.</summary>
+    private static string AppendExploreSteering(string? prior)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("You have already explored the relevant files. Produce the final edit plan now.");
+        sb.AppendLine("Do NOT emit any more _explore steps. Plan only the edits the task requires — no extra work.");
+        if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
+        return sb.ToString();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  UNIFIED PIPELINE  (discover → plan → execute)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -3431,14 +3545,9 @@ private sealed class StepExplorationResult
             await SendSse(Response, "phase",
                 new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
 
-        var plan = await AnalyzePromptAndPlanCodeChanges(
+        var (plan, convergedContext) = await RunPlanningConvergenceLoop(
             prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-
-        if (plan == null || plan.Plan.Count == 0)
-        {
-            await EmitLog(emitSse, "error", "Plan phase produced no items.", ct: ct);
-            throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
-        }
+        discoveryContext = convergedContext;
 
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
@@ -3459,25 +3568,7 @@ private sealed class StepExplorationResult
             ["description"] = "Plan complete"
         });
 
-        // Phase 2.5: Explore if needed
-        var exploreSteps = plan.Plan
-            .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (exploreSteps.Count > 0)
-        {
-            await EmitLog(emitSse, "info",
-                $"Phase 2.5 — EXPLORE: {exploreSteps.Count} target(s)…", ct: ct);
-            discoveryContext = await ExplorationPipeline(
-                exploreSteps, discoveryContext, projectRoot, emitSse, ct);
-            var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-            if (replan == null) throw new InvalidOperationException("Re-plan after exploration returned empty.");
-            plan = MergePlans(plan, replan);
-            if (emitSse)
-                await SendSse(Response, "plan",
-                    new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
-        }
-
-        // Phase 2.75: Plan validation
+        // Phase 2.75: Plan validation — final safety gate after convergence.
         var validationReason = await ValidatePlanAsync(prompt, plan, ct);
         if (_gracefulStop)
         {
@@ -3488,8 +3579,11 @@ private sealed class StepExplorationResult
         {
             await EmitLog(emitSse, "warn",
                 $"Plan validation failed: {validationReason} — replanning…", ct: ct);
+            var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
+                "Fix exactly that issue — do not add unrelated files, features, or refactors." +
+                (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
             var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+                prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
             if (replan != null && replan.Plan.Count > 0)
             {
                 plan = MergePlans(plan, replan);
