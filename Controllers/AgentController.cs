@@ -3139,9 +3139,17 @@ private sealed class StepExplorationResult
                     // Only generate new steps if all original steps are done but quality check still failed
                     if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
-                        await EmitLog(emitSse, "info", "All steps done — generating additional steps…", ct: ct);
+                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct);
+                        // Every planned step succeeded, so any extra steps must be anchored to the
+                        // user's explicit request — not invented scope. GenerateReplanStepsAsync
+                        // returns an empty plan when nothing is genuinely missing, which stops here.
+                        var scopedSteering = "The original plan's steps all succeeded. Only add steps for work the " +
+                            "user EXPLICITLY requested that is still genuinely missing. Do NOT invent extra files, " +
+                            "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
+                            "missing, return an empty plan." +
+                            (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                            steeringContext, projectRoot, emitSse, ct,
+                            scopedSteering, projectRoot, emitSse, ct,
                             attachedFiles: attachedFiles, qualityCheckReason: reason);
                         if (newSteps?.Count > 0)
                         {
@@ -3265,6 +3273,8 @@ private sealed class StepExplorationResult
         var sb = new StringBuilder();
         sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
         sb.AppendLine("IMPORTANT: Only plan steps that address specific failures below. Do NOT repeat existing steps.");
+        sb.AppendLine("Only address concrete failures or work the user EXPLICITLY requested that is genuinely missing.");
+        sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
 
@@ -5729,12 +5739,14 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             }
         }
 
-        sb.AppendLine(@"Evaluate the code changes against the original task. Check for:
-1. Does the code solve the original task completely?
-2. Are there any bugs, syntax errors, or logic issues in the modified files?
-3. Are there any missing pieces or regressions?
-4. Check every file in ""Unmodified attached files"" — does any of them need changes to satisfy the task? If yes, the task is NOT complete.
-5. If the planned steps covered only part of the task (e.g. only backend but not frontend), report it as incomplete.
+        sb.AppendLine(@"Evaluate the code changes against the ORIGINAL TASK ONLY. Judge strictly against what the user
+EXPLICITLY requested — do NOT invent additional requirements, features, files, or 'best practice' improvements the
+user did not ask for. Check for:
+1. Does the code address everything the user EXPLICITLY requested?
+2. Are there bugs, syntax errors, or logic issues in the modified files that would break the requested change?
+3. Did any planned step fail or get left unfinished?
+4. Check files in ""Unmodified attached files"" ONLY against the explicit request — mark incomplete only if the user's request clearly required changing them.
+A task is complete when the explicit request is satisfied, even if you can imagine further improvements. When in doubt, mark complete=true.
 
 Respond with JSON only:
 ```json
@@ -5745,7 +5757,7 @@ Respond with JSON only:
 }
 ```");
 
-        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, syntax mistakes, and whether the task requirements are fully met. Pay special attention to files that were NOT modified — if any of them need changes to complete the task, mark complete=false. Output ONLY valid JSON in the format specified.";
+        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, and syntax mistakes that would break the requested change. Judge completion ONLY against what the user explicitly requested — never invent new requirements, features, or scope the user did not ask for. When the explicit request is met, mark complete=true even if further improvements are imaginable. Output ONLY valid JSON in the format specified.";
 
         var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(30));
         if (string.IsNullOrWhiteSpace(raw)) return (failed.Count == 0, "Assessment timed out");
