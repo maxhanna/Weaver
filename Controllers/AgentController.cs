@@ -484,7 +484,48 @@ public class AgentController : ControllerBase
     /// (1-3 spaces) but the file uses 8+ spaces, this shifts the entire block
     /// to the correct base while preserving relative internal nesting.
     /// </summary>
-    private static string AutoIndentCode(string oldSource, string newCode)
+    /// <summary>
+    /// File extensions whose indentation IS the syntax (no braces to recover structure from).
+    /// For these we must never re-indent by brace depth — doing so flattens the code.
+    /// </summary>
+    private static readonly HashSet<string> _whitespaceSignificantExts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".py", ".pyi", ".pyw",            // Python
+        ".yaml", ".yml",                  // YAML
+        ".coffee",                        // CoffeeScript
+        ".haml", ".slim", ".pug", ".jade",// indented templating
+        ".fs", ".fsx", ".fsi",            // F# (offside rule)
+        ".nim",                           // Nim
+        ".sass",                          // indented Sass (NOT .scss)
+    };
+
+    private static bool IsWhitespaceSignificant(string? filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return false;
+        return _whitespaceSignificantExts.Contains(Path.GetExtension(filePath));
+    }
+
+    /// <summary>
+    /// Infers the indentation unit (a tab, or N spaces) used by the surrounding source so
+    /// re-indentation matches the file's own convention instead of a hardcoded width.
+    /// </summary>
+    private static string DetectIndentUnit(string source)
+    {
+        var lines = source.Split('\n');
+        foreach (var line in lines)
+            if (line.Length > 0 && line[0] == '\t') return "\t";
+        var min = int.MaxValue;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var n = 0;
+            while (n < line.Length && line[n] == ' ') n++;
+            if (n > 0 && n < min) min = n;
+        }
+        return new string(' ', min is > 0 and < int.MaxValue ? min : 4);
+    }
+
+    private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
     {
         var oldLines = oldSource.Split('\n');
         var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
@@ -527,15 +568,18 @@ public class AgentController : ControllerBase
         var shifted = string.Join("\n", result);
 
         // If the shifted code has no relative nesting (all non-empty lines at the same
-        // indent level), the LLM flattened the structure. Re-indent by brace depth.
+        // indent level), the LLM flattened the structure. Re-indent by brace depth — but
+        // ONLY for brace-based languages. For whitespace-significant languages (Python,
+        // YAML, F#, …) there are no braces to recover from, so brace-reindent would
+        // collapse everything to the base indent. There we keep the rebased code as-is.
         var shiftedLines = shifted.Split('\n');
         var distinctIndents = shiftedLines
             .Where(l => !string.IsNullOrWhiteSpace(l))
             .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
             .Distinct()
             .ToList();
-        if (distinctIndents.Count <= 1)
-            return ReindentByBraceDepth(shifted, baseIndent);
+        if (distinctIndents.Count <= 1 && !IsWhitespaceSignificant(filePath))
+            return ReindentByBraceDepth(shifted, baseIndent, DetectIndentUnit(oldSource));
 
         return shifted;
     }
@@ -544,7 +588,7 @@ public class AgentController : ControllerBase
     /// Re-indents code by tracking brace depth, using baseIndent as the starting
     /// indentation. Accounts for strings and comments to avoid false brace matches.
     /// </summary>
-    private static string ReindentByBraceDepth(string code, string baseIndent, int indentSize = 2)
+    private static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
     {
         var lines = code.Split('\n');
         var result = new List<string>();
@@ -566,7 +610,7 @@ public class AgentController : ControllerBase
             var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
             if (effectiveDepth < 0) effectiveDepth = 0;
 
-            var indent = baseIndent + new string(' ', effectiveDepth * indentSize);
+            var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
             result.Add(indent + trimmed);
 
             // Count braces on this line, tracking string/comment state
@@ -832,7 +876,7 @@ public class AgentController : ControllerBase
                         if (fullStr == null)
                             return (null, null, false, null, false, astErr ?? "AST resolution failed");
 
-                        var indented = AutoIndentCode(fullStr, newCodeStr);
+                        var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null);
                     }
@@ -842,7 +886,7 @@ public class AgentController : ControllerBase
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
-                            var indented = AutoIndentCode(astOldStr, newCodeStr);
+                            var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
                             return (astOldStr, indented, false, null, false, null);
                         }
                         return (null, null, false, null, false, astErr ?? "AST resolution failed");
@@ -976,12 +1020,12 @@ public class AgentController : ControllerBase
                         if (insertAfter)
                         {
                             var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
+                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
                         }
                         else
                         {
                             var (astOldStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr); return (astOldStr, indented, false, null, false, null); }
+                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null); }
                         }
                     }
                 }
@@ -3139,9 +3183,17 @@ private sealed class StepExplorationResult
                     // Only generate new steps if all original steps are done but quality check still failed
                     if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
-                        await EmitLog(emitSse, "info", "All steps done — generating additional steps…", ct: ct);
+                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct);
+                        // Every planned step succeeded, so any extra steps must be anchored to the
+                        // user's explicit request — not invented scope. GenerateReplanStepsAsync
+                        // returns an empty plan when nothing is genuinely missing, which stops here.
+                        var scopedSteering = "The original plan's steps all succeeded. Only add steps for work the " +
+                            "user EXPLICITLY requested that is still genuinely missing. Do NOT invent extra files, " +
+                            "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
+                            "missing, return an empty plan." +
+                            (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                            steeringContext, projectRoot, emitSse, ct,
+                            scopedSteering, projectRoot, emitSse, ct,
                             attachedFiles: attachedFiles, qualityCheckReason: reason);
                         if (newSteps?.Count > 0)
                         {
@@ -3265,6 +3317,8 @@ private sealed class StepExplorationResult
         var sb = new StringBuilder();
         sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
         sb.AppendLine("IMPORTANT: Only plan steps that address specific failures below. Do NOT repeat existing steps.");
+        sb.AppendLine("Only address concrete failures or work the user EXPLICITLY requested that is genuinely missing.");
+        sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
 
@@ -3404,6 +3458,120 @@ private sealed class StepExplorationResult
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  PLANNING CONVERGENCE LOOP
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>Minimum planner self-confidence (0-100) required to stop iterating and execute.</summary>
+    private const int PlanScoreThreshold = 75;
+    /// <summary>Upper bound on planning iterations so a low-scoring/exploring model still terminates.</summary>
+    private const int MaxPlanningIterations = 4;
+
+    /// <summary>
+    /// Iterates planning until the planner is confident (score ≥ threshold) or the iteration
+    /// budget is exhausted, gathering more context via _explore steps in between. This replaces
+    /// the old single-shot Plan → Explore → Replan sequence: the number of loops is now data-driven
+    /// off the planner's own score, so confident plans stop early and uncertain ones gather more
+    /// context before committing — without an open-ended "invent more work" path.
+    /// </summary>
+    private async Task<(AgentPlan plan, string discoveryContext)> RunPlanningConvergenceLoop(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        CancellationToken ct, string? steeringContext)
+    {
+        AgentPlan? best = null;
+        var steering = steeringContext;
+
+        for (var iter = 1; iter <= MaxPlanningIterations; iter++)
+        {
+            var plan = await AnalyzePromptAndPlanCodeChanges(
+                prompt, discoveryContext, projectRoot, emitSse, ct, steering);
+
+            if (plan == null || plan.Plan.Count == 0)
+            {
+                if (best != null) break; // reuse the last good plan rather than failing
+                throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
+            }
+
+            // If the planner asked to read more files, gather that context and replan.
+            // Exploration rounds never count as a converged plan, so _explore steps can
+            // never leak into the executable plan.
+            var exploreSteps = plan.Plan
+                .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (exploreSteps.Count > 0)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Planning {iter}/{MaxPlanningIterations}: planner requested {exploreSteps.Count} exploration target(s) — gathering context…", ct: ct);
+                discoveryContext = await ExplorationPipeline(exploreSteps, discoveryContext, projectRoot, emitSse, ct);
+                if (iter == MaxPlanningIterations)
+                    steering = AppendExploreSteering(steeringContext); // last shot: force a real plan
+                continue;
+            }
+
+            if (best == null || plan.Score > best.Score) best = plan;
+
+            await EmitLog(emitSse, "info",
+                $"Planning {iter}/{MaxPlanningIterations} — score {plan.Score}/100 ({plan.Plan.Count} step(s))",
+                new { plan.Score }, ct: ct);
+
+            if (plan.Score >= PlanScoreThreshold)
+            {
+                await EmitLog(emitSse, "success",
+                    $"Plan converged: score {plan.Score} ≥ {PlanScoreThreshold}.", ct: ct);
+                best = plan;
+                break;
+            }
+
+            if (iter < MaxPlanningIterations)
+            {
+                await EmitLog(emitSse, "info",
+                    $"Plan score {plan.Score} below {PlanScoreThreshold} — refining…", ct: ct);
+                steering = BuildLowScoreSteering(plan, steeringContext);
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Planning budget exhausted at score {best!.Score} — proceeding with best plan.", ct: ct);
+            }
+        }
+
+        // Only-ever-explored fallback: force one final plan with no further exploration.
+        if (best == null)
+        {
+            var forced = await AnalyzePromptAndPlanCodeChanges(
+                prompt, discoveryContext, projectRoot, emitSse, ct, AppendExploreSteering(steeringContext));
+            best = forced?.Plan.Count > 0
+                ? forced
+                : throw new InvalidOperationException("Planner did not produce an actionable plan after exploration.");
+            best.Plan = best.Plan
+                .Where(p => !p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+
+        return (best, discoveryContext);
+    }
+
+    /// <summary>Steering that nudges a low-confidence planner to gather context or sharpen steps — never to invent extra work.</summary>
+    private static string BuildLowScoreSteering(AgentPlan plan, string? prior)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PlanScoreThreshold}.");
+        sb.AppendLine("Raise your confidence by EITHER:");
+        sb.AppendLine("  • Emitting _explore steps (a file path or glob in \"change\") to read files you are unsure about, OR");
+        sb.AppendLine("  • Making each step more precise so you are confident it fully solves the task.");
+        sb.AppendLine("Plan ONLY what the user's request requires — do not invent extra files, features, or refactors.");
+        if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
+        return sb.ToString();
+    }
+
+    /// <summary>Steering that forces the planner to stop exploring and emit the final edit plan.</summary>
+    private static string AppendExploreSteering(string? prior)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("You have already explored the relevant files. Produce the final edit plan now.");
+        sb.AppendLine("Do NOT emit any more _explore steps. Plan only the edits the task requires — no extra work.");
+        if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
+        return sb.ToString();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  UNIFIED PIPELINE  (discover → plan → execute)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -3431,14 +3599,9 @@ private sealed class StepExplorationResult
             await SendSse(Response, "phase",
                 new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
 
-        var plan = await AnalyzePromptAndPlanCodeChanges(
+        var (plan, convergedContext) = await RunPlanningConvergenceLoop(
             prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-
-        if (plan == null || plan.Plan.Count == 0)
-        {
-            await EmitLog(emitSse, "error", "Plan phase produced no items.", ct: ct);
-            throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
-        }
+        discoveryContext = convergedContext;
 
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
@@ -3459,25 +3622,7 @@ private sealed class StepExplorationResult
             ["description"] = "Plan complete"
         });
 
-        // Phase 2.5: Explore if needed
-        var exploreSteps = plan.Plan
-            .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (exploreSteps.Count > 0)
-        {
-            await EmitLog(emitSse, "info",
-                $"Phase 2.5 — EXPLORE: {exploreSteps.Count} target(s)…", ct: ct);
-            discoveryContext = await ExplorationPipeline(
-                exploreSteps, discoveryContext, projectRoot, emitSse, ct);
-            var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-            if (replan == null) throw new InvalidOperationException("Re-plan after exploration returned empty.");
-            plan = MergePlans(plan, replan);
-            if (emitSse)
-                await SendSse(Response, "plan",
-                    new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
-        }
-
-        // Phase 2.75: Plan validation
+        // Phase 2.75: Plan validation — final safety gate after convergence.
         var validationReason = await ValidatePlanAsync(prompt, plan, ct);
         if (_gracefulStop)
         {
@@ -3488,8 +3633,11 @@ private sealed class StepExplorationResult
         {
             await EmitLog(emitSse, "warn",
                 $"Plan validation failed: {validationReason} — replanning…", ct: ct);
+            var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
+                "Fix exactly that issue — do not add unrelated files, features, or refactors." +
+                (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
             var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+                prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
             if (replan != null && replan.Plan.Count > 0)
             {
                 plan = MergePlans(plan, replan);
@@ -5635,12 +5783,14 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             }
         }
 
-        sb.AppendLine(@"Evaluate the code changes against the original task. Check for:
-1. Does the code solve the original task completely?
-2. Are there any bugs, syntax errors, or logic issues in the modified files?
-3. Are there any missing pieces or regressions?
-4. Check every file in ""Unmodified attached files"" — does any of them need changes to satisfy the task? If yes, the task is NOT complete.
-5. If the planned steps covered only part of the task (e.g. only backend but not frontend), report it as incomplete.
+        sb.AppendLine(@"Evaluate the code changes against the ORIGINAL TASK ONLY. Judge strictly against what the user
+EXPLICITLY requested — do NOT invent additional requirements, features, files, or 'best practice' improvements the
+user did not ask for. Check for:
+1. Does the code address everything the user EXPLICITLY requested?
+2. Are there bugs, syntax errors, or logic issues in the modified files that would break the requested change?
+3. Did any planned step fail or get left unfinished?
+4. Check files in ""Unmodified attached files"" ONLY against the explicit request — mark incomplete only if the user's request clearly required changing them.
+A task is complete when the explicit request is satisfied, even if you can imagine further improvements. When in doubt, mark complete=true.
 
 Respond with JSON only:
 ```json
@@ -5651,7 +5801,7 @@ Respond with JSON only:
 }
 ```");
 
-        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, syntax mistakes, and whether the task requirements are fully met. Pay special attention to files that were NOT modified — if any of them need changes to complete the task, mark complete=false. Output ONLY valid JSON in the format specified.";
+        const string sys = @"You are a thorough code reviewer and task completion verifier. Examine the original task, the changes made, and the current state of all files. Check for bugs, logic errors, and syntax mistakes that would break the requested change. Judge completion ONLY against what the user explicitly requested — never invent new requirements, features, or scope the user did not ask for. When the explicit request is met, mark complete=true even if further improvements are imaginable. Output ONLY valid JSON in the format specified.";
 
         var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, TimeSpan.FromSeconds(30));
         if (string.IsNullOrWhiteSpace(raw)) return (failed.Count == 0, "Assessment timed out");
@@ -6264,6 +6414,13 @@ Respond with JSON only:
     /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
     private static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
     {
+        // Brace-depth re-indentation is only meaningful when the code actually uses braces.
+        // For whitespace-significant languages (Python, YAML, …) there are no braces, so this
+        // would collapse every line to the base indent. IndentReplacement has already rebased
+        // the relative indentation, so keep it as-is.
+        if (!replacement.Contains('{') && !replacement.Contains('}'))
+            return replacement;
+
         // Infer indent size from the file (difference between parent and child indent levels)
         var indentSize = InferIndentSize(fileLines, start);
         if (indentSize <= 0) return replacement;
