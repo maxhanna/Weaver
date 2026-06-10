@@ -484,7 +484,48 @@ public class AgentController : ControllerBase
     /// (1-3 spaces) but the file uses 8+ spaces, this shifts the entire block
     /// to the correct base while preserving relative internal nesting.
     /// </summary>
-    private static string AutoIndentCode(string oldSource, string newCode)
+    /// <summary>
+    /// File extensions whose indentation IS the syntax (no braces to recover structure from).
+    /// For these we must never re-indent by brace depth — doing so flattens the code.
+    /// </summary>
+    private static readonly HashSet<string> _whitespaceSignificantExts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".py", ".pyi", ".pyw",            // Python
+        ".yaml", ".yml",                  // YAML
+        ".coffee",                        // CoffeeScript
+        ".haml", ".slim", ".pug", ".jade",// indented templating
+        ".fs", ".fsx", ".fsi",            // F# (offside rule)
+        ".nim",                           // Nim
+        ".sass",                          // indented Sass (NOT .scss)
+    };
+
+    private static bool IsWhitespaceSignificant(string? filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return false;
+        return _whitespaceSignificantExts.Contains(Path.GetExtension(filePath));
+    }
+
+    /// <summary>
+    /// Infers the indentation unit (a tab, or N spaces) used by the surrounding source so
+    /// re-indentation matches the file's own convention instead of a hardcoded width.
+    /// </summary>
+    private static string DetectIndentUnit(string source)
+    {
+        var lines = source.Split('\n');
+        foreach (var line in lines)
+            if (line.Length > 0 && line[0] == '\t') return "\t";
+        var min = int.MaxValue;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var n = 0;
+            while (n < line.Length && line[n] == ' ') n++;
+            if (n > 0 && n < min) min = n;
+        }
+        return new string(' ', min is > 0 and < int.MaxValue ? min : 4);
+    }
+
+    private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
     {
         var oldLines = oldSource.Split('\n');
         var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
@@ -527,15 +568,18 @@ public class AgentController : ControllerBase
         var shifted = string.Join("\n", result);
 
         // If the shifted code has no relative nesting (all non-empty lines at the same
-        // indent level), the LLM flattened the structure. Re-indent by brace depth.
+        // indent level), the LLM flattened the structure. Re-indent by brace depth — but
+        // ONLY for brace-based languages. For whitespace-significant languages (Python,
+        // YAML, F#, …) there are no braces to recover from, so brace-reindent would
+        // collapse everything to the base indent. There we keep the rebased code as-is.
         var shiftedLines = shifted.Split('\n');
         var distinctIndents = shiftedLines
             .Where(l => !string.IsNullOrWhiteSpace(l))
             .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
             .Distinct()
             .ToList();
-        if (distinctIndents.Count <= 1)
-            return ReindentByBraceDepth(shifted, baseIndent);
+        if (distinctIndents.Count <= 1 && !IsWhitespaceSignificant(filePath))
+            return ReindentByBraceDepth(shifted, baseIndent, DetectIndentUnit(oldSource));
 
         return shifted;
     }
@@ -544,7 +588,7 @@ public class AgentController : ControllerBase
     /// Re-indents code by tracking brace depth, using baseIndent as the starting
     /// indentation. Accounts for strings and comments to avoid false brace matches.
     /// </summary>
-    private static string ReindentByBraceDepth(string code, string baseIndent, int indentSize = 2)
+    private static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
     {
         var lines = code.Split('\n');
         var result = new List<string>();
@@ -566,7 +610,7 @@ public class AgentController : ControllerBase
             var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
             if (effectiveDepth < 0) effectiveDepth = 0;
 
-            var indent = baseIndent + new string(' ', effectiveDepth * indentSize);
+            var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
             result.Add(indent + trimmed);
 
             // Count braces on this line, tracking string/comment state
@@ -832,7 +876,7 @@ public class AgentController : ControllerBase
                         if (fullStr == null)
                             return (null, null, false, null, false, astErr ?? "AST resolution failed");
 
-                        var indented = AutoIndentCode(fullStr, newCodeStr);
+                        var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null);
                     }
@@ -842,7 +886,7 @@ public class AgentController : ControllerBase
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
-                            var indented = AutoIndentCode(astOldStr, newCodeStr);
+                            var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
                             return (astOldStr, indented, false, null, false, null);
                         }
                         return (null, null, false, null, false, astErr ?? "AST resolution failed");
@@ -976,12 +1020,12 @@ public class AgentController : ControllerBase
                         if (insertAfter)
                         {
                             var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
+                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
                         }
                         else
                         {
                             var (astOldStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr); return (astOldStr, indented, false, null, false, null); }
+                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null); }
                         }
                     }
                 }
@@ -6370,6 +6414,13 @@ Respond with JSON only:
     /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
     private static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
     {
+        // Brace-depth re-indentation is only meaningful when the code actually uses braces.
+        // For whitespace-significant languages (Python, YAML, …) there are no braces, so this
+        // would collapse every line to the base indent. IndentReplacement has already rebased
+        // the relative indentation, so keep it as-is.
+        if (!replacement.Contains('{') && !replacement.Contains('}'))
+            return replacement;
+
         // Infer indent size from the file (difference between parent and child indent levels)
         var indentSize = InferIndentSize(fileLines, start);
         if (indentSize <= 0) return replacement;
