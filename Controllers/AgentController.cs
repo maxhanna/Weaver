@@ -112,10 +112,11 @@ public class AgentController : ControllerBase
         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
          "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-           "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
-                "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
-                "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
-                "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
+            "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
+                 "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
+                 "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
+                 "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
+            "12b. targetType=\"class\": ONLY use to REPLACE the entire class body. To ADD a single field/property, use oldString/newString instead — never use targetType=\"class\" for small additions.\n" +
          "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
          "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
          "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.";
@@ -309,28 +310,56 @@ public class AgentController : ControllerBase
         // ── Non-C#: regex-based resolution (TypeScript, JS, etc.) ─────
         if (ext != ".cs")
         {
-            if (!string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
-                return (null, $"For {ext} files, only targetType 'method'/'function' is supported. Got '{targetType}'.");
+            Regex? regex = null;
+            string label;
 
-            // Must be a proper method declaration at line start (not inside a method body,
-            // not an object property, not a variable assignment).
-            // Pattern: line start + optional indent + optional modifiers + methodName(params) { or => {
-            var pattern = $@"^\s*(?:(?:async|export)\s+)?(?:(?:public|private|protected|internal)\s+)?(?:(?:static|readonly)\s+)?(?:\w+\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)";
-            var match = Regex.Match(sourceText, pattern, RegexOptions.Multiline);
+            if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
+            {
+                label = "Method/function";
+                regex = new Regex($@"^\s*(?:(?:async|export)\s+)?(?:(?:public|private|protected|internal)\s+)?(?:(?:static|readonly)\s+)?(?:\w+\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)", RegexOptions.Multiline);
+            }
+            else if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
+            {
+                label = "Class";
+                regex = new Regex($@"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+{Regex.Escape(targetName)}\b", RegexOptions.Multiline);
+            }
+            else if (string.Equals(targetType, "interface", StringComparison.OrdinalIgnoreCase))
+            {
+                label = "Interface";
+                regex = new Regex($@"^\s*(?:export\s+)?(?:default\s+)?interface\s+{Regex.Escape(targetName)}\b", RegexOptions.Multiline);
+            }
+            else if (string.Equals(targetType, "property", StringComparison.OrdinalIgnoreCase))
+            {
+                label = "Property";
+                regex = new Regex($@"^\s*(?:(?:public|private|protected|readonly|static)\s+)*{Regex.Escape(targetName)}\s*(?::\s*[^;=]+)?\s*(?:=|[;)])", RegexOptions.Multiline);
+            }
+            else
+            {
+                return (null, $"For {ext} files, only targetType 'method'/'function'/'class'/'interface'/'property' is supported. Got '{targetType}'.");
+            }
+
+            var match = regex.Match(sourceText);
             if (!match.Success)
             {
                 var hint = ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".json" or ".css" or ".svg"
-                    ? $" {ext} files don't contain methods — use oldString/newString format instead of targetType/targetName/newCode"
+                    ? $" {ext} files don't contain {label.ToLowerInvariant()}s — use oldString/newString format instead of targetType/targetName/newCode"
                     : "";
-                return (null, $"Method/function '{targetName}' not found in {ext} file.{hint}");
+                return (null, $"{label} '{targetName}' not found in {ext} file.{hint}");
             }
 
             var startIdx = match.Index;
-            // Advance past any => to find the opening brace
+
+            // Properties without bodies (ending in ; or )) don't need brace matching
+            if (string.Equals(targetType, "property", StringComparison.OrdinalIgnoreCase) &&
+                match.Value.TrimEnd().EndsWith(";"))
+            {
+                return (match.Value, null);
+            }
+
             var openBraceIdx = sourceText.IndexOf('{', startIdx);
             if (openBraceIdx < 0)
-                return (null, $"Method '{targetName}' has no opening brace");
+                return (null, $"{label} '{targetName}' has no opening brace");
 
             // Find the matching closing brace, skipping braces inside strings and comments
             var braceDepth = 0;
@@ -372,7 +401,7 @@ public class AgentController : ControllerBase
                 }
             }
             if (endIdx < 0)
-                return (null, $"Could not find closing brace for method '{targetName}'");
+                return (null, $"Could not find closing brace for {label} '{targetName}'");
 
             var resolved = sourceText[startIdx..(endIdx + 1)].Replace("\r\n", "\n").Replace("\r", "\n");
 
@@ -523,6 +552,19 @@ public class AgentController : ControllerBase
             if (n > 0 && n < min) min = n;
         }
         return new string(' ', min is > 0 and < int.MaxValue ? min : 4);
+    }
+
+    /// <summary>Strips existing indent and re-indents code to the given indent level.</summary>
+    private static string ReindentToLevel(string code, string indent)
+    {
+        if (string.IsNullOrEmpty(code)) return code;
+        var lines = code.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+                lines[i] = indent + lines[i].TrimStart();
+        }
+        return string.Join("\n", lines);
     }
 
     private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
@@ -729,10 +771,12 @@ public class AgentController : ControllerBase
         // Always encourage small, focused oldStrings
         sb.AppendLine();
         sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
-        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) to avoid text-matching issues.");
+        sb.AppendLine("SMALL targeted edits (1-3 lines): PREFER oldString/newString. Include the line above/below for context, repeat it unchanged in newString.");
+        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) only for LARGE operations (replacing an entire method/class body).");
         sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
         sb.AppendLine("To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
         sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
+        sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\"). Do NOT use targetType=\"class\" to add a single property.");
         sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
 
         if (history?.Count > 0)
@@ -876,6 +920,19 @@ public class AgentController : ControllerBase
                         if (fullStr == null)
                             return (null, null, false, null, false, astErr ?? "AST resolution failed");
 
+                        if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // For classes, insert new members inside the body (before closing })
+                            var unit = DetectIndentUnit(fullStr);
+                            var bodyIndented = ReindentToLevel(newCodeStr, unit);
+                            var lastBrace = fullStr.LastIndexOf('}');
+                            if (lastBrace >= 0)
+                            {
+                                newStr = fullStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + fullStr[lastBrace..];
+                                return (fullStr, newStr, false, null, false, null);
+                            }
+                        }
+
                         var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null);
@@ -886,6 +943,24 @@ public class AgentController : ControllerBase
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
+                            // Safety check: when targeting a class and newCode doesn't contain
+                            // a full class declaration, the LLM likely meant insert mode —
+                            // auto-switch to inserting members inside the class body.
+                            var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
+                            var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
+                            var isPartialClass = hasClassDecl && newCodeStr.Split('\n').Length < astOldStr.Split('\n').Length * 0.8;
+                            if (isClassTarget && (!hasClassDecl || isPartialClass))
+                            {
+                                var unit = DetectIndentUnit(astOldStr);
+                                var bodyIndented = ReindentToLevel(newCodeStr, unit);
+                                var lastBrace = astOldStr.LastIndexOf('}');
+                                if (lastBrace >= 0)
+                                {
+                                    var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
+                                    return (astOldStr, mergedStr, false, null, false, null);
+                                }
+                            }
+
                             var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
                             return (astOldStr, indented, false, null, false, null);
                         }
@@ -1340,8 +1415,59 @@ private sealed class StepExplorationResult
                 if (!System.IO.File.Exists(fp) ||
                     !AgentUtilities.IsPathUnderRoot(fp, projectRoot))
                 {
-                    await EmitLog(emitSse, "warn",
-                        $"  ⚠ Not found: {requested}", ct: ct);
+                    // Search for the file by filename in the project
+                    var fileName = Path.GetFileName(requested.Replace('/', '\\'));
+                    var matches = new List<string>();
+                    try
+                    {
+                        matches = Directory.EnumerateFiles(projectRoot, fileName, SearchOption.AllDirectories)
+                            .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
+                            .Where(rel => AgentUtilities.IsPathUnderRoot(
+                                Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar))), projectRoot))
+                            .Take(5)
+                            .ToList();
+                    }
+                    catch { }
+
+                    if (matches.Count == 1)
+                    {
+                        // Exactly one match — read it and tell the LLM the correct path
+                        var correctPath = matches[0];
+                        var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
+                        var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
+                        var matchExcerpt = matchContent.Length > 3_500 ? ExtractRelevantExcerpt(matchContent, step.Change, step.OldString) : matchContent;
+                        if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
+                        {
+                            ctx.AppendLine($"### {correctPath}  (resolved from `{requested}`)");
+                            ctx.AppendLine("```");
+                            ctx.AppendLine(matchExcerpt);
+                            ctx.AppendLine("```");
+                            ctx.AppendLine();
+                        }
+                        else
+                        {
+                            ctx.AppendLine($"⚠ `{requested}` resolved to `{correctPath}` (skipped — context budget exhausted)");
+                            ctx.AppendLine();
+                        }
+                        filesRead.Add(correctPath);
+                        await EmitLog(emitSse, "info",
+                            $"  🔍 {requested} → {correctPath}", ct: ct);
+                    }
+                    else if (matches.Count > 1)
+                    {
+                        var suggestions = string.Join(", ", matches.Select(m => $"`{m}`"));
+                        ctx.AppendLine($"⚠ `{requested}` not found. Possible matches: {suggestions}. Use an exact relative path from the project root.");
+                        ctx.AppendLine();
+                        await EmitLog(emitSse, "warn",
+                            $"  ⚠ Not found: {requested} — found {matches.Count} candidates: {string.Join(", ", matches)}", ct: ct);
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"  ⚠ Not found: {requested}", ct: ct);
+                        ctx.AppendLine($"⚠ The path `{requested}` does not exist. Use an exact relative path from the project root.");
+                        ctx.AppendLine();
+                    }
                     continue;
                 }
 
@@ -1373,7 +1499,7 @@ private sealed class StepExplorationResult
                 await EmitLog(emitSse, "info", $"  📄 {requested}", ct: ct);
             }
 
-            if (newlyRead == 0) break;
+            if (newlyRead == 0 && parsed.FilesToRead.Count == 0) break;
         }
 
     ExplorationComplete:
@@ -1389,7 +1515,14 @@ private sealed class StepExplorationResult
             var supportedExt = ext is ".cs" or ".ts" or ".js" or ".tsx" or ".jsx";
             if (supportedExt)
             {
-                var (astOld, astErr) = AstResolveEdit(fullPath, "method", targetSymbol);
+                // Try method first, then class (symbol could be a method or a class)
+                string? astOld = null;
+                string? astErr = null;
+                foreach (var tryType in new[] { "method", "class", "interface", "property" })
+                {
+                    (astOld, astErr) = AstResolveEdit(fullPath, tryType, targetSymbol);
+                    if (astOld != null) break;
+                }
                 if (astOld != null)
                 {
                     astOldStringHint = astOld;
@@ -1729,7 +1862,7 @@ private sealed class StepExplorationResult
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
 
         await EmitLog(emitSse, "info",
-            $"▶ Resolving: {relPath} — {step.Change}", ct: ct);
+            $"▶ Resolving: {relPath} — {step.Change}", new {prompt, plan, stepIndex, allResults}, ct: ct);
 
         if (emitSse)
             await SendSse(Response, "step", new
@@ -1821,10 +1954,19 @@ private sealed class StepExplorationResult
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
             {
                 planOldTried = true;
-                oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
-                newStr = AgentUtilities.NormalizeLineEndings(planNewStr ?? "");
-                await EmitLog(emitSse, "info",
-                    $"Using plan-provided edit for {relPath}", ct: ct);
+                if (string.IsNullOrWhiteSpace(planNewStr))
+                {
+                    // No newString provided — skip plan-provided edit and let the LLM resolve it
+                    await EmitLog(emitSse, "info",
+                        $"Plan-provided oldString is set but newString is empty — falling through to LLM resolve", ct: ct);
+                }
+                else
+                {
+                    oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                    newStr = AgentUtilities.NormalizeLineEndings(planNewStr!);
+                    await EmitLog(emitSse, "info",
+                        $"Using plan-provided edit for {relPath}", step, ct: ct);
+                }
             }
             else
             {
@@ -1845,7 +1987,7 @@ private sealed class StepExplorationResult
             {
                 await EmitLog(emitSse, "warn",
                     $"Resolve attempt {attempt + 1}/{MaxAttempts}: {resolveError}",
-                    new { resolveError, fullContent }, ct: ct);
+                    new { resolveError, fullContent, step }, ct: ct);
                 history.Add((step.OldString ?? "", step.NewString ?? "", resolveError));
 
                 if (resolveError == lastResolveError) resolveStuckCount++;
@@ -1916,7 +2058,7 @@ private sealed class StepExplorationResult
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
                 await EmitLog(emitSse, "warn",
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}",
-                    ct: ct);
+                    new { step }, ct: ct);
 
                 // Self-heal: extract verbatim file lines at the fuzzy match location
                 var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!);
@@ -1936,7 +2078,7 @@ private sealed class StepExplorationResult
                             await System.IO.File.WriteAllTextAsync(
                                 fullPath, newContent2, Encoding.UTF8, ct);
                             await EmitLog(emitSse, "success",
-                                $"✓ Edited {relPath} (self-healed)", ct: ct);
+                                $"✓ Edited {relPath} (self-healed)", step, ct: ct);
                             var r2 = new Dictionary<string, object?>();
                             PopulateEditResult(r2, "modified", relPath,
                                 correctedBlock, newStr ?? "", "self-healed");
@@ -1987,7 +2129,7 @@ private sealed class StepExplorationResult
                     var verr = "Replacement produced mismatched content — " +
                                "oldString matched wrong location";
                     await EmitLog(emitSse, "warn",
-                        $"Verify failed for {relPath}: {verr}", ct: ct);
+                        $"Verify failed for {relPath}: {verr}", step, ct: ct);
                     history.Add((oldStr!, newStr, verr));
                     continue;
                 }
@@ -4605,6 +4747,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
     //  COMMAND EXECUTION PIPELINE
     // ═══════════════════════════════════════════════════════════════════════
 
+
     private async Task<(List<object> steps, AgentPlan? plan)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         string? steeringContext = null, string? cardId = null)
@@ -4658,108 +4801,27 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         if (!string.IsNullOrWhiteSpace(steeringContext)) { baseInstructions.AppendLine("### Steering ###"); baseInstructions.AppendLine(steeringContext); }
         baseInstructions.AppendLine($"Task: {prompt}");
 
-        // ── Phase 1: Plan ──────────────────────────────────────────────────
-        var planPrompt = new StringBuilder();
-        planPrompt.Append(baseInstructions);
-        planPrompt.AppendLine("\nFIRST, output a plan as {\"plan\": [...]} listing each step you will take. Then you will execute each step one by one. When all steps are done, output {\"done\": true}.");
-
-        var (planRaw, _, planErr) = await CallLlmRaw(
-            "You are a terminal agent. Output only JSON.",
-            planPrompt.ToString(), ct, TimeSpan.FromSeconds(30));
-
-        List<PlanStep>? planSteps = null;
-        if (!string.IsNullOrWhiteSpace(planRaw))
-        {
-            var cleaned = planRaw.Trim();
-            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
-            foreach (var candidate in new[] { cleaned }.Concat(AgentUtilities.ExtractJsonBlocks(cleaned)))
-            {
-                if (string.IsNullOrWhiteSpace(candidate)) continue;
-                try
-                {
-                    using var doc = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
-                    var root = doc.RootElement;
-                    if (root.TryGetProperty("plan", out var pArr) && pArr.ValueKind == JsonValueKind.Array && pArr.GetArrayLength() > 0)
-                    {
-                        planSteps = new List<PlanStep>();
-                        foreach (var item in pArr.EnumerateArray())
-                            planSteps.Add(new PlanStep
-                            {
-                                File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
-                                Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
-                            });
-                        break;
-                    }
-                }
-                catch { }
-            }
-        }
-
-        if (planSteps != null && planSteps.Count > 0)
-        {
-            await EmitLog(emitSse, "info", $"Plan: {planSteps.Count} step(s) — {string.Join(", ", planSteps.Select(p => p.File))}", ct: ct);
-            if (emitSse)
-                await SendSse(Response, "plan", new
-                {
-                    thinking = "Planned steps",
-                    summary = string.Join(" → ", planSteps.Select(p => p.Change)),
-                    items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
-                }, ct);
-        }
-        else
-        {
-            await EmitLog(emitSse, "warn", "No plan produced — proceeding with reactive loop.", ct: ct);
-        }
-
-        // ── Phase 2: Execute ──────────────────────────────────────────────
+        // Execute: one step at a time, plan as you go
         const int maxIter = MAX_COMMAND_ITERATIONS;
         var stepIndex = 0; string? summary = null;
         var usedSearchQueries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var planSteps = new List<PlanStep>();
         var completedPlanSteps = new HashSet<int>();
-        var totalPlanSteps = planSteps?.Count ?? 0;
+        var totalPlanSteps = 0;
+        var consecutiveErrors = 0;
 
         var conversation = new StringBuilder();
         conversation.Append(baseInstructions);
-        if (planSteps != null && planSteps.Count > 0)
-        {
-            conversation.AppendLine("\n### PLAN ###");
-            for (var pi = 0; pi < planSteps.Count; pi++)
-                conversation.AppendLine($"  Step {pi + 1}: [{planSteps[pi].File}] {planSteps[pi].Change}");
-            conversation.AppendLine("### END PLAN ###");
-            conversation.AppendLine("\nExecute steps in order. After each step succeeds, output {\"step\": N} to mark it done.");
-            conversation.AppendLine("When all steps are done, output {\"done\": true}.");
-        }
+        conversation.AppendLine("\nYou plan ONE step at a time. No upfront planning. Output:");
+        conversation.AppendLine("  {\"plan\": [{\"file\": \"<output path>\", \"change\": \"what to do\"}]}  # define a step, then execute it");
+        conversation.AppendLine("  {\"cmd\": \"...\"} / {\"web_fetch\": \"...\"} / {\"web_search\": \"...\"}  # execute directly");
+        conversation.AppendLine("  {\"step\": N}  # explicitly mark step N done (if current approach failed but you want a different one)");
+        conversation.AppendLine("  {\"done\": true, \"summary\": \"...\"}  # finish");
+        conversation.AppendLine("After each action, verify if the step\'s objective was met. If a step errors, you can mark it done and try a different approach.");
 
-        const int maxReplan = 3;
-        var replanCount = 0;
-        var consecutiveErrors = 0;
-
-        // Outer replan loop: execute → verify → replan if needed
-        while (replanCount <= maxReplan)
+        for (var i = 0; i < MAX_COMMAND_ITERATIONS; i++)
         {
-            var executionDone = false;
-            for (var i = 0; i < MAX_COMMAND_ITERATIONS && !executionDone; i++)
-            {
             ct.ThrowIfCancellationRequested();
-
-            if (totalPlanSteps > 0)
-            {
-                var next = completedPlanSteps.Count;
-                if (next < totalPlanSteps)
-                {
-                    if (consecutiveErrors >= 3)
-                    {
-                        conversation.AppendLine($"\n[Step {next + 1}/{totalPlanSteps} keeps failing — skip to next step or use a different approach]");
-                        consecutiveErrors = 0;
-                    }
-                    else
-                    {
-                        conversation.AppendLine($"\n[Current: Step {next + 1}/{totalPlanSteps} — {planSteps![next].Change}]");
-                    }
-                }
-                else
-                    conversation.AppendLine($"\n[All {totalPlanSteps} steps completed — output done]");
-            }
 
             AgentUtilities.CompactConversation(conversation);
 
@@ -4779,259 +4841,174 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             foreach (var c in candidates.ToList()) { var rep = AgentUtilities.RepairJsonString(c); if (rep != null && !candidates.Contains(rep)) candidates.Add(rep); }
             foreach (var candidate in candidates) { if (string.IsNullOrWhiteSpace(candidate)) continue; try { JsonDocument.Parse(candidate, jsonOpts); jsonToParse = candidate; break; } catch (JsonException) { } }
 
-            if (jsonToParse != null)
+            if (jsonToParse == null) { conversation.AppendLine("Could not parse JSON."); continue; }
+
+            using var doc = JsonDocument.Parse(jsonToParse, jsonOpts);
+            var root = doc.RootElement;
+
+            // Plan step definition
+            if (root.TryGetProperty("plan", out var pArr) && pArr.ValueKind == JsonValueKind.Array && pArr.GetArrayLength() > 0)
             {
-                using var doc = JsonDocument.Parse(jsonToParse, jsonOpts);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("step", out var stepEl) && stepEl.ValueKind == JsonValueKind.Number)
-                {
-                    var stepNum = stepEl.GetInt32();
-                    if (stepNum >= 1 && stepNum <= totalPlanSteps && completedPlanSteps.Add(stepNum - 1))
+                var newSteps = new List<PlanStep>();
+                foreach (var item in pArr.EnumerateArray())
+                    newSteps.Add(new PlanStep
                     {
-                        conversation.AppendLine($"→ Step {stepNum} marked done.");
-                        if (emitSse)
-                            await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum - 1, status = "done" }, ct);
-                        await PersistBoardDataPlanStepAsync(cardId, stepNum - 1, emitSse, ct);
-                    }
-                }
-
-                if (root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True)
-                { summary = root.TryGetProperty("summary", out var s) ? s.GetString() : "Task complete"; break; }
-
-                if (root.TryGetProperty("cmd", out var cmdEl) || root.TryGetProperty("command", out cmdEl))
-                {
-                    var cmd = cmdEl.GetString() ?? "";
-                    if (string.IsNullOrWhiteSpace(cmd)) { conversation.AppendLine("Empty command — try again."); continue; }
-                    if ((cmd.Contains('\n') || cmd.Contains('\r')) && !cmd.Contains("@\""))
+                        File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
+                        Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
+                    });
+                planSteps.AddRange(newSteps);
+                totalPlanSteps = planSteps.Count;
+                await EmitLog(emitSse, "info", $"Plan: +{newSteps.Count} step(s) -- {string.Join(", ", newSteps.Select(p => p.File))}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "plan", new
                     {
-                        var san = cmd.Replace("\r\n", "; ").Replace("\r", "; ").Replace("\n", "; ");
-                        await EmitLog(emitSse, "info", $"⚠ newlines in cmd — joined", ct: ct);
-                        cmd = san;
-                    }
-                    var cmdLower = cmd.TrimStart().ToLowerInvariant();
-                    if (cmdLower.StartsWith("mkdir") && Regex.IsMatch(cmd, @"\.\w{2,4}[""'\s]|\.\w{2,4}$"))
-                    { conversation.AppendLine($"REJECTED: mkdir creates DIRECTORIES. Use: New-Item -ItemType File -Path \"<path>\" -Force"); continue; }
-                    if (cmdLower == "cd" || cmdLower.StartsWith("cd ") || cmdLower.Contains("set-location"))
-                    { conversation.AppendLine($"REJECTED: cd/Set-Location not supported. Use absolute paths."); continue; }
-
-                    var beforeLen = _terminal.ReadAll().Length;
-                    await _terminal.SendCommandAsync(cmd, projectRoot);
-                    var marker = $"__DONE_{Guid.NewGuid():N}__";
-                    await _terminal.WriteStdinAsync($"echo '{marker}'");
-                    var timeout2 = DateTime.UtcNow.AddMinutes(10);
-                    while (!ct.IsCancellationRequested && DateTime.UtcNow < timeout2)
-                    { await Task.Delay(500); if (_terminal.ReadAll().Contains(marker)) break; }
-                    var fullOut = _terminal.ReadAll();
-                    var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
-                    freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
-                    var isError = !string.IsNullOrWhiteSpace(freshOut) &&
-                        Regex.IsMatch(freshOut.ToLowerInvariant(),
-                            @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
-                    var result = new Dictionary<string, object?>
-                    { ["index"] = stepIndex++, ["type"] = "command", ["command"] = cmd, ["status"] = isError ? "error" : "done", ["output"] = freshOut };
-                    steps.Add(result);
-                    if (emitSse) await SendSse(Response, "step", result, ct);
-                    conversation.AppendLine($"Command [{i + 1}]: {cmd}");
-                    conversation.AppendLine(isError ? "⚠ Error:" : "Output:");
-                    conversation.AppendLine(freshOut);
-                    if (isError && freshOut.Contains("ConvertFrom-Json"))
-                        conversation.AppendLine("💡 Hint: Invoke-RestMethod already parses JSON — remove ConvertFrom-Json from the pipeline.");
-                    if (isError && freshOut.Contains("already exists"))
-                        conversation.AppendLine("💡 Hint: The file already exists. Use -Force flag or a different path.");
-                    if (isError) consecutiveErrors++;
-                    else await AdvanceStepAsync();
-                    continue;
-                }
-
-                if (root.TryGetProperty("web_search", out var searchEl))
-                {
-                    var query = searchEl.GetString() ?? "";
-                    if (string.IsNullOrWhiteSpace(query)) { conversation.AppendLine("Empty query."); continue; }
-                    if (!usedSearchQueries.Add(query)) { conversation.AppendLine($"Already searched for \"{query}\". Use the results above."); continue; }
-                    var (searchOut, _) = await WebSearchAsync(query, ct);
-                    var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
-                    steps.Add(wr); if (emitSse) await SendSse(Response, "step", wr, ct);
-                    conversation.AppendLine($"Web search [{i + 1}]: {query}\nResults:\n{searchOut}");
-                    await AdvanceStepAsync();
-                    continue;
-                }
-
-                if (root.TryGetProperty("web_fetch", out var fetchEl))
-                {
-                    var url = fetchEl.GetString() ?? "";
-                    if (string.IsNullOrWhiteSpace(url)) { conversation.AppendLine("Empty URL."); continue; }
-                    // Validate URL format
-                    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-                        (uri.Scheme != "http" && uri.Scheme != "https"))
-                    {
-                        conversation.AppendLine($"Invalid URL: \"{url}\" — must be http/https. Provide a real URL.");
-                        consecutiveErrors++;
-                        continue;
-                    }
-                    var (fetchOut, fetchErr) = await WebFetchAsync(url, ct);
-                    var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
-                        (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
-                    var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
-                    steps.Add(fr); if (emitSse) await SendSse(Response, "step", fr, ct);
-                    if (isFetchError)
-                    {
-                        conversation.AppendLine($"⚠ Fetch error [{i + 1}]: {url}\n{fetchOut}");
-                        consecutiveErrors++;
-                    }
-                    else
-                    {
-                        conversation.AppendLine($"Fetch [{i + 1}]: {url}\n{fetchOut}");
-                        await AdvanceStepAsync();
-                    }
-                    continue;
-                }
-
-                if (root.TryGetProperty("message", out var msgEl) || root.TryGetProperty("result", out msgEl))
-                {
-                    var msgText = msgEl.GetString() ?? "";
-                    var mr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "message", ["output"] = msgText };
-                    steps.Add(mr); if (emitSse) await SendSse(Response, "step", mr, ct);
-                    conversation.AppendLine($"Message: {msgText}");
-                    continue;
-                }
-
-                conversation.AppendLine("Unrecognized JSON — use cmd, web_search, web_fetch, message, done, or plan.");
+                        thinking = "Planned steps",
+                        summary = string.Join(" -> ", planSteps.Select(p => p.Change)),
+                        items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
+                    }, ct);
+                conversation.AppendLine($"\n### PLAN UPDATED ({totalPlanSteps} total steps) ###");
+                for (var pi = 0; pi < planSteps.Count; pi++)
+                    conversation.AppendLine($"  Step {pi + 1}: [{planSteps[pi].File}] {planSteps[pi].Change}");
+                conversation.AppendLine("### END PLAN ###");
                 continue;
             }
 
-            // Helper: advance plan step if current step not yet marked done
-            async Task AdvanceStepAsync()
+            // Mark step done
+            if (root.TryGetProperty("step", out var stepEl) && stepEl.ValueKind == JsonValueKind.Number)
             {
-                if (totalPlanSteps > 0 && completedPlanSteps.Count < totalPlanSteps)
+                var stepNum = stepEl.GetInt32();
+                if (stepNum >= 1 && stepNum <= totalPlanSteps && completedPlanSteps.Add(stepNum - 1))
                 {
-                    var stepNum = completedPlanSteps.Count;
-                    if (completedPlanSteps.Add(stepNum))
-                    {
-                        conversation.AppendLine($"→ Step {stepNum + 1} completed.");
-                        if (emitSse)
-                            await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum, status = "done" }, ct);
-                        await PersistBoardDataPlanStepAsync(cardId, stepNum, emitSse, ct);
-                    }
+                    conversation.AppendLine("-> Step " + stepNum + " marked done.");
+                    if (emitSse)
+                        await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = stepNum - 1, status = "done" }, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, stepNum - 1, emitSse, ct);
                 }
-                consecutiveErrors = 0;
-            }
-
-            var fallback = cleaned.Trim().Trim('"');
-            if (!string.IsNullOrWhiteSpace(fallback) && fallback.Length < 500)
-            {
-                var bl = _terminal.ReadAll().Length;
-                await _terminal.SendCommandAsync(fallback, projectRoot);
-                await Task.Delay(3000);
-                var out2 = _terminal.ReadAll();
-                var fresh2 = bl < out2.Length ? out2[bl..] : "";
-                conversation.AppendLine($"Tried: {fallback}\nOutput:\n{fresh2}");
-                steps.Add(new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "command", ["command"] = fallback, ["status"] = "done", ["output"] = fresh2 });
                 continue;
             }
-            conversation.AppendLine("Could not parse — use valid JSON.");
-        } // end of execution for-loop
 
-            // ── Verify completion (inside while loop) ──────────────────────
-            if (steps.Count == 0) break;
-
-            var verifyPrompt = $"Task: {prompt}\n\nSteps executed ({steps.Count} total):\n";
-            foreach (var s in steps.OfType<Dictionary<string, object?>>())
-                verifyPrompt += $"  [{s.GetValueOrDefault("type")}] {s.GetValueOrDefault("command") ?? s.GetValueOrDefault("query") ?? s.GetValueOrDefault("url") ?? ""}: {s.GetValueOrDefault("status")}\n";
-            verifyPrompt += "\nIs the task fully complete? Reply ONLY: {\"complete\": true} or {\"complete\": false, \"reason\": \"what's missing\"}";
-
-            var (vRaw, _, vErr) = await CallLlmRaw(
-                "You verify task completion. Output only JSON.",
-                verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
-
-            var taskComplete = true;
-            if (!string.IsNullOrWhiteSpace(vRaw))
+            // Done signal
+            if (root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True)
             {
-                try
-                {
-                    using var vDoc = JsonDocument.Parse(vRaw.Trim(), new JsonDocumentOptions { AllowTrailingCommas = true });
-                    var vRoot = vDoc.RootElement;
-                    if (vRoot.TryGetProperty("complete", out var vc) && vc.ValueKind == JsonValueKind.False)
-                    {
-                        taskComplete = false;
-                        var reason = vRoot.TryGetProperty("reason", out var vr) ? vr.GetString() : "unknown";
-                        await EmitLog(emitSse, "warn", $"Task verification: incomplete — {reason}", ct: ct);
-
-                        if (replanCount >= maxReplan)
-                        {
-                            await EmitLog(emitSse, "warn", $"Max replans ({maxReplan}) reached — stopping.", ct: ct);
-                            break;
-                        }
-                        replanCount++;
-
-                        var replanPrompt = $"Original task: {prompt}\nVerification says: {reason}\n\nGenerate NEW plan steps. Output ONLY: {{\"plan\": [{{\"file\": \"command/web_search/web_fetch\", \"change\": \"what to do\"}}]}}";
-                        var (rRaw, _, rErr) = await CallLlmRaw(
-                            "You generate additional plan steps. Output only JSON.",
-                            replanPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 1024);
-
-                        List<PlanStep>? extraSteps = null;
-                        if (!string.IsNullOrWhiteSpace(rRaw))
-                        {
-                            var rCleaned = rRaw.Trim();
-                            if (rCleaned.StartsWith("```")) { var m = Regex.Match(rCleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) rCleaned = m.Groups[1].Value.Trim(); }
-                            foreach (var candidate in new[] { rCleaned }.Concat(AgentUtilities.ExtractJsonBlocks(rCleaned)))
-                            {
-                                if (string.IsNullOrWhiteSpace(candidate)) continue;
-                                try
-                                {
-                                    using var rDoc = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
-                                    if (rDoc.RootElement.TryGetProperty("plan", out var rpArr) && rpArr.ValueKind == JsonValueKind.Array)
-                                    {
-                                        extraSteps = new List<PlanStep>();
-                                        foreach (var item in rpArr.EnumerateArray())
-                                            extraSteps.Add(new PlanStep
-                                            {
-                                                File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
-                                                Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
-                                            });
-                                        break;
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-
-                        if (extraSteps != null && extraSteps.Count > 0)
-                        {
-                            await EmitLog(emitSse, "info", $"Replan #{replanCount}: {extraSteps.Count} additional step(s)", ct: ct);
-                            planSteps ??= new List<PlanStep>();
-                            planSteps.AddRange(extraSteps);
-                            totalPlanSteps = planSteps.Count;
-
-                            if (emitSse)
-                                await SendSse(Response, "plan", new
-                                {
-                                    thinking = "Replanned steps",
-                                    summary = string.Join(" → ", planSteps.Select(p => p.Change)),
-                                    items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
-                                }, ct);
-
-                            conversation.AppendLine($"\n### ADDITIONAL STEPS ({extraSteps.Count}) ###");
-                            for (var pi = 0; pi < extraSteps.Count; pi++)
-                                conversation.AppendLine($"  Step {totalPlanSteps - extraSteps.Count + pi + 1}: [{extraSteps[pi].File}] {extraSteps[pi].Change}");
-                            conversation.AppendLine("### END ADDITIONAL STEPS ###");
-                            conversation.AppendLine("Execute only the NEW steps above, then output done.");
-                            continue; // restart outer while loop (re-execute)
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            if (taskComplete)
-            {
-                await EmitLog(emitSse, "success", "Task verification: complete.", ct: ct);
+                summary = root.TryGetProperty("summary", out var s) ? s.GetString() : "Task complete";
                 break;
             }
-            break; // replan didn't produce steps — stop
-        } // end of while (replan loop)
 
-        summary ??= $"Command execution completed ({steps.Count} steps)";
+            // Execute command
+            if (root.TryGetProperty("cmd", out var cmdEl) || root.TryGetProperty("command", out cmdEl))
+            {
+                var cmd = cmdEl.GetString() ?? "";
+                if (string.IsNullOrWhiteSpace(cmd)) { conversation.AppendLine("Empty command - try again."); continue; }
+                if ((cmd.Contains('\n') || cmd.Contains('\r')) && !cmd.Contains("@\""))
+                {
+                    var san = cmd.Replace("\r\n", "; ").Replace("\r", "; ").Replace("\n", "; ");
+                    await EmitLog(emitSse, "info", "newlines in cmd - joined", ct: ct);
+                    cmd = san;
+                }
+                var cmdLower = cmd.TrimStart().ToLowerInvariant();
+                if (cmdLower.StartsWith("mkdir") && Regex.IsMatch(cmd, @"\.\w{2,4}[""'\s]|\.\w{2,4}$"))
+                { conversation.AppendLine("REJECTED: mkdir creates DIRECTORIES. Use: New-Item -ItemType File -Path \"<path>\" -Force"); continue; }
+                if (cmdLower == "cd" || cmdLower.StartsWith("cd ") || cmdLower.Contains("set-location"))
+                { conversation.AppendLine("REJECTED: cd/Set-Location not supported. Use absolute paths."); continue; }
+
+                var beforeLen = _terminal.ReadAll().Length;
+                await _terminal.SendCommandAsync(cmd, projectRoot);
+                var marker = "__DONE_" + Guid.NewGuid().ToString("N") + "__";
+                await _terminal.WriteStdinAsync("echo '" + marker + "'");
+                var timeout2 = DateTime.UtcNow.AddMinutes(10);
+                while (!ct.IsCancellationRequested && DateTime.UtcNow < timeout2)
+                { await Task.Delay(500); if (_terminal.ReadAll().Contains(marker)) break; }
+                var fullOut = _terminal.ReadAll();
+                var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
+                freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
+                var isError = !string.IsNullOrWhiteSpace(freshOut) &&
+                    Regex.IsMatch(freshOut.ToLowerInvariant(),
+                        @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
+                var result = new Dictionary<string, object?>
+                { ["index"] = stepIndex++, ["type"] = "command", ["command"] = cmd, ["status"] = isError ? "error" : "done", ["output"] = freshOut };
+                steps.Add(result);
+                if (emitSse) await SendSse(Response, "step", result, ct);
+                conversation.AppendLine("Command [" + (i + 1) + "]: " + cmd);
+                conversation.AppendLine(isError ? "Error:" : "Output:");
+                conversation.AppendLine(freshOut);
+                if (isError && freshOut.Contains("ConvertFrom-Json"))
+                    conversation.AppendLine("Hint: Invoke-RestMethod already parses JSON - remove ConvertFrom-Json from the pipeline.");
+                if (isError && freshOut.Contains("already exists"))
+                    conversation.AppendLine("Hint: The file already exists. Use -Force flag or a different path.");
+                if (isError) consecutiveErrors++;
+                else
+                {
+                    if (totalPlanSteps > 0 && completedPlanSteps.Count < totalPlanSteps)
+                    {
+                        var advStep = completedPlanSteps.Count;
+                        if (completedPlanSteps.Add(advStep))
+                        {
+                            if (emitSse)
+                                await SendSse(Response, "step", new { index = stepIndex, type = "plan_step", planItemIndex = advStep, status = "done" }, ct);
+                            await PersistBoardDataPlanStepAsync(cardId, advStep, emitSse, ct);
+                        }
+                    }
+                    consecutiveErrors = 0;
+                }
+                continue;
+            }
+
+            // Web search
+            if (root.TryGetProperty("web_search", out var searchEl))
+            {
+                var query = searchEl.GetString() ?? "";
+                if (string.IsNullOrWhiteSpace(query)) { conversation.AppendLine("Empty query."); continue; }
+                if (!usedSearchQueries.Add(query)) { conversation.AppendLine("Already searched for \"" + query + "\". Use the results above."); continue; }
+                var (searchOut, _) = await WebSearchAsync(query, ct);
+                var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
+                steps.Add(wr); if (emitSse) await SendSse(Response, "step", wr, ct);
+                conversation.AppendLine("Web search [" + (i + 1) + "]: " + query + "\nResults:\n" + searchOut);
+                continue;
+            }
+
+            // Web fetch
+            if (root.TryGetProperty("web_fetch", out var fetchEl))
+            {
+                var url = fetchEl.GetString() ?? "";
+                if (string.IsNullOrWhiteSpace(url)) { conversation.AppendLine("Empty URL."); continue; }
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                    (uri.Scheme != "http" && uri.Scheme != "https"))
+                {
+                    conversation.AppendLine("Invalid URL: \"" + url + "\" - must be http/https. Provide a real URL.");
+                    consecutiveErrors++;
+                    continue;
+                }
+                var (fetchOut, fetchErr) = await WebFetchAsync(url, ct);
+                var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
+                    (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
+                var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
+                steps.Add(fr); if (emitSse) await SendSse(Response, "step", fr, ct);
+                if (isFetchError)
+                {
+                    conversation.AppendLine("Fetch error [" + (i + 1) + "]: " + url + "\n" + fetchOut);
+                    consecutiveErrors++;
+                }
+                else
+                {
+                    conversation.AppendLine("Fetch [" + (i + 1) + "]: " + url + "\n" + fetchOut);
+                }
+                continue;
+            }
+
+            // Message / result
+            if (root.TryGetProperty("message", out var msgEl) || root.TryGetProperty("result", out msgEl))
+            {
+                var msgText = msgEl.GetString() ?? "";
+                var mr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "message", ["output"] = msgText };
+                steps.Add(mr); if (emitSse) await SendSse(Response, "step", mr, ct);
+                conversation.AppendLine("Message: " + msgText);
+                continue;
+            }
+
+            conversation.AppendLine("Unrecognized JSON - use cmd, web_search, web_fetch, message, done, or plan.");
+        }
+
+        summary ??= "Command execution completed (" + steps.Count + " steps)";
         await EmitLog(emitSse, "info", summary, steps, ct: ct);
 
         // Add done_signal so Orchestrate's quality check skips
@@ -5043,6 +5020,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             : null;
         return (steps, agentPlan);
     }
+
 
     // ═══════════════════════════════════════════════════════════════════════
     //  FILE CREATION
