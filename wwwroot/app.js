@@ -1906,6 +1906,7 @@
               try {
                 reader.read().then(function (result) {
                   if (result.done) {
+                    if (vm.streamingActive) return;
                     vm.streamingActive = false;
                     vm._lastStreamMs = null;
                     resumeTerminalPolling();
