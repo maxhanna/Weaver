@@ -10,6 +10,7 @@ public class AgentRequest
     public bool SelfImproving { get; set; }
     public bool IsDecomposing { get; set; }
     public string? CardId { get; set; } 
+    public bool CreateTests { get; set; }
 
     /// <summary>Indices of plan steps already completed (0-based).</summary>
     public List<int>? CompletedStepIndices { get; set; }

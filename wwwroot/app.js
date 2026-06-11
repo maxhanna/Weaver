@@ -1897,6 +1897,7 @@
             steeringContext: vm.steeringContext || '',
             selfImproving: card.selfImproving || false,
             isDecomposing: card.isDecomposing || false,
+            createTests: card.createTests || false,
             cardId: card.id
           };
 

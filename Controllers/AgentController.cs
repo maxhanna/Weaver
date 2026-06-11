@@ -3675,7 +3675,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
-        string? cardId = null)
+        string? cardId = null, bool createTests = false)
     {
         _gracefulStop = false;
 
@@ -3999,6 +3999,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         bool isEdited = allSteps.OfType<Dictionary<string, object?>>().Any(s => s.GetValueOrDefault("type")?.ToString() == "edit"); 
+
+        // ── Test creation pipeline ────────────────────────────────────────
+        if (createTests && isEdited)
+        {
+            await RunTestCreationPipeline(projectRoot, allSteps, emitSse, ct);
+        }
+
         // ── Build check ───────────────────────────────────────────────────
         bool buildOk = true;
         if (allSteps.Count > 0 && isEdited)
@@ -6013,7 +6020,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 steeringContext: req.SteeringContext,
                 existingPlan: existingPlan,
                 completedStepIndices: completedIndices,
-                cardId: req.CardId);
+                cardId: req.CardId,
+                createTests: req.CreateTests);
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
@@ -7867,6 +7875,204 @@ done = build OK; command = run this to fix; ask_user = need input";
 
         if (emitSse)
             await SendSse(Response, "done_signal", new { message = "Build repair completed" }, ct);
+    }
+
+    private async Task RunTestCreationPipeline(
+        string projectRoot, List<object> allSteps, bool emitSse, CancellationToken ct)
+    {
+        var editedFiles = allSteps
+            .OfType<Dictionary<string, object?>>()
+            .Where(s => s.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+            .Select(s => s.GetValueOrDefault("path")?.ToString())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (editedFiles.Count == 0) return;
+
+        await EmitLog(emitSse, "info", $"TestCreation: preparing tests for {editedFiles.Count} file(s)", ct: ct);
+
+        var existingTestFiles = FindExistingTestFiles(projectRoot);
+        var hasExistingTests = existingTestFiles.Count > 0;
+        var testFramework = await DetectTestFramework(projectRoot, ct);
+
+        if (!hasExistingTests && testFramework == null)
+        {
+            if (emitSse)
+                await SendSse(Response, "phase", new { phase = "test-creation", message = "No test framework detected" }, ct);
+
+            var answer = await AskUserAsync(
+                "No test files found. Enter framework name to set up (xunit, nunit, mstest) or leave empty to skip:",
+                new List<QuestionField>
+                {
+                    new() { Key = "framework", Label = "Test framework", Type = "text", DefaultValue = "xunit" }
+                }, ct);
+
+            var framework = answer.GetValueOrDefault("framework")?.Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(framework) || framework is "none" or "skip")
+            {
+                await EmitLog(emitSse, "info", "Test creation skipped by user.", ct: ct);
+                return;
+            }
+            testFramework = framework;
+        }
+
+        testFramework ??= "xunit";
+
+        if (existingTestFiles.Count > 0)
+        {
+            if (existingTestFiles.Any(f => FileContains(f, "xunit", "Fact"))) testFramework = "xunit";
+            else if (existingTestFiles.Any(f => FileContains(f, "nunit", "TestFixture"))) testFramework = "nunit";
+            else if (existingTestFiles.Any(f => FileContains(f, "mstest", "TestClass", "TestMethod"))) testFramework = "mstest";
+        }
+
+        await EmitLog(emitSse, "info", $"TestCreation: using '{testFramework}'", ct: ct);
+
+        if (emitSse)
+            await SendSse(Response, "phase", new { phase = "test-creation", message = $"Generating tests ({testFramework})" }, ct);
+
+        var existingContext = new StringBuilder();
+        foreach (var tf in existingTestFiles.Take(3))
+        {
+            try
+            {
+                var rel = Path.GetRelativePath(projectRoot, tf);
+                var content = await System.IO.File.ReadAllTextAsync(tf, Encoding.UTF8, ct);
+                existingContext.AppendLine($"// File: {rel}");
+                existingContext.AppendLine(content);
+                existingContext.AppendLine();
+            }
+            catch { }
+        }
+
+        var testDir = FindOrDetermineTestDir(projectRoot, existingTestFiles);
+
+        foreach (var filePath in editedFiles)
+        {
+            var fullPath = Path.Combine(projectRoot, filePath);
+            if (!System.IO.File.Exists(fullPath))
+            {
+                await EmitLog(emitSse, "warn", $"TestCreation: file not found: {filePath}", ct: ct);
+                continue;
+            }
+
+            var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var testFilePath = GetTestFilePath(projectRoot, filePath, testDir);
+
+            var sysMsg = "You are a test-generation assistant. Generate unit tests for the given source code. Return ONLY the code, no explanations or markdown formatting.";
+            var userMsg = new StringBuilder();
+            userMsg.AppendLine($"Test framework: {testFramework}");
+            userMsg.AppendLine($"Source file: {filePath}");
+            if (existingContext.Length > 0)
+            {
+                userMsg.AppendLine();
+                userMsg.AppendLine("Existing test files in the project (match style):");
+                userMsg.Append(existingContext);
+            }
+            userMsg.AppendLine();
+            userMsg.AppendLine("Source code to test:");
+            userMsg.AppendLine(fileContent);
+            userMsg.AppendLine();
+            userMsg.AppendLine($"Generate a complete {testFramework} test file. Return ONLY the code.");
+
+            var (raw, error) = await CallLlmRawText(sysMsg, userMsg.ToString(), ct,
+                requestTimeout: TimeSpan.FromMinutes(5), maxTokens: 4096);
+
+            if (error != null || string.IsNullOrWhiteSpace(raw))
+            {
+                await EmitLog(emitSse, "warn", $"TestCreation: LLM failed for {filePath}: {error}", ct: ct);
+                continue;
+            }
+
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:\w+)?\s*([\s\S]*?)```");
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+
+            var testFullDir = Path.GetDirectoryName(testFilePath);
+            if (!string.IsNullOrWhiteSpace(testFullDir))
+                Directory.CreateDirectory(testFullDir);
+
+            await System.IO.File.WriteAllTextAsync(testFilePath, cleaned, Encoding.UTF8, ct);
+
+            var relPath = Path.GetRelativePath(projectRoot, testFilePath);
+            await EmitLog(emitSse, "success", $"Test file created: {relPath}", ct: ct);
+
+            if (emitSse)
+                await SendSse(Response, "step", new { type = "create", path = relPath, status = "created" }, ct);
+        }
+    }
+
+    private static List<string> FindExistingTestFiles(string projectRoot)
+    {
+        var patterns = new[] { "*Test*.cs", "*Tests.cs", "*.Specs.cs", "*.specs.cs" };
+        var dirs = new[] { "test", "tests", "Test", "Tests" };
+        var result = new List<string>();
+
+        foreach (var p in patterns)
+        {
+            try { result.AddRange(Directory.EnumerateFiles(projectRoot, p, SearchOption.AllDirectories)
+                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\"))); }
+            catch { }
+        }
+
+        foreach (var d in dirs)
+        {
+            var dp = Path.Combine(projectRoot, d);
+            if (Directory.Exists(dp))
+            {
+                try { result.AddRange(Directory.EnumerateFiles(dp, "*.cs", SearchOption.AllDirectories)); }
+                catch { }
+            }
+        }
+
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static bool FileContains(string filePath, params string[] keywords)
+    {
+        try
+        {
+            using var sr = new StreamReader(filePath, Encoding.UTF8);
+            var header = sr.ReadToEnd();
+            return keywords.Any(k => header.Contains(k, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
+
+    private static string FindOrDetermineTestDir(string projectRoot, List<string> existingTestFiles)
+    {
+        if (existingTestFiles.Count > 0)
+        {
+            var dir = Path.GetDirectoryName(existingTestFiles[0]);
+            if (dir != null) return dir;
+        }
+        return Path.Combine(projectRoot, "tests");
+    }
+
+    private static string GetTestFilePath(string projectRoot, string sourceFilePath, string testDir)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(sourceFilePath);
+        var ext = Path.GetExtension(sourceFilePath);
+        return Path.Combine(testDir, $"{fileName}Tests{ext}");
+    }
+
+    private async Task<string?> DetectTestFramework(string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            foreach (var csproj in Directory.EnumerateFiles(projectRoot, "*.csproj", SearchOption.AllDirectories))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(csproj, Encoding.UTF8, ct);
+                if (content.Contains("xunit", StringComparison.OrdinalIgnoreCase)) return "xunit";
+                if (content.Contains("nunit", StringComparison.OrdinalIgnoreCase)) return "nunit";
+                if (content.Contains("MSTest", StringComparison.OrdinalIgnoreCase)) return "mstest";
+            }
+        }
+        catch { }
+        return null;
     }
 
     private async Task RunRepairPlan(

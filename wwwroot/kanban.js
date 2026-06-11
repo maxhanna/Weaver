@@ -117,7 +117,8 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           priority: 'medium',
           attached: [],
           autoPr: vm.prByDefault !== false,
-          selfImproving: false
+          selfImproving: false,
+          createTests: false
         });
         vm.saveCards();
         $timeout(function () {

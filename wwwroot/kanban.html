@@ -101,9 +101,13 @@
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
-            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
+            <!-- <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
               title="Decomposing card — will automatically decompose into smaller tasks. Use for big tasks.">
               <input type="checkbox" ng-model="card.isDecomposing" /> DECOMPOSE
+            </label> -->
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
+              title="Auto-create tests for the code changes">
+              <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
             </label>
           </div>
           <div class="attachments" ng-if="card.attached && vm.getAttachedFiles(card).length">
