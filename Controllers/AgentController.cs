@@ -2054,6 +2054,15 @@ private sealed class StepExplorationResult
                     await ResolveEditForStep(
                         step, projectRoot, emitSse, ct, history,
                         explorationContext: explorationContext);
+
+                if (resolveError == null)
+                {
+                    var fmt = fullFile ? "fullFile" : alreadyDone ? "alreadyDone" : "oldString/newString";
+                    var oldLen = oldStr?.Length ?? 0;
+                    var newLen = newStr?.Length ?? 0;
+                    await EmitLog(emitSse, "info",
+                        $"  LLM produced: format={fmt}, old={oldLen}ch, new={newLen}ch", ct: ct);
+                }
             }
 
             if (resolveError != null)
@@ -2121,6 +2130,18 @@ private sealed class StepExplorationResult
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
+
+            var oldLines = oldStr?.Split('\n').Length ?? 0;
+            var newLines = newStr?.Split('\n').Length ?? 0;
+            var oldPreview = oldStr is { Length: > 0 }
+                ? string.Join("\\n", oldStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
+                : "(empty)";
+            var newPreview = newStr is { Length: > 0 }
+                ? string.Join("\\n", newStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
+                : "(empty)";
+            await EmitLog(emitSse, "info",
+                $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
+                ct: ct);
 
             var (replaced, newContent, matchError, snippet) =
                 TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);

@@ -847,9 +847,9 @@
               <span style="font-size:12px;color:var(--muted);margin-bottom:8px;display:block;">
                 Map keywords to files so the agent knows where to look.
               </span>
-              <details ng-repeat="project in vm.projects track by $index" style="margin-bottom:8px;">
+              <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
                 <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
-                <div ng-repeat="hint in vm.fileHintsData[$index].hints track by $index"
+                <div ng-repeat="hint in vm.fileHintsData[$parent.$index].hints track by $index"
                   style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
                     <span style="font-size:12px;color:var(--muted);white-space:nowrap;">Keywords:</span>
