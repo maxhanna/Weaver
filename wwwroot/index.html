@@ -302,7 +302,7 @@
             <button class="steering-clear-btn" ng-click="vm.steeringContext = ''" title="Clear steering">&times;</button>
           </div>
 
-          <div class="agent-activity-log" ng-if="vm.agentActivityLog.length">
+          <div class="agent-latest-log agent-activity-log" ng-if="vm.agentActivityLog.length">
             <details>
               <summary>
                 <span>📋 Log ({{vm.agentActivityLogLength}})</span>
@@ -314,7 +314,7 @@
                     title="Increase font size">+</button>
                 </span>
               </summary>
-              <div class="log-entries" ng-style="{'font-size': vm.logFontSize + 'px'}">
+              <div class="log-entries" ng-style="{'font-size': vm.logFontSize + 'px'}" style="margin-top: 8px;">
                 <div class="log-entry" ng-repeat="e in vm.agentActivityLog track by $index" ng-class="e.level">
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
