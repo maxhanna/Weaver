@@ -739,6 +739,60 @@
             placeholder="Enter build commands, one per line" rows="4"></textarea>
         </details>
         <details>
+          <summary class="settings-header">Context Size Limits</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;gap:6px;padding:8px 0;">
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-maxFileContextChars">Max File Context Chars</label>
+                <span>{{vm.maxFileContextChars | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-maxFileContextChars" ng-model="vm.maxFileContextChars"
+                min="4000" max="64000" step="1000" style="width:100%;" />
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-maxFullFileTokens">Max Full File Tokens</label>
+                <span>{{vm.maxFullFileTokens | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-maxFullFileTokens" ng-model="vm.maxFullFileTokens"
+                min="512" max="16384" step="512" style="width:100%;" />
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-maxContextChars">Max Context Chars</label>
+                <span>{{vm.maxContextChars | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-maxContextChars" ng-model="vm.maxContextChars"
+                min="4000" max="64000" step="1000" style="width:100%;" />
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-fileBodyTruncation">File Body Truncation Chars</label>
+                <span>{{vm.fileBodyTruncationChars | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-fileBodyTruncation" ng-model="vm.fileBodyTruncationChars"
+                min="1000" max="32000" step="500" style="width:100%;" />
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-buildOutputTail">Build Output Tail Chars</label>
+                <span>{{vm.buildOutputTailChars | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-buildOutputTail" ng-model="vm.buildOutputTailChars"
+                min="1000" max="32000" step="500" style="width:100%;" />
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;">
+                <label for="ctx-defaultMaxTokens">Default Max Tokens</label>
+                <span>{{vm.defaultMaxTokens | formatNumber}}</span>
+              </div>
+              <input type="range" id="ctx-defaultMaxTokens" ng-model="vm.defaultMaxTokens"
+                min="256" max="16384" step="256" style="width:100%;" />
+            </div>
+            <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the agent to handle larger files but consume more tokens.</span>
+          </div>
+        </details>
+        <details>
           <summary class="settings-header">Email (IMAP)</summary>
           <div class="form-row"
             style="display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.1);padding-top:12px;margin-top:8px;gap:12px;">

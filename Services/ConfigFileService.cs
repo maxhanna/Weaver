@@ -36,6 +36,13 @@ public class FrontendConfig
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();
+    // Context size limits (tunable via settings panel)
+    public int maxFileContextChars { get; set; } = 24000;
+    public int maxFullFileTokens { get; set; } = 4096;
+    public int maxContextChars { get; set; } = 22000;
+    public int fileBodyTruncationChars { get; set; } = 8000;
+    public int buildOutputTailChars { get; set; } = 8000;
+    public int defaultMaxTokens { get; set; } = 2048;
     // Multiple email accounts
     public List<EmailAccountConfig> emailAccounts { get; set; } = new();
     // Legacy single-account fields (kept for backward compat with existing configs)

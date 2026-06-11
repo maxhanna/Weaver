@@ -33,6 +33,12 @@
     vm.disallowedTerminalRoots = [];
     vm.approvedTerminalRootsText = '';
     vm.disallowedTerminalRootsText = '';
+    vm.maxFileContextChars = 24000;
+    vm.maxFullFileTokens = 4096;
+    vm.maxContextChars = 22000;
+    vm.fileBodyTruncationChars = 8000;
+    vm.buildOutputTailChars = 8000;
+    vm.defaultMaxTokens = 2048;
     vm.pendingTerminalApprovals = [];
     vm.aiChatMessages = [];
     vm.aiChatInput = '';
@@ -347,6 +353,12 @@
         cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
         }).filter(Boolean);
+        cfg.maxFileContextChars = vm.maxFileContextChars || 24000;
+        cfg.maxFullFileTokens = vm.maxFullFileTokens || 4096;
+        cfg.maxContextChars = vm.maxContextChars || 22000;
+        cfg.fileBodyTruncationChars = vm.fileBodyTruncationChars || 8000;
+        cfg.buildOutputTailChars = vm.buildOutputTailChars || 8000;
+        cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
         cfg.fileHints = '';
         cfg.emailAccounts = vm.emailAccounts.map(function (a) {
           return {
@@ -493,6 +505,12 @@
           vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
           vm.disallowedTerminalRoots = cfg.disallowedTerminalRoots || [];
           vm.disallowedTerminalRootsText = vm.disallowedTerminalRoots.join(', ');
+          vm.maxFileContextChars = typeof cfg.maxFileContextChars === 'number' ? cfg.maxFileContextChars : 24000;
+          vm.maxFullFileTokens = typeof cfg.maxFullFileTokens === 'number' ? cfg.maxFullFileTokens : 4096;
+          vm.maxContextChars = typeof cfg.maxContextChars === 'number' ? cfg.maxContextChars : 22000;
+          vm.fileBodyTruncationChars = typeof cfg.fileBodyTruncationChars === 'number' ? cfg.fileBodyTruncationChars : 8000;
+          vm.buildOutputTailChars = typeof cfg.buildOutputTailChars === 'number' ? cfg.buildOutputTailChars : 8000;
+          vm.defaultMaxTokens = typeof cfg.defaultMaxTokens === 'number' ? cfg.defaultMaxTokens : 2048;
           vm.fileHintsData = [];
           vm.emailAccounts = (cfg.emailAccounts || []).map(function (a) {
             return {
@@ -608,6 +626,12 @@
         cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
         }).filter(Boolean);
+        cfg.maxFileContextChars = vm.maxFileContextChars || 24000;
+        cfg.maxFullFileTokens = vm.maxFullFileTokens || 4096;
+        cfg.maxContextChars = vm.maxContextChars || 22000;
+        cfg.fileBodyTruncationChars = vm.fileBodyTruncationChars || 8000;
+        cfg.buildOutputTailChars = vm.buildOutputTailChars || 8000;
+        cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
         cfg.fileHints = '';
         cfg.emailAccounts = vm.emailAccounts.map(function (a) {
           return {

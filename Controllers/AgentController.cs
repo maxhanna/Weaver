@@ -23,9 +23,20 @@ public class AgentController : ControllerBase
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
     private readonly BoardDataService _boardData;
-    private const int MaxFileContextChars = 24_000;
     private const int MAX_COMMAND_ITERATIONS = 30;
-    private const int MaxFullFileTokens = 4096; // 8192 max / 2 — fullFile must not exceed half the LLM's token limit
+    private FrontendConfig? _cfgCache;
+    private DateTime _cfgCacheTime = DateTime.MinValue;
+
+    private async Task<FrontendConfig> LoadConfigAsync()
+    {
+        if (_cfgCache == null || (DateTime.UtcNow - _cfgCacheTime).TotalSeconds > 3)
+        {
+            _cfgCache = await _configFile.LoadConfigAsync();
+            _cfgCacheTime = DateTime.UtcNow;
+        }
+        return _cfgCache;
+    }
+
     private bool _lastConnectionCheckResult = true;
     private bool _gracefulStop;
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
@@ -194,7 +205,7 @@ public class AgentController : ControllerBase
     /// centered around the plan's oldString or change-description keywords.
     /// Falls back to head+tail only when no location clue is available.
     /// </summary>
-    private static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString)
+    private static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000)
     {
         const int RadiusLines = 60;
         var lines = fileContent.Split('\n');
@@ -284,8 +295,8 @@ public class AgentController : ControllerBase
         {
             var hdr = lines.Take(structEnd).ToList();
             var body = string.Join('\n', lines.Skip(structEnd));
-            if (body.Length > 8000)
-                body = body[..8000] + $"\n... [lines {structEnd + 600}–{lines.Length} omitted]";
+            if (body.Length > fileBodyTruncation)
+                body = body[..fileBodyTruncation] + $"\n... [lines {structEnd + 600}–{lines.Length} omitted]";
             return string.Join('\n', hdr) + "\n" + body;
         }
 
@@ -1007,6 +1018,7 @@ public class AgentController : ControllerBase
          string? explorationContext = null,
          string? targetSymbol = null)  
     {
+        var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -1089,7 +1101,7 @@ public class AgentController : ControllerBase
             {
                 sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
                 sb.AppendLine("```");
-                sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
+                sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, cfg5.fileBodyTruncationChars));
                 sb.AppendLine("```");
                 sb.AppendLine();
                 sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): " 
@@ -1664,8 +1676,9 @@ private sealed class StepExplorationResult
         }
 
         const int MaxRounds = 4;
-        const int MaxContextChars = 22_000;
         const int ConfidenceThreshold = 80; // stop early once the LLM is this confident
+        var cfg4 = await LoadConfigAsync();
+        var MaxContextChars = cfg4.maxContextChars;
 
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
@@ -1703,7 +1716,7 @@ private sealed class StepExplorationResult
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             // For large files use the relevance-focused excerpt so context is targeted
             var excerpt = content.Length > 5_000
-                ? ExtractRelevantExcerpt(content, step.Change, step.OldString)
+                ? ExtractRelevantExcerpt(content, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
                 : content;
 
             ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
@@ -1796,7 +1809,7 @@ private sealed class StepExplorationResult
                         var correctPath = matches[0];
                         var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
                         var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
-                        var matchExcerpt = matchContent.Length > 3_500 ? ExtractRelevantExcerpt(matchContent, step.Change, step.OldString) : matchContent;
+                        var matchExcerpt = matchContent.Length > 3_500 ? ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars) : matchContent;
                         if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
                         {
                             ctx.AppendLine($"### {correctPath}  (resolved from `{requested}`)");
@@ -1834,7 +1847,7 @@ private sealed class StepExplorationResult
 
                 var fc = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
                 var excerpt = fc.Length > 3_500
-                    ? ExtractRelevantExcerpt(fc, step.Change, step.OldString)
+                    ? ExtractRelevantExcerpt(fc, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
                     : fc;
 
                 // Guard total context size so we don't overflow the LLM window
@@ -2235,6 +2248,7 @@ private sealed class StepExplorationResult
         int planItemIndex = -1,
         string? cardId = null)
     {
+        var cfg8 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -2420,7 +2434,7 @@ private sealed class StepExplorationResult
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
                     continue;
                 }
-                if (fullContent.Length > MaxFullFileTokens * 4)
+                if (fullContent.Length > cfg8.maxFullFileTokens * 4)
                 {
                     await EmitLog(emitSse, "warn",
                         $"fullFile too large ({fullContent.Length} chars) — skipping",
@@ -5459,7 +5473,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!string.IsNullOrWhiteSpace(changeDesc)) { sb.AppendLine("## Planned change"); sb.AppendLine(changeDesc); sb.AppendLine(); }
         sb.AppendLine($"## File: {relPath}");
         sb.AppendLine();
-        sb.AppendLine(BuildEditCorrectionContext(fileContent, changeDesc, history));
+        var cfg2 = await LoadConfigAsync();
+        sb.AppendLine(BuildEditCorrectionContext(fileContent, changeDesc, history, cfg2.maxFileContextChars));
         sb.AppendLine();
         sb.AppendLine("### Previous failed attempts:");
         for (var i = 0; i < history.Count; i++)
@@ -5496,11 +5511,12 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
 
     private static string BuildEditCorrectionContext(
         string fileContent, string changeDesc,
-        List<(string oldString, string newString, int score, string reason)> history)
+        List<(string oldString, string newString, int score, string reason)> history,
+        int maxFileContextChars = 24000)
     {
         var normalized = AgentUtilities.NormalizeLineEndings(fileContent);
         var sb = new StringBuilder();
-        if (normalized.Length <= MaxFileContextChars)
+        if (normalized.Length <= maxFileContextChars)
         {
             sb.AppendLine("### Current file content\n```");
             sb.AppendLine(normalized);
@@ -5527,11 +5543,11 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         foreach (var w in windows)
         {
             var excerpt = string.Join('\n', lines.Skip(w.start).Take(w.end - w.start + 1));
-            if (usedChars + excerpt.Length > MaxFileContextChars) excerpt = excerpt[..Math.Max(0, MaxFileContextChars - usedChars)];
+            if (usedChars + excerpt.Length > maxFileContextChars) excerpt = excerpt[..Math.Max(0, maxFileContextChars - usedChars)];
             if (string.IsNullOrWhiteSpace(excerpt)) break;
             sb.AppendLine($"Lines {w.start + 1}-{w.end + 1}:\n```\n{excerpt}\n```");
             usedChars += excerpt.Length;
-            if (usedChars >= MaxFileContextChars) break;
+            if (usedChars >= maxFileContextChars) break;
         }
         return sb.ToString();
     }
@@ -6170,7 +6186,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         HttpClient client, string target, string model, object messages,
         CancellationToken ct = default, int? maxTokens = null)
     {
-        var mt = maxTokens ?? 2048;
+        var cfg6 = await LoadConfigAsync();
+        var mt = maxTokens ?? cfg6.defaultMaxTokens;
         var reqBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = mt };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         try
@@ -6190,7 +6207,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         HttpClient client, string target, string model, object messages,
         CancellationToken ct = default, int? maxTokens = null, bool emitSse = false)
     {
-        var mt = maxTokens ?? 2048;
+        var cfg7 = await LoadConfigAsync();
+        var mt = maxTokens ?? cfg7.defaultMaxTokens;
         var reqBody = new { model, messages, stream = true, temperature = 0.05, max_tokens = mt };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         try
@@ -6255,7 +6273,8 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
             using var tCts = new CancellationTokenSource(timeout);
             using var lCts = CancellationTokenSource.CreateLinkedTokenSource(ct, tCts.Token);
-            var reqBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = maxTokens ?? MaxFileContextChars / 2 };
+            var cfg3 = await LoadConfigAsync();
+            var reqBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = maxTokens ?? cfg3.maxFileContextChars / 2 };
             var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
             var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, lCts.Token);
             var respText = await resp.Content.ReadAsStringAsync(lCts.Token);
@@ -7855,11 +7874,12 @@ done = build OK; command = run this to fix; ask_user = need input";
         string prompt, string buildOutput, List<object> resultSteps,
         string? steeringContext = null)
     {
+        var cfg9 = await LoadConfigAsync();
         await EmitLog(emitSse, "info", "RunRepairPlan: analyzing build errors…", ct: ct);
         if (emitSse)
             await SendSse(Response, "phase", new { phase = "repair", message = "Analyzing build errors and planning fixes…" }, ct);
 
-        var tail = buildOutput.Length > 8000 ? buildOutput[^8000..] : buildOutput;
+        var tail = buildOutput.Length > cfg9.buildOutputTailChars ? buildOutput[^cfg9.buildOutputTailChars..] : buildOutput;
         var repairPrompt = $"BUILD OUTPUT:\n```\n{tail}\n```\n\nAnalyze the build output above, identify compilation errors, and fix them by editing the source files. Do not add new features — only fix compilation errors/warnings.";
         var repairSteering = $"BUILD REPAIR: Fix the compilation errors shown in the build output. {(string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\nOriginal task: {steeringContext}")}";
 
