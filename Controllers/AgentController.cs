@@ -108,6 +108,7 @@ public class AgentController : ControllerBase
         "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
         "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
         "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
+        "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
         "8. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
@@ -802,11 +803,16 @@ public class AgentController : ControllerBase
         sb.AppendLine();
         sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
         sb.AppendLine("SMALL targeted edits (1-3 lines): PREFER oldString/newString. Include the line above/below for context, repeat it unchanged in newString.");
-        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) only for LARGE operations (replacing an entire method/class body).");
+        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) only for replacing ENTIRE methods or FULL classes.");
         sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
-        sb.AppendLine("To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
+        sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
         sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
-        sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\"). Do NOT use targetType=\"class\" to add a single property.");
+        sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
+                      "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
+                      "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
+                      "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
+                      "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
+        sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
         sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
 
         if (history?.Count > 0)
@@ -970,34 +976,45 @@ public class AgentController : ControllerBase
                         return (fullStr, newStr, false, null, false, null);
                     }
                     else
-                    {
-                        // REPLACE mode: find the full node and replace it entirely
-                        var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
-                        if (astOldStr != null)
                         {
-                            // Class target always uses insert mode: strip the class
-                            // declaration wrapper if present and insert body content
-                            // before the closing brace. Full-class replacements must
-                            // use oldString/newString instead.
-                            var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
-                            var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
-                            if (isClassTarget)
+                            // REPLACE mode: find the full node and replace it entirely
+                            var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                            if (astOldStr != null)
                             {
-                                // Strip the "export class Foo {" wrapper if present so only
-                                // body content (properties, constructor, etc.) is inserted.
-                                var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
-                                if (!string.IsNullOrWhiteSpace(body))
+                                // When targetType="class" is used WITHOUT a full class declaration
+                                // in newCode, the LLM is incorrectly trying to insert properties
+                                // via targetType. Reject this — the LLM must use oldString/newString
+                                // for property additions, or include the FULL class in newCode
+                                // for full-class replacements.
+                                var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
+                                var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
+                                if (isClassTarget && !hasClassDecl)
                                 {
-                                    var unit = DetectIndentUnit(astOldStr);
-                                    var bodyIndented = ReindentToLevel(body, unit);
-                                    var lastBrace = astOldStr.LastIndexOf('}');
-                                    if (lastBrace >= 0)
+                                    var codeLineCount = newCodeStr.Split('\n').Length;
+                                    return (null, null, false, null, false,
+                                        $"targetType 'class' used without a full class declaration in newCode ({codeLineCount} lines). " +
+                                        "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
+                                        "For adding properties/fields, use oldString/newString format instead: " +
+                                        "set oldString to the last 1-2 existing lines before the class closing brace, " +
+                                        "and newString to those lines plus the new property line.");
+                                }
+                                if (isClassTarget)
+                                {
+                                    // Strip the "export class Foo {" wrapper if present so only
+                                    // body content (properties, constructor, etc.) is inserted.
+                                    var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
+                                    if (!string.IsNullOrWhiteSpace(body))
                                     {
-                                        var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
-                                        return (astOldStr, mergedStr, false, null, false, null);
+                                        var unit = DetectIndentUnit(astOldStr);
+                                        var bodyIndented = ReindentToLevel(body, unit);
+                                        var lastBrace = astOldStr.LastIndexOf('}');
+                                        if (lastBrace >= 0)
+                                        {
+                                            var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
+                                            return (astOldStr, mergedStr, false, null, false, null);
+                                        }
                                     }
                                 }
-                            }
 
                             var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
                             return (astOldStr, indented, false, null, false, null);
@@ -1556,17 +1573,34 @@ private sealed class StepExplorationResult
                 // Try method first, then class (symbol could be a method or a class)
                 string? astOld = null;
                 string? astErr = null;
+                var resolvedType = "";
                 foreach (var tryType in new[] { "method", "class", "interface", "property" })
                 {
                     (astOld, astErr) = AstResolveEdit(fullPath, tryType, targetSymbol);
-                    if (astOld != null) break;
+                    if (astOld != null) { resolvedType = tryType; break; }
                 }
                 if (astOld != null)
                 {
-                    astOldStringHint = astOld;
-                    await EmitLog(emitSse, "info",
-                        $"  🎯 AST resolved '{targetSymbol}' " +
-                        $"({astOld.Split('\n').Length} lines)", ct: ct);
+                    var lineCount = astOld.Split('\n').Length;
+                    // Don't use class-level AST as hint for small additions —
+                    // it bloats the exploration excerpt (ExtractRelevantExcerpt
+                    // anchors on planOldString and extracts the full class + 60 lines),
+                    // causing the LLM to attempt full-class rewrites instead of
+                    // targeted single-line inserts.
+                    if (resolvedType == "class" && lineCount > 30)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"  🎯 AST resolved '{targetSymbol}' as class " +
+                            $"({lineCount} lines) — too large for hint, " +
+                            $"skipping to keep excerpt focused", ct: ct);
+                    }
+                    else
+                    {
+                        astOldStringHint = astOld;
+                        await EmitLog(emitSse, "info",
+                            $"  🎯 AST resolved '{targetSymbol}' " +
+                            $"({lineCount} lines)", ct: ct);
+                    }
                 }
                 else if (!string.IsNullOrWhiteSpace(astErr))
                 {
@@ -1997,6 +2031,7 @@ private sealed class StepExplorationResult
                     // No newString provided — skip plan-provided edit and let the LLM resolve it
                     await EmitLog(emitSse, "info",
                         $"Plan-provided oldString is set but newString is empty — falling through to LLM resolve", ct: ct);
+                    continue;
                 }
                 else
                 {
@@ -2409,7 +2444,7 @@ private sealed class StepExplorationResult
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
         "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
-        "  \"_explore\"            — Read a file for REFERENCE only (no edits). Put the file path in \"change\". Use this when you need to understand how existing code works before editing a different file.\n" +
+        "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations (fetching data, creating files outside the project). NEVER use mkdir/rmdir/del for project files — use edit steps instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
         "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
@@ -2421,7 +2456,7 @@ private sealed class StepExplorationResult
         "  \"_done\"               — Task is already complete; put reason in \"change\"\n" +
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
-        "1. Only reference files that exist in the discovery context.\n" +
+        "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
         "2. Plan AT MOST 2 steps. Smaller steps are better — you will be re-invoked to add more.\n" +
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
@@ -3660,6 +3695,7 @@ private sealed class StepExplorationResult
     {
         AgentPlan? best = null;
         var steering = steeringContext;
+        var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var iter = 1; iter <= MaxPlanningIterations; iter++)
         {
@@ -3677,11 +3713,32 @@ private sealed class StepExplorationResult
             // never leak into the executable plan.
             var exploreSteps = plan.Plan
                 .Where(p => p.File.Equals("_explore", StringComparison.OrdinalIgnoreCase)).ToList();
-            if (exploreSteps.Count > 0)
+
+            // Also detect steps where the LLM used a regular file path with a read-only
+            // change description (e.g. "Read the file…") instead of the _explore marker.
+            var readOnlyPrefixes = new[] { "read", "look at", "examine", "inspect", "review",
+                "understand", "study", "browse", "view", "check how", "see how",
+                "get familiar", "explore" };
+            foreach (var p in plan.Plan)
+            {
+                if (AgentUtilities.IsRelativePath(p.File) &&
+                    readOnlyPrefixes.Any(prefix =>
+                        (p.Change ?? "").Trim().ToLowerInvariant().StartsWith(prefix)))
+                {
+                    exploreSteps.Add(new PlanStep { File = "_explore", Change = p.File });
+                }
+            }
+
+            // Deduplicate: skip files already explored in a prior iteration
+            var newExploreSteps = exploreSteps
+                .Where(s => !string.IsNullOrWhiteSpace(s.Change) && exploredFiles.Add(s.Change))
+                .ToList();
+
+            if (newExploreSteps.Count > 0)
             {
                 await EmitLog(emitSse, "info",
-                    $"Planning {iter}/{MaxPlanningIterations}: planner requested {exploreSteps.Count} exploration target(s) — gathering context…", ct: ct);
-                discoveryContext = await ExplorationPipeline(exploreSteps, discoveryContext, projectRoot, emitSse, ct);
+                    $"Planning {iter}/{MaxPlanningIterations}: planner requested {newExploreSteps.Count} new exploration target(s) — gathering context…", ct: ct);
+                discoveryContext = await ExplorationPipeline(newExploreSteps, discoveryContext, projectRoot, emitSse, ct);
                 if (iter == MaxPlanningIterations)
                     steering = AppendExploreSteering(steeringContext); // last shot: force a real plan
                 continue;
@@ -3735,7 +3792,7 @@ private sealed class StepExplorationResult
         var sb = new StringBuilder();
         sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PlanScoreThreshold}.");
         sb.AppendLine("Raise your confidence by EITHER:");
-        sb.AppendLine("  • Emitting _explore steps (a file path or glob in \"change\") to read files you are unsure about, OR");
+        sb.AppendLine("  • Emitting _explore steps to read files NOT YET in the discovery context. Files already shown in DISCOVERY CONTEXT have been read — do not explore them again.");
         sb.AppendLine("  • Making each step more precise so you are confident it fully solves the task.");
         sb.AppendLine("Plan ONLY what the user's request requires — do not invent extra files, features, or refactors.");
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
@@ -4009,7 +4066,23 @@ private sealed class StepExplorationResult
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (modifiedPaths.Count == 0) return (true, ""); // nothing to verify
+        if (modifiedPaths.Count == 0)
+        {
+            // No files were edited — check if files were explored (read-only)
+            // and verify with the LLM whether the original task needs edits.
+            var exploredPaths = allResults
+                .OfType<Dictionary<string, object?>>()
+                .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "read")
+                .Select(r => r.GetValueOrDefault("path")?.ToString())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (exploredPaths.Count == 0)
+                return (true, ""); // nothing to verify — no steps at all
+            // Treat explored files as "current state" so the LLM
+            // can determine if code changes are still needed.
+            modifiedPaths = exploredPaths;
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
@@ -5292,8 +5365,9 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         }
         catch (Exception ex)
         {
-            await SendSse(Response, "error", new { message = ex.Message });
-            await SendSse(Response, "done", new { incomplete = true, summary = ex.Message });
+            Console.WriteLine($"[AGENT CRASH] {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine(ex.StackTrace);
+            await SendSse(Response, "error", new { message = $"{ex.GetType().Name}: {ex.Message}" });
         }
         finally
         {
