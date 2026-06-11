@@ -3176,16 +3176,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
 
         return plan;
-    }
-
-    private static bool LooksLikeTruncated(string raw)
-    {
-        var opens = raw.Count(c => c is '{' or '[');
-        var closes = raw.Count(c => c is '}' or ']');
-        if (opens > closes + 1) return true;
-        var lastLine = raw.Split('\n')[^1];
-        return Regex.Matches(lastLine, @"(?<!\\)""").Count % 2 != 0;
-    }
+    } 
 
     /// <summary>Check if file content looks truncated (unbalanced braces = LLM hit token limit).</summary>
     private static bool IsFullFileTruncated(string content)
