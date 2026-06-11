@@ -1,8 +1,6 @@
-﻿using Weaver.Services;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
-using System;
-using System.Threading.Tasks;
+﻿using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
+using Weaver.Services;
 
 namespace Weaver.Controllers
 {
@@ -12,6 +10,11 @@ namespace Weaver.Controllers
     {
         private readonly BoardDataService _svc;
         private readonly ILogger<BoardDataController> _logger;
+
+        // Using SemaphoreSlim ensures thread-safe queuing without deadlocks.
+        // Initial count 1 means only 1 thread can enter at a time (acts as a mutex/lock).
+        private static readonly SemaphoreSlim _saveLock = new SemaphoreSlim(1, 1);
+
         public BoardDataController(BoardDataService svc, ILogger<BoardDataController> logger)
         {
             _svc = svc;
@@ -26,10 +29,8 @@ namespace Weaver.Controllers
             {
                 return Ok(new { todo = Array.Empty<object>(), doing = Array.Empty<object>(), done = Array.Empty<object>(), archived = Array.Empty<object>() });
             }
-
             try
             {
-                // Return raw JSON as-is
                 return new ContentResult
                 {
                     Content = raw,
@@ -44,47 +45,82 @@ namespace Weaver.Controllers
             }
         }
 
-        private static readonly object _lock = new object ();
-        private static readonly Queue<Task> _saveQueue = new Queue<Task>();
+        [HttpPost("save")] // Typically Save is a POST/PUT, not a GET
         public async Task<IActionResult> Save([FromBody] object data)
         {
-            var json = System.Text.Json.JsonSerializer.Serialize(data, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            if (data == null)
+            {
+                return BadRequest("Data cannot be null");
+            }
+
+            string json;
+            try
+            {
+                // 1. Validate and Serialize upfront (before locking)
+                json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
+
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    _logger.LogWarning("Attempted to save empty JSON data.");
+                    return BadRequest("Data is empty");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to serialize data.");
+                return BadRequest("Invalid data format");
+            }
+
+            // 2. Enter the Queue (Wait for our turn)
+            // This blocks the request until the previous save is fully done.
+            await _saveLock.WaitAsync();
+
+            try
+            {
+                // 3. Perform the Critical Save with Retries
+                await SaveWithRetryAsync(json);
+                return Ok();
+            }
+            finally
+            {
+                // 4. Release the lock so the next queued request can proceed
+                _saveLock.Release();
+            }
+        }
+
+        private async Task SaveWithRetryAsync(string json)
+        {
             var retryCount = 0;
-            var delay = 100;
-            while (retryCount < 3)
+            var maxRetries = 3;
+            var delay = 100; // ms
+
+            while (retryCount < maxRetries)
             {
                 try
                 {
-                    lock (_lock)
-                    {
-                        var saveTask = _svc.SaveRawAsync(json);
-                        _saveQueue.Enqueue(saveTask);
-                        if (_saveQueue.Count > 1)
-                        {
-                            _saveQueue.Dequeue().Wait();
-                        }
+                    // Assuming BoardDataService handles the atomic file writing
+                    await _svc.SaveRawAsync(json);
 
-                        saveTask.Wait();
-                    }
-
-                    return Ok();
+                    // If successful, log and break
+                    _logger.LogInformation("Board data saved successfully.");
+                    return;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to save board data, retry attempt {RetryCount}", retryCount + 1);
                     retryCount++;
-                    if (retryCount >= 3)
+                    _logger.LogWarning(ex, "Failed to save board data. Attempt {RetryCount}/{MaxRetries}", retryCount, maxRetries);
+
+                    if (retryCount >= maxRetries)
                     {
-                        _logger.LogError(ex, "Failed to save board data after {RetryCount} attempts", retryCount);
-                        return StatusCode(500, "Failed to save board data");
+                        _logger.LogError(ex, "CRITICAL: Failed to save board data after {RetryCount} attempts.", retryCount);
+                        throw; // Throw to be caught by the outer try/catch block in Save()
                     }
 
+                    // Exponential backoff
                     await Task.Delay(delay);
                     delay *= 2;
                 }
             }
-
-            return Ok();
         }
     }
 }
