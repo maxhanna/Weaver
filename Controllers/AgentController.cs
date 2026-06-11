@@ -101,36 +101,38 @@ public class AgentController : ControllerBase
         "  \"alreadyDone\": true\n" +
         "}\n\n" +
         "CRITICAL RULES:\n" +
-         "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
-         "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
-         "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
-         "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
-         "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
-         "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
-         "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
-         "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
-         "8b. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
-         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping\n" +
-         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
-         "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-         "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
-              "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
-              "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
-              "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
-         "12b. targetType=\"class\": ONLY use to REPLACE the entire class body. To ADD a single field/property, use oldString/newString instead — never use targetType=\"class\" for small additions.\n" +
-         "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
-         "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
-         "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
-         "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
-         "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
-         "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
-          "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
-          "20. NEVER INVENT code: every variable, property, method, class, and component you reference in newString MUST already exist in the target file's codebase (or its imports). " +
-              "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
-              "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
-              "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
-              "(like `selectedCommand.command`, not `selectedCommand.title`; `cancelCommand()`, not `executeCommand()`). " +
-              "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit.";
+            "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
+            "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
+            "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
+            "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
+            "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
+            "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
+            "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
+            "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
+            "8b. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
+            "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping\n" +
+            "10. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
+            "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
+            "12. FORMAT C supported extensions:\n" +
+                "REQUIRED (.cs): Roslyn AST — oldString/newString WILL fail for C#\n" +
+                "SUPPORTED (regex): .ts .tsx .js .jsx .java .kt .scala .go .rs .swift .php .rb .dart .groovy\n" +
+                "→ targetType: 'method'/'function'/'class'/'interface'/'property'\n" +
+                "NOT SUPPORTED (use oldString/newString): .html .css .json .yaml .toml .xml .svg .md .sql .sh .py .lua .ex\n" +
+            "12b. targetType='class': ONLY to REPLACE the ENTIRE class body. " +
+                "To add a single property/field, use oldString/newString instead.\n" +
+            "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
+            "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
+            "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
+            "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
+            "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
+            "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
+            "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
+            "20. NEVER INVENT code: every variable, property, method, class, and component you reference in newString MUST already exist in the target file's codebase (or its imports). " +
+                "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
+                "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
+                "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
+                "(like `selectedCommand.command`, not `selectedCommand.title`; `cancelCommand()`, not `executeCommand()`). " +
+                "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -317,62 +319,144 @@ public class AgentController : ControllerBase
         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
         if (string.IsNullOrWhiteSpace(sourceText))
             return (null, "File is empty");
-
-        // ── Non-C#: regex-based resolution (TypeScript, JS, etc.) ─────
+ 
+        // ── Non-C#: regex-based resolution ─────────────────────────────────────────
         if (ext != ".cs")
         {
-            Regex? regex = null;
-            string label;
+            // Build a prioritised list of patterns for the target language.
+            // The first pattern that matches wins.
+            var patterns = new List<(string label, Regex regex)>();
 
             if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
             {
-                label = "Method/function";
-                regex = new Regex($@"^\s*(?:(?:async|export)\s+)?(?:(?:public|private|protected|internal)\s+)?(?:(?:static|readonly)\s+)?(?:\w+\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)", RegexOptions.Multiline);
+                // ── General: JS/TS/Java/PHP/C-family access-modifier prefix ─────
+                patterns.Add(("Method/function",
+                    new Regex(
+                        $@"^\s*(?:(?:async|export|default)\s+)?(?:(?:public|private|protected|internal|static|override|abstract|virtual|sealed|final|open|inline|suspend)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)",
+                        RegexOptions.Multiline)));
+
+                // ── Go: func [( receiver )] Name( ───────────────────────────────
+                if (ext == ".go")
+                    patterns.Add(("Go function",
+                        new Regex(
+                            $@"^\s*func\s+(?:\(\s*\w+\s+\*?\w+\s*\)\s+)?{Regex.Escape(targetName)}\s*\(",
+                            RegexOptions.Multiline)));
+
+                // ── Rust: [pub] [async|unsafe] fn Name ──────────────────────────
+                if (ext == ".rs")
+                    patterns.Add(("Rust fn",
+                        new Regex(
+                            $@"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+{Regex.Escape(targetName)}\s*[<(]",
+                            RegexOptions.Multiline)));
+
+                // ── Swift: func Name ─────────────────────────────────────────────
+                if (ext == ".swift")
+                    patterns.Add(("Swift func",
+                        new Regex(
+                            $@"^\s*(?:(?:public|private|internal|open|fileprivate|override|static|class|mutating|nonmutating|dynamic|final|lazy)\s+)*func\s+{Regex.Escape(targetName)}\s*[<(]",
+                            RegexOptions.Multiline)));
+
+                // ── Kotlin: fun Name ─────────────────────────────────────────────
+                if (ext is ".kt" or ".kts")
+                    patterns.Add(("Kotlin fun",
+                        new Regex(
+                            $@"^\s*(?:(?:public|private|protected|internal|override|abstract|open|inline|suspend|tailrec|operator|infix)\s+)*fun\s+{Regex.Escape(targetName)}\s*[<(]",
+                            RegexOptions.Multiline)));
+
+                // ── PHP: [modifiers] function Name ───────────────────────────────
+                if (ext == ".php")
+                    patterns.Add(("PHP function",
+                        new Regex(
+                            $@"^\s*(?:(?:public|private|protected|static|abstract|final)\s+)*function\s+{Regex.Escape(targetName)}\s*\(",
+                            RegexOptions.Multiline)));
+
+                // ── Ruby: def name ───────────────────────────────────────────────
+                if (ext == ".rb")
+                    patterns.Add(("Ruby def",
+                        new Regex(
+                            $@"^\s*def\s+(?:self\.)?{Regex.Escape(targetName)}\s*[\(\s]",
+                            RegexOptions.Multiline)));
             }
             else if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
             {
-                label = "Class";
-                regex = new Regex($@"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+{Regex.Escape(targetName)}\b", RegexOptions.Multiline);
+                patterns.Add(("Class",
+                    new Regex($@"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+{Regex.Escape(targetName)}\b",
+                        RegexOptions.Multiline)));
             }
             else if (string.Equals(targetType, "interface", StringComparison.OrdinalIgnoreCase))
             {
-                label = "Interface";
-                regex = new Regex($@"^\s*(?:export\s+)?(?:default\s+)?interface\s+{Regex.Escape(targetName)}\b", RegexOptions.Multiline);
+                patterns.Add(("Interface",
+                    new Regex($@"^\s*(?:export\s+)?(?:default\s+)?interface\s+{Regex.Escape(targetName)}\b",
+                        RegexOptions.Multiline)));
             }
             else if (string.Equals(targetType, "property", StringComparison.OrdinalIgnoreCase))
             {
-                label = "Property";
-                regex = new Regex($@"^\s*(?:(?:public|private|protected|readonly|static)\s+)*{Regex.Escape(targetName)}\s*(?::\s*[^;=]+)?\s*(?:=|[;)])", RegexOptions.Multiline);
+                patterns.Add(("Property",
+                    new Regex(
+                        $@"^\s*(?:(?:public|private|protected|readonly|static)\s+)*{Regex.Escape(targetName)}\s*(?::\s*[^;=]+)?\s*(?:=|[;)])",
+                        RegexOptions.Multiline)));
             }
             else
             {
                 return (null, $"For {ext} files, only targetType 'method'/'function'/'class'/'interface'/'property' is supported. Got '{targetType}'.");
             }
 
-            var match = regex.Match(sourceText);
+            // ── Try patterns in order ────────────────────────────────────────────
+            Match match = Match.Empty;
+            string label = "";
+            foreach (var (lbl, rx) in patterns)
+            {
+                match = rx.Match(sourceText);
+                if (match.Success) { label = lbl; break; }
+            }
+
             if (!match.Success)
             {
                 var hint = ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".json" or ".css" or ".svg"
-                    ? $" {ext} files don't contain {label.ToLowerInvariant()}s — use oldString/newString format instead of targetType/targetName/newCode"
+                    ? $" {ext} files don't contain named symbols — use oldString/newString format instead"
+                    : ext is ".yaml" or ".yml" or ".toml"
+                    ? $" {ext} config files don't contain named symbols — use oldString/newString format instead"
                     : "";
-                return (null, $"{label} '{targetName}' not found in {ext} file.{hint}");
+                return (null, $"{(string.IsNullOrEmpty(label) ? "Symbol" : label)} '{targetName}' not found in {ext} file.{hint}");
             }
 
             var startIdx = match.Index;
 
-            // Properties without bodies (ending in ; or )) don't need brace matching
+            // ── Ruby: find matching `end` by indentation ─────────────────────────
+            // Ruby uses def/end rather than braces, so we track indent level.
+            if (ext == ".rb")
+            {
+                var defLine = sourceText[..startIdx].Split('\n')[^1];
+                var defIndent = GetLeadingWhitespace(defLine);
+                // Look for the first `end` at the same (or lesser) indentation after the def line
+                var searchFrom = startIdx + match.Length;
+                var endRx = new Regex($@"^{Regex.Escape(defIndent)}end\s*$", RegexOptions.Multiline);
+                var endMatch = endRx.Match(sourceText, searchFrom);
+                if (!endMatch.Success)
+                    return (null, $"Could not find matching 'end' for def '{targetName}'");
+
+                var resolved2 = sourceText[startIdx..(endMatch.Index + endMatch.Length)]
+                    .Replace("\r\n", "\n").Replace("\r", "\n");
+                if (returnTail)
+                {
+                    var ls = resolved2.Split('\n');
+                    return (string.Join("\n", ls[^Math.Min(3, ls.Length)..]), null);
+                }
+                return (resolved2, null);
+            }
+
+            // ── All other non-C# languages: use brace-depth matching ────────────
+            // (Properties without bodies ending in ; need no brace matching)
             if (string.Equals(targetType, "property", StringComparison.OrdinalIgnoreCase) &&
                 match.Value.TrimEnd().EndsWith(";"))
-            {
                 return (match.Value, null);
-            }
 
             var openBraceIdx = sourceText.IndexOf('{', startIdx);
             if (openBraceIdx < 0)
                 return (null, $"{label} '{targetName}' has no opening brace");
 
-            // Find the matching closing brace, skipping braces inside strings and comments
+            // (The existing brace-matching loop continues unchanged from here...)
             var braceDepth = 0;
             var inSingleQuote = false;
             var inDoubleQuote = false;
@@ -529,22 +613,216 @@ public class AgentController : ControllerBase
     /// For these we must never re-indent by brace depth — doing so flattens the code.
     /// </summary>
     private static readonly HashSet<string> _whitespaceSignificantExts = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".py", ".pyi", ".pyw",            // Python
-        ".yaml", ".yml",                  // YAML
-        ".coffee",                        // CoffeeScript
-        ".haml", ".slim", ".pug", ".jade",// indented templating
-        ".fs", ".fsx", ".fsi",            // F# (offside rule)
-        ".nim",                           // Nim
-        ".sass",                          // indented Sass (NOT .scss)
-    };
+{
+    ".py", ".pyi", ".pyw",
+    ".yaml", ".yml",
+    ".coffee",
+    ".haml", ".slim", ".pug", ".jade",
+    ".fs", ".fsx", ".fsi",
+    ".nim",
+    ".sass",
+    ".hs", ".lhs",          // Haskell
+    ".elm",                 // Elm
+    ".ml", ".mli",          // OCaml (off-side rule)
+};
+    // Languages that use keyword terminators (def/end, if/fi, etc.) instead of braces.
+    // Brace-depth re-indentation would corrupt these just like whitespace-significant ones.
+    private static readonly HashSet<string> _endKeywordLanguages = new(StringComparer.OrdinalIgnoreCase)
+{
+    ".rb",                              // Ruby:   def/end
+    ".lua",                             // Lua:    function/end
+    ".ex", ".exs",                      // Elixir: do/end
+    ".sh", ".bash", ".zsh", ".fish",    // Shell:  if/fi, for/done, case/esac
+};
 
     private static bool IsWhitespaceSignificant(string? filePath)
     {
         if (string.IsNullOrWhiteSpace(filePath)) return false;
-        return _whitespaceSignificantExts.Contains(Path.GetExtension(filePath));
+        var ext = Path.GetExtension(filePath);
+        // Both true indent-based languages AND keyword-terminated ones are unsafe for
+        // brace-depth re-indentation — neither group uses braces to express structure.
+        return _whitespaceSignificantExts.Contains(ext) || _endKeywordLanguages.Contains(ext);
     }
+    /// <summary>
+    /// Returns (family, supportsFormatC, llmHint) for a file extension.
+    /// family: "brace" | "indent" | "end-keyword" | "tag" | "config" | "plain"
+    /// supportsFormatC: whether the AstResolveEdit regex can target named symbols
+    /// llmHint: the ⚠ line injected into the ResolveEditForStep prompt
+    /// </summary>
+    private static (string family, bool supportsFormatC, string llmHint) GetLanguageProfile(string ext)
+    {
+        return ext.ToLowerInvariant() switch
+        {
+            // ── C# (Roslyn AST) ────────────────────────────────────────────────────
+            ".cs" => ("brace", true,
+                "⚠ C# FILE: USE FORMAT C (targetType/targetName/newCode). " +
+                "This is the ONLY supported format for C# files — oldString/newString WILL fail. " +
+                "INDENTATION: method signature at class-member level, body indented 4 spaces more. " +
+                "To ADD a method use insertAfter:true. To add a PROPERTY use oldString/newString."),
 
+            // ── TypeScript / JavaScript ────────────────────────────────────────────
+            ".ts" or ".tsx" => ("brace", true,
+                "⚠ TS FILE: preserve ALL indentation exactly. Methods inside a class MUST be indented. " +
+                "You can use FORMAT C (targetType='method', targetName='name') for full method replacements. " +
+                "For small targeted edits (< 10 lines) prefer oldString/newString."),
+            ".js" or ".jsx" => ("brace", true,
+                "⚠ JS FILE: preserve ALL indentation exactly. " +
+                "FORMAT C supported (targetType='function'/'method', targetName='name'). " +
+                "For small edits prefer oldString/newString."),
+
+            // ── JVM / CLR family (brace-based, regex-targeted) ────────────────────
+            ".java" => ("brace", true,
+                "⚠ JAVA FILE: brace-based, similar to C#. " +
+                "FORMAT C supported: targetType='method'/'class'/'interface'. " +
+                "Preserve ALL annotations (@Override, @Autowired, etc.) exactly. " +
+                "NEVER alter generic type parameters or throws clauses."),
+            ".kt" or ".kts" => ("brace", true,
+                "⚠ KOTLIN FILE: brace-based. FORMAT C supported: targetType='function'/'class'. " +
+                "Preserve data class properties, suspend/inline/override modifiers, and lambda syntax exactly."),
+            ".scala" => ("brace", true,
+                "⚠ SCALA FILE: brace-based. FORMAT C supported: targetType='method'/'class'/'object'. " +
+                "Preserve implicits, case class syntax, and for-comprehension indentation exactly."),
+
+            // ── Go ─────────────────────────────────────────────────────────────────
+            ".go" => ("brace", true,
+                "⚠ GO FILE: brace-based, uses TABS (not spaces) for indentation — never convert tabs to spaces. " +
+                "FORMAT C supported: targetType='function', targetName='FunctionName'. " +
+                "Preserve ALL error-handling idioms (if err != nil), defer statements, and goroutine patterns."),
+
+            // ── Systems languages ──────────────────────────────────────────────────
+            ".rs" => ("brace", true,
+                "⚠ RUST FILE: brace-based. FORMAT C supported: targetType='function'/'impl'. " +
+                "Preserve ALL lifetime annotations ('a), borrow markers (&, &mut), " +
+                "ownership semantics, trait bounds, and match arm patterns EXACTLY."),
+            ".c" or ".cpp" or ".cc" or ".cxx" or ".h" or ".hpp" => ("brace", false,
+                "⚠ C/C++ FILE: brace-based, preprocessor directives must stay on their own line. " +
+                "Use oldString/newString. Preserve #include order, extern \"C\", " +
+                "template parameters, and pointer/reference syntax exactly."),
+            ".swift" => ("brace", true,
+                "⚠ SWIFT FILE: brace-based. FORMAT C supported: targetType='function'/'class'/'struct'. " +
+                "Preserve access modifiers (open/public/internal/fileprivate/private), " +
+                "property wrappers (@State, @Binding), and optional chaining exactly."),
+
+            // ── Scripting / dynamic ────────────────────────────────────────────────
+            ".php" => ("brace", true,
+                "⚠ PHP FILE: brace-based. FORMAT C supported: targetType='function'/'method'/'class'. " +
+                "Preserve $ sigils on all variables, type hints, and nullable ? modifiers exactly."),
+            ".dart" => ("brace", true,
+                "⚠ DART FILE: brace-based. FORMAT C supported: targetType='function'/'class'. " +
+                "Preserve async/await, null-safety operators (?., ??, ??=, !), and Widget tree indentation."),
+            ".groovy" => ("brace", true,
+                "⚠ GROOVY FILE: brace-based (Gradle/Groovy DSL). FORMAT C supported: targetType='method'. " +
+                "Preserve closure syntax { ... }, GString interpolation, and Gradle DSL patterns."),
+
+            // ── End-keyword languages (def/end, if/fi, function/end) ──────────────
+            ".rb" => ("end-keyword", true,
+                "⚠ RUBY FILE: uses def/end, do/end, class/end block terminators — NOT braces. " +
+                "FORMAT C supported: targetType='method', targetName='method_name' (snake_case). " +
+                "Use oldString/newString for small edits. " +
+                "Preserve Ruby idioms: ||=, &., symbol literals, and block/proc/lambda syntax."),
+            ".lua" => ("end-keyword", false,
+                "⚠ LUA FILE: uses function/end, if/end, for/end block terminators — NOT braces. " +
+                "Use oldString/newString only. Preserve Lua table syntax, colon-method calls (:), " +
+                "and global vs local variable scoping."),
+            ".ex" or ".exs" => ("end-keyword", false,
+                "⚠ ELIXIR FILE: uses do/end block terminators and pipe operators |>. " +
+                "Use oldString/newString. Preserve pattern matching, atoms (:name), " +
+                "and module attribute syntax (@doc, @spec)."),
+            ".sh" or ".bash" or ".zsh" or ".fish" => ("end-keyword", false,
+                "⚠ SHELL SCRIPT: uses if/fi, for/done, while/done, case/esac terminators. " +
+                "Use oldString/newString. Preserve $() vs ``, quoting rules, " +
+                "and test [ ] vs [[ ]] distinctions exactly."),
+            ".ps1" or ".psm1" or ".psd1" => ("brace", false,
+                "⚠ POWERSHELL FILE: brace-based, $Variables, -Flags syntax. " +
+                "Use oldString/newString. Preserve $_ pipeline variable, " +
+                "cmdlet verb-noun naming, and parameter attribute syntax."),
+
+            // ── Whitespace-significant / indent-based ─────────────────────────────
+            ".py" or ".pyi" => ("indent", false,
+                "⚠ PYTHON FILE: indentation IS the syntax — do NOT alter indent levels. " +
+                "Use oldString/newString only. FORMAT C is NOT supported. " +
+                "Copy every leading space/tab from the file exactly into oldString and newString. " +
+                "Preserve type hints, decorators (@), and docstring quotes."),
+            ".yaml" or ".yml" => ("indent", false,
+                "⚠ YAML FILE: whitespace-significant. Use oldString/newString only. " +
+                "NEVER change indentation levels — copy exactly. " +
+                "Preserve anchors (&), aliases (*), and multiline block styles (|, >)."),
+            ".fs" or ".fsx" or ".fsi" => ("indent", false,
+                "⚠ F# FILE: whitespace-significant (offside rule). Use oldString/newString only. " +
+                "Preserve pipeline |> operators, computation expressions, and discriminated union syntax."),
+            ".hs" or ".lhs" => ("indent", false,
+                "⚠ HASKELL FILE: whitespace-significant. Use oldString/newString only. " +
+                "Preserve do-notation alignment, type class instances, and where-clause indentation."),
+            ".coffee" => ("indent", false,
+                "⚠ COFFEESCRIPT FILE: whitespace-significant, no braces. Use oldString/newString only."),
+
+            // ── Tag / markup ───────────────────────────────────────────────────────
+            ".html" or ".htm" => ("tag", false,
+                "⚠ HTML FILE: tag-based indentation — child elements MUST be indented more than parent. " +
+                "Use oldString/newString. Preserve attribute quoting, void element self-closing, " +
+                "and Angular/Vue directive syntax exactly."),
+            ".xml" or ".xaml" or ".axaml" => ("tag", false,
+                "⚠ XML FILE: tag-based. Use oldString/newString. " +
+                "Preserve namespace prefixes (xmlns:), attribute order, and CDATA sections."),
+            ".cshtml" or ".razor" => ("tag", false,
+                "⚠ RAZOR FILE: HTML with @C# expressions. Use oldString/newString. " +
+                "Preserve @model, @inject, @Html.* helpers, and @{ } code blocks exactly."),
+            ".vue" => ("tag", true,
+                "⚠ VUE FILE: <template>/<script>/<style> sections. " +
+                "FORMAT C supported for methods inside <script>. " +
+                "For template changes use oldString/newString. Preserve v-bind/:, v-on/@, v-model directives."),
+            ".svelte" => ("tag", false,
+                "⚠ SVELTE FILE: <script>/<style>/template sections. Use oldString/newString. " +
+                "Preserve $: reactive declarations, {#if}, {#each} blocks, and slot syntax."),
+            ".svg" => ("tag", false,
+                "⚠ SVG FILE: XML tag-based. Use oldString/newString. " +
+                "Preserve viewBox, transform attributes, and path d= values exactly."),
+
+            // ── Stylesheets ────────────────────────────────────────────────────────
+            ".css" or ".scss" or ".less" => ("brace", false,
+                "⚠ CSS/SCSS/LESS FILE: brace-based selectors. Use oldString/newString. " +
+                "Preserve ALL whitespace in property values (e.g. '0 1px 2px rgba(0,0,0,0.5)' — " +
+                "every space and comma is significant). Preserve SCSS variables ($var), mixins, and nesting."),
+
+            // ── Config / data ──────────────────────────────────────────────────────
+            ".json" => ("config", false,
+                "⚠ JSON FILE: strict syntax — use oldString/newString only. " +
+                "NO trailing commas, NO comments. Preserve ALL nested object structure exactly. " +
+                "When editing arrays, include the full surrounding element for uniqueness."),
+            ".toml" => ("config", false,
+                "⚠ TOML FILE: use oldString/newString. Preserve [section] headers, " +
+                "[[array-of-tables]], and inline table {key=val} syntax exactly."),
+            ".env" or ".ini" => ("config", false,
+                "⚠ CONFIG FILE: key=value pairs. Use oldString/newString. " +
+                "Preserve comment lines (#) and section headers ([section]) exactly."),
+            ".proto" => ("brace", false,
+                "⚠ PROTOBUF FILE: brace-based. Use oldString/newString. " +
+                "Preserve field numbers, oneof blocks, and option statements exactly."),
+
+            // ── Query / data ───────────────────────────────────────────────────────
+            ".sql" => ("plain", false,
+                "⚠ SQL FILE: use oldString/newString. Preserve ALL whitespace in multi-line queries. " +
+                "Match exact keyword casing (uppercase SQL keywords are conventional). " +
+                "Preserve semicolons and comment styles (-- vs /* */)."),
+            ".graphql" or ".gql" => ("plain", false,
+                "⚠ GRAPHQL FILE: use oldString/newString. Preserve type definitions, " +
+                "field arguments, and directive (@deprecated, @skip) syntax exactly."),
+
+            // ── Documentation ──────────────────────────────────────────────────────
+            ".md" or ".mdx" => ("plain", false,
+                "⚠ MARKDOWN FILE: use oldString/newString. " +
+                "Preserve heading levels (# vs ##), list markers (-, *, 1.), " +
+                "and fenced code block language tags exactly."),
+            ".rst" => ("indent", false,
+                "⚠ RST FILE: indentation-significant section underlines. Use oldString/newString. " +
+                "Preserve directive syntax (.. directive::) and role syntax (:role:`text`)."),
+
+            // ── Default ────────────────────────────────────────────────────────────
+            _ => ("plain", false,
+                "⚠ Preserve ALL indentation and whitespace exactly as shown in the file. " +
+                "Use oldString/newString. Copy every leading space/tab character-for-character.")
+        };
+    }
     /// <summary>
     /// Infers the indentation unit (a tab, or N spaces) used by the surrounding source so
     /// re-indentation matches the file's own convention instead of a hardcoded width.
@@ -721,12 +999,13 @@ public class AgentController : ControllerBase
     /// Makes a focused LLM call to resolve the exact edit for a single plan step.
     /// The LLM sees the real file content and outputs delimiter-format diff.
     /// </summary>
-      private async Task<(string? oldStr, string? newStr, bool fullFile,
-         string? fullContent, bool alreadyDone, string? error)>
-         ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
-             CancellationToken ct,
-             List<(string old, string @new, string error)>? history = null,
-             string? explorationContext = null)
+    private async Task<(string? oldStr, string? newStr, bool fullFile,
+     string? fullContent, bool alreadyDone, string? error)>
+     ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
+         CancellationToken ct,
+         List<(string old, string @new, string error)>? history = null,
+         string? explorationContext = null,
+         string? targetSymbol = null)  
     {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(
@@ -745,13 +1024,24 @@ public class AgentController : ControllerBase
                       "Do NOT keep the old X and also add Y next to it. " +
                       "⚠ RULE: NEVER INVENT code — every property, variable, method, and component in newString MUST already exist in this file. " +
                       "Look at existing popupPanel/code sections in the target file; copy their exact structure and class names. " +
-                      "Do NOT reference properties like `title` or `description` or call methods like `executeCommand()` unless you can see they already exist in the file."); 
+                      "Do NOT reference properties like `title` or `description` or call methods like `executeCommand()` unless you can see they already exist in the file.");
 
-        // NEW: file-type hint so the LLM preserves structure
+
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
-        if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".svg")
-            sb.AppendLine("⚠ HTML FILE: preserve ALL relative indentation exactly — " +
-                          "child elements must be indented MORE than their parent tag.");
+        var (langFamily, langSupportsFormatC, langHint) = GetLanguageProfile(ext);
+        sb.AppendLine(langHint);
+
+        var lineCount = fileContent.Split('\n').Length;
+        var isLarge = fileContent.Length > 3000 || lineCount > 80;
+        // Large-file instruction depends on whether FORMAT C is available
+        if (isLarge)
+        {
+            if (langSupportsFormatC && ext != ".cs")
+                sb.AppendLine("⚠ Large file — prefer FORMAT C (targetType/targetName) to avoid fragile text matching.");
+            else if (ext != ".cs")
+                sb.AppendLine("⚠ Large file — use a tight oldString (3–6 lines max). " +
+                              "The excerpt above is the ONLY portion shown; your oldString MUST appear in it.");
+        } 
         else if (ext is ".css" or ".scss" or ".sass")
             sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
                           "(e.g. '0px 1px' must stay as two tokens with a space).");
@@ -776,16 +1066,17 @@ public class AgentController : ControllerBase
         //  signal the editor gets; the LLM should read it before the file content
         if (!string.IsNullOrWhiteSpace(explorationContext))
         {
-            sb.AppendLine();
-            sb.AppendLine("## EXPLORATION CONTEXT");
-            sb.AppendLine("The following files were read during the exploration phase to " +
-                          "understand exactly what needs to change. Use this context " +
-                          "to locate the precise edit target:");
-            var ctxPreview = explorationContext.Length > 14_000
-                ? explorationContext[..14_000] + "\n... [exploration context truncated]"
-                : explorationContext;
-            sb.AppendLine(ctxPreview);
-            sb.AppendLine();
+            var distilled = DistillExplorationContext(
+                explorationContext, relPath, step.Change, targetSymbol);
+            if (!string.IsNullOrWhiteSpace(distilled))
+            {
+                sb.AppendLine();
+                sb.AppendLine("## RELATED FILE CONTEXT");
+                sb.AppendLine("Types, interfaces, and relevant code from files read during exploration " +
+                              "(target file is shown above; these are supporting files only):");
+                sb.AppendLine(distilled);
+                sb.AppendLine();
+            }
         }
 
         if (!fileExists)
@@ -793,9 +1084,7 @@ public class AgentController : ControllerBase
             sb.AppendLine("FILE DOES NOT EXIST YET. Use <<<FULL_FILE>>> to create it with complete content.");
         }
         else
-        {
-            var lineCount = fileContent.Split('\n').Length;
-            var isLarge = fileContent.Length > 3000 || lineCount > 80;
+        { 
             if (isLarge)
             {
                 sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
@@ -803,8 +1092,9 @@ public class AgentController : ControllerBase
                 sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString));
                 sb.AppendLine("```");
                 sb.AppendLine();
-                sb.AppendLine("⚠ Do NOT output the full file. Use FORMAT C (targetType/targetName/newCode) for CODE files (.cs, .ts, .js, .tsx, .jsx). " +
-                              "For HTML, CSS, JSON, and other markup/data files, use oldString/newString instead — those files don't have methods/classes to target with FORMAT C.");
+                sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): " 
+                    + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods.");
+                sb.AppendLine("For ALL other file types: use oldString/newString — FORMAT C does not apply.");
             }
             else
             {
@@ -2069,7 +2359,8 @@ private sealed class StepExplorationResult
                 (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
                     await ResolveEditForStep(
                         step, projectRoot, emitSse, ct, history,
-                        explorationContext: explorationContext);
+                        explorationContext: explorationContext,
+                        targetSymbol: exploration.TargetSymbol);   
 
                 if (resolveError == null)
                 {
@@ -3731,7 +4022,142 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         return (allSteps, plan, complete);
     }
+    /// <summary>
+    /// Produces a compact version of the exploration context for the edit-resolve LLM:
+    /// - Removes the target file entirely (it is already shown in the main prompt)
+    /// - For each auxiliary file: keeps imports, type/class declarations, property signatures,
+    ///   and a ±3-line window around any keyword/symbol match — strips method bodies
+    /// - Caps output at maxChars so the edit LLM isn't overwhelmed with unrelated code
+    /// </summary>
+    private static string DistillExplorationContext(
+        string explorationContext,
+        string targetRelPath,
+        string changeDesc,
+        string? targetSymbol,
+        int maxChars = 7_000)
+    {
+        if (string.IsNullOrWhiteSpace(explorationContext)) return "";
 
+        var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
+            .Where(k => k.Length >= 4)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(targetSymbol))
+            keywords.Add(targetSymbol);
+
+        var normalizedTarget = targetRelPath.Replace('\\', '/');
+
+        // Split on section headers ("### ") — each file read in the loop produces one section
+        var sections = Regex.Split(explorationContext.Trim(), @"(?=^### )", RegexOptions.Multiline);
+        var result = new StringBuilder();
+
+        foreach (var rawSection in sections)
+        {
+            if (string.IsNullOrWhiteSpace(rawSection)) continue;
+
+            // Skip the target file — already shown verbatim in the main prompt
+            var firstLine = rawSection.Split('\n')[0];
+            if (firstLine.Contains("TARGET FILE:", StringComparison.OrdinalIgnoreCase)) continue;
+            var sectionPath = Regex.Match(firstLine, @"###\s+([^\s(]+)").Groups[1].Value
+                .Replace('\\', '/').Trim();
+            if (string.Equals(sectionPath, normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var distilled = DistillFileSection(rawSection, keywords);
+            if (string.IsNullOrWhiteSpace(distilled)) continue;
+
+            var budget = maxChars - result.Length;
+            if (budget < 100) { result.AppendLine("... [context budget exhausted]"); break; }
+            if (distilled.Length > budget)
+                distilled = distilled[..budget] + "\n    // ... [truncated]";
+            result.AppendLine(distilled);
+        }
+
+        return result.ToString();
+    }
+
+    /// <summary>
+    /// From a single "### filepath\n```\n...\n```" section, extracts:
+    /// - First 20 lines of the code block (imports + class/type declarations)
+    /// - ±3 lines around any line that contains a keyword or target symbol
+    /// Skips all other implementation lines, reducing an average file from
+    /// 3 000+ chars to ~400–800 chars while preserving type information.
+    /// </summary>
+    private static string DistillFileSection(string section, HashSet<string> keywords, int maxCharsPerSection = 1_800)
+    {
+        var lines = section.Split('\n');
+        var headerLines = new List<string>();
+        var codeLines = new List<string>();
+        var openingFence = "";
+        var inFence = false;
+        var pastFirstFence = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("```"))
+            {
+                if (!pastFirstFence)
+                {
+                    pastFirstFence = true;
+                    inFence = true;
+                    openingFence = line;
+                }
+                else if (inFence)
+                {
+                    inFence = false;
+                    break; // stop after the first code block
+                }
+                continue;
+            }
+            if (inFence)
+                codeLines.Add(line);
+            else
+                headerLines.Add(line);
+        }
+
+        if (codeLines.Count == 0)
+            return string.Join("\n", headerLines); // prose-only section, keep as-is
+
+        // ── Determine which code lines to include ────────────────────────────
+        var included = new SortedSet<int>();
+
+        // Always include the first 20 lines — imports and type declarations live here
+        for (var i = 0; i < Math.Min(20, codeLines.Count); i++)
+            included.Add(i);
+
+        // Include ±3 lines around any keyword match throughout the rest of the file
+        for (var i = 20; i < codeLines.Count; i++)
+        {
+            if (keywords.Count == 0) break;
+            if (keywords.Any(kw => codeLines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
+            {
+                for (var w = Math.Max(0, i - 3); w <= Math.Min(codeLines.Count - 1, i + 3); w++)
+                    included.Add(w);
+            }
+        }
+
+        // ── Build output, inserting gap markers between non-contiguous ranges ─
+        var result = new List<string>(headerLines) { openingFence };
+        var prevIdx = -2;
+
+        foreach (var idx in included)
+        {
+            if (prevIdx >= 0 && idx > prevIdx + 1)
+                result.Add("    // ...");
+            result.Add(codeLines[idx]);
+            prevIdx = idx;
+        }
+
+        if (prevIdx < codeLines.Count - 1)
+            result.Add("    // ...");
+
+        result.Add("```");
+
+        var output = string.Join("\n", result);
+        return output.Length > maxCharsPerSection
+            ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
+            : output;
+    }
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
         var sb = new StringBuilder();
