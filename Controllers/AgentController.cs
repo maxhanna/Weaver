@@ -101,26 +101,36 @@ public class AgentController : ControllerBase
         "  \"alreadyDone\": true\n" +
         "}\n\n" +
         "CRITICAL RULES:\n" +
-        "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
-        "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
-        "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
-        "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
-        "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
-        "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
-        "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
-        "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
-        "8. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
-        "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping" +
-        "10. Output ONLY the JSON — no markdown, no code fences, no introductory text" +
+         "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
+         "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
+         "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
+         "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
+         "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
+         "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
+         "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
+         "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
+         "8b. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
+         "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping\n" +
+         "10. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
          "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-            "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
-                 "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
-                 "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
-                 "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
-            "12b. targetType=\"class\": ONLY use to REPLACE the entire class body. To ADD a single field/property, use oldString/newString instead — never use targetType=\"class\" for small additions.\n" +
+         "12. FORMAT C (targetType/targetName/newCode) is for CODE files only (.cs, .ts, .js, .tsx, .jsx). " +
+              "For non-C# code files, use targetType=\"method\" or targetType=\"function\" with targetName=\"{name}\". " +
+              "For C# files, only FORMAT C is supported — oldString/newString will fail for C#. " +
+              "For HTML, CSS, JSON, and other markup/data files, use oldString/newString — FORMAT C does NOT apply to those.\n" +
+         "12b. targetType=\"class\": ONLY use to REPLACE the entire class body. To ADD a single field/property, use oldString/newString instead — never use targetType=\"class\" for small additions.\n" +
          "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
          "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
-         "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.";
+         "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
+         "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
+         "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
+         "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
+          "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
+          "20. NEVER INVENT code: every variable, property, method, class, and component you reference in newString MUST already exist in the target file's codebase (or its imports). " +
+              "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
+              "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
+              "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
+              "(like `selectedCommand.command`, not `selectedCommand.title`; `cancelCommand()`, not `executeCommand()`). " +
+              "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -730,6 +740,12 @@ public class AgentController : ControllerBase
         var sb = new StringBuilder();
         sb.AppendLine($"FILE: {relPath}");
         sb.AppendLine($"CHANGE REQUIRED: {step.Change}"); 
+        sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
+                      "If the change says \"instead of X use Y\", modify X to become Y. " +
+                      "Do NOT keep the old X and also add Y next to it. " +
+                      "⚠ RULE: NEVER INVENT code — every property, variable, method, and component in newString MUST already exist in this file. " +
+                      "Look at existing popupPanel/code sections in the target file; copy their exact structure and class names. " +
+                      "Do NOT reference properties like `title` or `description` or call methods like `executeCommand()` unless you can see they already exist in the file."); 
 
         // NEW: file-type hint so the LLM preserves structure
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -2265,6 +2281,15 @@ private sealed class StepExplorationResult
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
             await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+
+            // ── Method signature change: update call sites ─────────────
+            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
+            {
+                stepIndex = await HandleMethodSignatureChange(
+                    fullPath, relPath, oldStr, newStr, projectRoot,
+                    emitSse, ct, stepIndex, allResults, cardId);
+            }
+
             return stepIndex + 1;
         }
 
@@ -2378,6 +2403,194 @@ private sealed class StepExplorationResult
         {
             await EmitLog(true, "warn", "Failed to attach files to card", new { cardId, error = ex.Message });
         }
+    }
+
+    private static readonly Regex MethodDeclRegex = new(
+        @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|sealed|new|partial|async|unsafe)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?)\s+(\w+)\s*\(([^)]*)\)",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// After a successful edit, detect if the edit changed a method signature
+    /// (e.g., added a parameter). If so, search all .cs files for call sites
+    /// and update them with sub-step edits.
+    /// </summary>
+    private async Task<int> HandleMethodSignatureChange(
+        string fullPath, string relPath,
+        string oldStr, string newStr,
+        string projectRoot, bool emitSse, CancellationToken ct,
+        int stepIndex, List<object> allResults, string? cardId)
+    {
+        // ── Detect method signature change ──────────────────────────────
+        var oldMatch = MethodDeclRegex.Match(oldStr);
+        var newMatch = MethodDeclRegex.Match(newStr);
+        if (!oldMatch.Success || !newMatch.Success)
+            return stepIndex;
+
+        var oldMethodName = oldMatch.Groups[1].Value;
+        var newMethodName = newMatch.Groups[1].Value;
+        if (!string.Equals(oldMethodName, newMethodName, StringComparison.Ordinal))
+            return stepIndex; // different method — not a signature change
+
+        var oldParams = oldMatch.Groups[2].Value;
+        var newParams = newMatch.Groups[2].Value;
+        if (string.Equals(oldParams, newParams, StringComparison.Ordinal))
+            return stepIndex; // params identical — not a signature change
+
+        await EmitLog(emitSse, "info",
+            $"Method signature change detected: {oldMethodName}({oldParams}) → {newMethodName}({newParams}). Searching for call sites...", ct: ct);
+
+        // ── Find all .cs files in the project ──────────────────────────
+        var csFiles = new List<string>();
+        try
+        {
+            if (Directory.Exists(projectRoot))
+            {
+                csFiles = Directory.GetFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+                    .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\")
+                             && !f.Contains("\\dist\\") && !f.Contains("\\.git\\"))
+                    .OrderBy(f => f.Length)
+                    .ToList();
+            }
+        }
+        catch { return stepIndex; }
+
+        if (csFiles.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "No .cs files found in project to search for call sites.", ct: ct);
+            return stepIndex;
+        }
+
+        // ── Find files containing the method name ──────────────────────
+        var methodNameLower = oldMethodName.ToLowerInvariant();
+        var candidateFiles = new List<string>();
+        foreach (var f in csFiles)
+        {
+            if (string.Equals(f, fullPath, StringComparison.OrdinalIgnoreCase))
+                continue; // skip the file that was just edited
+            try
+            {
+                // Quick check: does the file contain the method name?
+                using var sr = new StreamReader(f, Encoding.UTF8);
+                var firstFewKb = new char[4096];
+                var read = await sr.ReadAsync(firstFewKb, 0, firstFewKb.Length);
+                var head = new string(firstFewKb, 0, read);
+                if (head.Contains(methodNameLower, StringComparison.OrdinalIgnoreCase))
+                    candidateFiles.Add(f);
+            }
+            catch { /* skip unreadable files */ }
+        }
+
+        if (candidateFiles.Count == 0)
+        {
+            await EmitLog(emitSse, "info", "No call site files found.", ct: ct);
+            return stepIndex;
+        }
+
+        await EmitLog(emitSse, "info",
+            $"Found {candidateFiles.Count} file(s) containing '{oldMethodName}' — checking for call sites...", ct: ct);
+
+        // ── For each candidate file, use LLM to find and fix call sites ─
+        foreach (var candidateFile in candidateFiles)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var fileContent = await System.IO.File.ReadAllTextAsync(candidateFile, Encoding.UTF8, ct);
+            var candidateRelPath = Path.GetRelativePath(projectRoot, candidateFile).Replace('\\', '/');
+
+            // Build LLM prompt to update call sites in this file
+            var callSitePrompt = $@"File: {candidateRelPath}
+
+METHOD SIGNATURE CHANGED:
+Old: `{oldMethodName}({oldParams})`
+New: `{newMethodName}({newParams})`
+
+The file above contains one or more calls to `{oldMethodName}` that may need updating because the method's signature changed.
+
+Search through the ENTIRE file content below and find EVERY occurrence of `{oldMethodName}(`. For each call site found:
+1. Determine the correct new call based on the new signature
+2. Output the edits needed
+
+FILE CONTENT:
+```csharp
+{fileContent}
+```
+
+For each call site that needs updating, output a JSON array:
+[
+  {{""oldString"": ""exact text of the old call"", ""newString"": ""exact text of the updated call""}}
+]
+
+If no call sites need updating, output an empty array [].
+Reply ONLY with the JSON array — no explanation, no markdown.";
+
+            var (callSitesJson, _, _) = await CallLlmRaw(
+                "You are a code refactoring assistant. Update method call sites to match a changed signature. Output only JSON.",
+                callSitePrompt, ct, TimeSpan.FromSeconds(30), maxTokens: 4096);
+
+            if (string.IsNullOrWhiteSpace(callSitesJson))
+                continue;
+
+            // Parse the JSON response
+            var cleanJson = callSitesJson.Trim();
+            if (cleanJson.StartsWith("```")) 
+            { 
+                var m = Regex.Match(cleanJson, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); 
+                if (m.Success) cleanJson = m.Groups[1].Value.Trim(); 
+            }
+
+            List<Dictionary<string, string>>? callSiteEdits = null;
+            try { callSiteEdits = JsonSerializer.Deserialize<List<Dictionary<string, string>>>(cleanJson); }
+            catch { /* try repair */ }
+
+            if (callSiteEdits == null || callSiteEdits.Count == 0)
+                continue;
+
+            await EmitLog(emitSse, "info",
+                $"  {candidateRelPath}: {callSiteEdits.Count} call site edit(s) suggested", ct: ct);
+
+            // ── Apply each suggested call site edit ─────────────────
+            var fileContentMut = fileContent;
+            var appliedCount = 0;
+            foreach (var edit in callSiteEdits)
+            {
+                if (!edit.TryGetValue("oldString", out var callOld) || string.IsNullOrWhiteSpace(callOld))
+                    continue;
+                if (!edit.TryGetValue("newString", out var callNew))
+                    callNew = "";
+
+                var (replaced, newContent, _, _) = TryReplaceSafe(fileContentMut, callOld, callNew);
+                if (replaced)
+                {
+                    fileContentMut = newContent;
+                    appliedCount++;
+
+                    stepIndex++;
+                    var stepResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "edit",
+                        ["status"] = "modified",
+                        ["path"] = candidateRelPath,
+                        ["description"] = $"Updated call site: {oldMethodName} → {newMethodName}",
+                        ["planItemIndex"] = -1,
+                        ["parentStep"] = relPath,
+                        ["methodSignature"] = $"{oldMethodName}({oldParams}) → {newMethodName}({newParams})"
+                    };
+                    allResults.Add(stepResult);
+                    if (emitSse)
+                        await SendSse(Response, "step", stepResult, ct);
+                }
+            }
+
+            if (appliedCount > 0)
+            {
+                await System.IO.File.WriteAllTextAsync(candidateFile, fileContentMut, Encoding.UTF8, ct);
+                await EmitLog(emitSse, "success",
+                    $"  ✓ Updated {appliedCount} call site(s) in {candidateRelPath}", ct: ct);
+            }
+        }
+
+        return stepIndex;
     }
 
     private async Task<(AgentPlan? plan, HashSet<int>? completedIndices)> LoadPlanFromBoardDataAsync(string? cardId)
@@ -7140,6 +7353,27 @@ done = build OK; command = run this to fix; ask_user = need input";
                     continue;
                 case "ask_user":
                     await EmitLog(emitSse, "info", $"Build needs user input: {decision.Summary}", ct: ct);
+                    var userQuestion = !string.IsNullOrWhiteSpace(decision.UserQuestion)
+                        ? decision.UserQuestion
+                        : $"Build needs input: {decision.Summary}\n\nProvide the required input or type 'skip' to skip this build check:";
+                    var answer = await AskUserAsync(userQuestion, new List<QuestionField>
+                    {
+                        new() { Key = "buildResponse", Label = decision.Summary, Type = "text", DefaultValue = "" }
+                    }, ct);
+                    var userResponse = answer.GetValueOrDefault("buildResponse", "").Trim();
+                    if (!string.IsNullOrWhiteSpace(userResponse))
+                    {
+                        if (userResponse.Equals("skip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await EmitLog(emitSse, "warn", "User skipped build check.", ct: ct);
+                            return true; // treat as pass
+                        }
+                        // Send the user's response as terminal input
+                        await _terminal.WriteStdinAsync(userResponse);
+                        await Task.Delay(1000);
+                        // Continue the loop to re-check build
+                        continue;
+                    }
                     return false;
                 default: return false;
             }
