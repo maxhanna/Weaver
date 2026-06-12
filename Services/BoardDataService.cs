@@ -1,52 +1,104 @@
 using System;
 using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
-namespace Weaver.Services
+public class BoardDataService
 {
-    public class BoardDataService
+    private readonly string _filePath;
+    private readonly ILogger<BoardDataService> _logger;
+
+    public BoardDataService(string filePath, ILogger<BoardDataService> logger)
     {
-        private readonly string _filePath;
-        private readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+        _filePath = filePath;
+        _logger = logger;
+    }
 
-        public BoardDataService(string basePath)
+    public async Task SaveRawAsync(string json)
+    {
+        var directory = Path.GetDirectoryName(_filePath);
+        if (!Directory.Exists(directory))
         {
-            if (string.IsNullOrEmpty(basePath)) basePath = Directory.GetCurrentDirectory();
-            _filePath = Path.Combine(basePath, ".boarddata");
+            Directory.CreateDirectory(directory);
         }
 
-        public async Task<string?> LoadRawAsync()
-        {
-            try
-            {
-                if (!File.Exists(_filePath)) return null;
-                using var fs = File.Open(_filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                using var sr = new StreamReader(fs);
-                return await sr.ReadToEndAsync();
-            }
-            catch
-            {
-                return null;
-            }
-        }
+        string backupPath = _filePath + ".bak";
+        string tempPath = _filePath + ".tmp";
 
-        public async Task SaveRawAsync(string json)
+        try
         {
-            if (json == null) json = string.Empty;
-            await _lock.WaitAsync();
+            // STEP 1: BACKUP
+            // Only backup if the file currently exists.
+            if (File.Exists(_filePath))
+            {
+                File.Copy(_filePath, backupPath, overwrite: true);
+            }
+
+            // STEP 2: WRITE TEMP
+            // Write data to the temp file.
+            await File.WriteAllTextAsync(tempPath, json);
+
+            // STEP 3: COMMIT (SWAP OR MOVE)
+            if (File.Exists(_filePath))
+            {
+                // SCENARIO A: File exists.
+                // Use File.Replace for an atomic swap that preserves metadata.
+                File.Replace(tempPath, _filePath, destinationBackupFileName: null);
+            }
+            else
+            {
+                // SCENARIO B: File does NOT exist (e.g., First Run).
+                // File.Replace throws FileNotFoundException if the destination is missing.
+                // Use File.Move instead (Atomic Rename) to create the new file.
+                File.Move(tempPath, _filePath);
+            }
+
+            _logger.LogInformation("Board data saved successfully.");
+        }
+        catch (Exception ex)
+        {
+            // STEP 4: ROLLBACK IF NEEDED
+            _logger.LogError(ex, "Save operation failed. Checking integrity...");
+
             try
             {
-                var dir = Path.GetDirectoryName(_filePath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                using var fs = File.Open(_filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-                using var sw = new StreamWriter(fs);
-                await sw.WriteAsync(json);
+                // Check if the main file is corrupt (missing or empty)
+                bool mainFileIsCorrupt = !File.Exists(_filePath) || new FileInfo(_filePath).Length == 0;
+
+                if (mainFileIsCorrupt)
+                {
+                    if (File.Exists(backupPath))
+                    {
+                        _logger.LogWarning("Main file corrupted. Restoring from backup...");
+                        File.Copy(backupPath, _filePath, overwrite: true);
+                    }
+                    else
+                    {
+                        _logger.LogCritical("Save failed AND no backup exists.");
+                    }
+                }
             }
-            finally
+            catch (Exception rollbackEx)
             {
-                _lock.Release();
+                _logger.LogCritical(rollbackEx, "Catastrophic failure during rollback.");
+            }
+
+            // Re-throw to let the Controller know it failed
+            throw;
+        }
+        finally
+        {
+            // Cleanup temp file if it still exists (e.g. if Write succeeded but Move/Replace failed)
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { /* Ignore */ }
             }
         }
     }
-}
+
+    public Task<string> LoadRawAsync()
+    {
+        if (!File.Exists(_filePath)) return Task.FromResult<string>(null);
+        return File.ReadAllTextAsync(_filePath);
+    }
+} 

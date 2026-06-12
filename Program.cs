@@ -30,7 +30,6 @@ builder.Services.AddSingleton<EmailService>();
 
 var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
-builder.Services.AddSingleton(new Weaver.Services.BoardDataService(basePath));
 builder.Services.AddSingleton(new CalendarService(basePath));
 builder.Services.AddSingleton<GitService>();
 
@@ -39,6 +38,18 @@ builder.Services.AddHttpClient("llama", client =>
     client.Timeout = TimeSpan.FromMinutes(30);
 });
 builder.Services.AddControllers();
+
+ 
+builder.Services.AddSingleton<BoardDataService>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<BoardDataService>>();
+    var config = sp.GetRequiredService<IConfiguration>();
+    // Assuming you store the path in appsettings.json, or use a default
+    var filePath = config["BoardData:FilePath"] ?? "data/board.json";
+
+    return new BoardDataService(filePath, logger);
+});
+
 builder.Services.AddSignalR();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 {

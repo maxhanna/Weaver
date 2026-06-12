@@ -36,7 +36,7 @@ namespace Weaver.Controllers
 
         private string GetFilePath(string project)
         {
-            return Path.Combine(GetProjectRoot(project), "improvementdata.json");
+            return Path.Combine(GetProjectRoot(project), "data/improvementdata.json");
         }
 
         [HttpGet]

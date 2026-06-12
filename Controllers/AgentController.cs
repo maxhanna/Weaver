@@ -330,7 +330,7 @@ public class AgentController : ControllerBase
         var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
         if (string.IsNullOrWhiteSpace(sourceText))
             return (null, "File is empty");
- 
+
         // ── Non-C#: regex-based resolution ─────────────────────────────────────────
         if (ext != ".cs")
         {
@@ -592,6 +592,21 @@ public class AgentController : ControllerBase
 
         if (targetNode == null)
         {
+            // Check if this is a top-level statements file (C# 9+ Program.cs style)
+            // — Roslyn synthesises the Main entry point; no MethodDeclarationSyntax named "Main" exists.
+            if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(targetType, "constructor", StringComparison.OrdinalIgnoreCase))
+            {
+                var hasTopLevel = root.DescendantNodes().OfType<GlobalStatementSyntax>().Any();
+                if (hasTopLevel)
+                    return (null,
+                        $"'{targetName}' not found — this .cs file uses TOP-LEVEL STATEMENTS " +
+                        "(C# 9+ Program.cs style; no class, no explicit Main). " +
+                        "FORMAT C is unsupported here. Use oldString/newString: " +
+                        "copy the exact lines to change verbatim from the file content shown in the prompt.");
+            }
+
             var kind = char.ToUpper(targetType[0]) + targetType[1..];
             return (null, $"{kind} '{targetName}' not found in file");
         }
@@ -1016,7 +1031,7 @@ public class AgentController : ControllerBase
          CancellationToken ct,
          List<(string old, string @new, string error)>? history = null,
          string? explorationContext = null,
-         string? targetSymbol = null)  
+         string? targetSymbol = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -1030,7 +1045,7 @@ public class AgentController : ControllerBase
 
         var sb = new StringBuilder();
         sb.AppendLine($"FILE: {relPath}");
-        sb.AppendLine($"CHANGE REQUIRED: {step.Change}"); 
+        sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
         sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
                       "If the change says \"instead of X use Y\", modify X to become Y. " +
                       "Do NOT keep the old X and also add Y next to it. " +
@@ -1043,6 +1058,29 @@ public class AgentController : ControllerBase
         var (langFamily, langSupportsFormatC, langHint) = GetLanguageProfile(ext);
         sb.AppendLine(langHint);
 
+        // For top-level statement .cs files the language hint above is wrong —
+        // FORMAT C needs named AST nodes that don't exist in these files.
+        // Override it here before the LLM reads the file content.
+        if (ext == ".cs" && fileExists && !string.IsNullOrWhiteSpace(fileContent))
+        {
+            try
+            {
+                var tlTree = CSharpSyntaxTree.ParseText(fileContent);
+                var tlRoot = tlTree.GetRoot();
+                if (tlRoot.DescendantNodes().OfType<GlobalStatementSyntax>().Any())
+                {
+                    sb.AppendLine(
+                        "⚠ OVERRIDE — TOP-LEVEL STATEMENTS FILE (Program.cs style): " +
+                        "The C# hint above does NOT apply here. This file has no class " +
+                        "declarations and no named methods, so FORMAT C will ALWAYS FAIL. " +
+                        "You MUST use oldString/newString. " +
+                        "Copy the exact lines to replace verbatim from the file content below, " +
+                        "including every leading space. Use a 3–6 line anchor for uniqueness.");
+                }
+            }
+            catch { /* non-critical — Roslyn parse errors fall through */ }
+        }
+
         var lineCount = fileContent.Split('\n').Length;
         var isLarge = fileContent.Length > 3000 || lineCount > 80;
         // Large-file instruction depends on whether FORMAT C is available
@@ -1053,7 +1091,7 @@ public class AgentController : ControllerBase
             else if (ext != ".cs")
                 sb.AppendLine("⚠ Large file — use a tight oldString (3–6 lines max). " +
                               "The excerpt above is the ONLY portion shown; your oldString MUST appear in it.");
-        } 
+        }
         else if (ext is ".css" or ".scss" or ".sass")
             sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
                           "(e.g. '0px 1px' must stay as two tokens with a space).");
@@ -1096,7 +1134,7 @@ public class AgentController : ControllerBase
             sb.AppendLine("FILE DOES NOT EXIST YET. Use <<<FULL_FILE>>> to create it with complete content.");
         }
         else
-        { 
+        {
             if (isLarge)
             {
                 sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
@@ -1104,7 +1142,7 @@ public class AgentController : ControllerBase
                 sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, cfg5.fileBodyTruncationChars));
                 sb.AppendLine("```");
                 sb.AppendLine();
-                sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): " 
+                sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): "
                     + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods.");
                 sb.AppendLine("For ALL other file types: use oldString/newString — FORMAT C does not apply.");
             }
@@ -1167,6 +1205,13 @@ public class AgentController : ControllerBase
                             sb.AppendLine($"  {hint}");
                         }
                     }
+                }
+                else if (h.error.Contains("FORMAT C failed", StringComparison.OrdinalIgnoreCase) || h.error.Contains("not found in file", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("  You used FORMAT C but the symbol was not found. " +
+                                  "This file has no named methods/classes for FORMAT C to target. " +
+                                  "Switch to oldString/newString: copy the EXACT lines from the file content, " +
+                                  "verbatim including indentation, and set them as oldString.");
                 }
             }
             sb.AppendLine();
@@ -1272,7 +1317,8 @@ public class AgentController : ControllerBase
                         // This avoids fragile tail matching (closing braces match wrong locations).
                         var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (fullStr == null)
-                            return (null, null, false, null, false, astErr ?? "AST resolution failed");
+                            return (null, null, false, null, false,
+                                $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}");
 
                         if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1294,50 +1340,50 @@ public class AgentController : ControllerBase
                         return (fullStr, newStr, false, null, false, null);
                     }
                     else
+                    {
+                        // REPLACE mode: find the full node and replace it entirely
+                        var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        if (astOldStr != null)
                         {
-                            // REPLACE mode: find the full node and replace it entirely
-                            var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
-                            if (astOldStr != null)
+                            // When targetType="class" is used WITHOUT a full class declaration
+                            // in newCode, the LLM is incorrectly trying to insert properties
+                            // via targetType. Reject this — the LLM must use oldString/newString
+                            // for property additions, or include the FULL class in newCode
+                            // for full-class replacements.
+                            var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
+                            var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
+                            if (isClassTarget && !hasClassDecl)
                             {
-                                // When targetType="class" is used WITHOUT a full class declaration
-                                // in newCode, the LLM is incorrectly trying to insert properties
-                                // via targetType. Reject this — the LLM must use oldString/newString
-                                // for property additions, or include the FULL class in newCode
-                                // for full-class replacements.
-                                var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
-                                var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
-                                if (isClassTarget && !hasClassDecl)
+                                var codeLineCount = newCodeStr.Split('\n').Length;
+                                return (null, null, false, null, false,
+                                    $"targetType 'class' used without a full class declaration in newCode ({codeLineCount} lines). " +
+                                    "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
+                                    "For adding properties/fields, use oldString/newString format instead: " +
+                                    "set oldString to the last 1-2 existing lines before the class closing brace, " +
+                                    "and newString to those lines plus the new property line.");
+                            }
+                            if (isClassTarget)
+                            {
+                                // Strip the "export class Foo {" wrapper if present so only
+                                // body content (properties, constructor, etc.) is inserted.
+                                var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
+                                if (!string.IsNullOrWhiteSpace(body))
                                 {
-                                    var codeLineCount = newCodeStr.Split('\n').Length;
-                                    return (null, null, false, null, false,
-                                        $"targetType 'class' used without a full class declaration in newCode ({codeLineCount} lines). " +
-                                        "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
-                                        "For adding properties/fields, use oldString/newString format instead: " +
-                                        "set oldString to the last 1-2 existing lines before the class closing brace, " +
-                                        "and newString to those lines plus the new property line.");
-                                }
-                                if (isClassTarget)
-                                {
-                                    // Strip the "export class Foo {" wrapper if present so only
-                                    // body content (properties, constructor, etc.) is inserted.
-                                    var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
-                                    if (!string.IsNullOrWhiteSpace(body))
+                                    var unit = DetectIndentUnit(astOldStr);
+                                    var bodyIndented = ReindentToLevel(body, unit);
+                                    var lastBrace = astOldStr.LastIndexOf('}');
+                                    if (lastBrace >= 0)
                                     {
-                                        var unit = DetectIndentUnit(astOldStr);
-                                        var bodyIndented = ReindentToLevel(body, unit);
-                                        var lastBrace = astOldStr.LastIndexOf('}');
-                                        if (lastBrace >= 0)
-                                        {
-                                            var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
-                                            return (astOldStr, mergedStr, false, null, false, null);
-                                        }
+                                        var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
+                                        return (astOldStr, mergedStr, false, null, false, null);
                                     }
                                 }
+                            }
 
                             var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
                             return (astOldStr, indented, false, null, false, null);
                         }
-                        return (null, null, false, null, false, astErr ?? "AST resolution failed");
+                        return (null, null, false, null, false, $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}");
                     }
                 }
             }
@@ -1427,7 +1473,7 @@ public class AgentController : ControllerBase
             if (ttMatch.Success && tnMatch.Success)
             {
                 var tt = ttMatch.Groups[1].Value;
-                var tn = tnMatch.Groups[2].Value;
+                var tn = tnMatch.Groups[1].Value;
                 var ncIdx = raw.IndexOf("\"newCode\"", StringComparison.OrdinalIgnoreCase);
                 if (ncIdx >= 0)
                 {
@@ -1613,13 +1659,13 @@ public class AgentController : ControllerBase
         return result.Distinct().ToList();
     }
 
- 
-/// <summary>
-/// Holds the result of the per-step exploration loop: an enriched step
-/// (with a precise change description), accumulated file context, and
-/// metadata about what was discovered.
-/// </summary>
-private sealed class StepExplorationResult
+
+    /// <summary>
+    /// Holds the result of the per-step exploration loop: an enriched step
+    /// (with a precise change description), accumulated file context, and
+    /// metadata about what was discovered.
+    /// </summary>
+    private sealed class StepExplorationResult
     {
         public PlanStep EnrichedStep { get; init; } = new();
         public string ExplorationContext { get; init; } = "";
@@ -1970,6 +2016,44 @@ private sealed class StepExplorationResult
         };
     }
 
+    private async Task<string?> BuildStepContextFromReferences(
+        PlanStep step, string projectRoot,
+        string discoveryContext, CancellationToken ct)
+    {
+        // Priority 1: explicit referenceFiles from the plan step
+        if (step.ReferenceFiles is { Count: > 0 })
+        {
+            var ctx = new StringBuilder();
+            ctx.AppendLine("### REFERENCE FILES (from plan) ###");
+            foreach (var refFile in step.ReferenceFiles)
+            {
+                if (string.IsNullOrWhiteSpace(refFile)) continue;
+                var fp = Path.GetFullPath(
+                    Path.Combine(projectRoot, refFile.Replace('/', Path.DirectorySeparatorChar)));
+                if (!System.IO.File.Exists(fp) ||
+                    !AgentUtilities.IsPathUnderRoot(fp, projectRoot))
+                    continue;
+                var content = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+                var excerpt = content.Length > 5_000
+                    ? ExtractRelevantExcerpt(content, step.Change, step.OldString, 3500)
+                    : content;
+                ctx.AppendLine($"### {refFile}  ({content.Length:N0} chars)");
+                ctx.AppendLine("```");
+                ctx.AppendLine(excerpt);
+                ctx.AppendLine("```");
+                ctx.AppendLine();
+            }
+            if (ctx.Length > 0) return ctx.ToString();
+        }
+
+        // Priority 2: fall back to plan's discovery context
+        if (!string.IsNullOrWhiteSpace(discoveryContext))
+            return $"### PLAN CONTEXT ###\n{discoveryContext}";
+
+        // Priority 3: no context — exploration loop will build from scratch
+        return null;
+    }
+
     // ── Exploration prompt builders ───────────────────────────────────────
 
     private static string BuildStepExplorationSystemPrompt() =>
@@ -2002,7 +2086,9 @@ private sealed class StepExplorationResult
         "5. targetSymbol: the identifier of the specific method/function/class being changed\n" +
         "6. confidence 0-100: if < 70, request more files rather than guessing\n" +
         "7. If the target file already has enough context (small file, obvious location), " +
-        "go ready=true on round 1 with a precise refinedChange";
+        "go ready=true on round 1 with a precise refinedChange\n" +
+        "8. If the change involves a component, import, alias, or UI element, " +
+        "request the import source files to verify the import path and alias are correct before proceeding";
 
     private static string BuildStepExplorationPrompt(
         PlanStep step,
@@ -2254,7 +2340,7 @@ private sealed class StepExplorationResult
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
 
         await EmitLog(emitSse, "info",
-            $"▶ Resolving: {relPath} — {step.Change}", new {prompt, plan, stepIndex, allResults}, ct: ct);
+            $"▶ Resolving: {relPath} — {step.Change}", new { prompt, plan, stepIndex, allResults }, ct: ct);
 
         if (emitSse)
             await SendSse(Response, "step", new
@@ -2374,7 +2460,7 @@ private sealed class StepExplorationResult
                     await ResolveEditForStep(
                         step, projectRoot, emitSse, ct, history,
                         explorationContext: explorationContext,
-                        targetSymbol: exploration.TargetSymbol);   
+                        targetSymbol: exploration.TargetSymbol);
 
                 if (resolveError == null)
                 {
@@ -2837,10 +2923,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             // Parse the JSON response
             var cleanJson = callSitesJson.Trim();
-            if (cleanJson.StartsWith("```")) 
-            { 
-                var m = Regex.Match(cleanJson, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); 
-                if (m.Success) cleanJson = m.Groups[1].Value.Trim(); 
+            if (cleanJson.StartsWith("```"))
+            {
+                var m = Regex.Match(cleanJson, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleanJson = m.Groups[1].Value.Trim();
             }
 
             List<Dictionary<string, string>>? callSiteEdits = null;
@@ -3000,11 +3086,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
-        "6. Score: Score from 0-100 (0 being lowest) of how confident you are the steps completely solve the task. \n" +
+        "6. Score precisely:\n" +
+        "   90-100: Exact file + precise change description, no uncertainty\n" +
+        "   70-89:  Correct file, good description, minor refinement possible\n" +
+        "   40-69:  File identified but change is vague or approach is uncertain\n" +
+        "   0-39:  Unsure which file or what to change.\n" +
+        "   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n" +
         "7. Each step must be ONE focused change — do not combine unrelated edits. The change field must be extremely precise. Ex: On line 50 Create method testMethod and populate test variable with extremely precise details about what to change. \n" +
         "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
-        "10. The exact edit content (oldString/newString) will be resolved later when the file content is available — just describe what to change in the \"change\" field. Be very precise, use 1-5 lines to describe the change.\n\n" +
+        "10. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
+        "11. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n\n" +
         "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
@@ -3013,7 +3105,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "  \"plan\": [\n" +
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
-        "      \"change\": \"Modify confirmFilePicker to append files to existing list\"\n" +
+        "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
+        "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
         "    }\n" +
         "  ]\n" +
         "}";
@@ -3126,7 +3219,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         userPrompt.AppendLine(projectRoot);
         userPrompt.AppendLine("### DISCOVERY CONTEXT (only use paths listed here) ###");
         userPrompt.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
-        
+
 
         Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
 
@@ -3152,16 +3245,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             bool containsLLMError = false;
             bool containsLLMLoading = false;
-            if (!string.IsNullOrEmpty(raw)) {
-                if (raw.ToLower().Contains("error")) {
+            if (!string.IsNullOrEmpty(raw))
+            {
+                if (raw.ToLower().Contains("error"))
+                {
                     containsLLMError = true;
                 }
-                if (raw.ToLower().Contains("loading model")) {
+                if (raw.ToLower().Contains("loading model"))
+                {
                     containsLLMLoading = true;
                 }
             }
             string errorMessage = containsLLMLoading ? " Model Loading. Please retry after a short period of time."
-                                    : containsLLMError ? " LLM Returned Error state. Check LLM." 
+                                    : containsLLMError ? " LLM Returned Error state. Check LLM."
                                     : "";
             await EmitLog(emitSse, "error", "Failed to parse plan." + errorMessage, raw, ct: ct);
             return null;
@@ -3176,7 +3272,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
 
         return plan;
-    } 
+    }
 
     /// <summary>Check if file content looks truncated (unbalanced braces = LLM hit token limit).</summary>
     private static bool IsFullFileTruncated(string content)
@@ -3603,39 +3699,45 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var truncOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, AllowTrailingCommas = true };
             foreach (var candidate in AgentUtilities.GeneratePlanJsonCandidates(truncRepaired))
             {
-                try { 
-                    var deserializedPlan = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts); 
-                    if (deserializedPlan?.Plan?.Count > 0) 
-                    return DeduplicatePlan(deserializedPlan); 
-                } 
+                try
+                {
+                    var deserializedPlan = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts);
+                    if (deserializedPlan?.Plan?.Count > 0)
+                        return DeduplicatePlan(deserializedPlan);
+                }
                 catch { }
             }
         }
         var jsonBlocks = AgentUtilities.ExtractJsonBlocks(cleaned).Where(LooksLikePlanJson).OrderByDescending(b => b.Length).ToList();
         if (LooksLikePlanJson(cleaned) && cleaned.StartsWith("{"))
         {
-            jsonBlocks.Insert(0, cleaned); 
+            jsonBlocks.Insert(0, cleaned);
         }
-        var fb = cleaned.IndexOf('{'); 
+        var fb = cleaned.IndexOf('{');
         var lb = cleaned.LastIndexOf('}');
-        if (fb >= 0 && lb > fb) { 
-            var bc = cleaned[fb..(lb + 1)]; 
-            if (LooksLikePlanJson(bc)) {
-                jsonBlocks.Add(bc); 
-            } 
+        if (fb >= 0 && lb > fb)
+        {
+            var bc = cleaned[fb..(lb + 1)];
+            if (LooksLikePlanJson(bc))
+            {
+                jsonBlocks.Add(bc);
+            }
         }
         foreach (var candidate in jsonBlocks.Distinct())
         {
             foreach (var repaired in AgentUtilities.GeneratePlanJsonCandidates(candidate))
             {
-                try { 
-                    var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts); 
-                    if (result?.Plan != null) {
-                        return DeduplicatePlan(result); 
-                    } 
-                } catch { }
+                try
+                {
+                    var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts);
+                    if (result?.Plan != null)
+                    {
+                        return DeduplicatePlan(result);
+                    }
+                }
+                catch { }
             }
-        } 
+        }
         var arrayCandidates = new List<string> { cleaned };
         var f2 = cleaned.IndexOf('['); var l2 = cleaned.LastIndexOf(']');
         if (f2 >= 0 && l2 > f2) arrayCandidates.Add(cleaned[f2..(l2 + 1)]);
@@ -3646,7 +3748,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var c = block.Trim();
                 if (!c.StartsWith("[")) continue;
                 var steps = JsonSerializer.Deserialize<List<PlanStep>>(c, opts);
-                    if (steps is { Count: > 0 }) return new AgentPlan { Summary = "Parsed array", Plan = steps, Score = 0 };
+                if (steps is { Count: > 0 }) return new AgentPlan { Summary = "Parsed array", Plan = steps, Score = 0 };
             }
             catch { }
         }
@@ -3712,8 +3814,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "info", $"Using existing plan — {existingPlan.Plan.Count} step(s), {doneCount} already done", existingPlan, ct: ct);
             if (emitSse)
                 await SendSse(Response, "plan",
-                    new { thinking = existingPlan.Thinking, summary = existingPlan.Summary,
-                          items = existingPlan.Plan, resumed = true }, ct);
+                    new
+                    {
+                        thinking = existingPlan.Thinking,
+                        summary = existingPlan.Summary,
+                        items = existingPlan.Plan,
+                        resumed = true
+                    }, ct);
 
             var resumeSteps = new List<object>();
             await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
@@ -3989,7 +4096,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
 
-        bool isEdited = allSteps.OfType<Dictionary<string, object?>>().Any(s => s.GetValueOrDefault("type")?.ToString() == "edit"); 
+        bool isEdited = allSteps.OfType<Dictionary<string, object?>>().Any(s => s.GetValueOrDefault("type")?.ToString() == "edit");
 
         // ── Test creation pipeline ────────────────────────────────────────
         if (createTests && isEdited)
@@ -4350,9 +4457,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Minimum planner self-confidence (0-100) required to stop iterating and execute.</summary>
-    private const int PlanScoreThreshold = 75;
+    private const int PlanScoreThreshold = 65;
     /// <summary>Upper bound on planning iterations so a low-scoring/exploring model still terminates.</summary>
-    private const int MaxPlanningIterations = 4;
+    private const int MaxPlanningIterations = 3;
 
     /// <summary>
     /// Iterates planning until the planner is confident (score ≥ threshold) or the iteration
@@ -4458,15 +4565,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (best, discoveryContext);
     }
 
-    /// <summary>Steering that nudges a low-confidence planner to gather context or sharpen steps — never to invent extra work.</summary>
+    /// <summary>Steering that nudges a low-confidence planner to sharpen steps — never to invent extra work or explore.</summary>
     private static string BuildLowScoreSteering(AgentPlan plan, string? prior)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PlanScoreThreshold}.");
-        sb.AppendLine("Raise your confidence by EITHER:");
-        sb.AppendLine("  • Emitting _explore steps to read files NOT YET in the discovery context. Files already shown in DISCOVERY CONTEXT have been read — do not explore them again.");
-        sb.AppendLine("  • Making each step more precise so you are confident it fully solves the task.");
-        sb.AppendLine("Plan ONLY what the user's request requires — do not invent extra files, features, or refactors.");
+        sb.AppendLine("Do NOT explore more files. The discovery context already has everything you need.");
+        sb.AppendLine("Raise your score by making each step's change description more precise:");
+        sb.AppendLine("  • Name the exact method, property, or line range (e.g. \"In getUser() around line 42:…\")");
+        sb.AppendLine("  • Describe the exact old → new behavior clearly");
+        sb.AppendLine("  • If the plan is already correct, simply increase your score to 85+ and re-output it");
+        sb.AppendLine("Do NOT change the file paths or add steps. Do NOT add _explore steps.");
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
         return sb.ToString();
     }
@@ -4475,8 +4584,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static string AppendExploreSteering(string? prior)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("You have already explored the relevant files. Produce the final edit plan now.");
-        sb.AppendLine("Do NOT emit any more _explore steps. Plan only the edits the task requires — no extra work.");
+        sb.AppendLine("You have exhausted exploration rounds. Produce the final edit plan NOW — no more _explore steps.");
+        sb.AppendLine("Be decisive: keep the same file paths and give each step a precise change description. Score the plan 85+ if it's correct.");
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
         return sb.ToString();
     }
@@ -4555,7 +4664,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await SendSse(Response, "plan",
                         new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
             }
-        } else {
+        }
+        else
+        {
             await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
         }
 
@@ -5105,8 +5216,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         allResults.Add(new Dictionary<string, object?>
                         {
                             ["index"] = stepIndex,
-                            ["type"] = "read", ["status"] = "done",
-                            ["path"] = relPath, ["description"] = item.Change,
+                            ["type"] = "read",
+                            ["status"] = "done",
+                            ["path"] = relPath,
+                            ["description"] = item.Change,
                             ["planItemIndex"] = itemIdx
                         });
                     }
@@ -5125,8 +5238,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         allResults.Add(new Dictionary<string, object?>
                         {
                             ["index"] = stepIndex,
-                            ["type"] = "read", ["status"] = "error",
-                            ["path"] = relPath, ["error"] = "File not found",
+                            ["type"] = "read",
+                            ["status"] = "error",
+                            ["path"] = relPath,
+                            ["error"] = "File not found",
                             ["planItemIndex"] = itemIdx
                         });
                     }
@@ -5139,7 +5254,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var prevCount = allResults.Count;
                 stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
                     ct, allResults, stepIndex,
-                    prompt, plan,     
+                    prompt, plan,
                     itemIdx, cardId);
 
                 if (allResults.Count > prevCount &&
@@ -6002,7 +6117,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                 var (loadedPlan, loadedCompleted) = await LoadPlanFromBoardDataAsync(req.CardId);
                 existingPlan = loadedPlan;
                 completedIndices = loadedCompleted;
-            } 
+            }
 
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
@@ -6361,7 +6476,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             if (emitSse)
             {
                 var label = step.Description ?? step.Path ?? step.Command ?? step.Query ?? step.Pattern ?? "";
-                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", new {result}, ct: ct);
+                await EmitLog(emitSse, "step", $"▶ {step.Type}: {label}", new { result }, ct: ct);
                 await SendSse(Response, "step", result, ct);
             }
             try
@@ -6378,7 +6493,7 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     case "web": case "web_search": case "web_fetch": await ExecuteWebStep(step, result); break;
                     default: result["status"] = "error"; result["error"] = $"Unknown step type: {step.Type}"; break;
                 }
-                await EmitLog(true, "log", "Raw Step Result", result, ct); 
+                await EmitLog(true, "log", "Raw Step Result", result, ct);
             }
             catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
@@ -6426,9 +6541,9 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
                     case "read": await ExecuteReadStep(step, projectRoot, result); break;
                     default: result["status"] = "error"; result["error"] = $"Unknown: {step.Type}"; break;
                 }
-            } 
+            }
             catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
-            await EmitLog(true, "log", "Raw Discovery Step Result", result); 
+            await EmitLog(true, "log", "Raw Discovery Step Result", result);
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());
         }));
         await Task.WhenAll(tasks);
@@ -7527,15 +7642,17 @@ Respond with JSON only:
     {
         var relPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
         var targetPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
-        if (!AgentUtilities.IsPathUnderRoot(targetPath, projectRoot)) { 
-            result["status"] = "error"; 
-            result["error"] = "Path outside root"; 
+        if (!AgentUtilities.IsPathUnderRoot(targetPath, projectRoot))
+        {
+            result["status"] = "error";
+            result["error"] = "Path outside root";
             return;
         }
-        if (!System.IO.File.Exists(targetPath)) { 
-            result["status"] = "error"; 
-            result["error"] = "File not found"; 
-            return; 
+        if (!System.IO.File.Exists(targetPath))
+        {
+            result["status"] = "error";
+            result["error"] = "File not found";
+            return;
         }
         result["path"] = step.Path;
         result["output"] = await System.IO.File.ReadAllTextAsync(targetPath, Encoding.UTF8);
@@ -7790,9 +7907,9 @@ done = build OK; command = run this to fix; ask_user = need input";
                 case "command":
                     if (!string.IsNullOrWhiteSpace(decision.Command))
                     {
-                        await EmitLog(emitSse, "info", $"Build fix: {decision.Command}", ct: ct); 
-                        await _terminal.SendCommandAsync(decision.Command, projectRoot); 
-                        await Task.Delay(2000); 
+                        await EmitLog(emitSse, "info", $"Build fix: {decision.Command}", ct: ct);
+                        await _terminal.SendCommandAsync(decision.Command, projectRoot);
+                        await Task.Delay(2000);
                     }
                     continue;
                 case "ask_user":
@@ -8004,8 +8121,11 @@ done = build OK; command = run this to fix; ask_user = need input";
 
         foreach (var p in patterns)
         {
-            try { result.AddRange(Directory.EnumerateFiles(projectRoot, p, SearchOption.AllDirectories)
-                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\"))); }
+            try
+            {
+                result.AddRange(Directory.EnumerateFiles(projectRoot, p, SearchOption.AllDirectories)
+                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\")));
+            }
             catch { }
         }
 
@@ -8101,7 +8221,7 @@ done = build OK; command = run this to fix; ask_user = need input";
         string prompt, string projectRoot, List<object> allSteps,
         AgentPlan? plan, bool complete, bool editsApplied)
     {
-        var filePath = Path.Combine(projectRoot, "improvementdata.json");
+        var filePath = Path.Combine(projectRoot, "data/improvementdata.json");
         List<JsonElement> features = new();
         if (System.IO.File.Exists(filePath))
         {

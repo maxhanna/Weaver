@@ -40,4 +40,5 @@ public class PlanStep
     public int Priority { get; set; }
     public string OldString { get; set; } = string.Empty;
     public string NewString { get; set; } = string.Empty;
+    public List<string>? ReferenceFiles { get; set; }
 }

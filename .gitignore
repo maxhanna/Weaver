@@ -4,6 +4,7 @@
 **/publish/
 weaverconfig.json
 filehints.json
-.boarddata
-.calendardata
+data/.calendardata
 improvementdata.json
+data/board.json
+data/board.json.bak

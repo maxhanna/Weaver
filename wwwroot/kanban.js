@@ -50,7 +50,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         // Save to .boarddata file
         try {
           $http.post('/api/boarddata/save', vm.state).catch(function (err) {
-            console.error('Failed to save to .boarddata file:', err);
+            console.error('Failed to save to board.data file:', err);
           });
           _cardsVersion++;
           vm.updateSelfImprovingCount();

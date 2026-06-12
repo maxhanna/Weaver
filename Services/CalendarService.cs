@@ -14,7 +14,7 @@ namespace Weaver.Services
         public CalendarService(string basePath)
         {
             if (string.IsNullOrEmpty(basePath)) basePath = Directory.GetCurrentDirectory();
-            _filePath = Path.Combine(basePath, ".calendardata");
+            _filePath = Path.Combine(basePath, "data/.calendardata");
         }
 
         public async Task<string?> LoadRawAsync()
