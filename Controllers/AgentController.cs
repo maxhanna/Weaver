@@ -689,10 +689,14 @@ public class AgentController : ControllerBase
             // ── TypeScript / JavaScript ────────────────────────────────────────────
             ".ts" or ".tsx" => ("brace", true,
                 "⚠ TS FILE: preserve ALL indentation exactly. Methods inside a class MUST be indented. " +
+                "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
+                "and after commas in arrays/objects. " +
                 "You can use FORMAT C (targetType='method', targetName='name') for full method replacements. " +
                 "For small targeted edits (< 10 lines) prefer oldString/newString."),
             ".js" or ".jsx" => ("brace", true,
                 "⚠ JS FILE: preserve ALL indentation exactly. " +
+                "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
+                "and after commas in arrays/objects. " +
                 "FORMAT C supported (targetType='function'/'method', targetName='name'). " +
                 "For small edits prefer oldString/newString."),
 
@@ -1552,6 +1556,11 @@ public class AgentController : ControllerBase
     /// calling the LLM. Verifies oldString still exists, newString isn't already
     /// present, and the edit makes sense given the current file content.
     /// </summary>
+    private static readonly string[] _verifyPrefixes = {
+        "ensure", "verify", "make sure", "confirm", "validate",
+        "check", "guarantee", "see if", "determine if", "review"
+    };
+
     private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
     {
         if (string.IsNullOrWhiteSpace(fileContent))
@@ -1565,6 +1574,21 @@ public class AgentController : ControllerBase
             var newStr = AgentUtilities.NormalizeLineEndings(step.NewString);
             if (content.Contains(newStr, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file");
+        }
+
+        // Verification-only step: change description uses passive language,
+        // oldString already exists, and no newString means no actual change.
+        // The planner should not have created this step, but if it slipped
+        // through, skip it instead of entering a no-op retry loop.
+        if (string.IsNullOrWhiteSpace(step.NewString) && !string.IsNullOrWhiteSpace(step.OldString))
+        {
+            var changeLower = (step.Change ?? "").Trim().ToLowerInvariant();
+            if (_verifyPrefixes.Any(p => changeLower.StartsWith(p)))
+            {
+                var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
+                if (content.Contains(oldStr, StringComparison.Ordinal))
+                    return (PreEditVerdict.AlreadyDone, "step is verification-only — code already present");
+            }
         }
 
         // Gone stale: oldString no longer exists in the file
@@ -2014,45 +2038,7 @@ public class AgentController : ControllerBase
             Confidence = confidence,
             RoundsCompleted = roundsCompleted
         };
-    }
-
-    private async Task<string?> BuildStepContextFromReferences(
-        PlanStep step, string projectRoot,
-        string discoveryContext, CancellationToken ct)
-    {
-        // Priority 1: explicit referenceFiles from the plan step
-        if (step.ReferenceFiles is { Count: > 0 })
-        {
-            var ctx = new StringBuilder();
-            ctx.AppendLine("### REFERENCE FILES (from plan) ###");
-            foreach (var refFile in step.ReferenceFiles)
-            {
-                if (string.IsNullOrWhiteSpace(refFile)) continue;
-                var fp = Path.GetFullPath(
-                    Path.Combine(projectRoot, refFile.Replace('/', Path.DirectorySeparatorChar)));
-                if (!System.IO.File.Exists(fp) ||
-                    !AgentUtilities.IsPathUnderRoot(fp, projectRoot))
-                    continue;
-                var content = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
-                var excerpt = content.Length > 5_000
-                    ? ExtractRelevantExcerpt(content, step.Change, step.OldString, 3500)
-                    : content;
-                ctx.AppendLine($"### {refFile}  ({content.Length:N0} chars)");
-                ctx.AppendLine("```");
-                ctx.AppendLine(excerpt);
-                ctx.AppendLine("```");
-                ctx.AppendLine();
-            }
-            if (ctx.Length > 0) return ctx.ToString();
-        }
-
-        // Priority 2: fall back to plan's discovery context
-        if (!string.IsNullOrWhiteSpace(discoveryContext))
-            return $"### PLAN CONTEXT ###\n{discoveryContext}";
-
-        // Priority 3: no context — exploration loop will build from scratch
-        return null;
-    }
+    } 
 
     // ── Exploration prompt builders ───────────────────────────────────────
 
@@ -2392,6 +2378,7 @@ public class AgentController : ControllerBase
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
                 return stepIndex + 1;
             }
         }
@@ -2420,7 +2407,7 @@ public class AgentController : ControllerBase
         var resolveStuckCount = 0;
         var lastResolveError = "";
         var lastOld = "";
-        const int MaxAttempts = 20;
+        const int MaxAttempts = 8;
 
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
@@ -2505,6 +2492,7 @@ public class AgentController : ControllerBase
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
                 return stepIndex + 1;
             }
 
@@ -2549,6 +2537,41 @@ public class AgentController : ControllerBase
             await EmitLog(emitSse, "info",
                 $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                 ct: ct);
+
+            // Detect no-op edit: if old and new are functionally identical, skip
+            if (!string.IsNullOrWhiteSpace(oldStr) &&
+                AgentUtilities.NormalizeLineEndings(oldStr) == AgentUtilities.NormalizeLineEndings(newStr ?? ""))
+            {
+                await EmitLog(emitSse, "info", $"⏭ No change needed: {relPath}", ct: ct);
+                var r = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "edit",
+                    ["status"] = "skipped",
+                    ["path"] = relPath,
+                    ["reason"] = "already done",
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", r, ct);
+                allResults.Add(r);
+                return stepIndex + 1;
+            }
+
+            // Format C# replacement text with Roslyn before insertion — this
+            // normalizes spacing/line-breaks only in the edited region, leaving
+            // the rest of the file untouched. IndentReplacement will then
+            // adjust leading whitespace to match brace depth.
+            var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
+            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
+            {
+                try
+                {
+                    var fmtTree = CSharpSyntaxTree.ParseText(newStr);
+                    newStr = AgentUtilities.NormalizeLineEndings(
+                        fmtTree.GetRoot().NormalizeWhitespace().ToFullString());
+                }
+                catch { /* non-critical — keep LLM's formatting */ }
+            }
 
             var (replaced, newContent, matchError, snippet) =
                 TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
@@ -2595,8 +2618,11 @@ public class AgentController : ControllerBase
 
                 history.Add((oldStr!, newStr ?? "", err));
 
-                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal)) stuckCount++;
-                else { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (string.Equals(
+                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                    AgentUtilities.NormalizeLineEndings(lastOld),
+                    StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                 if (stuckCount >= 3)
                 {
                     await EmitLog(emitSse, "error",
@@ -2614,14 +2640,18 @@ public class AgentController : ControllerBase
                 await EmitLog(emitSse, "warn",
                     $"Verify failed for {relPath}: {verifyReason}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", verifyReason));
-                if (string.Equals(oldStr, lastOld, StringComparison.Ordinal)) stuckCount++;
-                else { stuckCount = 0; lastOld = oldStr ?? ""; }
+                if (string.Equals(
+                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                    AgentUtilities.NormalizeLineEndings(lastOld),
+                    StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                 if (stuckCount >= 3) goto RecordFailure;
                 continue;
             }
 
             if (!string.IsNullOrWhiteSpace(newStr) &&
-                !newContent.Contains(newStr, StringComparison.Ordinal))
+                !newContent.Contains(
+                    AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
                 var strippedNew = StripLineLeadingWhitespace(newStr);
                 var strippedContent = StripLineLeadingWhitespace(newContent);
@@ -2636,16 +2666,14 @@ public class AgentController : ControllerBase
                 }
             }
 
-            // Auto-format C# before writing
-            var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
-            if (fileExt == ".cs")
+            // Normalize TypeScript/JS object literal spacing (C# was already
+            // formatted before insertion above — no file-wide Roslyn pass).
+            if (Path.GetExtension(relPath).Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(relPath).Equals(".tsx", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(relPath).Equals(".js", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(relPath).Equals(".jsx", StringComparison.OrdinalIgnoreCase))
             {
-                try
-                {
-                    var fmtTree = CSharpSyntaxTree.ParseText(newContent);
-                    newContent = fmtTree.GetRoot().NormalizeWhitespace().ToFullString();
-                }
-                catch { /* non-critical */ }
+                newContent = NormalizeTypeScriptObjectLiterals(newContent);
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -3086,6 +3114,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
+        "   The DISCOVERY CONTEXT section above shows the ACTUAL content of files that were read.\n" +
+        "   Check that content BEFORE planning an edit step. If the property, method, or config\n" +
+        "   already exists in the file shown in discovery context, do NOT create an edit step.\n" +
+        "   Use _done instead.\n" +
         "6. Score precisely:\n" +
         "   90-100: Exact file + precise change description, no uncertainty\n" +
         "   70-89:  Correct file, good description, minor refinement possible\n" +
@@ -3167,7 +3199,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine(userPrompt);
         sb.AppendLine();
         sb.AppendLine("### PLAN ###");
-        sb.AppendLine(JsonSerializer.Serialize(plan.Plan, new JsonSerializerOptions { WriteIndented = true }));
+        sb.AppendLine(JsonSerializer.Serialize(plan!.Plan, new JsonSerializerOptions { WriteIndented = true }));
 
         var (raw, _, err) = await CallLlmRaw(
             "You validate code-change plans. Output ONLY a JSON object with a \"valid\" boolean and optional \"reason\". No extra text, no markdown fences.",
@@ -3654,10 +3686,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     // ═══════════════════════════════════════════════════════════════════════
     //  PLAN PARSING
     // ═══════════════════════════════════════════════════════════════════════
-    private AgentPlan DeduplicatePlan(AgentPlan plan)
+    private AgentPlan DeduplicatePlan(AgentPlan? plan)
     {
         if (plan?.Plan == null || plan.Plan.Count == 0)
-            return plan;
+            return plan!;
 
         var seen = new HashSet<string>();
         var unique = new List<PlanStep>();
@@ -3857,7 +3889,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (decision == "override" && vRoot.TryGetProperty("pipeline", out var ov))
                 {
                     var overridePipeline = ov.GetString();
-                    pipelineType = overridePipeline.ToLowerInvariant() switch
+                    pipelineType = overridePipeline?.ToLowerInvariant() switch
                     {
                         "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
                         "commandexecution" or "command" => PipelineType.CommandExecution,
@@ -4846,6 +4878,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit")
             .Select(r => r.GetValueOrDefault("path")?.ToString())
             .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -4858,6 +4891,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "read")
                 .Select(r => r.GetValueOrDefault("path")?.ToString())
                 .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => p!)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
             if (exploredPaths.Count == 0)
@@ -5257,17 +5291,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     prompt, plan,
                     itemIdx, cardId);
 
+                var stepSkipped = false;
                 if (allResults.Count > prevCount &&
-                    allResults[^1] is Dictionary<string, object?> lastDict &&
-                    lastDict.TryGetValue("status", out var st) && st?.ToString() == "error")
+                    allResults[^1] is Dictionary<string, object?> lastDict2 &&
+                    lastDict2.TryGetValue("status", out var st2))
                 {
-                    await EmitLog(emitSse, "error",
-                        $"✗ Step permanently failed for {planFile} — {lastDict.GetValueOrDefault("error")}", ct: ct);
+                    var status = st2?.ToString();
+                    if (status == "error")
+                    {
+                        await EmitLog(emitSse, "error",
+                            $"✗ Step permanently failed for {planFile} — {lastDict2.GetValueOrDefault("error")}", ct: ct);
+                    }
+                    else if (status == "skipped" || status == "done")
+                    {
+                        stepSkipped = true;
+                    }
                 }
-                else if (allResults.Count > prevCount)
+
+                // Step was skipped (already done / irrelevant) or succeeded —
+                // check if more work remains by re-running the planner
+                if (stepSkipped || (allResults.Count > prevCount &&
+                    allResults[^1] is Dictionary<string, object?> lastDict3 &&
+                    lastDict3.TryGetValue("status", out var st3) && st3?.ToString() != "error"))
                 {
-                    // Edit succeeded — check if more work from the original prompt remains
-                    // by re-running the planner against current file state.
                     var remainingSteps = planItems.Skip(itemIdx + 1)
                         .Where(p => !string.IsNullOrWhiteSpace(p.File)).ToList();
                     if (remainingSteps.Count == 0)
@@ -5533,155 +5579,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var i = 0; i < lines.Length; i++)
             lines[i] = lines[i].TrimStart();
         return string.Join("\n", lines);
-    }
-
-    private async Task<bool> ApplyEditWithRetry(
-        PlanStep item, string projectRoot, bool emitSse, CancellationToken ct)
-    {
-        var relPath = item.File.Replace('\\', '/');
-        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-        if (!System.IO.File.Exists(fullPath)) return false;
-
-        var history = new List<(string oldString, string newString, int score, string reason)>();
-
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            if (attempt > 0)
-            {
-                var freshContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
-                var corrected = await CorrectEdit(
-                    "", relPath, freshContent, item.Change, history, attempt, emitSse, ct);
-                if (corrected == null) break;
-                if ((corrected.Value.oldString ?? "").Trim() == (corrected.Value.newString ?? "").Trim())
-                {
-                    await EmitLog(emitSse, "warn",
-                        $"CorrectEdit returned identical strings for {relPath} — stopping retries", ct: ct);
-                    break;
-                }
-                item.OldString = corrected.Value.oldString!;
-                item.NewString = corrected.Value.newString!;
-            }
-
-            var (applied, reason, score) = await ApplyEdit(item, projectRoot, emitSse, ct);
-            if (applied) return true;
-
-            history.Add((item.OldString!, item.NewString ?? "", score, reason));
-            if (attempt < 2)
-                await EmitLog(emitSse, "warn",
-                    $"Attempt {attempt + 1}/3 failed for {relPath}: {reason}", ct: ct);
-            else
-                await EmitLog(emitSse, "error",
-                    $"All 3 attempts failed for {relPath}: {reason}", ct: ct);
-        }
-        return false;
-    }
-
-    private async Task<(string oldString, string newString)?> CorrectEdit(
-        string originalPrompt, string relPath, string fileContent, string changeDesc,
-        List<(string oldString, string newString, int score, string reason)> history,
-        int attempt, bool emitSse, CancellationToken ct)
-    {
-        var sb = new StringBuilder();
-        if (!string.IsNullOrWhiteSpace(originalPrompt)) { sb.AppendLine("## Original task"); sb.AppendLine(originalPrompt); sb.AppendLine(); }
-        if (!string.IsNullOrWhiteSpace(changeDesc)) { sb.AppendLine("## Planned change"); sb.AppendLine(changeDesc); sb.AppendLine(); }
-        sb.AppendLine($"## File: {relPath}");
-        sb.AppendLine();
-        var cfg2 = await LoadConfigAsync();
-        sb.AppendLine(BuildEditCorrectionContext(fileContent, changeDesc, history, cfg2.maxFileContextChars));
-        sb.AppendLine();
-        sb.AppendLine("### Previous failed attempts:");
-        for (var i = 0; i < history.Count; i++)
-        {
-            var h = history[i];
-            sb.AppendLine($"--- Attempt {i + 1} — Score {h.score}/10 ---");
-            sb.AppendLine($"Reason: {h.reason}");
-            sb.AppendLine($"oldString:\n```\n{RemoveUnsafeEditMarkersForPrompt(h.oldString)}\n```");
-            sb.AppendLine($"newString:\n```\n{RemoveUnsafeEditMarkersForPrompt(h.newString)}\n```");
-        }
-        sb.AppendLine("Produce corrected oldString/newString.");
-        sb.AppendLine("- oldString must exist verbatim in the file");
-        sb.AppendLine("- Match exact whitespace and indentation");
-
-        const string system = @"You are an edit-correction agent. Output ONLY valid JSON:
-{""oldString"": ""exact code from file"", ""newString"": ""replacement code""}
-Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identical strings.";
-
-        var (raw, _, err) = await CallLlmRaw(system, sb.ToString(), ct, TimeSpan.FromSeconds(30));
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-
-        try
-        {
-            var (os, ns, parseError) = AgentUtilities.ExtractEditFromCodeGen(raw);
-            if (string.IsNullOrWhiteSpace(os)) return null;
-            return (os, ns ?? "");
-        }
-        catch
-        {
-            await EmitLog(emitSse, "warn", $"Failed to parse correction for {relPath}", ct: ct);
-            return null;
-        }
-    }
-
-    private static string BuildEditCorrectionContext(
-        string fileContent, string changeDesc,
-        List<(string oldString, string newString, int score, string reason)> history,
-        int maxFileContextChars = 24000)
-    {
-        var normalized = AgentUtilities.NormalizeLineEndings(fileContent);
-        var sb = new StringBuilder();
-        if (normalized.Length <= maxFileContextChars)
-        {
-            sb.AppendLine("### Current file content\n```");
-            sb.AppendLine(normalized);
-            sb.AppendLine("```");
-            return sb.ToString();
-        }
-        var tokens = ExtractCorrectionTokens(changeDesc, history);
-        var lines = normalized.Split('\n');
-        var hitLines = new SortedSet<int>();
-        if (tokens.Count > 0)
-            for (var i = 0; i < lines.Length; i++)
-                if (tokens.Any(t => lines[i].Contains(t, StringComparison.OrdinalIgnoreCase)))
-                    hitLines.Add(i);
-        var windows = new List<(int start, int end)>();
-        foreach (var hit in hitLines.Take(12))
-        {
-            var start = Math.Max(0, hit - 30); var end = Math.Min(lines.Length - 1, hit + 30);
-            if (windows.Count > 0 && start <= windows[^1].end + 5) windows[^1] = (windows[^1].start, Math.Max(windows[^1].end, end));
-            else windows.Add((start, end));
-        }
-        if (windows.Count == 0) { windows.Add((0, Math.Min(lines.Length - 1, 180))); }
-        sb.AppendLine("### Current file excerpts");
-        var usedChars = 0;
-        foreach (var w in windows)
-        {
-            var excerpt = string.Join('\n', lines.Skip(w.start).Take(w.end - w.start + 1));
-            if (usedChars + excerpt.Length > maxFileContextChars) excerpt = excerpt[..Math.Max(0, maxFileContextChars - usedChars)];
-            if (string.IsNullOrWhiteSpace(excerpt)) break;
-            sb.AppendLine($"Lines {w.start + 1}-{w.end + 1}:\n```\n{excerpt}\n```");
-            usedChars += excerpt.Length;
-            if (usedChars >= maxFileContextChars) break;
-        }
-        return sb.ToString();
-    }
-
-    private static HashSet<string> ExtractCorrectionTokens(
-        string changeDesc,
-        List<(string oldString, string newString, int score, string reason)> history)
-    {
-        var common = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "string","public","private","protected","internal","static","readonly","return",
-            "await","async","using","namespace","class","void","var","new","null","true","false",
-            "this","base","file","change","oldString","newString","reason","score"
-        };
-        var text = new StringBuilder(changeDesc ?? "");
-        foreach (var h in history) { text.AppendLine(h.oldString); text.AppendLine(h.newString); }
-        return Regex.Matches(text.ToString(), @"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
-            .Select(m => m.Value).Where(t => !common.Contains(t))
-            .OrderByDescending(t => t.Length).Take(40)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    }
+    } 
 
     private async Task<List<PlanStep>?> ReplanRemainingSteps(
         string originalPrompt, List<PlanStep> remaining,
@@ -5760,7 +5658,6 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
         baseInstructions.AppendLine($"Task: {prompt}");
 
         // Execute: one step at a time, plan as you go
-        const int maxIter = MAX_COMMAND_ITERATIONS;
         var stepIndex = 0; string? summary = null;
         var usedSearchQueries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var planSteps = new List<PlanStep>();
@@ -6336,10 +6233,11 @@ Rules: oldString MUST exist verbatim. Escape newlines as \n. Never return identi
             var reader = new StreamReader(stream);
             var sb = new StringBuilder();
 
-            while (!reader.EndOfStream)
+            while (true)
             {
                 var line = await reader.ReadLineAsync();
-                if (line == null || string.IsNullOrWhiteSpace(line)) continue;
+                if (line == null) break;
+                if (string.IsNullOrWhiteSpace(line)) continue;
                 if (line.Contains("[DONE]")) break;
                 if (!line.StartsWith("data: ")) continue;
                 var data = line[6..].Trim();
@@ -7275,10 +7173,8 @@ Respond with JSON only:
                                       .Select(GetLeadingWhitespace)
                                       .FirstOrDefault();
 
-        var baseShifted = false;
         if (replBaseIndent != null && replBaseIndent != fileIndent)
         {
-            baseShifted = true;
             for (var i = 0; i < replLines.Length; i++)
             {
                 if (replLines[i].Length == 0) continue;
@@ -7391,6 +7287,16 @@ Respond with JSON only:
             }
         }
         return string.Join("\n", lines);
+    }
+
+    /// <summary>Normalize spacing after colons in .ts/.js object literals.
+    /// Ensures property:value pairs inside {...} have a space after the colon,
+    /// matching the codebase convention. Avoids modifying already-correct
+    /// spacing or content inside string literals.</summary>
+    private static string NormalizeTypeScriptObjectLiterals(string content)
+    {
+        // Match propertyName:value after { or , — add space after colon if missing
+        return Regex.Replace(content, @"(?<=[\{,]\s*)(\w[\w']*)\s*:\s*(?=\S)", "$1: ");
     }
 
     /// <summary>Infer the file's indent size (e.g. 2 or 4) by sampling indentation deltas.</summary>
@@ -7919,7 +7825,7 @@ done = build OK; command = run this to fix; ask_user = need input";
                         : $"Build needs input: {decision.Summary}\n\nProvide the required input or type 'skip' to skip this build check:";
                     var answer = await AskUserAsync(userQuestion, new List<QuestionField>
                     {
-                        new() { Key = "buildResponse", Label = decision.Summary, Type = "text", DefaultValue = "" }
+                        new() { Key = "buildResponse", Label = decision.Summary ?? "", Type = "text", DefaultValue = "" }
                     }, ct);
                     var userResponse = answer.GetValueOrDefault("buildResponse", "").Trim();
                     if (!string.IsNullOrWhiteSpace(userResponse))
@@ -7993,6 +7899,7 @@ done = build OK; command = run this to fix; ask_user = need input";
             .Where(s => s.GetValueOrDefault("type")?.ToString() is "edit" or "create")
             .Select(s => s.GetValueOrDefault("path")?.ToString())
             .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 

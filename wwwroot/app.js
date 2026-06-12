@@ -1764,7 +1764,7 @@
         if (item.done) return;
         // Match by planItemIndex from SSE step events (most precise)
         var doneSteps = vm.streamingSteps.filter(function (s) {
-          if (s.status !== 'done') return false;
+          if (s.status !== 'done' && s.status !== 'skipped') return false;
           if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
             return s.planItemIndex === item.index;
           }
@@ -1944,6 +1944,10 @@
                   var parts = buffer.split('\n\n');
                   buffer = parts.pop();
 
+                  // Wrap all SSE event processing in $applyAsync so Angular picks
+                  // up every vm change (modals, countdowns, logs, streaming state, …)
+                  // without needing per-case $apply calls.
+                  $scope.$applyAsync(function () {
                   for (var p = 0; p < parts.length; p++) {
                     var block = parts[p];
                     var lines = block.split('\n');
@@ -2085,7 +2089,7 @@
                               vm.contextReviewTimer = $interval(function () {
                                 vm.contextReviewCountdown--;
                                 if (vm.contextReviewCountdown < 0) vm.contextReviewCountdown = 0;
-                              }, 1000, 5, false);
+                              }, 1000, 5);
                               vm.contextReviewAutoConfirm = $timeout(function () {
                                 if (!vm._contextReviewSubmitted && vm.pendingContextReview) {
                                   vm.confirmContextReview();
@@ -2094,6 +2098,19 @@
                             }
                           } catch (e) {
                             pushAgentLog('error', 'Context review error: ' + (e.message || e));
+                          }
+                          break;
+                         case 'ask-question':
+                          try {
+                            if (parsed && parsed.id && parsed.question) {
+                              vm.pendingQuestion = parsed;
+                              vm.questionAnswers = {};
+                              vm.questionError = '';
+                              vm.showQuestionModal = true;
+                              pushAgentLog('info', '❓ Question from agent: ' + parsed.question);
+                            }
+                          } catch (e) {
+                            pushAgentLog('error', 'Question error: ' + (e.message || e));
                           }
                           break;
                         case 'done':
@@ -2231,6 +2248,7 @@
                       }
                     }
                   }
+                  }); // end $scope.$applyAsync
                   try { $scope.$applyAsync(); } catch (e) { /* applyAsync guard */ }
                   readNext();
                 }).catch(function (readErr) {
@@ -2472,22 +2490,26 @@
     vm.submitQuestion = function () {
       if (!vm.pendingQuestion) return;
       var answers = {};
-      var allFilled = true;
       vm.pendingQuestion.fields.forEach(function (f) {
-        var val = (vm.questionAnswers[f.key] || '').trim();
-        if (!val) allFilled = false;
-        answers[f.key] = val;
+        answers[f.key] = (vm.questionAnswers[f.key] || '').trim();
       });
-      if (!allFilled) {
-        vm.questionError = 'Please fill in all fields (password is required).';
-        return;
-      }
       vm.questionError = '';
       $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: answers }).then(function () {
         vm.showQuestionModal = false;
         vm.pendingQuestion = null;
       }, function (err) {
         vm.questionError = 'Failed to submit: ' + (err.data || err.statusText || err);
+      });
+    };
+
+    vm.cancelQuestion = function () {
+      if (!vm.pendingQuestion) return;
+      $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () {
+        vm.showQuestionModal = false;
+        vm.pendingQuestion = null;
+      }, function () {
+        vm.showQuestionModal = false;
+        vm.pendingQuestion = null;
       });
     };
 

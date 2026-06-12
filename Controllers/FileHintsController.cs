@@ -24,7 +24,7 @@ namespace Weaver.Controllers
             {
                 // Ensure the directory exists (good practice)
                 var directory = Path.GetDirectoryName(_filePath);
-                if (!Directory.Exists(directory))
+                if (directory != null && !Directory.Exists(directory))
                 {
                     Directory.CreateDirectory(directory);
                 }

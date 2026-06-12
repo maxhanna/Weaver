@@ -17,7 +17,7 @@ public class BoardDataService
     public async Task SaveRawAsync(string json)
     {
         var directory = Path.GetDirectoryName(_filePath);
-        if (!Directory.Exists(directory))
+        if (directory != null && !Directory.Exists(directory))
         {
             Directory.CreateDirectory(directory);
         }
@@ -96,9 +96,9 @@ public class BoardDataService
         }
     }
 
-    public Task<string> LoadRawAsync()
+    public async Task<string?> LoadRawAsync()
     {
-        if (!File.Exists(_filePath)) return Task.FromResult<string>(null);
-        return File.ReadAllTextAsync(_filePath);
+        if (!File.Exists(_filePath)) return null;
+        return await File.ReadAllTextAsync(_filePath);
     }
 } 
