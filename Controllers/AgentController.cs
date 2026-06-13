@@ -280,12 +280,27 @@ public class AgentController : ControllerBase
                                          .Where(kw => kw.Length >= 5).ToList();
             if (keywords.Count > 0)
             {
+                // Prefer lines that look like a method/function definition containing
+                // the keyword, over arbitrary keyword occurrences (e.g. route attr, comment).
+                var methodPattern = new[] { "public ", "private ", "protected ", "internal ",
+                    "static ", "async ", "function ", "def ", "fun " };
+                var bestLine = -1;
                 for (var i = structEnd; i < lines.Length; i++)
                 {
-                    if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
-                    targetStart = Math.Max(structEnd, i - 20);
-                    targetEnd = Math.Min(lines.Length, i + RadiusLines);
-                    break;
+                    if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    // If this line also looks like a method declaration, prefer it
+                    if (methodPattern.Any(p => lines[i].TrimStart().StartsWith(p, StringComparison.Ordinal)))
+                    {
+                        bestLine = i;
+                        break; // method declaration match is best — stop
+                    }
+                    if (bestLine < 0) bestLine = i;
+                }
+                if (bestLine >= 0)
+                {
+                    targetStart = Math.Max(structEnd, bestLine - 20);
+                    targetEnd = Math.Min(lines.Length, bestLine + RadiusLines);
                 }
             }
         }
@@ -692,7 +707,10 @@ public class AgentController : ControllerBase
                 "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
                 "and after commas in arrays/objects. " +
                 "You can use FORMAT C (targetType='method', targetName='name') for full method replacements. " +
-                "For small targeted edits (< 10 lines) prefer oldString/newString."),
+                "For small targeted edits (< 10 lines) prefer oldString/newString." +
+                " Do NOT use targetType='class' — class REPLACE is blocked for .ts files. " +
+                "Use insertAfter:true with targetType='method' to add methods, " +
+                "or oldString/newString to add properties."),
             ".js" or ".jsx" => ("brace", true,
                 "⚠ JS FILE: preserve ALL indentation exactly. " +
                 "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
@@ -1105,15 +1123,17 @@ public class AgentController : ControllerBase
                           "must be indented relative to their parent. Copy the leading " +
                           "whitespace from oldString character-for-character into newString.");
         else if (ext == ".cs")
-            sb.AppendLine("⚠ C# FILE: USE FORMAT C (targetType/targetName/newCode). This is the ONLY supported format for C# files. " +
-                          "It uses AST parsing and bypasses text-matching entirely. Just name the method/class/property " +
-                          "to replace or insert after and output its new body. " +
-                          "Do NOT use oldString/newString for C# files — they WILL fail. " +
-                          "To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method. " +
-                          "Do NOT use targetType=\"class\" — that replaces the entire class. " +
-                          "INDENTATION: newCode MUST include proper C# indentation — method signature at the class member level " +
-                          "(typically 4 or 8 spaces), method body indented 4 spaces more, nested blocks (try/catch/using/if/for) " +
-                          "each indented 4 spaces more than their parent. Copy the file's existing indentation pattern.");
+            sb.AppendLine("⚠ C# FILE: Choose your edit format based on change SIZE.");
+            sb.AppendLine("  • For SMALL targeted changes (1-5 lines, e.g. add a column to SQL, add a property, change a return value):");
+            sb.AppendLine("    USE oldString/newString. Copy 2-3 lines verbatim from the file as oldString.");
+            sb.AppendLine("    Include the line above and below your change as anchor context, repeating them unchanged in newString.");
+            sb.AppendLine("  • For FULL method/class replacements (entire method body rewrite):");
+            sb.AppendLine("    USE FORMAT C (targetType/targetName/newCode). AST-based, bypasses text matching.");
+            sb.AppendLine("    CRITICAL: Preserve the existing attribute(s), return type, method name, and parameter list VERBATIM from the file.");
+            sb.AppendLine("    Only change the method BODY. Do NOT change [FromBody], route templates, or parameter names.");
+            sb.AppendLine("  • To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
+            sb.AppendLine("  • Do NOT use targetType=\"class\" — that replaces the entire class.");
+            sb.AppendLine("INDENTATION: newCode MUST include proper C# indentation.");
         sb.AppendLine();
 
         //  Include exploration context if available — this is the most important
@@ -1147,7 +1167,8 @@ public class AgentController : ControllerBase
                 sb.AppendLine("```");
                 sb.AppendLine();
                 sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): "
-                    + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods.");
+                    + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods. "
+                    + "For SMALL changes (1-5 lines), use oldString/newString even for code files — copy lines verbatim from the excerpt above.");
                 sb.AppendLine("For ALL other file types: use oldString/newString — FORMAT C does not apply.");
             }
             else
@@ -1162,11 +1183,14 @@ public class AgentController : ControllerBase
         // Always encourage small, focused oldStrings
         sb.AppendLine();
         sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
-        sb.AppendLine("SMALL targeted edits (1-3 lines): PREFER oldString/newString. Include the line above/below for context, repeat it unchanged in newString.");
-        sb.AppendLine("For CODE files (.cs, .ts, .js, .tsx, .jsx): use FORMAT C (targetType/targetName/newCode) only for replacing ENTIRE methods or FULL classes.");
+        sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
+                      "Include the line above/below for anchor context, repeat them unchanged in newString.");
+        sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
+                      "with unchanged signature.");
         sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
         sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
-        sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter.");
+        sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
+                      "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode.");
         sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
                       "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
                       "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
@@ -1368,23 +1392,54 @@ public class AgentController : ControllerBase
                             }
                             if (isClassTarget)
                             {
-                                // Strip the "export class Foo {" wrapper if present so only
-                                // body content (properties, constructor, etc.) is inserted.
+                                // For .ts/.js and other non-C# files: full-class REPLACE is unsafe.
+                                // The old merge formula appended the new body to the existing one (doubling
+                                // every member). LLM output is also frequently truncated mid-class.
+                                // Force the LLM to use insertAfter or oldString/newString instead.
+                                if (!string.Equals(ext, ".cs", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    return (null, null, false, null, false,
+                                        $"targetType='class' REPLACE is not allowed for {ext} files — " +
+                                        "it risks member duplication and truncation. " +
+                                        "To ADD a method: use insertAfter:true with targetType='method' and an existing method name. " +
+                                        "To ADD a property/field: use oldString/newString — set oldString to the last 1-2 lines " +
+                                        "before the closing brace (e.g. the isMenuPanelOpen declaration), " +
+                                        "and newString to those same lines followed by the new property.");
+                                }
+
+                                // C# only: strip the class declaration wrapper so newCode body
+                                // REPLACES the existing body rather than being appended to it.
                                 var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
                                 if (!string.IsNullOrWhiteSpace(body))
                                 {
                                     var unit = DetectIndentUnit(astOldStr);
                                     var bodyIndented = ReindentToLevel(body, unit);
                                     var lastBrace = astOldStr.LastIndexOf('}');
-                                    if (lastBrace >= 0)
+                                    var openBrace = astOldStr.IndexOf('{');
+                                    if (lastBrace >= 0 && openBrace >= 0 && openBrace < lastBrace)
                                     {
-                                        var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + astOldStr[lastBrace..];
+                                        // FIXED: classHeader + new body + }, not old-body + new body + }
+                                        var classHeader = astOldStr[..(openBrace + 1)];
+                                        var mergedStr = classHeader.TrimEnd() + "\n" + bodyIndented.TrimEnd() + "\n" + astOldStr[lastBrace..];
                                         return (astOldStr, mergedStr, false, null, false, null);
                                     }
                                 }
                             }
 
-                            var indented = AutoIndentCode(astOldStr, newCodeStr, relPath);
+                            // Format newCode with Roslyn BEFORE AutoIndentCode so that
+                            // the indentation adjustment shifts from a normalized base
+                            // (0 indent for root, 4 spaces per level) to the file's level
+                            var fmtNewCode = newCodeStr;
+                            if (string.Equals(Path.GetExtension(relPath), ".cs", StringComparison.OrdinalIgnoreCase))
+                            {
+                                try
+                                {
+                                    var fmtTree = CSharpSyntaxTree.ParseText(fmtNewCode);
+                                    fmtNewCode = fmtTree.GetRoot().NormalizeWhitespace().ToFullString();
+                                }
+                                catch { }
+                            }
+                            var indented = AutoIndentCode(astOldStr, fmtNewCode, relPath);
                             return (astOldStr, indented, false, null, false, null);
                         }
                         return (null, null, false, null, false, $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}");
@@ -2557,21 +2612,7 @@ public class AgentController : ControllerBase
                 return stepIndex + 1;
             }
 
-            // Format C# replacement text with Roslyn before insertion — this
-            // normalizes spacing/line-breaks only in the edited region, leaving
-            // the rest of the file untouched. IndentReplacement will then
-            // adjust leading whitespace to match brace depth.
             var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
-            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
-            {
-                try
-                {
-                    var fmtTree = CSharpSyntaxTree.ParseText(newStr);
-                    newStr = AgentUtilities.NormalizeLineEndings(
-                        fmtTree.GetRoot().NormalizeWhitespace().ToFullString());
-                }
-                catch { /* non-critical — keep LLM's formatting */ }
-            }
 
             var (replaced, newContent, matchError, snippet) =
                 TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
@@ -2595,23 +2636,39 @@ public class AgentController : ControllerBase
                         TryReplaceSafe(fileContent, correctedBlock, newStr ?? string.Empty);
                     if (replaced2)
                     {
-                        var (approved2, _, _) =
-                            VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2);
-                        if (approved2)
+                        // Prefix leak check for self-healed block
+                        var fixFirstLine = correctedBlock.TrimStart().Split('\n', '\r')
+                            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+                        if (fixFirstLine?.TrimStart().StartsWith('}') == true)
                         {
-                            await System.IO.File.WriteAllTextAsync(
-                                fullPath, newContent2, Encoding.UTF8, ct);
-                            await EmitLog(emitSse, "success",
-                                $"✓ Edited {relPath} (self-healed)", step, ct: ct);
-                            var r2 = new Dictionary<string, object?>();
-                            PopulateEditResult(r2, "modified", relPath,
-                                correctedBlock, newStr ?? "", "self-healed");
-                            r2["index"] = stepIndex; r2["planItemIndex"] = planItemIndex;
-                            if (emitSse) await SendSse(Response, "step", r2, ct);
-                            allResults.Add(r2);
-                            await PersistBoardDataPlanStepAsync(
-                                cardId, planItemIndex, emitSse, ct);
-                            return stepIndex + 1;
+                            err = "oldString starts with '}' — includes previous method's closing brace. " +
+                                "Set oldString to start AT the target method declaration.";
+                        }
+                        else if (!string.IsNullOrEmpty(newStr) &&
+                            (double)newStr.Length / correctedBlock.Length < 0.1)
+                        {
+                            err = $"newString too short ({(double)newStr.Length / correctedBlock.Length:P1} of self-healed block)";
+                        }
+                        else
+                        {
+                            var (approved2, _, _) =
+                                VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2);
+                            if (approved2)
+                            {
+                                await System.IO.File.WriteAllTextAsync(
+                                    fullPath, newContent2, Encoding.UTF8, ct);
+                                await EmitLog(emitSse, "success",
+                                    $"✓ Edited {relPath} (self-healed)", step, ct: ct);
+                                var r2 = new Dictionary<string, object?>();
+                                PopulateEditResult(r2, "modified", relPath,
+                                    correctedBlock, newStr ?? "", "self-healed");
+                                r2["index"] = stepIndex; r2["planItemIndex"] = planItemIndex;
+                                if (emitSse) await SendSse(Response, "step", r2, ct);
+                                allResults.Add(r2);
+                                await PersistBoardDataPlanStepAsync(
+                                    cardId, planItemIndex, emitSse, ct);
+                                return stepIndex + 1;
+                            }
                         }
                     }
                 }
@@ -2630,6 +2687,45 @@ public class AgentController : ControllerBase
                         ct: ct);
                     goto RecordFailure;
                 }
+                continue;
+            }
+
+            // Content-shrink check: if newString is drastically shorter than oldString,
+            // the LLM likely dropped the method body by accident (e.g. old=96L, new="}")
+            if (!string.IsNullOrEmpty(newStr) && (double)newStr.Length / oldStr!.Length < 0.1)
+            {
+                var err = $"newString too short ({(double)newStr.Length / oldStr.Length:P1} of oldString length) — possible content deletion";
+                await EmitLog(emitSse, "warn",
+                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                history.Add((oldStr!, newStr ?? "", err));
+                if (string.Equals(
+                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                    AgentUtilities.NormalizeLineEndings(lastOld),
+                    StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 3) goto RecordFailure;
+                continue;
+            }
+
+            // Prefix leak check: if oldString's first trimmed line starts with '}',
+            // the LLM included the previous method's closing brace as context.
+            // The newString typically doesn't include it, causing the previous method
+            // to lose its closing brace and become corrupted.
+            var firstOldLine = oldStr?.TrimStart().Split('\n', '\r')
+                .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+            if (firstOldLine?.TrimStart().StartsWith('}') == true)
+            {
+                var err = $"oldString starts with '}}' — it includes the previous method's closing brace. " +
+                    "Set oldString to start AT the target method declaration, not before it.";
+                await EmitLog(emitSse, "warn",
+                    $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                history.Add((oldStr!, newStr ?? "", err));
+                if (string.Equals(
+                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                    AgentUtilities.NormalizeLineEndings(lastOld),
+                    StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 3) goto RecordFailure;
                 continue;
             }
 
@@ -2674,6 +2770,26 @@ public class AgentController : ControllerBase
                 Path.GetExtension(relPath).Equals(".jsx", StringComparison.OrdinalIgnoreCase))
             {
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
+            }
+
+            // C# signature preservation check — reject edits that change method
+            // attributes, return type, name, or parameters unless the LLM used
+            // an oldString that doesn't contain a method declaration.
+            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
+            {
+                var oldSig = ExtractMethodSignature(oldStr);
+                var newSig = ExtractMethodSignature(newStr);
+                if (oldSig != null && newSig != null &&
+                    !string.Equals(oldSig, newSig, StringComparison.Ordinal))
+                {
+                    var verr = $"Method signature changed: \"{TruncateForLog(oldSig, 80)}\" → \"{TruncateForLog(newSig, 80)}\". " +
+                               "Preserve attributes, return type, name, and parameters verbatim. Try again with oldString/newString targeting only the changed lines.";
+                    await EmitLog(emitSse, "warn",
+                        $"Verify failed for {relPath}: {verr}", ct: ct);
+                    history.Add((oldStr!, newStr ?? "", verr));
+                    if (stuckCount >= 3) goto RecordFailure;
+                    continue;
+                }
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -2782,6 +2898,73 @@ public class AgentController : ControllerBase
         catch (Exception ex)
         {
             await EmitLog(true, "warn", "Failed to persist boarddata plan progress", new { cardId, planItemIndex, error = ex.Message });
+        }
+    }
+
+    private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || planSteps == null || planSteps.Count == 0)
+            return;
+
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    var planItems = new JsonArray();
+                    for (var i = 0; i < planSteps.Count; i++)
+                    {
+                        var s = planSteps[i];
+                        planItems.Add(new JsonObject
+                        {
+                            ["index"] = i,
+                            ["file"] = s.File,
+                            ["change"] = s.Change,
+                            ["priority"] = s.Priority,
+                            ["done"] = false
+                        });
+                    }
+
+                    cardObj["_plan"] = new JsonObject
+                    {
+                        ["items"] = planItems,
+                        ["summary"] = "",
+                        ["score"] = 0
+                    };
+
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "refresh", new
+                        {
+                            target = "boarddata",
+                            reason = "plan-updated",
+                            cardId
+                        }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist full plan to boarddata", new { cardId, error = ex.Message });
         }
     }
 
@@ -4086,6 +4269,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             if (emitSse)
                                 await SendSse(Response, "plan",
                                     new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
+                            await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct);
 
                             // Rebuild doneIndices with merged plan and execute remaining
                             var mergedDone = new HashSet<int>();
@@ -4357,13 +4541,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 // Look up the result for this step
                 string? status = null;
+                string? output = null;
                 if (executedSteps != null)
                 {
                     var result = executedSteps.OfType<Dictionary<string, object?>>()
                         .LastOrDefault(s =>
-                            string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase));
+                            string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) ||
+                            (string.Equals(s.GetValueOrDefault("type")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                             string.Equals(s.GetValueOrDefault("command")?.ToString(), step.Change, StringComparison.OrdinalIgnoreCase)));
                     if (result != null)
+                    {
                         status = result.GetValueOrDefault("status")?.ToString();
+                        var raw = result.GetValueOrDefault("output")?.ToString();
+                        if (!string.IsNullOrWhiteSpace(raw))
+                        {
+                            var trimmed = raw.Trim();
+                            if (trimmed.Length > 2000) trimmed = trimmed[..2000] + "… (truncated)";
+                            output = trimmed;
+                        }
+                    }
                 }
                 var tag = status switch
                 {
@@ -4373,6 +4569,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     _ => "… PENDING"
                 };
                 sb.AppendLine($"  {tag} {step.File}: {step.Change}");
+                if (output != null)
+                    sb.AppendLine($"    stdout: {output}");
             }
             sb.AppendLine();
         }
@@ -4519,6 +4717,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
             }
 
+            // Deduplicate plan steps: merge steps with the same file and similar
+            // change description (normalized). The planner often hallucinates the
+            // same step repeatedly despite "AT MOST 2 steps" in the prompt.
+            plan.Plan = DeduplicateSteps(plan.Plan);
+
+            // Cap total steps — the planner should produce ≤2 per iteration, but
+            // we enforce a hard limit as a safety net against runaway hallucination.
+            const int MaxPlanSteps = 5;
+            if (plan.Plan.Count > MaxPlanSteps)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Plan has {plan.Plan.Count} steps (max {MaxPlanSteps}) — truncating to first {MaxPlanSteps}", ct: ct);
+                plan.Plan = plan.Plan.Take(MaxPlanSteps).ToList();
+            }
+
             // If the planner asked to read more files, gather that context and replan.
             // Exploration rounds never count as a converged plan, so _explore steps can
             // never leak into the executable plan.
@@ -4620,6 +4833,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Be decisive: keep the same file paths and give each step a precise change description. Score the plan 85+ if it's correct.");
         if (!string.IsNullOrWhiteSpace(prior)) { sb.AppendLine(); sb.AppendLine(prior); }
         return sb.ToString();
+    }
+
+    /// <summary>Deduplicate plan steps that have the same file and similar change description.</summary>
+    private static List<PlanStep> DeduplicateSteps(List<PlanStep> steps)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deduped = new List<PlanStep>();
+        foreach (var step in steps)
+        {
+            var normChange = (step.Change ?? "").Trim().ToLowerInvariant();
+            // Normalize whitespace so minor phrasing differences collapse
+            normChange = string.Join(" ", normChange.Split(default(char[]), StringSplitOptions.RemoveEmptyEntries));
+            var key = $"{step.File}|{normChange}";
+            if (seen.Add(key))
+                deduped.Add(step);
+        }
+        return deduped;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4725,6 +4955,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 prompt, freshContext, projectRoot, emitSse, ct, verifySteering);
             if (replan != null && replan.Plan.Count > 0)
             {
+                // Emit plan SSE so the frontend card shows the new step(s)
+                if (emitSse)
+                    await SendSse(Response, "plan",
+                        new { thinking = replan.Thinking, summary = $"Re-plan: {replan.Summary}", items = replan.Plan }, ct);
+
+                // Persist to boarddata so step progress is tracked in the card
+                await PersistBoardDataPlanAsync(cardId, replan.Plan, emitSse, ct);
+
                 await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
                     steeringContext: verifySteering, cardId: cardId);
             }
@@ -5031,6 +5269,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (true, ""); // parse failure — assume ok
     }
 
+    /// <summary>After a step completes, check if more plan steps are needed and ask the LLM.</summary>
+    private async Task<List<PlanStep>> TryReplanAfterStep(
+        string prompt, List<object> allResults, AgentPlan plan,
+        string? steeringContext, string projectRoot, bool emitSse,
+        CancellationToken ct, List<PlanStep> planItems, int itemIdx,
+        bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
+        string? cardId = null)
+    {
+        if (!stepSkipped && !stepSucceeded) return planItems;
+        var remainingSteps = planItems.Skip(itemIdx + 1)
+            .Where(p => !string.IsNullOrWhiteSpace(p.File)).ToList();
+        if (remainingSteps.Count == 0)
+        {
+            var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
+                steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
+            if (moreSteps != null && moreSteps.Count > 0)
+            {
+                planItems = MergePlanSteps(planItems, moreSteps);
+                if (emitSse)
+                    await SendSse(Response, "plan",
+                        new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
+                await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+            }
+        }
+        return planItems;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  EXECUTE PLAN  — progressive checklist, per-step resolve+retry
     // ═══════════════════════════════════════════════════════════════════════
@@ -5175,8 +5440,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planFile.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
             {
                 await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
+                var prevCount = allResults.Count;
                 var cr = await HandleCreateFile(changeDesc, projectRoot, prompt, discoveryContext, stepIndex, emitSse, ct, null, attachedFiles);
                 stepIndex += cr.stepsCount; allResults.AddRange(cr.results);
+                planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                    steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
+                    stepSkipped: false, stepSucceeded: allResults.Count > prevCount, attachedFiles, cardId: cardId);
                 continue;
             }
 
@@ -5194,8 +5463,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await EmitLog(emitSse, "info", $"Command: {cmd}", ct: ct);
                     _terminal.Start();
                     var cs = new AgentStep { Index = 0, Type = "command", Command = cmd, Description = cmd };
+                    var prevCount = allResults.Count;
                     var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += cr.Count; allResults.AddRange(cr);
+                    planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                        steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
+                        stepSkipped: false, stepSucceeded: allResults.Count > prevCount, attachedFiles, cardId: cardId);
                 }
                 continue;
             }
@@ -5310,25 +5583,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 // Step was skipped (already done / irrelevant) or succeeded —
                 // check if more work remains by re-running the planner
-                if (stepSkipped || (allResults.Count > prevCount &&
-                    allResults[^1] is Dictionary<string, object?> lastDict3 &&
-                    lastDict3.TryGetValue("status", out var st3) && st3?.ToString() != "error"))
-                {
-                    var remainingSteps = planItems.Skip(itemIdx + 1)
-                        .Where(p => !string.IsNullOrWhiteSpace(p.File)).ToList();
-                    if (remainingSteps.Count == 0)
-                    {
-                        var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
-                            steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
-                        if (moreSteps != null && moreSteps.Count > 0)
-                        {
-                            planItems = MergePlanSteps(planItems, moreSteps);
-                            if (emitSse)
-                                await SendSse(Response, "plan",
-                                    new { summary = $"Added {moreSteps.Count} step(s) after verifying prompt", items = planItems }, ct);
-                        }
-                    }
-                }
+                planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                    steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
+                    stepSkipped, allResults.Count > prevCount, attachedFiles, cardId: cardId);
                 continue;
             }
 
@@ -5579,6 +5836,36 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var i = 0; i < lines.Length; i++)
             lines[i] = lines[i].TrimStart();
         return string.Join("\n", lines);
+    }
+
+    /// <summary>Extract a C# method signature (attributes + declaration up to the body brace) for comparison.</summary>
+    private static string? ExtractMethodSignature(string code)
+    {
+        try
+        {
+            var tree = CSharpSyntaxTree.ParseText(code);
+            var root = tree.GetRoot();
+            var method = root.DescendantNodes().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            if (method == null) return null;
+            // Collect all attribute lists preceding the method
+            var attrTexts = method.AttributeLists.Select(a => a.ToFullString().Trim());
+            var declText = method.ReturnType.ToFullString().Trim() + " " +
+                           method.Identifier.Text +
+                           method.TypeParameterList?.ToFullString() + "(" +
+                           string.Join(", ", method.ParameterList.Parameters.Select(p =>
+                               p.AttributeLists.Any()
+                                   ? string.Join(" ", p.AttributeLists.Select(a => a.ToFullString().Trim())) + " " + p.ToFullString().Trim()
+                                   : p.ToFullString().Trim())) +
+                           ")";
+            return string.Join(" ", attrTexts) + " " + declText;
+        }
+        catch { return null; }
+    }
+
+    private static string TruncateForLog(string s, int maxLen)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length <= maxLen) return s;
+        return s[..(maxLen - 3)] + "...";
     } 
 
     private async Task<List<PlanStep>?> ReplanRemainingSteps(
@@ -5642,6 +5929,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
         baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
         baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
+        baseInstructions.AppendLine("BEFORE planning the first step, briefly assess the full task end-to-end. What data do you need? What files will be created? What merge/transform steps are needed? Then plan only the next 1-2 steps. Re-assess after each step.");
+        baseInstructions.AppendLine("KEEP THE ORIGINAL TASK AS YOUR NORTH STAR. After each step, check: does this complete the user's request yet? If the planned steps do not add up to finishing the task, add the remaining steps. If your plan covers the full task, execute the steps — do NOT keep planning new steps.");
         if (isWindows)
         {
             baseInstructions.AppendLine("You are on WINDOWS PowerShell. Platform differences:");
@@ -5667,12 +5956,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var conversation = new StringBuilder();
         conversation.Append(baseInstructions);
-        conversation.AppendLine("\nYou plan ONE step at a time. No upfront planning. Output:");
-        conversation.AppendLine("  {\"plan\": [{\"file\": \"<output path>\", \"change\": \"what to do\"}]}  # define a step, then execute it");
+        conversation.AppendLine("\nPlan 1-2 steps at a time. Do NOT repeat steps already in the plan. Output:");
+        conversation.AppendLine("  {\"plan\": [{\"file\": \"<output path>\", \"change\": \"what to do\"}]}  # add 1-2 new steps");
         conversation.AppendLine("  {\"cmd\": \"...\"} / {\"web_fetch\": \"...\"} / {\"web_search\": \"...\"}  # execute directly");
         conversation.AppendLine("  {\"step\": N}  # explicitly mark step N done (if current approach failed but you want a different one)");
         conversation.AppendLine("  {\"done\": true, \"summary\": \"...\"}  # finish");
         conversation.AppendLine("After each action, verify if the step\'s objective was met. If a step errors, you can mark it done and try a different approach.");
+        conversation.AppendLine("IMPORTANT: Check the PLAN section above before adding new steps. If a step is already in the plan, DO NOT add it again.");
 
         for (var i = 0; i < MAX_COMMAND_ITERATIONS; i++)
         {
@@ -5711,9 +6001,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
                         Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
                     });
-                planSteps.AddRange(newSteps);
+                // Deduplicate against already-planned steps so the LLM can't
+                // add the same step multiple times across iterations
+                var deduped = newSteps.Where(ns =>
+                    !planSteps.Any(ps =>
+                        string.Equals(ps.File, ns.File, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals((ps.Change ?? "").Trim(), (ns.Change ?? "").Trim(), StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+                if (deduped.Count == 0)
+                {
+                    conversation.AppendLine("Step(s) already in plan — not added. Execute existing steps or plan something new.");
+                    continue;
+                }
+                planSteps.AddRange(deduped);
                 totalPlanSteps = planSteps.Count;
-                await EmitLog(emitSse, "info", $"Plan: +{newSteps.Count} step(s) -- {string.Join(", ", newSteps.Select(p => p.File))}", ct: ct);
+                await EmitLog(emitSse, "info", $"Plan: +{deduped.Count} step(s) -- {string.Join(", ", deduped.Select(p => p.File))}", ct: ct);
                 if (emitSse)
                     await SendSse(Response, "plan", new
                     {
