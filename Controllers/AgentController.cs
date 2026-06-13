@@ -1629,8 +1629,13 @@ public class AgentController : ControllerBase
             var newStr = AgentUtilities.NormalizeLineEndings(step.NewString);
             if (content.Contains(newStr, StringComparison.Ordinal))
                 return (PreEditVerdict.AlreadyDone, "code already present in file");
-        }
 
+            var collapsedNew = CollapseWhitespace(newStr);
+            if (collapsedNew.Length >= 15 &&
+                CollapseWhitespace(content).Contains(collapsedNew, StringComparison.Ordinal))
+                return (PreEditVerdict.AlreadyDone, "code already present in file (whitespace differences only)");
+        }
+        
         // Verification-only step: change description uses passive language,
         // oldString already exists, and no newString means no actual change.
         // The planner should not have created this step, but if it slipped
@@ -1661,6 +1666,181 @@ public class AgentController : ControllerBase
         }
 
         return (PreEditVerdict.Proceed, "");
+    }
+
+    /// <summary>
+    /// Plan Pre-Audit: checks each plan step against current file content via LLM
+    /// to detect (a) steps where the change is already present, and (b) steps that
+    /// combine multiple distinct changes and should be decoupled into smaller edits.
+    /// Runs AFTER plan validation but BEFORE execution.
+    /// </summary>
+    private async Task<PlanAuditResult?> PlanPreAuditAsync(
+        AgentPlan plan, string projectRoot, bool emitSse,
+        CancellationToken ct, string? originalPrompt = null)
+    {
+        if (plan?.Plan == null || plan.Plan.Count == 0) return null;
+
+        var auditSteps = new List<AuditPlanStepResult>();
+        var sb = new StringBuilder();
+
+        sb.AppendLine("You are auditing a code-change plan BEFORE execution. Your job: detect problems that would waste time or cause bugs.");
+        sb.AppendLine();
+        sb.AppendLine("For EACH step in the plan, examine the target file's content and determine:");
+        sb.AppendLine("1. alreadyDone = true/false — Is the proposed change ALREADY present in the file?");
+        sb.AppendLine("   Example: if step says \"Add CalendarNotificationsEnabled property to UserSettings\"");
+        sb.AppendLine("   but the file ALREADY has `public bool CalendarNotificationsEnabled { get; set; } = true;`,");
+        sb.AppendLine("   then alreadyDone = true.");
+        sb.AppendLine("2. needsDecoupling = true/false — Does this step combine TWO OR MORE distinct");
+        sb.AppendLine("   changes that should be separate steps? Example: \"Add X property AND implement Y toggle\"");
+        sb.AppendLine("   should be two steps: one for the property, one for the toggle.");
+        sb.AppendLine("3. If needsDecoupling, provide decoupledSteps as an array of {file, change} objects.");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY valid JSON:");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"steps\": [");
+        sb.AppendLine("    {");
+        sb.AppendLine("      \"index\": 0,");
+        sb.AppendLine("      \"alreadyDone\": false,");
+        sb.AppendLine("      \"needsDecoupling\": false,");
+        sb.AppendLine("      \"reason\": \"\",");
+        sb.AppendLine("      \"decoupledSteps\": []");
+        sb.AppendLine("    }");
+        sb.AppendLine("  ]");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        if (!string.IsNullOrWhiteSpace(originalPrompt))
+        {
+            sb.AppendLine("### ORIGINAL TASK ###");
+            sb.AppendLine(originalPrompt);
+            sb.AppendLine();
+        }
+
+        for (var i = 0; i < plan.Plan.Count; i++)
+        {
+            var step = plan.Plan[i];
+            sb.AppendLine($"--- STEP {i + 1} ---");
+            sb.AppendLine($"File:   {step.File}");
+            sb.AppendLine($"Change: {step.Change}");
+            sb.AppendLine();
+
+            if (AgentUtilities.IsRelativePath(step.File) && !AgentUtilities.IsSpecialMarker(step.File))
+            {
+                var relPath = step.File.Replace('\\', '/');
+                var fullPath = Path.GetFullPath(
+                    Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(fullPath) && AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                    sb.AppendLine("TARGET FILE CONTENT:");
+                    sb.AppendLine("```");
+                    if (content.Length > 6000)
+                        sb.AppendLine(content[..6000] + $"\n... (truncated, full file is {content.Length} chars)");
+                    else
+                        sb.AppendLine(content);
+                    sb.AppendLine("```");
+                }
+                else
+                {
+                    sb.AppendLine("(file does not exist yet — will be created)");
+                }
+            }
+            else
+            {
+                sb.AppendLine("(special marker step — no file to check)");
+            }
+            sb.AppendLine();
+        }
+
+        var (raw, _, error) = await CallLlmRaw(
+            "You are a plan auditor. Output ONLY the JSON object described below. No markdown, no extra text.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(60), maxTokens: 2048);
+
+        if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Plan audit LLM call failed: {error ?? "empty response"}", ct: ct);
+            return null;
+        }
+
+        var cleaned = raw.Trim();
+        if (cleaned.StartsWith("```"))
+        {
+            var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) cleaned = m.Groups[1].Value.Trim();
+        }
+        var fb = cleaned.IndexOf('{');
+        var lb = cleaned.LastIndexOf('}');
+        if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+        try
+        {
+            using var jDoc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = jDoc.RootElement;
+            if (!root.TryGetProperty("steps", out var stepsArr) || stepsArr.ValueKind != JsonValueKind.Array)
+            {
+                await EmitLog(emitSse, "warn", "Plan audit response missing 'steps' array", ct: ct);
+                return null;
+            }
+
+            foreach (var stepEl in stepsArr.EnumerateArray())
+            {
+                var idx = stepEl.TryGetProperty("index", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number
+                    ? idxEl.GetInt32() : -1;
+                if (idx < 0 || idx >= plan.Plan.Count) continue;
+
+                var alreadyDone = stepEl.TryGetProperty("alreadyDone", out var adEl) && adEl.GetBoolean();
+                var needsDecoupling = stepEl.TryGetProperty("needsDecoupling", out var ndEl) && ndEl.GetBoolean();
+                var reason = stepEl.TryGetProperty("reason", out var rEl) ? rEl.GetString() : null;
+
+                List<PlanStep>? decoupled = null;
+                if (needsDecoupling && stepEl.TryGetProperty("decoupledSteps", out var dcArr) && dcArr.ValueKind == JsonValueKind.Array)
+                {
+                    decoupled = new List<PlanStep>();
+                    foreach (var dc in dcArr.EnumerateArray())
+                    {
+                        var dcFile = dc.TryGetProperty("file", out var fEl) ? fEl.GetString() ?? plan.Plan[idx].File : plan.Plan[idx].File;
+                        var dcChange = dc.TryGetProperty("change", out var cEl) ? cEl.GetString() ?? plan.Plan[idx].Change : plan.Plan[idx].Change;
+                        if (!string.IsNullOrWhiteSpace(dcChange) && dcChange != plan.Plan[idx].Change)
+                        {
+                            decoupled.Add(new PlanStep
+                            {
+                                File = dcFile,
+                                Change = dcChange,
+                                Priority = plan.Plan[idx].Priority,
+                                ReferenceFiles = plan.Plan[idx].ReferenceFiles
+                            });
+                        }
+                    }
+                    if (decoupled.Count == 0)
+                    {
+                        // LLM didn't produce usable sub-steps — ignore decoupling request
+                        needsDecoupling = false;
+                    }
+                }
+
+                auditSteps.Add(new AuditPlanStepResult
+                {
+                    Index = idx,
+                    AlreadyDone = alreadyDone,
+                    NeedsDecoupling = needsDecoupling,
+                    Reason = reason,
+                    DecoupledSteps = decoupled
+                });
+
+                if (alreadyDone)
+                    await EmitLog(emitSse, "info",
+                        $"Audit: step {idx + 1} already done — {reason}", ct: ct);
+                if (needsDecoupling)
+                    await EmitLog(emitSse, "info",
+                        $"Audit: step {idx + 1} needs decoupling ({decoupled?.Count ?? 0} sub-steps) — {reason}", ct: ct);
+            }
+
+            return new PlanAuditResult { Steps = auditSteps };
+        }
+        catch (JsonException ex)
+        {
+            await EmitLog(emitSse, "warn", $"Plan audit JSON parse failed: {ex.Message}", ct: ct);
+            return null;
+        }
     }
 
     private static readonly HashSet<string> _builtInTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -2026,16 +2206,24 @@ public class AgentController : ControllerBase
                 if (astOld != null)
                 {
                     var lineCount = astOld.Split('\n').Length;
-                    // Don't use class-level AST as hint for small additions —
+                    // Don't use class-level AST as hint for property/field additions
+                    // or when the change description is about adding one member —
                     // it bloats the exploration excerpt (ExtractRelevantExcerpt
                     // anchors on planOldString and extracts the full class + 60 lines),
                     // causing the LLM to attempt full-class rewrites instead of
                     // targeted single-line inserts.
-                    if (resolvedType == "class" && lineCount > 30)
+                    var changeLower = (refinedChange ?? step.Change ?? "").ToLowerInvariant();
+                    var isPropertyAdd = changeLower.Contains("add") &&
+                        (changeLower.Contains("property") || changeLower.Contains("field") ||
+                         changeLower.Contains("column") || changeLower.Contains("setting") ||
+                         changeLower.Contains("option") || changeLower.Contains("bool") ||
+                         changeLower.Contains("string") || changeLower.Contains("int") ||
+                         changeLower.Contains("{ get;") || changeLower.Contains("{get;"));
+                    if (resolvedType == "class" && (lineCount > 20 || isPropertyAdd))
                     {
                         await EmitLog(emitSse, "info",
                             $"  🎯 AST resolved '{targetSymbol}' as class " +
-                            $"({lineCount} lines) — too large for hint, " +
+                            $"({lineCount} lines) — {(isPropertyAdd ? "change targets a property add — skipping class AST hint to avoid full-class rewrite" : "too large for hint")}, " +
                             $"skipping to keep excerpt focused", ct: ct);
                     }
                     else
@@ -2745,6 +2933,21 @@ public class AgentController : ControllerBase
                 continue;
             }
 
+            // hallucination guard
+            var declIssue = CheckForDroppedOrInventedDeclarations(oldStr!, newStr ?? "", fileContent, explorationContext);
+            if (declIssue != null)
+            {
+                await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {declIssue}", ct: ct);
+                history.Add((oldStr!, newStr ?? "", declIssue));
+                if (string.Equals(
+                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                    AgentUtilities.NormalizeLineEndings(lastOld),
+                    StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 3) goto RecordFailure;
+                continue;
+            }
+
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 !newContent.Contains(
                     AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
@@ -3293,7 +3496,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
         "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
-        "2. Plan AT MOST 2 steps. Smaller steps are better — you will be re-invoked to add more.\n" +
+        "2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps. " +
+        "Do NOT artificially limit yourself to 1-2 steps so you can be re-invoked later — under-planning " +
+        "causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. " +
+        "If the task is a single coherent code change (e.g. two related assignments in the same block, " +
+        "or one method body), output exactly ONE step for it.\n" + 
         "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
         "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
         "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
@@ -3307,7 +3514,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   40-69:  File identified but change is vague or approach is uncertain\n" +
         "   0-39:  Unsure which file or what to change.\n" +
         "   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n" +
-        "7. Each step must be ONE focused change — do not combine unrelated edits. The change field must be extremely precise. Ex: On line 50 Create method testMethod and populate test variable with extremely precise details about what to change. \n" +
+         "7. Each step must be ONE atomic change — do NOT combine two edits in one step.\n" +
+         "   BAD (combined): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
+         "   GOOD (decoupled): Two steps — Step 1: \"Add CalendarNotificationsEnabled property to UserSettings\", Step 2: \"Wire up CalendarNotificationsEnabled toggle in HTML\"\n" +
+         "   If your change description contains the word \"and\" joining two distinct actions, SPLIT it into separate steps.\n" +
+         "   Each step's change field must be extremely precise. Ex: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\"\n" +
         "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
         "10. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
@@ -4595,7 +4806,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine();
         }
 
-        sb.AppendLine("Add at most 1-2 new steps to fix ONLY the issues identified. If everything is done, return an EMPTY plan with no steps.");
+        sb.AppendLine("STOP AND THINK: does the CURRENT FILE CONTENT shown above ALREADY satisfy the ORIGINAL TASK, even imperfectly?");
+        sb.AppendLine("If the explicit request is met, return an EMPTY plan — do NOT propose restructuring, renaming, moving code");
+        sb.AppendLine("between methods, or 'cleanup' the user did not ask for.");
+        sb.AppendLine("Only add a step if you can name a SPECIFIC piece of the ORIGINAL TASK that is VERIFIABLY absent from the");
+        sb.AppendLine("current file content above.");
+        sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
+        sb.AppendLine("reuse existing names exactly, character for character.");
+        sb.AppendLine("Add at most 1 new step. If everything is done or you are unsure, return an EMPTY plan with no steps.");
         return sb.ToString();
     }
 
@@ -4930,6 +5148,59 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         else
         {
             await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
+        }
+
+        // Phase 2.9: Plan Pre-Audit — check for already-done steps and multi-concern steps
+        if (plan?.Plan?.Count > 0)
+        {
+            var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);
+            if (auditResult != null && auditResult.Steps.Count > 0)
+            {
+                var alreadyDoneIndices = auditResult.Steps
+                    .Where(s => s.AlreadyDone)
+                    .Select(s => s.Index)
+                    .ToHashSet();
+                var decoupledSteps = new List<(int originalIndex, List<PlanStep> newSteps)>();
+                foreach (var step in auditResult.Steps)
+                {
+                    if (step.NeedsDecoupling && step.DecoupledSteps?.Count > 0)
+                    {
+                        decoupledSteps.Add((step.Index, step.DecoupledSteps));
+                    }
+                }
+
+                if (alreadyDoneIndices.Count > 0 || decoupledSteps.Count > 0)
+                {
+                    var newPlanItems = new List<PlanStep>();
+                    for (var i = 0; i < plan.Plan.Count; i++)
+                    {
+                        if (alreadyDoneIndices.Contains(i))
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"Plan audit: step {i + 1} already done — skipping. Reason: {auditResult.Steps.First(s => s.Index == i).Reason}", ct: ct);
+                            continue;
+                        }
+                        var decoupled = decoupledSteps.FirstOrDefault(d => d.originalIndex == i);
+                        if (decoupled != default)
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"Plan audit: step {i + 1} decoupled into {decoupled.newSteps.Count} sub-steps", ct: ct);
+                            foreach (var sub in decoupled.newSteps)
+                            {
+                                sub.Priority = plan.Plan[i].Priority;
+                                newPlanItems.Add(sub);
+                            }
+                            continue;
+                        }
+                        newPlanItems.Add(plan.Plan[i]);
+                    }
+                    plan.Plan = newPlanItems;
+
+                    if (emitSse)
+                        await SendSse(Response, "plan",
+                            new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+                }
+            }
         }
 
         // Phase 3: Execute
@@ -5271,27 +5542,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     /// <summary>After a step completes, check if more plan steps are needed and ask the LLM.</summary>
     private async Task<List<PlanStep>> TryReplanAfterStep(
-        string prompt, List<object> allResults, AgentPlan plan,
-        string? steeringContext, string projectRoot, bool emitSse,
-        CancellationToken ct, List<PlanStep> planItems, int itemIdx,
-        bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
-        string? cardId = null)
+    string prompt, List<object> allResults, AgentPlan plan,
+    string? steeringContext, string projectRoot, bool emitSse,
+    CancellationToken ct, List<PlanStep> planItems, int itemIdx,
+    bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
+    int[] replanBudget, string? cardId = null)
     {
         if (!stepSkipped && !stepSucceeded) return planItems;
         var remainingSteps = planItems.Skip(itemIdx + 1)
             .Where(p => !string.IsNullOrWhiteSpace(p.File)).ToList();
-        if (remainingSteps.Count == 0)
+        if (remainingSteps.Count > 0) return planItems;
+
+        if (replanBudget[0] <= 0)
         {
-            var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
-                steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
-            if (moreSteps != null && moreSteps.Count > 0)
-            {
-                planItems = MergePlanSteps(planItems, moreSteps);
-                if (emitSse)
-                    await SendSse(Response, "plan",
-                        new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
-                await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
-            }
+            await EmitLog(emitSse, "info",
+                "Replan budget exhausted — any remaining gaps will be handled by post-execution verification.", ct: ct);
+            return planItems;
+        }
+
+        var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
+            steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
+        if (moreSteps != null && moreSteps.Count > 0)
+        {
+            replanBudget[0]--;
+            planItems = MergePlanSteps(planItems, moreSteps);
+            if (emitSse)
+                await SendSse(Response, "plan",
+                    new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
+            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
         }
         return planItems;
     }
@@ -5312,6 +5590,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var checkpointCount = 0;
         const int MaxCheckpoints = 3;
         completedStepIndices ??= new HashSet<int>();
+        // Per-execution budget: TryReplanAfterStep may add at most ONE extra round of
+        // steps. Genuinely missing work beyond that is handled by PostExecuteVerify's
+        // single, well-grounded replan (full file content + compile-check), not by
+        // repeated cheap re-invocations that tend to hallucinate.
+        var replanBudget = new[] { 1 };
 
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
@@ -5439,13 +5722,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (planFile.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
             {
+                var stepSkipped = false;
                 await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
                 var prevCount = allResults.Count;
                 var cr = await HandleCreateFile(changeDesc, projectRoot, prompt, discoveryContext, stepIndex, emitSse, ct, null, attachedFiles);
                 stepIndex += cr.stepsCount; allResults.AddRange(cr.results);
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
-                    stepSkipped: false, stepSucceeded: allResults.Count > prevCount, attachedFiles, cardId: cardId);
+                    stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
                 continue;
             }
 
@@ -5457,6 +5741,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (planFile.Equals("_command", StringComparison.OrdinalIgnoreCase))
             {
+                var stepSkipped = false;
                 var cmd = changeDesc.Trim().Trim('`', '"', '\'');
                 if (!string.IsNullOrWhiteSpace(cmd))
                 {
@@ -5468,7 +5753,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     stepIndex += cr.Count; allResults.AddRange(cr);
                     planItems = await TryReplanAfterStep(prompt, allResults, plan,
                         steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
-                        stepSkipped: false, stepSucceeded: allResults.Count > prevCount, attachedFiles, cardId: cardId);
+                        stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
                 }
                 continue;
             }
@@ -5585,7 +5870,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // check if more work remains by re-running the planner
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
-                    stepSkipped, allResults.Count > prevCount, attachedFiles, cardId: cardId);
+                    stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
                 continue;
             }
 
@@ -5767,7 +6052,45 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "success", $"✔ Edited {relPath}", ct: ct);
         return (true, "", 10);
     }
+    private static readonly Regex SimpleDeclPattern = new(
+        @"^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+|const\s+|let\s+|var\s+)*([A-Za-z_]\w*)\s*[?!]?\s*(?::\s*[^=;\n]+)?\s*(?:=|;)",
+        RegexOptions.Multiline);
 
+    private static int CountWordOccurrences(string text, string word) =>
+        Regex.Matches(text ?? "", $@"\b{Regex.Escape(word)}\b").Count;
+
+    /// <summary>
+    /// Heuristic guard against renamed/hallucinated identifiers: if an edit drops a
+    /// declaration that ONLY existed inside oldString (removing it deletes it from the
+    /// whole file) while introducing a brand-new identifier that appears NOWHERE else
+    /// in the file or exploration context, the LLM likely invented or typo'd a name
+    /// instead of preserving the existing one.
+    /// </summary>
+    private static string? CheckForDroppedOrInventedDeclarations(
+        string oldStr, string newStr, string fileContent, string? explorationContext)
+    {
+        var oldDecls = SimpleDeclPattern.Matches(oldStr).Select(m => m.Groups[1].Value)
+            .Where(n => n != "this").ToHashSet(StringComparer.Ordinal);
+        var newDecls = SimpleDeclPattern.Matches(newStr).Select(m => m.Groups[1].Value)
+            .Where(n => n != "this").ToHashSet(StringComparer.Ordinal);
+
+        var dropped = oldDecls.Where(d =>
+            !newDecls.Contains(d) &&
+            CountWordOccurrences(fileContent, d) <= CountWordOccurrences(oldStr, d)).ToList();
+
+        var invented = newDecls.Where(d =>
+            !oldDecls.Contains(d) &&
+            CountWordOccurrences(fileContent, d) == 0 &&
+            (string.IsNullOrWhiteSpace(explorationContext) || CountWordOccurrences(explorationContext, d) == 0)).ToList();
+
+        if (dropped.Count > 0 && invented.Count > 0)
+            return $"This edit removes existing declaration(s) [{string.Join(", ", dropped)}] (not used anywhere else " +
+                   $"in the file) and introduces unrecognized name(s) [{string.Join(", ", invented)}]. " +
+                   "Do NOT rename or replace existing property/variable names — keep them exactly as-is and only " +
+                   "change their values/logic.";
+
+        return null;
+    }
     private static (bool approved, string reason, int score) VerifyEdit(
         string oldString, string newString, string oldContent, string newContent)
     {
@@ -6429,7 +6752,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var tcpCmd = OperatingSystem.IsWindows()
             ? $"powershell -Command \"Test-NetConnection {uri.Host} -Port {uri.Port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded | Format-List\""
             : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
-        var step = new AgentStep { Index = 0, Type = "command", Command = tcpCmd, Description = "tcp check" };
+        var step = new AgentStep { Index = 0, Type = "command", Command = tcpCmd, Description = "TCP Check" };
         var results = await ExecuteSteps(new List<AgentStep> { step }, projectRoot, 0, emitSse, ct);
         var first = results.FirstOrDefault() as Dictionary<string, object?>;
         var output = first?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
