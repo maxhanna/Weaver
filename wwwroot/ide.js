@@ -47,7 +47,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       };
 
       vm.openFileBrowser = function() {
-        vm.ide.showSidebar = true;
+        vm.toggleSidebar();
         if (vm.ide.filePickerEntries.length === 0) {
           vm.loadFilePickerEntries();
         }
@@ -570,8 +570,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
 
       // ── Line diff algorithm (LCS-based) ───────────────────────────────
       vm.computeLineDiff = function (oldText, newText) {
-        var oldLines = oldText.split('\n');
-        var newLines = newText.split('\n');
+        var oldLines = oldText.replace(/\r\n/g, '\n').split('\n');
+        var newLines = newText.replace(/\r\n/g, '\n').split('\n');
 
         // Build LCS table
         var m = oldLines.length, n = newLines.length;

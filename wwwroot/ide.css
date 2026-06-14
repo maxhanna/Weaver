@@ -668,6 +668,7 @@
     display: flex;
     flex-direction: column;
     box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+    overflow: hidden;
 }
 .ide-diff-header {
     display: flex;

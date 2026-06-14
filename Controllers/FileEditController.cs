@@ -450,7 +450,7 @@ public class FileEditController : ControllerBase
             process.StartInfo = new ProcessStartInfo
             {
                 FileName = "git",
-                Arguments = $"show HEAD:\"{path.Trim().Replace('/', '\\')}\"",
+                Arguments = $"show HEAD:\"{path.Trim().Replace('\\', '/')}\"",
                 WorkingDirectory = projectRoot,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
