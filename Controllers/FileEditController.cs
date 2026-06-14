@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using System.IO;
 using System.Text;
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -295,5 +296,184 @@ public class FileEditController : ControllerBase
         {
             return StatusCode(500, ex.Message);
         }
+    }
+
+    [HttpGet("git-diff")]
+    public async Task<IActionResult> GitDiff([FromQuery] string project = "")
+    {
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var projectRoot = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
+
+        if (!Directory.Exists(projectRoot))
+        {
+            return NotFound("Project directory not found.");
+        }
+
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "diff --no-color",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            process.Start();
+            var output = await process.StandardOutput.ReadToEndAsync();
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            // Also get untracked files
+            using var untracked = new Process();
+            untracked.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "ls-files --others --exclude-standard",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            untracked.Start();
+            var untrackedOutput = await untracked.StandardOutput.ReadToEndAsync();
+            await untracked.WaitForExitAsync();
+
+            // Parse diff into structured file-level entries
+            var files = new List<object>();
+            var currentFile = "";
+            var currentLines = new List<string>();
+
+            void FlushFile()
+            {
+                if (!string.IsNullOrWhiteSpace(currentFile) && currentLines.Count > 0)
+                {
+                    var headerCount = currentLines.Count(l => l.StartsWith("---") || l.StartsWith("+++") || l.StartsWith("@@") || l.StartsWith("diff --git") || l.StartsWith("index "));
+                    files.Add(new
+                    {
+                        path = currentFile,
+                        header = string.Join("\n", currentLines.Take(headerCount)),
+                        body = string.Join("\n", currentLines.Skip(headerCount))
+                    });
+                }
+            }
+
+            foreach (var line in output.Split('\n'))
+            {
+                if (line.StartsWith("diff --git "))
+                {
+                    FlushFile();
+                    var parts = line.Split(' ');
+                    currentFile = parts.Length >= 4 && parts[3].Length > 2 ? parts[3][2..] : "";
+                }
+                currentLines.Add(line);
+            }
+            FlushFile();
+
+            var untrackedFiles = untrackedOutput
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(f => f.Trim())
+                .Where(f => !string.IsNullOrWhiteSpace(f))
+                .ToList();
+
+            return Ok(new
+            {
+                diff = output,
+                files,
+                untracked = untrackedFiles,
+                hasChanges = !string.IsNullOrWhiteSpace(output) || untrackedFiles.Count > 0
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("git-diff-file")]
+    public async Task<IActionResult> GitDiffFile([FromQuery] string project = "", [FromQuery] string path = "")
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return BadRequest(new { error = "Path is required" });
+
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var projectRoot = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
+
+        if (!Directory.Exists(projectRoot))
+            return NotFound(new { error = "Project directory not found." });
+
+        // Read new content from disk
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, path.Trim().Replace('/', Path.DirectorySeparatorChar)));
+        string newContent = "";
+        if (System.IO.File.Exists(fullPath))
+            newContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+
+        // Read old content from git HEAD
+        string oldContent = "";
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = $"show HEAD:\"{path.Trim().Replace('/', '\\')}\"",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            process.Start();
+            var gitOutput = await process.StandardOutput.ReadToEndAsync();
+            var gitError = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            if (process.ExitCode == 0)
+                oldContent = gitOutput;
+        }
+        catch { }
+
+        return Ok(new
+        {
+            path,
+            oldContent,
+            newContent,
+            isNewFile = string.IsNullOrWhiteSpace(oldContent)
+        });
     }
 }

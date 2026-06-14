@@ -20,11 +20,24 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         sharedEditorActive: false,
         sharedFiles: [],
         conflictFiles: {},
+        searchQuery: '',
+        searchMatches: [],
+        searchCurrentIdx: -1,
+        searchVisible: false,
+        gitDiffVisible: false,
+        gitDiffLoading: false,
+        gitDiffData: null,
+        gitDiffError: '',
+        gitDiffView: 'list',
+        gitDiffFilePath: '',
+        gitDiffRows: [],
         left: 60,
         top: 60,
         width: 600,
         height: 400
       };
+      var _searchMarks = [];
+      var _searchDebounce = null;
 
 
       var _contentSyncDebounce = null;
@@ -138,6 +151,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
             vm.ide.currentTab = null;
             vm.ide.dirty = false;
             vm.ide.sharedEditorActive = false;
+            _searchMarks = [];
+            vm.ide.searchVisible = false;
+            vm.ide.searchQuery = '';
+            vm.ide.searchMatches = [];
+            vm.ide.searchCurrentIdx = -1;
             // Destroy CodeMirror when last tab closes
             if (vm._editor) {
               var wrapper = vm._editor.getWrapperElement();
@@ -192,8 +210,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           lineWrapping: false,
           matchBrackets: true,
           autoCloseBrackets: true,
+          highlightSelectionMatches: {showToken: false, annotateScrollbar: false},
           extraKeys: {
-            'Ctrl-S': function () { vm.saveFile(); }
+            'Ctrl-S': function () { vm.saveFile(); },
+            'Ctrl-F': function () { if (vm && vm.openSearch) vm.openSearch(); },
+            'Cmd-F': function () { if (vm && vm.openSearch) vm.openSearch(); }
           }
         });
         vm._editor.on('change', function () {
@@ -211,6 +232,14 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
               vm.syncEditorState();
             }
           }, 500, false);
+          if (vm.ide.searchVisible && vm.ide.searchQuery) {
+            if (_searchDebounce) $timeout.cancel(_searchDebounce);
+            _searchDebounce = $timeout(function () {
+              if (vm.ide.searchVisible && vm.ide.searchQuery) {
+                vm.doSearch();
+              }
+            }, 300, false);
+          }
         });
         vm._editor.setSize('100%', '100%');
         vm._editor.refresh();
@@ -218,6 +247,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
 
       function setEditorContent(content, path) {
         if (!vm._editor) return;
+        _searchMarks.forEach(function (m) { m.clear(); });
+        _searchMarks = [];
+        vm.ide.searchVisible = false;
+        vm.ide.searchQuery = '';
+        vm.ide.searchMatches = [];
+        vm.ide.searchCurrentIdx = -1;
         vm._editorIgnoreChange = true;
         vm._editor.setValue(content || '');
         var mode = detectMode(path);
@@ -393,7 +428,188 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.searchFilter = '';
         vm.ide.sharedEditorActive = false;
         vm.ide.sharedFiles = [];
+        _searchMarks = [];
+        vm.ide.searchVisible = false;
+        vm.ide.searchQuery = '';
+        vm.ide.searchMatches = [];
+        vm.ide.searchCurrentIdx = -1;
+        vm.ide.gitDiffVisible = false;
+        vm.ide.gitDiffData = null;
+        vm.ide.gitDiffError = '';
         vm.showIDE = false;
+      };
+
+      // ── Search ─────────────────────────────────────────────────────────
+      vm.openSearch = function () {
+        vm.ide.searchVisible = true;
+        vm.ide.searchQuery = '';
+        vm.ide.searchMatches = [];
+        vm.ide.searchCurrentIdx = -1;
+        $timeout(function () {
+          var input = document.querySelector('.ide-search-input');
+          if (input) input.focus();
+          if (vm._editor) {
+            var sel = vm._editor.getSelection();
+            if (sel) {
+              vm.ide.searchQuery = sel;
+              vm.doSearch();
+            }
+          }
+        }, 50);
+      };
+
+      vm.closeSearch = function () {
+        vm.ide.searchVisible = false;
+        _searchMarks.forEach(function (m) { m.clear(); });
+        _searchMarks = [];
+        vm.ide.searchMatches = [];
+        vm.ide.searchCurrentIdx = -1;
+        vm.ide.searchQuery = '';
+        if (vm._editor) vm._editor.focus();
+      };
+
+      vm.doSearch = function () {
+        _searchMarks.forEach(function (m) { m.clear(); });
+        _searchMarks = [];
+        vm.ide.searchMatches = [];
+        vm.ide.searchCurrentIdx = -1;
+        var query = vm.ide.searchQuery;
+        if (!query || !vm._editor) return;
+        try {
+          var cur = vm._editor.getSearchCursor(query, { line: 0, ch: 0 });
+          while (cur.findNext()) {
+            vm.ide.searchMatches.push({ from: cur.from(), to: cur.to() });
+            var mark = vm._editor.markText(cur.from(), cur.to(), { className: 'cm-search-match' });
+            _searchMarks.push(mark);
+          }
+        } catch (e) {
+          return;
+        }
+        if (vm.ide.searchMatches.length > 0) {
+          vm.ide.searchCurrentIdx = 0;
+          vm._editor.setSelection(vm.ide.searchMatches[0].from, vm.ide.searchMatches[0].to);
+          vm._editor.scrollIntoView({ from: vm.ide.searchMatches[0].from, to: vm.ide.searchMatches[0].to });
+        }
+      };
+
+      vm.searchNext = function () {
+        if (vm.ide.searchMatches.length === 0) return;
+        var idx = vm.ide.searchCurrentIdx + 1;
+        if (idx >= vm.ide.searchMatches.length) idx = 0;
+        vm.ide.searchCurrentIdx = idx;
+        var match = vm.ide.searchMatches[idx];
+        vm._editor.setSelection(match.from, match.to);
+        vm._editor.scrollIntoView({ from: match.from, to: match.to });
+      };
+
+      vm.searchPrev = function () {
+        if (vm.ide.searchMatches.length === 0) return;
+        var idx = vm.ide.searchCurrentIdx - 1;
+        if (idx < 0) idx = vm.ide.searchMatches.length - 1;
+        vm.ide.searchCurrentIdx = idx;
+        var match = vm.ide.searchMatches[idx];
+        vm._editor.setSelection(match.from, match.to);
+        vm._editor.scrollIntoView({ from: match.from, to: match.to });
+      };
+
+      vm.onSearchKeydown = function ($event) {
+        if ($event.key === 'Enter') {
+          if ($event.shiftKey) {
+            vm.searchPrev();
+          } else {
+            vm.searchNext();
+          }
+          $event.preventDefault();
+        } else if ($event.key === 'Escape') {
+          vm.closeSearch();
+          $event.preventDefault();
+        }
+      };
+
+      // ── Git Diff Viewer ───────────────────────────────────────────────
+      vm.showGitDiff = function () {
+        vm.ide.gitDiffVisible = true;
+        vm.ide.gitDiffLoading = true;
+        vm.ide.gitDiffData = null;
+        vm.ide.gitDiffError = '';
+        vm.ide.gitDiffView = 'list';
+        vm.ide.gitDiffFilePath = '';
+        vm.ide.gitDiffRows = [];
+        $http.get('/api/editor/git-diff', { params: { project: vm.selectedProject } }).then(function (resp) {
+          vm.ide.gitDiffLoading = false;
+          vm.ide.gitDiffData = resp.data;
+        }, function (err) {
+          vm.ide.gitDiffLoading = false;
+          vm.ide.gitDiffError = (err.data && err.data.error) || err.statusText || 'Failed to load git diff';
+        });
+      };
+
+      vm.closeGitDiff = function () {
+        vm.ide.gitDiffVisible = false;
+        vm.ide.gitDiffData = null;
+        vm.ide.gitDiffError = '';
+        vm.ide.gitDiffView = 'list';
+        vm.ide.gitDiffFilePath = '';
+        vm.ide.gitDiffRows = [];
+      };
+
+      vm.showFileDiff = function (path) {
+        vm.ide.gitDiffView = 'diff';
+        vm.ide.gitDiffFilePath = path;
+        vm.ide.gitDiffLoading = true;
+        vm.ide.gitDiffRows = [];
+        $http.get('/api/editor/git-diff-file', { params: { project: vm.selectedProject, path: path } }).then(function (resp) {
+          vm.ide.gitDiffLoading = false;
+          var data = resp.data;
+          vm.ide.gitDiffRows = vm.computeLineDiff(data.oldContent || '', data.newContent || '');
+        }, function (err) {
+          vm.ide.gitDiffLoading = false;
+          vm.ide.gitDiffError = (err.data && err.data.error) || err.statusText || 'Failed to load file diff';
+        });
+      };
+
+      // ── Line diff algorithm (LCS-based) ───────────────────────────────
+      vm.computeLineDiff = function (oldText, newText) {
+        var oldLines = oldText.split('\n');
+        var newLines = newText.split('\n');
+
+        // Build LCS table
+        var m = oldLines.length, n = newLines.length;
+        var dp = [];
+        for (var i = 0; i <= m; i++) {
+          dp[i] = new Array(n + 1).fill(0);
+        }
+        for (var i = 1; i <= m; i++) {
+          for (var j = 1; j <= n; j++) {
+            if (oldLines[i - 1] === newLines[j - 1]) {
+              dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+              dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+            }
+          }
+        }
+
+        // Backtrack to build diff rows
+        var rows = [];
+        var i = m, j = n;
+        var tempRows = [];
+        while (i > 0 || j > 0) {
+          if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+            tempRows.push({ type: 'equal', oldNum: i, oldContent: oldLines[i - 1], newNum: j, newContent: newLines[j - 1] });
+            i--; j--;
+          } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+            tempRows.push({ type: 'add', oldNum: null, oldContent: '', newNum: j, newContent: newLines[j - 1] });
+            j--;
+          } else if (i > 0) {
+            tempRows.push({ type: 'remove', oldNum: i, oldContent: oldLines[i - 1], newNum: null, newContent: '' });
+            i--;
+          }
+        }
+        // Reverse to get chronological order
+        for (var k = tempRows.length - 1; k >= 0; k--) {
+          rows.push(tempRows[k]);
+        }
+        return rows;
       };
 
       // ===== Shared editing via BugHosted =====

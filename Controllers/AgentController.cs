@@ -1945,6 +1945,7 @@ public class AgentController : ControllerBase
         public string? EstimatedLineRange { get; init; }
         public int Confidence { get; init; }
         public int RoundsCompleted { get; init; }
+        public string? LowConfidenceWarning { get; init; }
     }
 
     /// <summary>
@@ -2253,6 +2254,29 @@ public class AgentController : ControllerBase
             }
         }
 
+        // ── Step 3.5: If all rounds exhausted with very low confidence ────
+        //    the replanned description is likely too vague to ground an edit.
+        //    Re-derive a crisp description directly from the original prompt.
+        string? lowConfidenceWarning = null;
+        if (roundsCompleted >= MaxRounds && confidence > 0 && confidence < 30)
+        {
+            lowConfidenceWarning =
+                $"Exploration exhausted {MaxRounds} rounds at only {confidence}% confidence — " +
+                $"step description may be too vague for a reliable edit";
+
+            var reDerived = await ReDeriveStepDescription(
+                step, originalPrompt, ctx.ToString(), refinedChange, ct);
+
+            if (!string.IsNullOrWhiteSpace(reDerived) &&
+                reDerived.Length > (refinedChange?.Length ?? 0) / 3)
+            {
+                await EmitLog(emitSse, "info",
+                    $"  🔄 Re-derived from original prompt " +
+                    $"(was {confidence}% after {roundsCompleted} rounds)", ct: ct);
+                refinedChange = reDerived;
+            }
+        }
+
         // ── Step 4: Build the enriched step ──────────────────────────────
         var enrichedStep = new PlanStep
         {
@@ -2274,7 +2298,8 @@ public class AgentController : ControllerBase
             targetSymbol,
             estimatedLineRange = lineRange,
             confidence,
-            astResolved = astOldStringHint != null
+            astResolved = astOldStringHint != null,
+            lowConfidenceWarning
         }, emitSse, ct);
 
         await EmitLog(emitSse, "info",
@@ -2290,9 +2315,48 @@ public class AgentController : ControllerBase
             TargetSymbol = targetSymbol,
             EstimatedLineRange = lineRange,
             Confidence = confidence,
-            RoundsCompleted = roundsCompleted
+            RoundsCompleted = roundsCompleted,
+            LowConfidenceWarning = lowConfidenceWarning
         };
-    } 
+    }
+
+    /// <summary>
+    /// When exploration exhausts all rounds at low confidence, the step
+    /// description has been diluted by repeated replanning.  Re-derive a
+    /// crisp, specific description directly from the original prompt so
+    /// that ResolveEditForStep has a concrete target.
+    /// </summary>
+    private async Task<string?> ReDeriveStepDescription(
+        PlanStep step,
+        string originalPrompt,
+        string explorationContext,
+        string vagueDescription,
+        CancellationToken ct)
+    {
+        var sysPrompt = "You are an expert code reviewer. Given the original user request, "
+            + "the exploration context (files read and their content), and the current step "
+            + "description (which may be vague), produce a crisp, specific, one-sentence "
+            + "re-description of exactly what code change this step requires. Be concrete — "
+            + "include the file path, the symbol or code region, and the exact nature of the "
+            + "change (add, modify, delete, rename). Output ONLY the re-derived description, "
+            + "no JSON, no explanation.";
+
+        var userPrompt =
+            $"## Original User Request\n{originalPrompt}\n\n"
+            + $"## Exploration Context (files read)\n{explorationContext}\n\n"
+            + $"## Current Step Description (may be vague)\n{vagueDescription}\n\n"
+            + "Produce a crisp, specific, one-sentence re-description of this step's code change:";
+
+        var (raw, _, _) = await CallLlmRaw(
+            sysPrompt, userPrompt, ct,
+            TimeSpan.FromSeconds(20), maxTokens: 256);
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var cleaned = raw.Trim().Trim('"').Trim();
+        if (cleaned.Length > 250) cleaned = cleaned[..250] + "…";
+        return cleaned;
+    }
 
     // ── Exploration prompt builders ───────────────────────────────────────
 
@@ -2648,6 +2712,20 @@ public class AgentController : ControllerBase
 
         step = exploration.EnrichedStep;
         var explorationContext = exploration.ExplorationContext;
+
+        if (exploration.LowConfidenceWarning != null)
+        {
+            await EmitLog(emitSse, "warn", $"  ⚠ {exploration.LowConfidenceWarning}", ct: ct);
+            await SendSse(Response, "step", new
+            {
+                index = planItemIndex,
+                type = "edit",
+                status = "low-confidence",
+                path = relPath,
+                warning = exploration.LowConfidenceWarning,
+                planItemIndex
+            }, ct);
+        }
 
         // Signal "applying" now that exploration is complete
         await PersistStepStatusAsync(cardId, planItemIndex, "applying", emitSse, ct);

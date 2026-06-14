@@ -5,6 +5,7 @@
     <div class="ide-panel-controls">
       <span class="ide-shared-badge" ng-if="vm.bughostedStatus === 'connected'" title="Shared editing active">🌐</span>
       <button class="ide-panel-btn" ng-click="vm.openFileBrowser()" title="Open File">📂</button>
+      <button class="ide-panel-btn" ng-click="vm.showGitDiff()" title="Show git diff of edited files">🔀 Git Diff</button>
       <button class="ide-panel-btn" ng-click="vm.saveFile()" ng-disabled="!vm.ide.dirty" title="Save File">💾</button>
       <button class="ide-panel-btn" ng-click="vm.newFile()" title="New File">➕</button>
       <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()"
@@ -62,6 +63,7 @@
           </div>
         </div>
         <div class="ide-editor-actions">
+          <button class="ide-panel-btn" ng-click="vm.openSearch()" title="Search (Ctrl+F)">🔍</button>
           <button class="ide-panel-btn" ng-click="vm.toggleSidebar()" title="Toggle sidebar">▶</button>
         </div>
       </div>
@@ -70,6 +72,20 @@
           <strong>⚠ Edit Conflict</strong>
           <span>Remote user edited this file while you had unsaved changes.</span>
           <button ng-click="vm.resolveConflict(vm.ide.currentFile)" class="ide-panel-btn">Resolve</button>
+        </div>
+        <div class="ide-search-panel" ng-if="vm.ide.searchVisible">
+          <div class="ide-search-row">
+            <input type="text" class="ide-search-input" ng-model="vm.ide.searchQuery"
+              ng-change="vm.doSearch()" placeholder="Search in file..."
+              ng-keydown="vm.onSearchKeydown($event)" />
+            <span class="ide-search-count" ng-if="vm.ide.searchQuery">
+              <span ng-if="vm.ide.searchMatches.length">{{vm.ide.searchCurrentIdx + 1}}/{{vm.ide.searchMatches.length}}</span>
+              <span ng-if="!vm.ide.searchMatches.length">0/0</span>
+            </span>
+            <button class="ide-search-btn" ng-click="vm.searchPrev()" title="Previous match (Shift+Enter)">▲</button>
+            <button class="ide-search-btn" ng-click="vm.searchNext()" title="Next match (Enter)">▼</button>
+            <button class="ide-search-btn ide-search-close" ng-click="vm.closeSearch()" title="Close search (Esc)">✕</button>
+          </div>
         </div>
         <div class="ide-codemirror-container" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"></div>
         <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
@@ -87,5 +103,81 @@
           remote user can browse and edit files</p>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Git Diff Viewer Modal -->
+<div class="ide-diff-overlay" ng-if="vm.ide.gitDiffVisible" ng-click="vm.closeGitDiff()">
+  <div class="ide-diff-panel" ng-click="$event.stopPropagation()"
+    ng-class="{'ide-diff-panel--wide': vm.ide.gitDiffView === 'diff'}">
+
+    <!-- ── File list view ── -->
+    <div ng-if="vm.ide.gitDiffView === 'list'">
+      <div class="ide-diff-header">
+        <span class="ide-diff-title">🔀 Git Differences</span>
+        <div class="ide-diff-actions">
+          <button class="ide-diff-refresh-btn" ng-click="vm.showGitDiff()" title="Refresh">↻</button>
+          <button class="ide-diff-close-btn" ng-click="vm.closeGitDiff()" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="ide-diff-loading" ng-if="vm.ide.gitDiffLoading">Loading diff...</div>
+      <div class="ide-diff-empty" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffData && !vm.ide.gitDiffData.hasChanges">
+        No uncommitted changes.
+      </div>
+      <div class="ide-diff-error" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffError">
+        {{vm.ide.gitDiffError}}
+      </div>
+      <div class="ide-diff-body" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffData && vm.ide.gitDiffData.hasChanges">
+        <div class="ide-diff-untracked" ng-if="vm.ide.gitDiffData.untracked.length">
+          <div class="ide-diff-section-label">Untracked files</div>
+          <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.gitDiffData.untracked track by $index"
+            ng-click="vm.showFileDiff(f)">
+            <span class="ide-diff-file-status">U</span>
+            <span class="ide-diff-file-path">{{f}}</span>
+          </div>
+        </div>
+        <div class="ide-diff-files" ng-if="vm.ide.gitDiffData.files.length">
+          <div class="ide-diff-section-label">Modified files</div>
+          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.files track by file.path"
+            ng-click="vm.showFileDiff(file.path)">
+            <span class="ide-diff-file-status">M</span>
+            <span class="ide-diff-file-path">{{file.path}}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Side-by-side diff view ── -->
+    <div ng-if="vm.ide.gitDiffView === 'diff'">
+      <div class="ide-diff-header">
+        <button class="ide-diff-back-btn" ng-click="vm.gitDiffView = 'list'" title="Back to file list">←</button>
+        <span class="ide-diff-title">{{vm.ide.gitDiffFilePath}}</span>
+        <div class="ide-diff-actions">
+          <button class="ide-diff-refresh-btn" ng-click="vm.showFileDiff(vm.ide.gitDiffFilePath)" title="Refresh">↻</button>
+          <button class="ide-diff-close-btn" ng-click="vm.closeGitDiff()" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="ide-diff-loading" ng-if="vm.ide.gitDiffLoading">Loading diff...</div>
+      <div class="ide-diff-sbs" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffRows">
+        <div class="ide-diff-sbs-header">
+          <div class="ide-diff-sbs-header-cell ide-diff-sbs-old">Before</div>
+          <div class="ide-diff-sbs-header-cell ide-diff-sbs-new">After</div>
+        </div>
+        <div class="ide-diff-sbs-body">
+          <div class="ide-diff-sbs-row" ng-repeat="row in vm.ide.gitDiffRows track by $index"
+            ng-class="'ide-diff-row--' + row.type">
+            <div class="ide-diff-sbs-cell ide-diff-sbs-old">
+              <span class="ide-diff-lineno">{{row.oldNum}}</span>
+              <span class="ide-diff-line-content">{{row.oldContent}}</span>
+            </div>
+            <div class="ide-diff-sbs-cell ide-diff-sbs-new">
+              <span class="ide-diff-lineno">{{row.newNum}}</span>
+              <span class="ide-diff-line-content">{{row.newContent}}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
