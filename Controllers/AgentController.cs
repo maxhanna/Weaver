@@ -6157,7 +6157,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// instead of preserving the existing one.
     /// </summary>
     private static string? CheckForDroppedOrInventedDeclarations(
-        string oldStr, string newStr, string fileContent, string? explorationContext)
+     string oldStr, string newStr, string fileContent, string? explorationContext)
     {
         var oldDecls = SimpleDeclPattern.Matches(oldStr).Select(m => m.Groups[1].Value)
             .Where(n => n != "this").ToHashSet(StringComparer.Ordinal);
@@ -6173,13 +6173,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             CountWordOccurrences(fileContent, d) == 0 &&
             (string.IsNullOrWhiteSpace(explorationContext) || CountWordOccurrences(explorationContext, d) == 0)).ToList();
 
-        if (dropped.Count > 0 && invented.Count > 0)
-            return $"This edit removes existing declaration(s) [{string.Join(", ", dropped)}] (not used anywhere else " +
-                   $"in the file) and introduces unrecognized name(s) [{string.Join(", ", invented)}]. " +
-                   "Do NOT rename or replace existing property/variable names — keep them exactly as-is and only " +
-                   "change their values/logic.";
+        if (dropped.Count == 0 || invented.Count == 0) return null;
 
-        return null;
+        // A full method/class rewrite legitimately introduces unrelated new locals
+        // (e.g. List<int> -> Dictionary<int,string> needs a brand-new "note" var
+        // that has nothing to do with the old "userIds"). Only flag when an
+        // invented name closely resembles a dropped one — that pattern is what
+        // actually indicates an accidental rename/typo.
+        var suspiciousRenames = invented
+            .Where(i => dropped.Any(d => ComputeLineSimilarity(i, d) >= 0.6))
+            .ToList();
+
+        if (suspiciousRenames.Count == 0) return null;
+
+        return $"This edit removes existing declaration(s) [{string.Join(", ", dropped)}] and introduces " +
+               $"unrecognized name(s) [{string.Join(", ", suspiciousRenames)}] that closely resemble them — " +
+               "looks like an accidental rename. Keep existing property/variable names exactly as-is.";
     }
     private static (bool approved, string reason, int score) VerifyEdit(
         string oldString, string newString, string oldContent, string newContent)
@@ -6260,10 +6269,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var root = tree.GetRoot();
             var method = root.DescendantNodes().OfType<MethodDeclarationSyntax>().FirstOrDefault();
             if (method == null) return null;
-            // Collect all attribute lists preceding the method
             var attrTexts = method.AttributeLists.Select(a => a.ToFullString().Trim());
-            var declText = method.ReturnType.ToFullString().Trim() + " " +
-                           method.Identifier.Text +
+            // Return type intentionally excluded — changing it is a common, legitimate edit.
+            var declText = method.Identifier.Text +
                            method.TypeParameterList?.ToFullString() + "(" +
                            string.Join(", ", method.ParameterList.Parameters.Select(p =>
                                p.AttributeLists.Any()
@@ -7263,7 +7271,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         AgentPlan? plan = null, List<string>? attachedFiles = null)
     {
         var editSteps = executedSteps.OfType<Dictionary<string, object?>>()
-            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit").ToList();
+            .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "edit")
+            .GroupBy(s => s.GetValueOrDefault("path")?.ToString() ?? Guid.NewGuid().ToString())
+            .Select(g => g.Last())
+            .ToList();
         if (editSteps.Count == 0) return (true, "No edit steps — command-only task");
 
         var failed = editSteps.Where(s => !s.TryGetValue("status", out var st) || st?.ToString() is not ("done" or "skipped")).ToList();
