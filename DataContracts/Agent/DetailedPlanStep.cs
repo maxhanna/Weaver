@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class DetailedPlanStep
 {
     public int Index { get; set; }

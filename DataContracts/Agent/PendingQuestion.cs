@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class PendingQuestion
 {
     public string Id { get; set; } = "";

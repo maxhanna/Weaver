@@ -11,6 +11,12 @@
   </PropertyGroup> 
 
   <ItemGroup>
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="wwwroot\**\*.*" />
   </ItemGroup> 
 

@@ -35,8 +35,8 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(put|place|write|save|download)\s+(a\s+)?(file|data|content|result)\s+(on|to|at|in)\s+(the\s+)?(desktop|downloads|documents|home)\b"))
             cmdScore += 80;
 
-        if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree)\b"))
-            cmdScore += 60;
+        if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree|logs?|journal|stdout|stderr|console|output|terminal|logs|process|service)\b"))
+            cmdScore += 65;
         // "list" alone is ambiguous (data list vs file listing) — use lower weight
         if (Regex.IsMatch(lower, @"\b(list)\b") &&
             !Regex.IsMatch(lower, @"\b(list\s+of\s+\w+)\b")) // "list of plants" is data, not filesystem
@@ -135,13 +135,9 @@ public static class AgentUtilities
         if (cmdScore >= 50 && editScore == 0) editScore -= 40;
 
         // ── Decision ─────────────────────────────────────────────────────────
-        const double tieThreshold = 15;
-        double diff = editScore - cmdScore;
+        if (editScore > cmdScore) return (PipelineType.CodeEdit, cmdScore, editScore);
+        if (cmdScore > editScore) return (PipelineType.CommandExecution, cmdScore, editScore);
 
-        if (diff > tieThreshold) return (PipelineType.CodeEdit, cmdScore, editScore);
-        if (diff < -tieThreshold) return (PipelineType.CommandExecution, cmdScore, editScore);
-
-        // Close call — lean toward CodeEdit (it can discover + plan + edit)
         return (PipelineType.CodeEdit, cmdScore, editScore);
     }
 
@@ -161,14 +157,15 @@ public static class AgentUtilities
 
         // ── Rename / Move file ────────────────────────────────────────────────
         // Matches: "rename X to Y", "rename X → Y", "move X to Y", etc.
-        // Deliberately lenient: captures any token that looks like a filename/path
+        // Handles quoted paths and unquoted paths.
         var renameMatch = Regex.Match(p,
-            @"\b(?:rename|move)\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?\s+(?:to|→|-?>)\s+['""]?(\.?[\w./\\-]+(?:\.[\w.-]+)?)['""]?",
+            @"\b(?:rename|move)\s+(?:""([^""]+)""|'([^']+)'|([^\s]+))\s+(?:to|→|-?>)\s+(?:""([^""]+)""|'([^']+)'|([^\s]+))",
             RegexOptions.IgnoreCase);
+
         if (renameMatch.Success)
         {
-            var src = renameMatch.Groups[1].Value.Replace('\\', '/').Trim('/', ' ');
-            var dst = renameMatch.Groups[2].Value.Replace('\\', '/').Trim('/', ' ');
+            var src = (renameMatch.Groups[1].Value + renameMatch.Groups[2].Value + renameMatch.Groups[3].Value).Replace('\\', '/').Trim('/', ' ', '"', '\'');
+            var dst = (renameMatch.Groups[4].Value + renameMatch.Groups[5].Value + renameMatch.Groups[6].Value).Replace('\\', '/').Trim('/', ' ', '"', '\'');
             // If dst is a bare name (no dir), inherit the source's directory
             if (!dst.Contains('/') && src.Contains('/'))
             {
@@ -418,11 +415,10 @@ public static class AgentUtilities
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return null;
 
-        var idx = changeDesc.LastIndexOf(" to ", StringComparison.OrdinalIgnoreCase);
-        if (idx < 0) idx = changeDesc.LastIndexOf(" → ", StringComparison.OrdinalIgnoreCase);
-        if (idx < 0) return null;
+        var m = Regex.Match(changeDesc, @"(?:\s+to\s+|[ \t]*[→\u2192][ \t]*)", RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        var after = changeDesc[(m.Index + m.Length)..].Trim().Trim(' ', '"', '\'');
 
-        var after = changeDesc[(idx + 4)..].Trim().Trim(' ', '"', '\'');
         if (string.IsNullOrWhiteSpace(after)) return null;
 
         var dir = Path.GetDirectoryName(currentRelPath.Replace('/', Path.DirectorySeparatorChar)) ?? string.Empty;
@@ -511,6 +507,7 @@ public static class AgentUtilities
 
     public static string QuoteJsonKeys(string json)
     {
+        if (string.IsNullOrEmpty(json)) return json;
         return Regex.Replace(json,
             @"(?<=[\{\,])\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=:)" ,
             m => $"\"{m.Groups[1].Value}\"");
@@ -557,6 +554,7 @@ public static class AgentUtilities
             if (c == '\t') { sb.Append("\\t"); changed = true; continue; }
             sb.Append(c);
         }
+        if (inString) { sb.Append('"'); changed = true; }
         return changed ? sb.ToString() : null;
     }
 
@@ -662,33 +660,29 @@ public static class AgentUtilities
         if (startIdx >= 0 && endIdx > startIdx)
             json = json.Substring(startIdx, endIdx - startIdx + 1);
 
-        // Try proper JSON parse
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            var os = root.TryGetProperty("oldString", out var osEl) ? osEl.GetString() : null;
-            var ns = root.TryGetProperty("newString", out var nsEl) ? nsEl.GetString() : null;
-            if (os != null || ns != null)
-                return (os, ns, null);
+        var candidates = new List<string> { json };
+        var repaired = RepairJsonString(json);
+        if (repaired != null) candidates.Add(repaired);
+        var quoted = QuoteJsonKeys(json);
+        if (quoted != json) candidates.Add(quoted);
+        if (repaired != null) {
+            var quotedRepaired = QuoteJsonKeys(repaired);
+            if (quotedRepaired != repaired) candidates.Add(quotedRepaired);
         }
-        catch { }
 
-        // Fallback: try with RepairJsonString
-        try
+        foreach (var candidate in candidates)
         {
-            var repaired = RepairJsonString(json);
-            if (repaired != null)
+            try
             {
-                using var doc = JsonDocument.Parse(repaired);
+                using var doc = JsonDocument.Parse(candidate);
                 var root = doc.RootElement;
                 var os = root.TryGetProperty("oldString", out var osEl) ? osEl.GetString() : null;
                 var ns = root.TryGetProperty("newString", out var nsEl) ? nsEl.GetString() : null;
                 if (os != null || ns != null)
                     return (os, ns, null);
             }
+            catch { }
         }
-        catch { }
 
         // Last resort: manual extraction via ExtractEditPairs logic
         var pairs = ExtractEditPairs(raw, "");
@@ -1102,15 +1096,269 @@ public static class AgentUtilities
                 case 'b': sb.Append('\b'); break;
                 case 'f': sb.Append('\f'); break;
                 case 'u':
-                    if (i + 4 < s.Length && int.TryParse(s.Substring(i + 1, 4),
-                        System.Globalization.NumberStyles.HexNumber, null, out var code))
-                    { sb.Append((char)code); i += 4; }
-                    else sb.Append('u');
+                    if (i + 4 < s.Length && int.TryParse(s.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, null, out var code))
+                    {
+                        sb.Append((char)code);
+                        i += 4;
+                    }
                     break;
                 default: sb.Append(s[i]); break;
             }
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// For large files, returns a "skeleton" of the file, keeping the structural header
+    /// and the excerpt most likely to contain the relevant edit target, while replacing
+    /// other large blocks with method/class signatures.
+    /// </summary>
+    public static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000)
+    {
+        const int RadiusLines = 60;
+        var lines = fileContent.Split('\n');
+
+        // ── Step 1: Always include structural header (imports + declaration) ──
+        var structEnd = 0;
+        var foundClassLine = -1;
+        for (var i = 0; i < Math.Min(lines.Length, 100); i++)
+        {
+            var trimmed = lines[i].Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) {
+                structEnd = i + 1;
+                continue;
+            }
+            
+            // Header lines (using, import, etc.)
+            if (Regex.IsMatch(trimmed, @"^(using|import|namespace|package|from|export|#include|@|\[)", RegexOptions.IgnoreCase)) {
+                structEnd = i + 1;
+                continue;
+            }
+
+            // Declaration lines (class, interface, etc.)
+            if (Regex.IsMatch(trimmed, @"\b(class|interface|struct|record|enum|function|void)\b", RegexOptions.IgnoreCase)) {
+                foundClassLine = i;
+                structEnd = i + 1;
+                if (i + 1 < lines.Length && lines[i+1].Trim() == "{") structEnd = i + 2;
+                break;
+            }
+            
+            if (foundClassLine == -1 && i > 50) break;
+        }
+        if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
+
+        // ── Step 2: Find the target region ──
+        var targetStart = -1;
+        var targetEnd = -1;
+
+        if (!string.IsNullOrWhiteSpace(planOldString))
+        {
+            var anchor = planOldString.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length >= 8);
+            if (anchor != null)
+            {
+                for (var i = structEnd; i < lines.Length; i++)
+                {
+                    if (!lines[i].Contains(anchor, StringComparison.OrdinalIgnoreCase)) continue;
+                    targetStart = Math.Max(structEnd, i - 15);
+                    targetEnd = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
+                    break;
+                }
+            }
+        }
+
+        if (targetStart < 0)
+        {
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant()).Where(kw => kw.Length >= 5).ToList();
+            if (keywords.Count > 0)
+            {
+                for (var i = structEnd; i < lines.Length; i++)
+                {
+                    if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase))) continue;
+                    targetStart = Math.Max(structEnd, i - 20);
+                    targetEnd = Math.Min(lines.Length, i + RadiusLines);
+                    break;
+                }
+            }
+        }
+
+        // ── Step 3: Assemble with Skeleton ──
+        var header = string.Join('\n', lines.Take(structEnd));
+        
+        if (targetStart < 0)
+        {
+            // No target found: provide skeleton of the entire body
+            var bodySkeleton = GetSkeletonForRange(lines, structEnd, lines.Length);
+            return header + "\n" + bodySkeleton;
+        }
+
+        var preSkeleton = GetSkeletonForRange(lines, structEnd, targetStart);
+        var excerpt = string.Join('\n', lines.Skip(targetStart).Take(targetEnd - targetStart));
+        var postSkeleton = GetSkeletonForRange(lines, targetEnd, lines.Length);
+
+        var result = new StringBuilder();
+        result.AppendLine(header);
+        if (!string.IsNullOrWhiteSpace(preSkeleton)) result.AppendLine(preSkeleton);
+        result.AppendLine(excerpt);
+        if (!string.IsNullOrWhiteSpace(postSkeleton)) result.AppendLine(postSkeleton);
+
+        return result.ToString();
+    }
+
+    // Normalize a single line into a compact skeleton signature when possible.
+    private static bool TryNormalizeSkeletonSignature(string line, out string signature)
+    {
+        signature = null!;
+        if (string.IsNullOrWhiteSpace(line)) return false;
+        var l = line.Trim();
+        // Preserve attributes like [HttpGet], [Route(...)] as lightweight skeleton markers
+        if (l.StartsWith("["))
+        {
+            var am = Regex.Match(l, @"^\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.IgnoreCase);
+            if (am.Success)
+            {
+                signature = am.Groups[1].Value + " { ... }";
+                return true;
+            }
+            return false;
+        }
+
+        // Ignore single-line comments
+        if (l.StartsWith("//") || l.StartsWith("/*")) return false;
+
+        // C# class/struct/record/interface
+        var csClass = Regex.Match(l, @"^\s*(public|internal|protected|private)?\s*(?:sealed|partial|static|abstract|unsafe|readonly)?\s*(class|struct|record|interface)\s+([A-Za-z_][\w<>]*)\s*(?:[:\{].*)?$", RegexOptions.IgnoreCase);
+        if (csClass.Success)
+        {
+            var mods = csClass.Groups[1].Value;
+            var kind = csClass.Groups[2].Value;
+            var name = csClass.Groups[3].Value;
+            signature = (mods + " " + kind + " " + name).Trim() + " { ... }";
+            return true;
+        }
+
+        // C# method (includes async, modifiers and generic return types)
+        var csMethod = Regex.Match(l, @"^\s*(?!(?:func\b|pub\s+fn\b))(public|private|protected|internal)?\s*(?:static|async|virtual|override|extern|unsafe|sealed|partial)?\s*([\w<>,\s\[\]]+?)\s+([A-Za-z_][\w]*)\s*\([^\)]*\)\s*(?:\{|$)", RegexOptions.IgnoreCase);
+        if (csMethod.Success)
+        {
+            var mods = csMethod.Groups[1].Value;
+            var ret = csMethod.Groups[2].Value.Trim();
+            var name = csMethod.Groups[3].Value;
+            var hasAsync = Regex.IsMatch(l, @"\basync\b", RegexOptions.IgnoreCase);
+            string head;
+            if (!string.IsNullOrWhiteSpace(mods))
+                head = mods + (hasAsync ? " async " : " ") + ret + " " + name;
+            else
+                head = (hasAsync ? "async " : "") + ret + " " + name;
+            head = Regex.Replace(head, @"\t+|\s{2,}", " ").Trim();
+            signature = head + "() { ... }";
+            return true;
+        }
+
+        // TypeScript / JS: export interface/class
+        var tsDecl = Regex.Match(l, @"^\s*(export\s+)?(interface|class)\s+([A-Za-z_][\w]*)", RegexOptions.IgnoreCase);
+        if (tsDecl.Success)
+        {
+            var expo = tsDecl.Groups[1].Value;
+            var kind = tsDecl.Groups[2].Value;
+            var name = tsDecl.Groups[3].Value;
+            signature = (expo + kind + " " + name).Trim() + " { ... }";
+            return true;
+        }
+
+        // TypeScript / JS method (async optional)
+        var tsMethod = Regex.Match(l, @"^\s*(async\s+)?([A-Za-z_][\w]*)\s*\([^\)]*\)\s*(:\s*[\w<>,\s\[\]]+)?\s*\{?", RegexOptions.IgnoreCase);
+        if (tsMethod.Success)
+        {
+            var async = tsMethod.Groups[1].Value;
+            var name = tsMethod.Groups[2].Value;
+            signature = (async + name).Trim() + "() { ... }";
+            return true;
+        }
+
+        // Python def/class
+        var pyDef = Regex.Match(l, @"^\s*def\s+([A-Za-z_][\w]*)\s*\([^\)]*\)\s*:\s*$", RegexOptions.IgnoreCase);
+        if (pyDef.Success)
+        {
+            signature = $"def {pyDef.Groups[1].Value}() {{ ... }}";
+            return true;
+        }
+        var pyClass = Regex.Match(l, @"^\s*class\s+([A-Za-z_][\w]*)(?:\([^\)]*\))?\s*:\s*$", RegexOptions.IgnoreCase);
+        if (pyClass.Success)
+        {
+            signature = $"class {pyClass.Groups[1].Value}() {{ ... }}";
+            return true;
+        }
+
+        // Go: func (receiver) Name(...)
+        var goFunc = Regex.Match(l, @"^\s*func\s*(?:\(([^\)]*)\)\s*)?([A-Za-z_][\w]*)\s*\(", RegexOptions.IgnoreCase);
+        if (goFunc.Success)
+        {
+            var recv = goFunc.Groups[1].Value?.Trim();
+            var name = goFunc.Groups[2].Value;
+            signature = (string.IsNullOrEmpty(recv) ? $"func {name}" : $"func ({recv}) {name}") + "() { ... }";
+            return true;
+        }
+
+        // Rust: pub fn / fn
+        var rustFn = Regex.Match(l, @"^\s*(pub\s+)?fn\s+([A-Za-z_][\w]*)\s*\(", RegexOptions.IgnoreCase);
+        if (rustFn.Success)
+        {
+            var pub = rustFn.Groups[1].Value;
+            var name = rustFn.Groups[2].Value;
+            signature = (pub + "fn " + name).Trim() + "() { ... }";
+            return true;
+        }
+
+        // Fallback: detect function-like lines with parentheses but avoid single-word lines
+        var funcLike = Regex.Match(l, @"^\s*([A-Za-z_][\w]*)\s*\([^\)]*\)\s*\{?\s*$");
+        if (funcLike.Success)
+        {
+            var name = funcLike.Groups[1].Value;
+            if (string.Equals(name, "func", StringComparison.OrdinalIgnoreCase) || string.Equals(name, "pub", StringComparison.OrdinalIgnoreCase) || string.Equals(name, "export", StringComparison.OrdinalIgnoreCase))
+                return false;
+            signature = name + "() { ... }";
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Test helper: exposes the internal TryNormalizeSkeletonSignature for unit tests.
+    /// Returns true when the line can be normalized into a compact skeleton signature.
+    /// </summary>
+    public static bool NormalizeSkeletonSignatureForTest(string line, out string signature) => TryNormalizeSkeletonSignature(line, out signature);
+
+    /// <summary>
+    /// Scans a range of lines for class, method, and property signatures, 
+    /// returning a condensed "skeleton" view for the LLM.
+    /// </summary>
+    public static string GetSkeletonForRange(string[] allLines, int start, int end)
+    {
+        if (start >= end) return "";
+        var skeleton = new StringBuilder();
+
+        int omittedCount = 0;
+        for (int i = start; i < end; i++)
+        {
+            var line = allLines[i];
+            if (TryNormalizeSkeletonSignature(line, out var normalized))
+            {
+                if (omittedCount > 0)
+                {
+                    skeleton.AppendLine($"... [{omittedCount} lines omitted]");
+                    omittedCount = 0;
+                }
+                skeleton.AppendLine(normalized);
+            }
+            else
+            {
+                omittedCount++;
+            }
+        }
+        if (omittedCount > 0) skeleton.AppendLine($"... [{omittedCount} lines omitted]");
+        
+        return skeleton.ToString();
     }
     public static IEnumerable<string> GeneratePlanJsonCandidates(string json)
     {
@@ -1369,8 +1617,8 @@ public static class AgentUtilities
         // Also normalize ###STEPN### (no spaces)
         trimmed = Regex.Replace(trimmed, @"###STEP(\d+)###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
 
-        var thinking = ExtractDelimitedSection(trimmed, "THINKING", "SUMMARY|SCORE|STEP\\s*\\d+|DONE|$");
-        var summary = ExtractDelimitedSection(trimmed, "SUMMARY", "THINKING|SCORE|STEP\\s*\\d+|DONE|$");
+        var thinking = ExtractDelimitedSection(trimmed, "THINKING");
+        var summary = ExtractDelimitedSection(trimmed, "SUMMARY");
         var scoreMatch = Regex.Match(trimmed, @"<<<SCORE>>>\s*(\d+)");
         var score = scoreMatch.Success && int.TryParse(scoreMatch.Groups[1].Value, out var s) ? Math.Clamp(s, 0, 100) : 50;
         var doneMatch = Regex.Match(trimmed, @"<<<DONE>>>\s*(true|false)", RegexOptions.IgnoreCase);
@@ -1395,8 +1643,8 @@ public static class AgentUtilities
             var change = ExtractField(content, "CHANGE");
             if (string.IsNullOrWhiteSpace(file) && string.IsNullOrWhiteSpace(change)) continue;
 
-            var oldString = ExtractDelimitedSection(content, "OLD", "NEW|STEP END|$");
-            var newString = ExtractDelimitedSection(content, "NEW", "STEP END|$");
+            var oldString = ExtractDelimitedSection(content, "OLD");
+            var newString = ExtractDelimitedSection(content, "NEW");
 
             steps.Add(new PlanStep
             {
@@ -1458,11 +1706,9 @@ public static class AgentUtilities
         return tasks;
     }
 
-    private static string? ExtractDelimitedSection(string text, string sectionName, string nextSectionsPattern)
+    private static string? ExtractDelimitedSection(string text, string sectionName)
     {
-        // Normalize optional whitespace in section names (e.g., "STEP 1" matches "STEP1" or "STEP  1")
-        var normalizedNext = Regex.Replace(nextSectionsPattern, @"\\s\*", @"\s*");
-        var pattern = $@"<<<{sectionName}>>>\s*(.*?)(?=<<<(?:{normalizedNext})>>>)";
+        var pattern = $@"<<<{sectionName}>>>\s*(.*?)(?=<<<|$)";
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }

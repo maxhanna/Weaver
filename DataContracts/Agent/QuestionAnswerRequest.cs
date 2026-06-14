@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class QuestionAnswerRequest
 {
     public string Id { get; set; } = "";

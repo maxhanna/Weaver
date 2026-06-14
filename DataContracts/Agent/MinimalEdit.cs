@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class MinimalEditDto
 {
     public string Path { get; set; } = "";

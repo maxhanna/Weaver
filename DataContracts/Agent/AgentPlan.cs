@@ -1,3 +1,5 @@
+namespace Weaver;
+
 /// <summary>
 /// One item in the structured plan the LLM produces during Phase 2.
 /// </summary>

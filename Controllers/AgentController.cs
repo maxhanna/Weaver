@@ -201,9 +201,9 @@ public class AgentController : ControllerBase
     //  EDIT RESOLUTION  (two-phase: plan describes WHAT, resolve finds HOW)
     // ═══════════════════════════════════════════════════════════════════════
     /// <summary>
-    /// For large files, returns the excerpt most likely to contain the relevant edit target,
-    /// centered around the plan's oldString or change-description keywords.
-    /// Falls back to head+tail only when no location clue is available.
+    /// For large files, returns a "skeleton" of the file, keeping the structural header
+    /// and the excerpt most likely to contain the relevant edit target, while replacing
+    /// other large blocks with method/class signatures.
     /// </summary>
     private static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000)
     {
@@ -211,7 +211,6 @@ public class AgentController : ControllerBase
         var lines = fileContent.Split('\n');
 
         // ── Step 1: Always include structural header (imports + declaration) ──
-        // Collect import lines (import/using/require) and the @Component/@Injectable/class line
         var structEnd = 0;
         var foundClassLine = -1;
         for (var i = 0; i < Math.Min(lines.Length, 80); i++)
@@ -240,44 +239,33 @@ public class AgentController : ControllerBase
                      trimmed.StartsWith("function ") || trimmed.StartsWith("export function"))
             {
                 foundClassLine = i;
-                // Include the decorator line (i-1) if it starts with @
-                if (i > 0 && lines[i - 1].TrimStart().StartsWith("@"))
-                    structEnd = i + 1;
-                else
-                    structEnd = i + 1;
-                // Don't break — keep looking for a class line if there's only a function/interface
+                structEnd = i + 1;
             }
         }
-        // If we found a real class/interface/enum/struct line, use it; else fall through
         if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
 
         // ── Step 2: Find the target region ──
         var targetStart = -1;
         var targetEnd = -1;
 
-        // Strategy A: anchor on the first long line of planOldString
-        if (targetStart < 0 && !string.IsNullOrWhiteSpace(planOldString))
+        if (!string.IsNullOrWhiteSpace(planOldString))
         {
-            var anchor = planOldString.Split('\n')
-                .Select(l => l.Trim())
-                .FirstOrDefault(l => l.Length >= 8);
+            var anchor = planOldString.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length >= 8);
             if (anchor != null)
             {
                 for (var i = structEnd; i < lines.Length; i++)
                 {
                     if (!lines[i].Contains(anchor, StringComparison.OrdinalIgnoreCase)) continue;
-                    targetStart = Math.Max(structEnd, i - 10);
+                    targetStart = Math.Max(structEnd, i - 15);
                     targetEnd = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
                     break;
                 }
             }
         }
 
-        // Strategy B: keyword scan on the change description
         if (targetStart < 0)
         {
-            var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
-                                         .Where(kw => kw.Length >= 5).ToList();
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant()).Where(kw => kw.Length >= 5).ToList();
             if (keywords.Count > 0)
             {
                 for (var i = structEnd; i < lines.Length; i++)
@@ -290,34 +278,62 @@ public class AgentController : ControllerBase
             }
         }
 
-        // If no target found, include file from structEnd onwards
+        // ── Step 3: Assemble with Skeleton ──
+        var header = string.Join('\n', lines.Take(structEnd));
+        
         if (targetStart < 0)
         {
-            var hdr = lines.Take(structEnd).ToList();
-            var body = string.Join('\n', lines.Skip(structEnd));
-            if (body.Length > fileBodyTruncation)
-                body = body[..fileBodyTruncation] + $"\n... [lines {structEnd + 600}–{lines.Length} omitted]";
-            return string.Join('\n', hdr) + "\n" + body;
+            // No target found: provide skeleton of the entire body
+            var bodySkeleton = GetSkeletonForRange(lines, structEnd, lines.Length);
+            return header + "\n" + bodySkeleton;
         }
 
-        // ── Step 3: Assemble ──
-        var headLines = lines.Take(structEnd).ToList();
-        var bodyLines = lines.Skip(structEnd).ToArray();
+        var preSkeleton = GetSkeletonForRange(lines, structEnd, targetStart);
+        var excerpt = string.Join('\n', lines.Skip(targetStart).Take(targetEnd - targetStart));
+        var postSkeleton = GetSkeletonForRange(lines, targetEnd, lines.Length);
 
-        // Map body-relative indices back to absolute
-        var absStart = targetStart;
-        var absEnd = targetEnd;
+        var result = new StringBuilder();
+        result.AppendLine(header);
+        if (!string.IsNullOrWhiteSpace(preSkeleton)) result.AppendLine(preSkeleton);
+        result.AppendLine(excerpt);
+        if (!string.IsNullOrWhiteSpace(postSkeleton)) result.AppendLine(postSkeleton);
 
-        var excerpt = string.Join('\n', lines.Skip(absStart).Take(absEnd - absStart));
-        var header = string.Join('\n', headLines);
+        return result.ToString();
+    }
 
-        var gapLines = absStart - structEnd;
-        if (gapLines > 3)
-            return header + $"\n... [lines {structEnd + 1}–{absStart} omitted]\n" + excerpt;
-        else if (gapLines > 0)
-            return header + "\n" + string.Join('\n', lines.Skip(structEnd).Take(gapLines)) + "\n" + excerpt;
+    /// <summary>
+    /// Scans a range of lines for class, method, and property signatures, 
+    /// returning a condensed "skeleton" view for the LLM.
+    /// </summary>
+    private static string GetSkeletonForRange(string[] allLines, int start, int end)
+    {
+        if (start >= end) return "";
+        var skeleton = new StringBuilder();
+        var sigRegex = new Regex(@"^\s*(?:(?:public|private|protected|internal|static|async|export|default|readonly|virtual|override|abstract|sealed|final|open|inline|suspend|fn|func|def)\s+)*" +
+                                 @"(?:(?:class|interface|struct|record|enum|function|method|property|fn|func|def)\s+)?\b([A-Za-z_][A-Za-z0-9_]*)\b\s*[({<]", RegexOptions.Compiled);
 
-        return header + "\n" + excerpt;
+        int omittedCount = 0;
+        for (int i = start; i < end; i++)
+        {
+            var line = allLines[i];
+            if (sigRegex.IsMatch(line))
+            {
+                if (omittedCount > 0)
+                {
+                    skeleton.AppendLine($"... [{omittedCount} lines omitted]");
+                    omittedCount = 0;
+                }
+                var sig = line.Split('{')[0].TrimEnd();
+                skeleton.AppendLine($"{sig} {{ ... }}");
+            }
+            else
+            {
+                omittedCount++;
+            }
+        }
+        if (omittedCount > 0) skeleton.AppendLine($"... [{omittedCount} lines omitted]");
+        
+        return skeleton.ToString();
     }
 
     /// <summary>Use Roslyn to find a C# AST node and return its exact source text as oldString.</summary>
@@ -1143,7 +1159,7 @@ public class AgentController : ControllerBase
             {
                 sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
                 sb.AppendLine("```");
-                sb.AppendLine(ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, cfg5.fileBodyTruncationChars));
+                sb.AppendLine(AgentUtilities.ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, cfg5.fileBodyTruncationChars));
                 sb.AppendLine("```");
                 sb.AppendLine();
                 sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): "
@@ -1786,7 +1802,7 @@ public class AgentController : ControllerBase
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             // For large files use the relevance-focused excerpt so context is targeted
             var excerpt = content.Length > 5_000
-                ? ExtractRelevantExcerpt(content, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                ? AgentUtilities.ExtractRelevantExcerpt(content, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
                 : content;
 
             ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
@@ -1879,7 +1895,7 @@ public class AgentController : ControllerBase
                         var correctPath = matches[0];
                         var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
                         var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
-                        var matchExcerpt = matchContent.Length > 3_500 ? ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars) : matchContent;
+                        var matchExcerpt = matchContent.Length > 3_500 ? AgentUtilities.ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars) : matchContent;
                         if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
                         {
                             ctx.AppendLine($"### {correctPath}  (resolved from `{requested}`)");
@@ -1917,7 +1933,7 @@ public class AgentController : ControllerBase
 
                 var fc = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
                 var excerpt = fc.Length > 3_500
-                    ? ExtractRelevantExcerpt(fc, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                    ? AgentUtilities.ExtractRelevantExcerpt(fc, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
                     : fc;
 
                 // Guard total context size so we don't overflow the LLM window
@@ -5285,11 +5301,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
 
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
-                var prevCount = allResults.Count;
-                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
-                    ct, allResults, stepIndex,
-                    prompt, plan,
-                    itemIdx, cardId);
+        var prevCount = allResults.Count;
+        stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
+            ct, allResults, stepIndex,
+            prompt, plan,
+            itemIdx, cardId);
 
                 var stepSkipped = false;
                 if (allResults.Count > prevCount &&

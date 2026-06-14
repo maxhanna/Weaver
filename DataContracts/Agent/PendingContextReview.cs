@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class PendingContextReview
 {
     public string Id { get; set; } = "";
