@@ -774,6 +774,13 @@
 .ide-diff-panel--wide {
     width: 900px;
     max-width: 95vw;
+    height: 80vh;
+}
+.ide-diff-panel--wide > div {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 /* Back button */
