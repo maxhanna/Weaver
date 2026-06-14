@@ -829,6 +829,11 @@ public class AgentController : ControllerBase
             // ── Stylesheets ────────────────────────────────────────────────────────
             ".css" or ".scss" or ".less" => ("brace", false,
                 "⚠ CSS/SCSS/LESS FILE: brace-based selectors. Use oldString/newString. " +
+                "CRITICAL: oldString MUST be at most 4 lines — never replace an entire CSS block. " +
+                "To change a CSS property value, set oldString to the ONE line containing that property " +
+                "(copied verbatim from the file), and newString to that line with the new value. " +
+                "Example: if changing `flex-direction: row;` to `flex-direction: column;`, " +
+                "oldString = \"  flex-direction: row;\" (exact whitespace), newString = \"  flex-direction: column;\". " +
                 "Preserve ALL whitespace in property values (e.g. '0 1px 2px rgba(0,0,0,0.5)' — " +
                 "every space and comma is significant). Preserve SCSS variables ($var), mixins, and nesting."),
 
@@ -1693,6 +1698,12 @@ public class AgentController : ControllerBase
         sb.AppendLine("2. needsDecoupling = true/false — Does this step combine TWO OR MORE distinct");
         sb.AppendLine("   changes that should be separate steps? Example: \"Add X property AND implement Y toggle\"");
         sb.AppendLine("   should be two steps: one for the property, one for the toggle.");
+        sb.AppendLine("   CRITICAL: MOVING content is TWO changes: add at new location + remove from old location.");
+        sb.AppendLine("   Example: \"Move the link button from the action column into the todo text cell\"");
+        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
+        sb.AppendLine("     { file: \"...\", change: \"Append link button after the todo text content\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Remove link button from the action column\" }");
+        sb.AppendLine("   ]");
         sb.AppendLine("3. If needsDecoupling, provide decoupledSteps as an array of {file, change} objects.");
         sb.AppendLine();
         sb.AppendLine("Output ONLY valid JSON:");
@@ -2246,7 +2257,7 @@ public class AgentController : ControllerBase
         var enrichedStep = new PlanStep
         {
             File = step.File,
-            Change = string.IsNullOrWhiteSpace(refinedChange) ? step.Change : refinedChange,
+            Change = (string.IsNullOrWhiteSpace(refinedChange) ? step.Change : refinedChange) ?? "",
             Priority = step.Priority,
             OldString = astOldStringHint ?? step.OldString ?? "",
             NewString = step.NewString ?? ""
@@ -2275,7 +2286,7 @@ public class AgentController : ControllerBase
             EnrichedStep = enrichedStep,
             ExplorationContext = ctx.ToString(),
             FilesRead = filesRead.ToList(),
-            RefinedChange = refinedChange,
+            RefinedChange = refinedChange ?? "",
             TargetSymbol = targetSymbol,
             EstimatedLineRange = lineRange,
             Confidence = confidence,
@@ -2861,6 +2872,70 @@ public class AgentController : ControllerBase
                     }
                 }
 
+                // ── CSS/SCSS auto-shrink fallback ────────────────────
+                // If oldString is huge (>=8 lines) and the edit failed, try to
+                // extract just the lines that actually differ and apply those
+                // as independent 1-line edits.
+                if (!replaced && fileExt is ".css" or ".scss" or ".less" && oldStr != null &&
+                    newStr != null && oldStr.Split('\n').Length >= 8)
+                {
+                    var slimOldLines = oldStr.Split('\n');
+                    var slimNewLines = newStr.Split('\n');
+                    var slimFileLines = fileContent.Split('\n');
+                    var diffLines = new List<int>();
+                    for (var i = 0; i < Math.Min(slimOldLines.Length, slimNewLines.Length); i++)
+                    {
+                        var o = slimOldLines[i].Trim();
+                        var n = slimNewLines[i].Trim();
+                        if (!string.IsNullOrWhiteSpace(o) && o != n)
+                            diffLines.Add(i);
+                    }
+                    // Try each differing line as an independent 1-line replacement
+                    foreach (var li in diffLines)
+                    {
+                        var oldTrimmed = slimOldLines[li].TrimEnd();
+                        var newTrimmed = slimNewLines[li].TrimEnd();
+                        if (string.IsNullOrWhiteSpace(oldTrimmed) || oldTrimmed == newTrimmed)
+                            continue;
+                        // Find this line in the actual file (exact match)
+                        var found = false;
+                        for (var fi = 0; fi < slimFileLines.Length; fi++)
+                        {
+                            if (slimFileLines[fi].TrimEnd() != oldTrimmed) continue;
+                            if (found) { found = false; break; } // ambiguous
+                            found = true;
+                        }
+                        if (!found) continue;
+                        // Found a unique matching line — apply it
+                        var slimOld = slimOldLines[li];   // preserve exact whitespace from LLM
+                        var slimNew = slimNewLines[li];
+                        // But use the file's actual content for the oldString
+                        for (var fi = 0; fi < slimFileLines.Length; fi++)
+                        {
+                            if (slimFileLines[fi].TrimEnd() != oldTrimmed) continue;
+                            slimOld = slimFileLines[fi];
+                            break;
+                        }
+                        var (slimReplaced, slimContent, _, _) = TryReplaceSafe(fileContent, slimOld, slimNew);
+                        if (slimReplaced)
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"CSS auto-shrink: replacing \"{slimOld.Trim()}\" with \"{slimNew.Trim()}\"",
+                                ct: ct);
+                            await System.IO.File.WriteAllTextAsync(fullPath, slimContent, Encoding.UTF8, ct);
+                            await EmitLog(emitSse, "success",
+                                $"✓ Edited {relPath} (CSS auto-shrink)", step, ct: ct);
+                            var r2 = new Dictionary<string, object?>();
+                            PopulateEditResult(r2, "modified", relPath, slimOld, slimNew, "css-auto-shrink");
+                            r2["index"] = stepIndex; r2["planItemIndex"] = planItemIndex;
+                            if (emitSse) await SendSse(Response, "step", r2, ct);
+                            allResults.Add(r2);
+                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                            return stepIndex + 1;
+                        }
+                    }
+                }
+
                 history.Add((oldStr!, newStr ?? "", err));
 
                 if (string.Equals(
@@ -2872,6 +2947,15 @@ public class AgentController : ControllerBase
                 {
                     await EmitLog(emitSse, "error",
                         $"LLM keeps producing the same oldString — aborting {relPath}",
+                        ct: ct);
+                    goto RecordFailure;
+                }
+                // CSS/SCSS: abort after 4 attempts (plan + 3 retries) — LLM consistently
+                // hallucinates oldStrings that don't match the actual file content.
+                if (attempt >= 4 && fileExt is ".css" or ".scss" or ".less")
+                {
+                    await EmitLog(emitSse, "error",
+                        $"CSS edit failed after {attempt + 1} attempts — aborting {relPath}",
                         ct: ct);
                     goto RecordFailure;
                 }
@@ -3517,6 +3601,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
          "7. Each step must be ONE atomic change — do NOT combine two edits in one step.\n" +
          "   BAD (combined): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
          "   GOOD (decoupled): Two steps — Step 1: \"Add CalendarNotificationsEnabled property to UserSettings\", Step 2: \"Wire up CalendarNotificationsEnabled toggle in HTML\"\n" +
+         "   IMPORTANT: MOVING content from one location to another is NOT a single step. It is TWO steps:\n" +
+         "     Step 1: Add/copy the content at the new location\n" +
+         "     Step 2: Remove the content from the old location\n" +
+         "   BAD (combined): \"Move the link button from the action column into the todo text column\"\n" +
+         "   GOOD (decoupled): Step 1: \"Append link button at end of todo text cell, after the text content\", Step 2: \"Remove link button from the action column\"\n" +
          "   If your change description contains the word \"and\" joining two distinct actions, SPLIT it into separate steps.\n" +
          "   Each step's change field must be extremely precise. Ex: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\"\n" +
         "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
@@ -5205,9 +5294,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
-        if (emitSse)
+        if (emitSse) {
             await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
-
+        }
+        
         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
             steeringContext: steeringContext, attachedFiles: attachedFiles,
             cardId: cardId);

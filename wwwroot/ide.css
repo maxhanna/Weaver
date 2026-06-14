@@ -384,22 +384,79 @@
     font-weight: 600;
 }
 
-/* Resizer */
-.ide-panel-resizer {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 4px;
+/* Floating IDE container */
+.ide-floating-panel {
+    position: fixed;
+    z-index: 1100;
+    display: flex;
+    flex-direction: column;
+    min-width: 300px;
+    min-height: 200px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: var(--border);
+}
+.ide-floating-panel > .ide-panel {
     height: 100%;
-    cursor: ew-resize;
-    background: transparent;
-    transition: background 0.2s;
-    z-index: 10;
+}
+.ide-floating-panel .panel:has(> .ide-panel) {
+    padding: 0;
+    height: 100%;
+    border: none;
+}
+.ide-floating-panel .panel:has(> .ide-panel) .ide-panel {
+    height: 100%;
 }
 
-.ide-panel-resizer:hover {
-    background: var(--accent);
-    opacity: 0.5;
+/* Drag handle in header */
+.ide-drag-handle {
+    cursor: grab;
+    font-size: 14px;
+    color: var(--muted);
+    margin-right: 6px;
+    user-select: none;
+    line-height: 1;
+}
+.ide-drag-handle:active {
+    cursor: grabbing;
+}
+.ide-panel-header {
+    cursor: grab;
+    user-select: none;
+}
+.ide-panel-header:active {
+    cursor: grabbing;
+}
+/* But reset cursor for interactive elements inside header */
+.ide-panel-header button,
+.ide-panel-header input {
+    cursor: pointer;
+}
+.ide-panel-header button:active,
+.ide-panel-header input:active {
+    cursor: pointer;
+}
+
+/* Resize handles */
+.ide-resize-handle {
+    position: absolute;
+    z-index: 10;
+}
+.ide-resize-e {
+    top: 0; right: 0;
+    width: 6px; height: 100%;
+    cursor: ew-resize;
+}
+.ide-resize-s {
+    bottom: 0; left: 0;
+    width: 100%; height: 6px;
+    cursor: ns-resize;
+}
+.ide-resize-se {
+    bottom: 0; right: 0;
+    width: 14px; height: 14px;
+    cursor: nwse-resize;
 }
 
 .ide-textarea {

@@ -36,7 +36,15 @@ namespace Weaver.Controllers
             }
 
             var fileContent = System.IO.File.ReadAllText(_filePath);
-            return Ok(fileContent);
+            try
+            {
+                var parsed = JsonDocument.Parse(fileContent);
+                return Ok(parsed.RootElement.Clone());
+            }
+            catch
+            {
+                return Ok(fileContent);
+            }
         }
 
         [HttpPut]

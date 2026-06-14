@@ -86,6 +86,7 @@
     vm.streamingSteps = [];
     vm.streamingFilesEdited = [];
     vm.streamingTokenBuffer = '';
+    vm.streamingStableCount = 0;
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
     vm.logFontSize = 10;
@@ -108,51 +109,19 @@
     vm.lastStreamingStepsUpdate = 0;
     vm.planItems = [];
 
-    // Debug logging for file size and token count
+    // Pre-load file hints on init (results used when settings panel opens)
     $http.get('/api/filehints').then(function (resp) {
       try {
         var store = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data;
         if (store && store.Projects) {
-          vm.fileHintsData = vm.projects.map(function (p) {
-            var proj = store.Projects[p.Path];
-            return {
-              projectPath: p.Path,
-              hints: proj && proj.Hints ? proj.Hints.map(function (h) {
-                return {
-                  keywords: (h.Keywords || []).join(', '),
-                  files: (h.Files || []).length > 0 ? h.Files.slice(0, 3).join(', ') + (h.Files.length > 3 ? '...' : '') : 'None',
-                  allFiles: h.Files || [],
-                  description: h.Description || ''
-                };
-              }) : []
-            };
-          });
-        } else {
-          vm.fileHintsData = [];
+          vm._preloadedFileHints = store.Projects;
         }
       } catch (e) {
         console.error('Error loading file hints:', e);
-        vm.fileHintsData = [];
       }
     }).catch(function (error) {
       console.error('HTTP error loading file hints:', error);
-      vm.fileHintsData = [];
     });
-
-    // Fallback for when file hints data is not available
-    if (!vm.fileHintsData || vm.fileHintsData.length === 0) {
-      vm.fileHintsData = vm.projects.map(function (p) {
-        return {
-          projectPath: p.Path,
-          hints: []
-        };
-      });
-    }
-
-    // Ensure proper initialization of fileHintsData when no hints exist
-    if (!vm.fileHintsData) {
-      vm.fileHintsData = [];
-    }
 
     vm.logFileSizeAndTokens = function (filePath, content) {
       if (!filePath || !content) return;
@@ -298,20 +267,43 @@
     // Load file hints from server
     vm.loadFileHints = function () {
       $http.get('/api/filehints').then(function (response) {
-        vm.fileHintsData = [];
-        for (var projectKey in response.data.Projects) {
-          vm.fileHintsData.push({
-            projectPath: projectKey,
-            hints: response.data.Projects[projectKey].Hints
-          });
+        try {
+          var store = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+          if (store && store.Projects && vm.projects) {
+            vm.fileHintsData = vm.projects.map(function (p) {
+              var proj = store.Projects[p.Path];
+              return {
+                projectPath: p.Path,
+                hints: proj && proj.Hints ? proj.Hints.map(function (h) {
+                  return { keywords: (h.Keywords || []).join(', '), files: (h.Files || []).length > 0 ? h.Files.slice() : [''] };
+                }) : []
+              };
+            });
+          } else {
+            vm.fileHintsData = [];
+          }
+        } catch (e) {
+          console.error('Error parsing file hints:', e);
+          vm.fileHintsData = [];
+        }
+      }, function () {
+        console.error('HTTP error loading file hints');
+        if (vm.projects && vm.projects.length > 0) {
+          vm.fileHintsData = vm.projects.map(function (p) { return { projectPath: p.Path, hints: [] }; });
+        } else {
+          vm.fileHintsData = [];
         }
       });
     };
 
-    // Initialize file hints
+    // Initialize file hints (will populate properly once projects load)
     vm.loadFileHints();
 
     vm.addHint = function (projectIndex) {
+      if (!vm.fileHintsData) vm.fileHintsData = [];
+      if (!vm.fileHintsData[projectIndex] && vm.projects && vm.projects[projectIndex]) {
+        vm.fileHintsData[projectIndex] = { projectPath: vm.projects[projectIndex].Path, hints: [] };
+      }
       if (vm.fileHintsData[projectIndex]) {
         vm.fileHintsData[projectIndex].hints.push({ keywords: '', files: [''] });
       }
@@ -1411,8 +1403,15 @@
         } catch (e) {
           vm.fileHintsData = [];
         }
-      }, function () {
-        vm.fileHintsData = [];
+      }, function (err) {
+        console.error('Failed to load file hints for settings panel:', err);
+        if (vm.projects && vm.projects.length > 0) {
+          vm.fileHintsData = vm.projects.map(function (p) {
+            return { projectPath: p.Path, hints: [] };
+          });
+        } else {
+          vm.fileHintsData = [];
+        }
       });
       var backdrop = document.getElementById('backdrop');
       if (backdrop) {
@@ -1871,6 +1870,7 @@
           vm.streamingPhase = '';
           vm.streamingContextSize = 0;
           vm.streamingTokenBuffer = '';
+          vm.streamingStableCount = 0;
           vm.streamingSteps = [];
           vm.streamingFilesEdited = [];
           vm.planItems = [];
@@ -1998,6 +1998,11 @@
                         case 'token':
                           if (parsed && parsed.token) {
                             vm.streamingTokenBuffer += parsed.token;
+                            // Debounce stable count update to prevent infdig when user interacts during streaming
+                            if (vm._streamingLengthTimer) { $timeout.cancel(vm._streamingLengthTimer); }
+                            vm._streamingLengthTimer = $timeout(function () {
+                              vm.streamingStableCount = vm.streamingTokenBuffer.length;
+                            }, 100);
                             if (vm.resolveStreams) {
                               var buf = vm.resolveStreams;
                               if (buf && buf.length) buf[buf.length - 1].content += parsed.token;
@@ -2101,18 +2106,23 @@
                           }
                           break;
                          case 'ask-question':
-                          try {
-                            if (parsed && parsed.id && parsed.question) {
-                              vm.pendingQuestion = parsed;
-                              vm.questionAnswers = {};
-                              vm.questionError = '';
-                              vm.showQuestionModal = true;
-                              pushAgentLog('info', '❓ Question from agent: ' + parsed.question);
-                            }
-                          } catch (e) {
-                            pushAgentLog('error', 'Question error: ' + (e.message || e));
-                          }
-                          break;
+                           try {
+                             if (parsed && parsed.id && parsed.question) {
+                               vm.pendingQuestion = parsed;
+                               vm.questionAnswers = {};
+                               vm.questionError = '';
+                               vm.showQuestionModal = true;
+                               pushAgentLog('info', '❓ Question from agent: ' + parsed.question);
+                               // Auto-close after 55s (backend times out AskUserAsync at 60s)
+                               if (vm.questionTimeout) { $timeout.cancel(vm.questionTimeout); }
+                               vm.questionTimeout = $timeout(function () {
+                                 if (vm.showQuestionModal) vm.cancelQuestion();
+                               }, 55000);
+                             }
+                           } catch (e) {
+                             pushAgentLog('error', 'Question error: ' + (e.message || e));
+                           }
+                           break;
                         case 'done':
                           vm.streamingActive = false;
                           resumeTerminalPolling();
@@ -2489,6 +2499,7 @@
 
     vm.submitQuestion = function () {
       if (!vm.pendingQuestion) return;
+      if (vm.questionTimeout) { $timeout.cancel(vm.questionTimeout); vm.questionTimeout = null; }
       var answers = {};
       vm.pendingQuestion.fields.forEach(function (f) {
         answers[f.key] = (vm.questionAnswers[f.key] || '').trim();
@@ -2504,6 +2515,7 @@
 
     vm.cancelQuestion = function () {
       if (!vm.pendingQuestion) return;
+      if (vm.questionTimeout) { $timeout.cancel(vm.questionTimeout); vm.questionTimeout = null; }
       $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () {
         vm.showQuestionModal = false;
         vm.pendingQuestion = null;
@@ -2562,6 +2574,7 @@
       vm.abortController = new AbortController();
       vm.streamingActive = false;
       vm.streamingTokenBuffer = '';
+      vm.streamingStableCount = 0;
       vm.agentResult = { warning: 'Agent stopped by user.' };
       pushAgentLog('warn', 'Agent stopped by user');
       if (card) {

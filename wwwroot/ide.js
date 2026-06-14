@@ -19,8 +19,13 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         pendingFileContent: null,
         sharedEditorActive: false,
         sharedFiles: [],
-        conflictFiles: {}
+        conflictFiles: {},
+        left: 60,
+        top: 60,
+        width: 600,
+        height: 400
       };
+
 
       var _contentSyncDebounce = null;
 
@@ -374,22 +379,58 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         }
       };
 
-      vm.startResize = function($event) {
+      vm.startDrag = function($event) {
+        // Only drag on the header itself, not buttons/inputs inside it
+        if ($event.target.tagName === 'BUTTON' || $event.target.tagName === 'INPUT' ||
+            $event.target.tagName === 'TEXTAREA' || $event.target.closest('button')) return;
         $event.preventDefault();
-        var panel = $event.target.closest('.panel');
-        if (!panel) return;
         var startX = $event.clientX;
-        var startWidth = panel.offsetWidth;
-        function onMouseMove(e) {
-          var w = startWidth + (e.clientX - startX);
-          if (w > 300) panel.style.width = w + 'px';
+        var startY = $event.clientY;
+        var startLeft = vm.ide.left;
+        var startTop = vm.ide.top;
+        var viewW = window.innerWidth;
+        var viewH = window.innerHeight;
+        function onMove(e) {
+          vm.ide.left = Math.max(0, Math.min(viewW - 100, startLeft + (e.clientX - startX)));
+          vm.ide.top = Math.max(0, Math.min(viewH - 60, startTop + (e.clientY - startY)));
+          $scope.$digest();
         }
-        function onMouseUp() {
-          document.removeEventListener('mousemove', onMouseMove);
-          document.removeEventListener('mouseup', onMouseUp);
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
         }
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      };
+
+      vm.startResize = function(dir, $event) {
+        $event.preventDefault();
+        var startX = $event.clientX;
+        var startY = $event.clientY;
+        var startW = vm.ide.width;
+        var startH = vm.ide.height;
+        var startLeft = vm.ide.left;
+        var startTop = vm.ide.top;
+        var minW = 300, minH = 200;
+        var viewW = window.innerWidth;
+        var viewH = window.innerHeight;
+        function onMove(e) {
+          var dx = e.clientX - startX;
+          var dy = e.clientY - startY;
+          if (dir === 'e' || dir === 'se') {
+            vm.ide.width = Math.max(minW, Math.min(viewW - vm.ide.left, startW + dx));
+          }
+          if (dir === 's' || dir === 'se') {
+            vm.ide.height = Math.max(minH, Math.min(viewH - vm.ide.top, startH + dy));
+          }
+          $scope.$digest();
+        }
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
       };
     }
   };

@@ -13,17 +13,23 @@ public class FileHintsManager
         _basePath = basePath;
     }
 
-    private string HintsFilePath => Path.Combine(_basePath, "filehints.json");
+    private string HintsFilePath => Path.Combine(_basePath, "data", "filehints.json");
 
     private GlobalHintsStore LoadAll()
     {
         try
         {
-            if (System.IO.File.Exists(HintsFilePath))
+            if (!System.IO.File.Exists(HintsFilePath))
             {
-                var json = System.IO.File.ReadAllText(HintsFilePath);
-                return JsonSerializer.Deserialize<GlobalHintsStore>(json) ?? new GlobalHintsStore();
+                var dir = Path.GetDirectoryName(HintsFilePath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+                var defaultContent = "{\"Projects\": {}}";
+                System.IO.File.WriteAllText(HintsFilePath, defaultContent);
+                return new GlobalHintsStore();
             }
+            var json = System.IO.File.ReadAllText(HintsFilePath);
+            return JsonSerializer.Deserialize<GlobalHintsStore>(json) ?? new GlobalHintsStore();
         }
         catch { }
         return new GlobalHintsStore();

@@ -211,8 +211,6 @@
 
     <!-- RIGHT PANEL: Agent + Terminal -->
     <div class="right-panel" ng-class="{'full-width': !vm.showKanban && !vm.showCalendar}">
-      <!-- IDE Panel -->
-      <div class="panel" data-panel-type="ide" data-panel-id="ide-panel" ng-include="'ide.html'" ng-if="vm.showIDE"></div>
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
         <h3>🤖 Ask AI <span class="mode-toggle" ng-click="vm.toggleChatMode()"
@@ -349,7 +347,7 @@
 
           <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer && vm.streamingPhase === 'Planning...'">
             <details open>
-              <summary>💬 LLM Streaming{{ vm.streamingTokenBuffer ? ' (' + vm.streamingTokenBuffer.length + ' chars)' : '' }}</summary>
+              <summary>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : '' }}</summary>
               <pre class="streaming-text streaming-tokens">{{vm.streamingTokenBuffer}}</pre>
             </details>
           </div>
@@ -527,6 +525,15 @@
       </div>
 
       <div ng-include="'calendar.html'" ng-if="vm.showCalendar"></div>
+    </div>
+
+    <!-- FLOATING IDE PANEL -->
+    <div class="ide-floating-panel" ng-if="vm.showIDE" 
+      ng-style="{left: vm.ide.left + 'px', top: vm.ide.top + 'px', width: vm.ide.width + 'px', height: vm.ide.height + 'px'}">
+      <div ng-include="'ide.html'" style="height: 100%; width: 100%;"></div>
+      <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startResize('e', $event)"></div>
+      <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startResize('s', $event)"></div>
+      <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startResize('se', $event)"></div>
     </div>
   </main>
 
