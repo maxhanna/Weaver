@@ -71,9 +71,7 @@
           <span>Remote user edited this file while you had unsaved changes.</span>
           <button ng-click="vm.resolveConflict(vm.ide.currentFile)" class="ide-panel-btn">Resolve</button>
         </div>
-        <textarea class="ide-textarea" ng-model="vm.ide.currentTab.content" ng-change="vm.onContentChange()"
-          ng-model-options="{debounce: 200}" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"
-          placeholder="Editing {{vm.ide.currentFile}}..."></textarea>
+        <div class="ide-codemirror-container" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"></div>
         <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
           <span>Lines: {{vm.ide.currentTab.lineCount}}</span>
           <span class="ide-dirty-indicator" ng-if="vm.ide.dirty">● unsaved</span>

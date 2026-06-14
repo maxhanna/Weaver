@@ -138,8 +138,96 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
             vm.ide.currentTab = null;
             vm.ide.dirty = false;
             vm.ide.sharedEditorActive = false;
+            // Destroy CodeMirror when last tab closes
+            if (vm._editor) {
+              var wrapper = vm._editor.getWrapperElement();
+              if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+              vm._editor = null;
+            }
           }
         }
+      };
+
+      // ── CodeMirror syntax highlighting ───────────────────────────────
+      var MODE_BY_EXT = {
+        '.cs': 'text/x-csharp', '.java': 'text/x-java', '.c': 'text/x-csrc',
+        '.cpp': 'text/x-c++src', '.h': 'text/x-csrc', '.hpp': 'text/x-c++src',
+        '.js': 'text/javascript', '.ts': 'text/typescript', '.jsx': 'text/jsx', '.tsx': 'text/typescript',
+        '.html': 'text/html', '.htm': 'text/html', '.xml': 'application/xml', '.svg': 'application/xml',
+        '.css': 'text/css', '.scss': 'text/x-scss', '.less': 'text/x-less',
+        '.json': 'application/json', '.sql': 'text/x-sql',
+        '.py': 'text/x-python', '.rb': 'text/x-ruby', '.php': 'text/x-php',
+        '.go': 'text/x-go', '.rs': 'text/x-rust', '.swift': 'text/x-swift',
+        '.md': 'text/x-markdown', '.yaml': 'text/x-yaml', '.yml': 'text/x-yaml',
+        '.sh': 'text/x-sh', '.bash': 'text/x-sh', '.ps1': 'text/x-sh',
+        '.kt': 'text/x-kotlin', '.kts': 'text/x-kotlin'
+      };
+      function detectMode(path) {
+        if (!path) return null;
+        var dot = path.lastIndexOf('.');
+        if (dot < 0) return null;
+        var ext = path.slice(dot).toLowerCase();
+        return MODE_BY_EXT[ext] || null;
+      }
+
+      vm._editor = null;
+      vm._editorIgnoreChange = false;
+
+      function initEditor() {
+        var container = document.querySelector('.ide-codemirror-container');
+        if (!container) return;
+        if (vm._editor) {
+          var wrapper = vm._editor.getWrapperElement();
+          if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+          vm._editor = null;
+        }
+        vm._editor = CodeMirror(container, {
+          value: vm.ide.currentTab ? vm.ide.currentTab.content : '',
+          mode: detectMode(vm.ide.currentFile),
+          theme: 'weaver-dark',
+          lineNumbers: true,
+          indentUnit: 2,
+          tabSize: 2,
+          indentWithTabs: false,
+          lineWrapping: false,
+          matchBrackets: true,
+          autoCloseBrackets: true,
+          extraKeys: {
+            'Ctrl-S': function () { vm.saveFile(); }
+          }
+        });
+        vm._editor.on('change', function () {
+          if (vm._editorIgnoreChange) return;
+          if (!vm.ide.currentTab) return;
+          var val = vm._editor.getValue();
+          vm.ide.currentTab.content = val;
+          var isDirty = val !== vm.ide.currentTab.savedContent;
+          vm.ide.currentTab.dirty = isDirty;
+          vm.ide.currentTab.lineCount = (val.match(/\n/g) || []).length + 1;
+          vm.ide.dirty = isDirty;
+          if (_contentSyncDebounce) { $timeout.cancel(_contentSyncDebounce); }
+          _contentSyncDebounce = $timeout(function () {
+            if (vm.bughostedStatus === 'connected' && vm.bughostedClientId) {
+              vm.syncEditorState();
+            }
+          }, 500, false);
+        });
+        vm._editor.setSize('100%', '100%');
+        vm._editor.refresh();
+      }
+
+      function setEditorContent(content, path) {
+        if (!vm._editor) return;
+        vm._editorIgnoreChange = true;
+        vm._editor.setValue(content || '');
+        var mode = detectMode(path);
+        if (mode) vm._editor.setOption('mode', mode);
+        vm._editor.clearHistory();
+        vm._editorIgnoreChange = false;
+      }
+
+      vm.highlightSyntax = function (tab) {
+        // CodeMirror handles highlighting natively — this is kept for compatibility
       };
 
       vm.loadFileContent = function(path, tab) {
@@ -155,10 +243,14 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
-          // Trigger syntax highlighting
-          if (vm.highlightSyntax) {
-            vm.highlightSyntax(tab);
-          }
+          // Initialize or update CodeMirror
+          $timeout(function () {
+            if (!vm._editor) {
+              initEditor();
+            } else {
+              setEditorContent(content, path);
+            }
+          }, 50);
           if (vm.bughostedStatus === 'connected') {
             $timeout(function() { vm.syncEditorState(); }, 50);
           }
@@ -168,25 +260,33 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           tab.dirty = false;
           tab.lineCount = 1;
           vm.ide.dirty = false;
+          $timeout(function () {
+            if (!vm._editor) {
+              initEditor();
+            } else {
+              setEditorContent(tab.content, path);
+            }
+          }, 50);
         });
       };
 
       vm.onContentChange = function() {
-        if (!vm.ide.currentTab) return;
-        var isDirty = vm.ide.currentTab.content !== vm.ide.currentTab.savedContent;
-        vm.ide.currentTab.dirty = isDirty;
-        vm.ide.currentTab.lineCount = (vm.ide.currentTab.content.match(/\n/g) || []).length + 1;
-        vm.ide.dirty = isDirty;
-        // Trigger syntax highlighting
-        if (vm.highlightSyntax) {
-          vm.highlightSyntax(vm.ide.currentTab);
-        }
-        if (_contentSyncDebounce) { $timeout.cancel(_contentSyncDebounce); }
-        _contentSyncDebounce = $timeout(function() {
-          if (vm.bughostedStatus === 'connected' && vm.bughostedClientId) {
-            vm.syncEditorState();
+        // Content changes are now handled by CodeMirror's change event
+      };
+
+      // Re-init editor when tab switches (ng-if may recreate DOM)
+      var _origSwitchTab = vm.switchTab;
+      vm.switchTab = function (path) {
+        _origSwitchTab(path);
+        $timeout(function () {
+          if (vm.ide.currentTab) {
+            if (!vm._editor) {
+              initEditor();
+            } else {
+              setEditorContent(vm.ide.currentTab.content, path);
+            }
           }
-        }, 500, false);
+        }, 50);
       };
 
       vm.saveFile = function() {
@@ -244,6 +344,13 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.currentFile = fullPath;
         vm.ide.currentTab = tab;
         vm.ide.dirty = true;
+        $timeout(function () {
+          if (!vm._editor) {
+            initEditor();
+          } else {
+            setEditorContent('', fullPath);
+          }
+        }, 50);
       };
 
       vm.closeFile = function() {
@@ -272,6 +379,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           if (vm.ide.openTabs[i].dirty) { hasDirty = true; break; }
         }
         if (hasDirty && !confirm('You have unsaved changes. Close anyway?')) return;
+        if (vm._editor) {
+          var wrapper = vm._editor.getWrapperElement();
+          if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+          vm._editor = null;
+        }
         vm.ide.openTabs = [];
         vm.ide.currentFile = null;
         vm.ide.currentTab = null;
