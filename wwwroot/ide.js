@@ -31,6 +31,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         gitDiffView: 'list',
         gitDiffFilePath: '',
         gitDiffRows: [],
+        gitCommitMessage: '',
+        gitCommitBusy: false,
+        gitCommitStatus: '',
+        gitCommitResult: '',
+        gitCommitError: '',
+        gitPrUrl: '',
         left: 60,
         top: 60,
         width: 600,
@@ -436,6 +442,13 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.gitDiffVisible = false;
         vm.ide.gitDiffData = null;
         vm.ide.gitDiffError = '';
+        vm.ide.gitDiffView = 'list';
+        vm.ide.gitDiffFilePath = '';
+        vm.ide.gitDiffRows = [];
+        vm.ide.gitCommitMessage = '';
+        vm.ide.gitCommitResult = '';
+        vm.ide.gitCommitError = '';
+        vm.ide.gitPrUrl = '';
         vm.showIDE = false;
       };
 
@@ -535,6 +548,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.gitDiffView = 'list';
         vm.ide.gitDiffFilePath = '';
         vm.ide.gitDiffRows = [];
+        vm.ide.gitCommitMessage = '';
+        vm.ide.gitCommitResult = '';
+        vm.ide.gitCommitError = '';
+        vm.ide.gitPrUrl = '';
         $http.get('/api/editor/git-diff', { params: { project: vm.selectedProject } }).then(function (resp) {
           vm.ide.gitDiffLoading = false;
           vm.ide.gitDiffData = resp.data;
@@ -551,6 +568,10 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.gitDiffView = 'list';
         vm.ide.gitDiffFilePath = '';
         vm.ide.gitDiffRows = [];
+        vm.ide.gitCommitMessage = '';
+        vm.ide.gitCommitResult = '';
+        vm.ide.gitCommitError = '';
+        vm.ide.gitPrUrl = '';
       };
 
       vm.showFileDiff = function (path) {
@@ -611,6 +632,76 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         }
         return rows;
       };
+
+      vm.backToSourceControl = function () {
+        vm.ide.gitDiffView = 'list';
+        vm.ide.gitDiffFilePath = '';
+        vm.ide.gitDiffRows = [];
+        vm.showGitDiff();
+      };
+
+      function _doGitCommit(pushAfter, createPr) {
+        vm.ide.gitCommitResult = '';
+        vm.ide.gitCommitError = '';
+        vm.ide.gitPrUrl = '';
+        vm.ide.gitCommitBusy = true;
+        vm.ide.gitCommitStatus = 'Committing';
+        var payload = { project: vm.selectedProject, message: vm.ide.gitCommitMessage };
+        $http.post('/api/editor/git-commit', payload).then(function (resp) {
+          if (resp.data.nothingToCommit) {
+            vm.ide.gitCommitBusy = false;
+            vm.ide.gitCommitError = 'Nothing to commit — no changes staged or unstaged';
+            return;
+          }
+          if (!resp.data.success) {
+            vm.ide.gitCommitBusy = false;
+            vm.ide.gitCommitError = resp.data.commitOutput || resp.data.error || 'Commit failed';
+            return;
+          }
+          if (pushAfter || createPr) {
+            vm.ide.gitCommitStatus = 'Pushing';
+            $http.post('/api/editor/git-push', payload).then(function (pushResp) {
+              if (createPr) {
+                vm.ide.gitCommitStatus = 'Creating PR';
+                $http.post('/api/editor/git-pr', payload).then(function (prResp) {
+                  vm.ide.gitCommitBusy = false;
+                  if (prResp.data.success) {
+                    vm.ide.gitCommitResult = 'PR created successfully';
+                    vm.ide.gitPrUrl = prResp.data.prUrl || '';
+                    vm.ide.gitCommitMessage = '';
+                    vm.showGitDiff();
+                  } else {
+                    vm.ide.gitCommitError = prResp.data.prUrl || prResp.data.error || 'PR creation failed';
+                  }
+                }, function (err) {
+                  vm.ide.gitCommitBusy = false;
+                  vm.ide.gitCommitError = 'PR creation failed: ' + (err.statusText || '');
+                });
+              } else {
+                vm.ide.gitCommitBusy = false;
+                vm.ide.gitCommitResult = 'Committed and pushed successfully';
+                vm.ide.gitCommitMessage = '';
+                vm.showGitDiff();
+              }
+            }, function (err) {
+              vm.ide.gitCommitBusy = false;
+              vm.ide.gitCommitError = 'Push failed: ' + (err.statusText || '');
+            });
+          } else {
+            vm.ide.gitCommitBusy = false;
+            vm.ide.gitCommitResult = 'Committed successfully';
+            vm.ide.gitCommitMessage = '';
+            vm.showGitDiff();
+          }
+        }, function (err) {
+          vm.ide.gitCommitBusy = false;
+          vm.ide.gitCommitError = (err.data && err.data.error) || err.statusText || 'Commit failed';
+        });
+      }
+
+      vm.gitCommit = function () { _doGitCommit(false, false); };
+      vm.gitCommitAndPush = function () { _doGitCommit(true, false); };
+      vm.gitCreatePr = function () { _doGitCommit(true, true); };
 
       // ===== Shared editing via BugHosted =====
       vm.broadcastFileOpen = function(path, content) {

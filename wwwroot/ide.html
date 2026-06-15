@@ -106,21 +106,43 @@
   </div>
 </div>
 
-<!-- Git Diff Viewer Modal -->
+<!-- Git Source Control Panel -->
 <div class="ide-diff-overlay" ng-if="vm.ide.gitDiffVisible" ng-click="vm.closeGitDiff()">
   <div class="ide-diff-panel" ng-click="$event.stopPropagation()"
     ng-class="{'ide-diff-panel--wide': vm.ide.gitDiffView === 'diff'}">
 
-    <!-- ── File list view ── -->
+    <!-- ── Source control view ── -->
     <div ng-if="vm.ide.gitDiffView === 'list'">
       <div class="ide-diff-header">
-        <span class="ide-diff-title">🔀 Git Differences</span>
+        <span class="ide-diff-title">🔀 Source Control</span>
+        <span class="ide-diff-branch" title="Current branch">⎇ {{vm.ide.gitDiffData.branch}}</span>
         <div class="ide-diff-actions">
           <button class="ide-diff-refresh-btn" ng-click="vm.showGitDiff()" title="Refresh">↻</button>
           <button class="ide-diff-close-btn" ng-click="vm.closeGitDiff()" title="Close">✕</button>
         </div>
       </div>
-      <div class="ide-diff-loading" ng-if="vm.ide.gitDiffLoading">Loading diff...</div>
+
+      <!-- Commit section -->
+      <div class="ide-diff-commit-section" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffData">
+        <input type="text" class="ide-commit-input" ng-model="vm.ide.gitCommitMessage"
+          placeholder="Commit message..." ng-keydown="$event.key==='Enter' && vm.gitCommit()" />
+        <div class="ide-commit-actions">
+          <button class="ide-commit-btn" ng-click="vm.gitCommit()"
+            ng-disabled="!vm.ide.gitCommitMessage || vm.ide.gitCommitBusy">Commit</button>
+          <button class="ide-commit-btn ide-commit-btn--push" ng-click="vm.gitCommitAndPush()"
+            ng-disabled="!vm.ide.gitCommitMessage || vm.ide.gitCommitBusy">Commit &amp; Push</button>
+          <button class="ide-commit-btn ide-commit-btn--pr" ng-click="vm.gitCreatePr()"
+            ng-disabled="!vm.ide.gitCommitMessage || vm.ide.gitCommitBusy">Create PR</button>
+        </div>
+        <div class="ide-commit-status" ng-if="vm.ide.gitCommitBusy">⏳ {{vm.ide.gitCommitStatus}}...</div>
+        <div class="ide-commit-result success" ng-if="vm.ide.gitCommitResult && !vm.ide.gitCommitError">{{vm.ide.gitCommitResult}}</div>
+        <div class="ide-commit-result error" ng-if="vm.ide.gitCommitError">{{vm.ide.gitCommitError}}</div>
+        <div class="ide-commit-pr-url" ng-if="vm.ide.gitPrUrl">
+          <a href="{{vm.ide.gitPrUrl}}" target="_blank" rel="noopener noreferrer">🔗 {{vm.ide.gitPrUrl}}</a>
+        </div>
+      </div>
+
+      <div class="ide-diff-loading" ng-if="vm.ide.gitDiffLoading">Loading...</div>
       <div class="ide-diff-empty" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffData && !vm.ide.gitDiffData.hasChanges">
         No uncommitted changes.
       </div>
@@ -128,20 +150,31 @@
         {{vm.ide.gitDiffError}}
       </div>
       <div class="ide-diff-body" ng-if="!vm.ide.gitDiffLoading && vm.ide.gitDiffData && vm.ide.gitDiffData.hasChanges">
-        <div class="ide-diff-untracked" ng-if="vm.ide.gitDiffData.untracked.length">
-          <div class="ide-diff-section-label">Untracked files</div>
-          <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.gitDiffData.untracked track by $index"
-            ng-click="vm.showFileDiff(f)">
-            <span class="ide-diff-file-status">U</span>
-            <span class="ide-diff-file-path">{{f}}</span>
+        <!-- Staged files -->
+        <div class="ide-diff-staged" ng-if="vm.ide.gitDiffData.staged && vm.ide.gitDiffData.staged.length">
+          <div class="ide-diff-section-label ide-diff-section-label--staged">Staged changes ({{vm.ide.gitDiffData.staged.length}})</div>
+          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.staged track by file.path"
+            ng-click="vm.showFileDiff(file.path)">
+            <span class="ide-diff-file-status">✓</span>
+            <span class="ide-diff-file-path">{{file.path}}</span>
           </div>
         </div>
+        <!-- Modified files -->
         <div class="ide-diff-files" ng-if="vm.ide.gitDiffData.files.length">
-          <div class="ide-diff-section-label">Modified files</div>
+          <div class="ide-diff-section-label">Modified ({{vm.ide.gitDiffData.files.length}})</div>
           <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.files track by file.path"
             ng-click="vm.showFileDiff(file.path)">
             <span class="ide-diff-file-status">M</span>
             <span class="ide-diff-file-path">{{file.path}}</span>
+          </div>
+        </div>
+        <!-- Untracked files -->
+        <div class="ide-diff-untracked" ng-if="vm.ide.gitDiffData.untracked.length">
+          <div class="ide-diff-section-label">Untracked ({{vm.ide.gitDiffData.untracked.length}})</div>
+          <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.gitDiffData.untracked track by $index"
+            ng-click="vm.showFileDiff(f)">
+            <span class="ide-diff-file-status">U</span>
+            <span class="ide-diff-file-path">{{f}}</span>
           </div>
         </div>
       </div>
@@ -150,7 +183,7 @@
     <!-- ── Side-by-side diff view ── -->
     <div ng-if="vm.ide.gitDiffView === 'diff'">
       <div class="ide-diff-header">
-        <button class="ide-diff-back-btn" ng-click="vm.gitDiffView = 'list'" title="Back to file list">←</button>
+        <button class="ide-diff-back-btn" ng-click="vm.backToSourceControl()" title="Back to source control">←</button>
         <span class="ide-diff-title">{{vm.ide.gitDiffFilePath}}</span>
         <div class="ide-diff-actions">
           <button class="ide-diff-refresh-btn" ng-click="vm.showFileDiff(vm.ide.gitDiffFilePath)" title="Refresh">↻</button>

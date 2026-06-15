@@ -203,7 +203,8 @@ public class BughostedController : ControllerBase
             session.Url = url;
             _sessions[session.ClientId] = session;
 
-            return Ok(new { clientId = session.ClientId, token = session.Token, user = session.User });
+            var weaverAddress = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { clientId = session.ClientId, token = session.Token, user = session.User, weaverAddress });
         }
         catch (Exception ex)
         {
@@ -369,6 +370,79 @@ public class BughostedController : ControllerBase
         }
     }
 
+    [HttpGet("events")]
+    public async Task Events([FromQuery] string clientId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
+        {
+            Response.StatusCode = 401;
+            return;
+        }
+
+        Response.ContentType = "text/event-stream";
+        Response.Headers["Cache-Control"] = "no-cache";
+        Response.Headers["X-Accel-Buffering"] = "no";
+        Response.Headers["Connection"] = "keep-alive";
+        var bufferingFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
+        bufferingFeature?.DisableBuffering();
+        await Response.Body.FlushAsync(ct);
+
+        var client = _clientFactory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
+        var seenIds = new HashSet<int>();
+        var keepAliveElapsed = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                pollCts.CancelAfter(TimeSpan.FromSeconds(10));
+                var httpReq = new HttpRequestMessage(HttpMethod.Get,
+                    $"{session.Url}/weaver/commands?token={session.Token}");
+                var httpRes = await client.SendAsync(httpReq, pollCts.Token);
+
+                if (httpRes.IsSuccessStatusCode)
+                {
+                    var body = await httpRes.Content.ReadAsStringAsync(pollCts.Token);
+                    var cmds = JsonSerializer.Deserialize<List<JsonElement>>(body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                    if (cmds != null)
+                    {
+                        foreach (var cmd in cmds)
+                        {
+                            var id = cmd.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 0;
+                            if (id != 0 && seenIds.Add(id))
+                            {
+                                await Response.WriteAsync($"event: command\ndata: {cmd.GetRawText()}\n\n", ct);
+                                await Response.Body.FlushAsync(ct);
+                                keepAliveElapsed = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (HttpRequestException) { }
+            catch (IOException) { break; }
+            catch (Exception ex) { Console.WriteLine($"SSE poll error: {ex.Message}"); }
+
+            if (ct.IsCancellationRequested) break;
+
+            keepAliveElapsed++;
+            if (keepAliveElapsed >= 30)
+            {
+                try { await Response.WriteAsync(":\n\n", ct); await Response.Body.FlushAsync(ct); }
+                catch { break; }
+                keepAliveElapsed = 0;
+            }
+
+            try { await Task.Delay(1000, ct); }
+            catch { break; }
+        }
+    }
+
     [HttpPost("commands/ack")]
     public async Task<IActionResult> AckCommand([FromBody] BughostedAckRequest req)
     {
@@ -378,13 +452,16 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var payload = JsonSerializer.Serialize(new
+            var ackPayload = new Dictionary<string, object?>
             {
-                token = session.Token,
-                commandId = req.CommandId,
-                status = req.Status,
-                result = req.Result
-            });
+                ["token"] = session.Token,
+                ["commandId"] = req.CommandId,
+                ["status"] = req.Status,
+                ["result"] = req.Result
+            };
+            if (!string.IsNullOrWhiteSpace(req.RequestId))
+                ackPayload["requestId"] = req.RequestId;
+            var payload = JsonSerializer.Serialize(ackPayload);
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/commands/ack")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")

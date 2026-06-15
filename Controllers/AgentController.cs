@@ -139,6 +139,7 @@ public class AgentController : ControllerBase
             "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
             "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
             "20. NEVER INVENT code: every variable, property, method, class, and component you reference in newString MUST already exist in the target file's codebase (or its imports). " +
+            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'), 'font-size:12px' → 'font-size:12px' is OK but '12pximportant' → '12px important'. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
                 "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
                 "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
                 "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
@@ -2392,7 +2393,10 @@ public class AgentController : ControllerBase
         "7. If the target file already has enough context (small file, obvious location), " +
         "go ready=true on round 1 with a precise refinedChange\n" +
         "8. If the change involves a component, import, alias, or UI element, " +
-        "request the import source files to verify the import path and alias are correct before proceeding";
+        "request the import source files to verify the import path and alias are correct before proceeding\n" +
+        "9. SPACING in refinedChange: where you describe code snippets inline, verify every token is properly " +
+        "separated by a space. 'INTERVAL15 MINUTE' is WRONG — it should be 'INTERVAL 15 MINUTE'. " +
+        "Read through your output character-by-character before finalizing.";
 
     private static string BuildStepExplorationPrompt(
         PlanStep step,

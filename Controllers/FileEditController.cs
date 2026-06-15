@@ -342,7 +342,25 @@ public class FileEditController : ControllerBase
             var error = await process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync();
 
-            // Also get untracked files
+            // Staged diff
+            using var stagedProc = new Process();
+            stagedProc.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "diff --staged --no-color",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            stagedProc.Start();
+            var stagedOutput = await stagedProc.StandardOutput.ReadToEndAsync();
+            await stagedProc.WaitForExitAsync();
+
+            // Untracked files
             using var untracked = new Process();
             untracked.StartInfo = new ProcessStartInfo
             {
@@ -360,21 +378,37 @@ public class FileEditController : ControllerBase
             var untrackedOutput = await untracked.StandardOutput.ReadToEndAsync();
             await untracked.WaitForExitAsync();
 
-            // Parse diff into structured file-level entries
+            // Current branch name
+            using var branchProc = new Process();
+            branchProc.StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --abbrev-ref HEAD",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            branchProc.Start();
+            var branchOutput = await branchProc.StandardOutput.ReadToEndAsync();
+            await branchProc.WaitForExitAsync();
+
+            // Parse working-dir diff into structured file-level entries
             var files = new List<object>();
             var currentFile = "";
             var currentLines = new List<string>();
 
-            void FlushFile()
+            void FlushFile(List<object> target)
             {
                 if (!string.IsNullOrWhiteSpace(currentFile) && currentLines.Count > 0)
                 {
-                    var headerCount = currentLines.Count(l => l.StartsWith("---") || l.StartsWith("+++") || l.StartsWith("@@") || l.StartsWith("diff --git") || l.StartsWith("index "));
-                    files.Add(new
+                    target.Add(new
                     {
                         path = currentFile,
-                        header = string.Join("\n", currentLines.Take(headerCount)),
-                        body = string.Join("\n", currentLines.Skip(headerCount))
+                        body = string.Join("\n", currentLines)
                     });
                 }
             }
@@ -383,13 +417,29 @@ public class FileEditController : ControllerBase
             {
                 if (line.StartsWith("diff --git "))
                 {
-                    FlushFile();
+                    FlushFile(files);
                     var parts = line.Split(' ');
                     currentFile = parts.Length >= 4 && parts[3].Length > 2 ? parts[3][2..] : "";
                 }
                 currentLines.Add(line);
             }
-            FlushFile();
+            FlushFile(files);
+
+            // Parse staged diff
+            var stagedFiles = new List<object>();
+            currentFile = "";
+            currentLines.Clear();
+            foreach (var line in stagedOutput.Split('\n'))
+            {
+                if (line.StartsWith("diff --git "))
+                {
+                    FlushFile(stagedFiles);
+                    var parts = line.Split(' ');
+                    currentFile = parts.Length >= 4 && parts[3].Length > 2 ? parts[3][2..] : "";
+                }
+                currentLines.Add(line);
+            }
+            FlushFile(stagedFiles);
 
             var untrackedFiles = untrackedOutput
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries)
@@ -397,12 +447,41 @@ public class FileEditController : ControllerBase
                 .Where(f => !string.IsNullOrWhiteSpace(f))
                 .ToList();
 
+            var branchName = branchOutput?.Trim() ?? "unknown";
+            var hasUnpushed = false;
+            try
+            {
+                using var unpushedProc = new Process();
+                unpushedProc.StartInfo = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = "rev-list --count @{u}..HEAD",
+                    WorkingDirectory = projectRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
+                };
+                unpushedProc.Start();
+                var unpushedOut = (await unpushedProc.StandardOutput.ReadToEndAsync()).Trim();
+                await unpushedProc.WaitForExitAsync();
+                if (int.TryParse(unpushedOut, out var count))
+                    hasUnpushed = count > 0;
+            }
+            catch { }
+
             return Ok(new
             {
                 diff = output,
                 files,
+                staged = stagedFiles,
                 untracked = untrackedFiles,
-                hasChanges = !string.IsNullOrWhiteSpace(output) || untrackedFiles.Count > 0
+                branch = branchName,
+                hasChanges = !string.IsNullOrWhiteSpace(output) || stagedFiles.Count > 0 || untrackedFiles.Count > 0,
+                hasStaged = stagedFiles.Count > 0,
+                hasUnpushed
             });
         }
         catch (Exception ex)
@@ -475,5 +554,162 @@ public class FileEditController : ControllerBase
             newContent,
             isNewFile = string.IsNullOrWhiteSpace(oldContent)
         });
+    }
+
+    public class GitCommitRequest
+    {
+        public string Project { get; set; } = "";
+        public string Message { get; set; } = "";
+    }
+
+    public class GitPrRequest
+    {
+        public string Project { get; set; } = "";
+        public string Message { get; set; } = "";
+        public string? Summary { get; set; }
+    }
+
+    private async Task<string> RunGitAsync(string args, string workingDir)
+    {
+        using var proc = new Process();
+        proc.StartInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = workingDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+        proc.Start();
+        var output = await proc.StandardOutput.ReadToEndAsync();
+        var error = await proc.StandardError.ReadToEndAsync();
+        await proc.WaitForExitAsync();
+        return proc.ExitCode == 0 ? output : error;
+    }
+
+    [HttpPost("git-commit")]
+    public async Task<IActionResult> GitCommit([FromBody] GitCommitRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Project))
+            return BadRequest(new { error = "Project required" });
+
+        var projectRoot = ResolveProjectRoot(req.Project);
+        if (!Directory.Exists(projectRoot))
+            return NotFound(new { error = "Project directory not found." });
+
+        try
+        {
+            var addOut = await RunGitAsync("add -A", projectRoot);
+            var escaped = (req.Message ?? "commit").Replace("\"", "\\\"");
+            var commitOut = await RunGitAsync($"commit -m \"{escaped}\"", projectRoot);
+            var isNoOp = commitOut.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase);
+            return Ok(new { success = !isNoOp, addOutput = addOut, commitOutput = commitOut, nothingToCommit = isNoOp });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    [HttpPost("git-push")]
+    public async Task<IActionResult> GitPush([FromBody] GitCommitRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Project))
+            return BadRequest(new { error = "Project required" });
+
+        var projectRoot = ResolveProjectRoot(req.Project);
+        if (!Directory.Exists(projectRoot))
+            return NotFound(new { error = "Project directory not found." });
+
+        try
+        {
+            var branch = (await RunGitAsync("rev-parse --abbrev-ref HEAD", projectRoot)).Trim();
+            var pushOut = await RunGitAsync($"push origin \"{branch}\"", projectRoot);
+            return Ok(new { success = true, branch, output = pushOut });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    [HttpPost("git-pr")]
+    public async Task<IActionResult> GitPr([FromBody] GitPrRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Project))
+            return BadRequest(new { error = "Project required" });
+
+        var projectRoot = ResolveProjectRoot(req.Project);
+        if (!Directory.Exists(projectRoot))
+            return NotFound(new { error = "Project directory not found." });
+
+        try
+        {
+            // Stage + commit
+            await RunGitAsync("add -A", projectRoot);
+            var escapedMsg = (req.Message ?? "commit").Replace("\"", "\\\"");
+            await RunGitAsync($"commit -m \"{escapedMsg}\"", projectRoot);
+
+            // Push to current branch
+            var branch = (await RunGitAsync("rev-parse --abbrev-ref HEAD", projectRoot)).Trim();
+            var pushOut = await RunGitAsync($"push -u origin \"{branch}\"", projectRoot);
+
+            // Create PR via gh
+            var prBody = req.Summary ?? req.Message ?? "";
+            var escapedBody = prBody.Replace("\"", "\\\"").Replace("\n", "\\n");
+            var escapedTitle = (req.Message ?? "Weaver changes").Replace("\"", "\\\"");
+
+            using var ghProc = new Process();
+            ghProc.StartInfo = new ProcessStartInfo
+            {
+                FileName = "gh",
+                Arguments = $"pr create --title \"{escapedTitle}\" --body \"{escapedBody}\" --head \"{branch}\"",
+                WorkingDirectory = projectRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            ghProc.Start();
+            var ghOut = await ghProc.StandardOutput.ReadToEndAsync();
+            var ghErr = await ghProc.StandardError.ReadToEndAsync();
+            await ghProc.WaitForExitAsync();
+
+            return Ok(new
+            {
+                success = ghProc.ExitCode == 0,
+                branch,
+                pushOutput = pushOut,
+                prUrl = ghProc.ExitCode == 0 ? ghOut?.Trim() : ghErr
+            });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
+    private string ResolveProjectRoot(string project)
+    {
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        }
+        else
+        {
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+        }
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
     }
 }

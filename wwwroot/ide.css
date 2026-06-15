@@ -702,6 +702,122 @@
     background: rgba(255,255,255,0.08);
     color: #e6edf3;
 }
+
+/* Branch name */
+.ide-diff-branch {
+    font-size: 11px;
+    color: #8b949e;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    margin-left: 8px;
+    padding: 2px 6px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 3px;
+}
+
+/* Commit section */
+.ide-diff-commit-section {
+    padding: 10px 14px;
+    border-bottom: 1px solid #21262d;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.ide-commit-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    color: #e6edf3;
+    padding: 8px 10px;
+    font-size: 13px;
+    border-radius: 4px;
+    outline: none;
+    font-family: inherit;
+}
+.ide-commit-input:focus {
+    border-color: #58a6ff;
+}
+.ide-commit-input::placeholder {
+    color: #484f58;
+}
+.ide-commit-actions {
+    display: flex;
+    gap: 6px;
+}
+.ide-commit-btn {
+    flex: 1;
+    background: #21262d;
+    border: 1px solid #30363d;
+    color: #e6edf3;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background 0.12s, border-color 0.12s;
+}
+.ide-commit-btn:hover:not(:disabled) {
+    background: #30363d;
+    border-color: #484f58;
+}
+.ide-commit-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+.ide-commit-btn--push {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+}
+.ide-commit-btn--push:hover:not(:disabled) {
+    background: #388bfd;
+    border-color: #388bfd;
+}
+.ide-commit-btn--pr {
+    background: #238636;
+    border-color: #238636;
+    color: #fff;
+}
+.ide-commit-btn--pr:hover:not(:disabled) {
+    background: #2ea043;
+    border-color: #2ea043;
+}
+.ide-commit-status {
+    font-size: 11px;
+    color: #8b949e;
+    text-align: center;
+}
+.ide-commit-result {
+    font-size: 11px;
+    text-align: center;
+    padding: 4px 8px;
+    border-radius: 3px;
+}
+.ide-commit-result.success {
+    color: #7ee787;
+    background: rgba(126, 231, 135, 0.1);
+}
+.ide-commit-result.error {
+    color: #f07178;
+    background: rgba(240, 113, 120, 0.1);
+}
+.ide-commit-pr-url {
+    text-align: center;
+    font-size: 11px;
+}
+.ide-commit-pr-url a {
+    color: #58a6ff;
+    text-decoration: none;
+}
+.ide-commit-pr-url a:hover {
+    text-decoration: underline;
+}
+
+/* Staged section label */
+.ide-diff-section-label--staged {
+    color: #7ee787;
+}
 .ide-diff-loading,
 .ide-diff-empty,
 .ide-diff-error {
