@@ -582,7 +582,8 @@ public class BughostedController : ControllerBase
             var path = req.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : "";
             var content = req.TryGetProperty("content", out var cProp) ? cProp.GetString() : null;
 
-            if (id == 0 || string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(path)) continue;
+            if (id == 0 || string.IsNullOrWhiteSpace(type)) continue;
+            if (type != "listing" && string.IsNullOrWhiteSpace(path)) continue;
 
             string? resultJson = null;
             string status = "fulfilled";
