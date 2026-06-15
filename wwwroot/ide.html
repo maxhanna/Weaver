@@ -153,28 +153,28 @@
         <!-- Staged files -->
         <div class="ide-diff-staged" ng-if="vm.ide.gitDiffData.staged && vm.ide.gitDiffData.staged.length">
           <div class="ide-diff-section-label ide-diff-section-label--staged">Staged changes ({{vm.ide.gitDiffData.staged.length}})</div>
-          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.staged track by file.path"
-            ng-click="vm.showFileDiff(file.path)">
+          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.staged track by file.path">
             <span class="ide-diff-file-status">✓</span>
-            <span class="ide-diff-file-path">{{file.path}}</span>
+            <span class="ide-diff-file-path" ng-click="vm.openFile(file.path)">{{file.path}}</span>
+            <span class="ide-diff-file-action" ng-click="vm.showFileDiff(file.path)" title="View diff">⇔</span>
           </div>
         </div>
         <!-- Modified files -->
         <div class="ide-diff-files" ng-if="vm.ide.gitDiffData.files.length">
           <div class="ide-diff-section-label">Modified ({{vm.ide.gitDiffData.files.length}})</div>
-          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.files track by file.path"
-            ng-click="vm.showFileDiff(file.path)">
+          <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.gitDiffData.files track by file.path">
             <span class="ide-diff-file-status">M</span>
-            <span class="ide-diff-file-path">{{file.path}}</span>
+            <span class="ide-diff-file-path" ng-click="vm.openFile(file.path)">{{file.path}}</span>
+            <span class="ide-diff-file-action" ng-click="vm.showFileDiff(file.path)" title="View diff">⇔</span>
           </div>
         </div>
         <!-- Untracked files -->
         <div class="ide-diff-untracked" ng-if="vm.ide.gitDiffData.untracked.length">
           <div class="ide-diff-section-label">Untracked ({{vm.ide.gitDiffData.untracked.length}})</div>
-          <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.gitDiffData.untracked track by $index"
-            ng-click="vm.showFileDiff(f)">
+          <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.gitDiffData.untracked track by $index">
             <span class="ide-diff-file-status">U</span>
-            <span class="ide-diff-file-path">{{f}}</span>
+            <span class="ide-diff-file-path" ng-click="vm.openFile(f)">{{f}}</span>
+            <span class="ide-diff-file-action" ng-click="vm.showFileDiff(f)" title="View diff">⇔</span>
           </div>
         </div>
       </div>

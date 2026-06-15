@@ -851,56 +851,75 @@
       if (_bhEditorSyncTimer) { $interval.cancel(_bhEditorSyncTimer); _bhEditorSyncTimer = null; }
     }
 
+    var _bhEventSource = null;
     var _bhCommandTimer = null;
     var _bhTimerRunning = false;
-    function startBughostedCommandPolling() {
-      if (vm.destroyed) {
-        return;
+
+    function receiveCommand(cmd) {
+      if (cmd.parameters && !cmd.params) {
+        try { cmd.params = JSON.parse(cmd.parameters); } catch (e) { cmd.params = {}; }
       }
-      try {
-        stopBughostedCommandPolling();
-        _bhCommandTimer = $interval(function () {
-          if (vm.destroyed || _bhTimerRunning) {
-            return;
-          }
-          if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
-          _bhTimerRunning = true;
-          $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
-            .then(function (resp) {
-              _bhTimerRunning = false;
-              if (resp && resp.data) {
-                console.log("GOT COMMAND : ", resp);
-                try {
-                  var cmds = resp.data || undefined;
-                  if (cmds && cmds.length > 0) {
-                    cmds.forEach(function (cmd) {
-                      if (cmd.parameters && !cmd.params) {
-                        try {
-                          cmd.params = JSON.parse(cmd.parameters);
-                        } catch (e) { cmd.params = {}; }
-                      }
-                      if (!vm.remoteCommands) { vm.remoteCommands = []; }
-                      var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
-                      if (!existing && cmd.command) {
-                        vm.remoteCommands.push(cmd);
-                        vm.executeRemoteCommand(cmd);
-                      }
-                    });
-                  }
-                } catch (e) {
-                  console.log("trying to absorb the infidigs", e);
-                }
-              }
-            }).catch(e => {
-              _bhTimerRunning = false;
-              console.log("trying to ignore the infidigs", e);
-            });
-        }, 15000, 0, false);
-      } catch (e) {
-        console.log("startBughostedCommandPolling error", e);
-      } 
+      if (!vm.remoteCommands) { vm.remoteCommands = []; }
+      var existing = vm.remoteCommands.find(function (c) { return c.id === cmd.id; });
+      if (!existing && cmd.command) {
+        vm.remoteCommands.push(cmd);
+        vm.executeRemoteCommand(cmd);
+      }
     }
+
+    function startBughostedCommandPolling() {
+      if (vm.destroyed) { return; }
+      stopBughostedCommandPolling();
+      var clientId = vm.bughostedClientId;
+      if (!clientId || vm.bughostedStatus !== 'connected') return;
+
+      // Try SSE for instant command delivery
+      try {
+        var es = new EventSource('/api/bughosted/events?clientId=' + encodeURIComponent(clientId));
+        es.addEventListener('command', function (e) {
+          try {
+            var cmd = JSON.parse(e.data);
+            receiveCommand(cmd);
+          } catch (ex) {
+            console.log("SSE command parse error", ex);
+          }
+        });
+        es.onerror = function () {
+          console.log("SSE failed, falling back to polling");
+          es.close();
+          _bhEventSource = null;
+          startPollingFallback();
+        };
+        _bhEventSource = es;
+      } catch (e) {
+        console.log("SSE not supported, falling back to polling");
+        startPollingFallback();
+      }
+    }
+
+    function startPollingFallback() {
+      if (vm.destroyed || _bhCommandTimer) return;
+      _bhCommandTimer = $interval(function () {
+        if (vm.destroyed || _bhTimerRunning) return;
+        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+        _bhTimerRunning = true;
+        $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId), { signal: vm.abortController.signal })
+          .then(function (resp) {
+            _bhTimerRunning = false;
+            if (resp && resp.data) {
+              try {
+                var cmds = resp.data || undefined;
+                if (cmds && cmds.length > 0) {
+                  cmds.forEach(receiveCommand);
+                }
+              } catch (e) { console.log("poll cmd error", e); }
+            }
+          }).catch(function () { _bhTimerRunning = false; });
+      }, 5000, 0, false);
+    }
+
     function stopBughostedCommandPolling() {
+      if (_bhEventSource) { _bhEventSource.close(); _bhEventSource = null; }
       if (_bhCommandTimer) { $interval.cancel(_bhCommandTimer); _bhCommandTimer = null; }
     }
 
@@ -1205,14 +1224,16 @@
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
             status: 'executed',
-            result: result
+            result: result,
+            requestId: cmd.params.requestId || undefined
           });
         }, function () {
           $http.post('/api/bughosted/commands/ack', {
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
             status: 'error',
-            result: JSON.stringify({ path: cmd.params.path || '', entries: [], error: 'Failed to list' })
+            result: JSON.stringify({ path: cmd.params.path || '', entries: [], error: 'Failed to list' }),
+            requestId: cmd.params.requestId || undefined
           });
         });
       } else if (cmd.command === 'requestFileContent' && cmd.params && cmd.params.path) {
@@ -1224,14 +1245,16 @@
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
             status: 'executed',
-            result: result
+            result: result,
+            requestId: cmd.params.requestId || undefined
           });
         }, function (err) {
           $http.post('/api/bughosted/commands/ack', {
             clientId: vm.bughostedClientId,
             commandId: cmd.id,
             status: 'error',
-            result: JSON.stringify({ path: cmd.params.path, content: '', error: 'Failed to load: ' + (err.statusText || 'Unknown') })
+            result: JSON.stringify({ path: cmd.params.path, content: '', error: 'Failed to load: ' + (err.statusText || 'Unknown') }),
+            requestId: cmd.params.requestId || undefined
           });
         });
       } else if (cmd.command === 'fileEdit' && cmd.params && cmd.params.path && cmd.params.content !== undefined) {

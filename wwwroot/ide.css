@@ -847,7 +847,6 @@
     align-items: center;
     gap: 8px;
     padding: 6px 14px;
-    cursor: pointer;
     transition: background 0.12s;
 }
 .ide-diff-file-row:hover {
@@ -885,6 +884,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    cursor: pointer;
+    flex: 1;
+}
+.ide-diff-file-path:hover {
+    color: #58a6ff;
+    text-decoration: underline;
+}
+.ide-diff-file-action {
+    font-size: 13px;
+    cursor: pointer;
+    opacity: 0;
+    flex-shrink: 0;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: opacity 0.15s;
+    user-select: none;
+}
+.ide-diff-file-row:hover .ide-diff-file-action {
+    opacity: 0.7;
+}
+.ide-diff-file-action:hover {
+    opacity: 1 !important;
+    background: rgba(255,255,255,0.1);
 }
 
 /* Diff panel wide layout */
