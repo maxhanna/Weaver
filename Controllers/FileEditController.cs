@@ -239,12 +239,49 @@ public class FileEditController : ControllerBase
         try
         {
             var content = System.IO.File.ReadAllText(targetFull);
-            return Ok(new { content });
+            var lastModified = System.IO.File.GetLastWriteTimeUtc(targetFull).ToString("O");
+            return Ok(new { content, lastModified });
         }
         catch (Exception ex)
         {
             return StatusCode(500, ex.Message);
         }
+    }
+
+    [HttpGet("check-modified")]
+    public IActionResult CheckModified([FromQuery] string project = "", [FromQuery] string path = "", [FromQuery] string? since = null)
+    {
+        if (string.IsNullOrEmpty(path))
+            return BadRequest("Path is required");
+
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        string workspaceRoot;
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+            workspaceRoot = Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        else
+            workspaceRoot = Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" : project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relativePath = path.Trim();
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment, relativePath));
+
+        if (!targetFull.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase))
+            return BadRequest("Path outside workspace root is not allowed.");
+
+        if (!System.IO.File.Exists(targetFull))
+            return Ok(new { exists = false, modified = false, lastModified = (string?)null });
+
+        var lastModified = System.IO.File.GetLastWriteTimeUtc(targetFull);
+        var modified = true;
+
+        if (!string.IsNullOrWhiteSpace(since) && DateTime.TryParse(since, null, System.Globalization.DateTimeStyles.RoundtripKind, out var sinceDt))
+        {
+            modified = lastModified > sinceDt;
+        }
+
+        return Ok(new { exists = true, modified, lastModified = lastModified.ToString("O") });
     }
 
     [HttpPost("save")]

@@ -1140,6 +1140,9 @@ public class AgentController : ControllerBase
             sb.AppendLine("  • To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
             sb.AppendLine("  • Do NOT use targetType=\"class\" — that replaces the entire class.");
             sb.AppendLine("INDENTATION: newCode MUST include proper C# indentation.");
+            sb.AppendLine("SQL STRINGS: PRESERVE exact whitespace inside SQL. 'INTERVAL 15 MINUTE' is CORRECT; " +
+                          "'INTERVAL15 MINUTE' is WRONG. '= 1' is CORRECT; '=1' is WRONG. " +
+                          "Copy SQL lines VERBATIM from the file and only change what the task requires.");
         sb.AppendLine();
 
         //  Include exploration context if available — this is the most important
@@ -1978,7 +1981,8 @@ public class AgentController : ControllerBase
         int planItemIndex,
         bool emitSse,
         CancellationToken ct,
-        string? cardId = null)
+        string? cardId = null,
+        List<string>? attachedFiles = null)
     {
         // ── Guard: skip if the plan already has precise edit info ─────────
         if (!string.IsNullOrWhiteSpace(step.OldString) &&
@@ -2004,6 +2008,32 @@ public class AgentController : ControllerBase
 
         var ctx = new StringBuilder();
         var filesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // ── Seed exploration with attached file content ───────────────────
+        if (attachedFiles != null && attachedFiles.Count > 0)
+        {
+            await EmitLog(emitSse, "info", $"  ⊕ Seeding {attachedFiles.Count} attached file(s) into exploration context", ct: ct);
+            foreach (var af in attachedFiles)
+            {
+                try
+                {
+                    var afPath = Path.GetFullPath(Path.Combine(projectRoot, af.TrimStart('/', '\\')));
+                    if (System.IO.File.Exists(afPath) && filesRead.Add(afPath))
+                    {
+                        var afContent = await System.IO.File.ReadAllTextAsync(afPath, ct);
+                        var afRel = Path.GetRelativePath(projectRoot, afPath).Replace('\\', '/');
+                        ctx.AppendLine($"--- {afRel} (attached) ---");
+                        ctx.AppendLine(afContent);
+                        ctx.AppendLine($"--- end {afRel} ---");
+                        ctx.AppendLine();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "warn", $"  ⚠ Could not read attached file '{af}': {ex.Message}", ct: ct);
+                }
+            }
+        }
 
         var refinedChange = step.Change;
         string? targetSymbol = null;
@@ -2640,7 +2670,8 @@ public class AgentController : ControllerBase
         string? prompt = null,   // NEW — original task prompt
         AgentPlan? plan = null,   // NEW — full plan for context
         int planItemIndex = -1,
-        string? cardId = null)
+        string? cardId = null,
+        List<string>? attachedFiles = null)
     {
         var cfg8 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -2712,7 +2743,7 @@ public class AgentController : ControllerBase
         var exploration = await RunStepExplorationLoop(
             step, projectRoot,
             prompt ?? step.Change,   // fall back to the step's own description
-            plan, planItemIndex, emitSse, ct, cardId);
+            plan, planItemIndex, emitSse, ct, cardId, attachedFiles);
 
         step = exploration.EnrichedStep;
         var explorationContext = exploration.ExplorationContext;
@@ -2891,6 +2922,21 @@ public class AgentController : ControllerBase
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
                 return stepIndex + 1;
+            }
+
+            // Detect replacement-when-insertion-was-intended: oldString >> newString
+            if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) &&
+                oldStr.Length > newStr.Length * 4 &&
+                !oldStr.TrimStart().StartsWith('}') &&
+                oldStr.Length > 200)
+            {
+                var err = $"oldString ({oldStr.Length}ch, {oldLines}L) is >4x newString ({newStr.Length}ch, {newLines}L) — " +
+                    "LLM likely replaced a method instead of inserting alongside it. " +
+                    "Use insertion pattern: oldString = the 1-2 anchor lines right BEFORE where the new code goes, " +
+                    "newString = anchor lines (unchanged) + your new code after them.";
+                await EmitLog(emitSse, "warn", err, new { step }, ct: ct);
+                history.Add((oldStr, newStr, err));
+                continue;
             }
 
             var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
@@ -3212,6 +3258,8 @@ public class AgentController : ControllerBase
         };
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
+        // Mark step done in boarddata so it won't be retried on restart
+        await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
         return stepIndex + 1;
     }
 
@@ -3270,7 +3318,8 @@ public class AgentController : ControllerBase
         }
     }
 
-    private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct)
+    private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct,
+        string summary = "", int score = 0)
     {
         if (string.IsNullOrWhiteSpace(cardId) || planSteps == null || planSteps.Count == 0)
             return;
@@ -3312,8 +3361,8 @@ public class AgentController : ControllerBase
                     cardObj["_plan"] = new JsonObject
                     {
                         ["items"] = planItems,
-                        ["summary"] = "",
-                        ["score"] = 0
+                        ["summary"] = summary,
+                        ["score"] = score
                     };
 
                     var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
@@ -3693,8 +3742,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
         "10. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
-        "11. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n\n" +
-        "### OUTPUT FORMAT ###\n" +
+        "11. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
+        "12. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
+        "For reading project source files use _explore with the relative file path. " +
+        "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
+        "If you don't know which file contains the code, add an _explore step first.\n\n" +
+         "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
         "  \"summary\": \"one sentence: what this step accomplishes\",\n" +
@@ -4424,7 +4477,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                 completedStepIndices: completedStepIndices, cardId: cardId);
 
-            return (resumeSteps, existingPlan, resumeSteps.Count > 0);
+            var allStepsAlreadyDone = completedStepIndices != null && completedStepIndices.Count >= existingPlan.Plan.Count;
+            return (resumeSteps, existingPlan, (resumeSteps.Count > 0) || allStepsAlreadyDone);
         }
 
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
@@ -4651,7 +4705,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             if (emitSse)
                                 await SendSse(Response, "plan",
                                     new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
-                            await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct);
+                            await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
+                                summary: plan.Summary ?? "Replan: added steps", score: plan.Score);
 
                             // Rebuild doneIndices with merged plan and execute remaining
                             var mergedDone = new HashSet<int>();
@@ -5389,7 +5444,31 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!taskComplete)
         {
             await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
-            var freshContext = AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
+            // Re-read all touched files from disk so the planner sees current code, not stale
+            // step outputs. BuildDiscoveryTextFromSteps misses edit steps (no "output" field),
+            // leaving context empty and causing the planner to fall back to _web_search.
+            var touchedPaths = allSteps.OfType<Dictionary<string, object?>>()
+                .Select(s => s.GetValueOrDefault("path")?.ToString())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var freshSb = new StringBuilder("ONLY use paths that appear below. Do NOT invent paths.\n\n");
+            foreach (var rp in touchedPaths.Take(10))
+            {
+                var fp2 = Path.GetFullPath(
+                    Path.Combine(projectRoot, rp!.Replace('/', Path.DirectorySeparatorChar)));
+                if (!System.IO.File.Exists(fp2)) continue;
+                try
+                {
+                    var fc2 = await System.IO.File.ReadAllTextAsync(fp2, Encoding.UTF8, ct);
+                    freshSb.AppendLine($"### read {rp}");
+                    freshSb.AppendLine($"```\n{fc2}\n```\n");
+                }
+                catch { /* skip unreadable files */ }
+            }
+            var freshContext = freshSb.Length > 100
+                ? freshSb.ToString()
+                : AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
             // Include verification failures as steering so the LLM knows what to fix
             var verifySteering = steeringContext;
             if (!string.IsNullOrWhiteSpace(verificationDetails))
@@ -5404,7 +5483,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         new { thinking = replan.Thinking, summary = $"Re-plan: {replan.Summary}", items = replan.Plan }, ct);
 
                 // Persist to boarddata so step progress is tracked in the card
-                await PersistBoardDataPlanAsync(cardId, replan.Plan, emitSse, ct);
+                await PersistBoardDataPlanAsync(cardId, replan.Plan, emitSse, ct,
+                    summary: $"Re-plan: {replan.Summary}", score: replan.Score);
 
                 await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
                     steeringContext: verifySteering, cardId: cardId);
@@ -5741,7 +5821,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
-            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
+                summary: $"Added {moreSteps.Count} step(s)", score: 0);
         }
         return planItems;
     }
@@ -6019,7 +6100,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
                     ct, allResults, stepIndex,
                     prompt, plan,
-                    itemIdx, cardId);
+                    itemIdx, cardId, attachedFiles);
 
                 var stepSkipped = false;
                 if (allResults.Count > prevCount &&
@@ -6331,6 +6412,80 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.Equals(normOld.Trim(), normNew.Trim(), StringComparison.Ordinal))
             return (false, "oldString and newString are identical after normalization", 3);
 
+        // Detect method signature changes across the edit — prevent the LLM
+        // from rewriting methods wholesale (changing return type, params, etc.)
+        // when it should only insert a few lines inside the existing body.
+        var oldSigs = ExtractAllMethodSignatures(oldContent);
+        var newSigs = ExtractAllMethodSignatures(newContent);
+        if (oldSigs.Count > 0 && newSigs.Count > 0)
+        {
+            var removed = oldSigs.Except(newSigs).ToList();
+            var added = newSigs.Except(oldSigs).ToList();
+            if (removed.Count == 1 && added.Count == 1)
+            {
+                // A method was replaced with a different signature — likely a rewrite
+                return (false,
+                    $"Method signature changed: was '{removed[0]}', became '{added[0]}'. " +
+                    "Do not rewrite existing methods. Insert the new code alongside the existing " +
+                    "method body (insertAfter or targeted addition).", 1);
+            }
+        }
+
+        // Detect duplicate HTTP-method route attributes (the most common source
+        // of LLM-produced method duplication — it copies a whole existing method
+        // alongside the new one instead of doing a clean insertion).
+        var uniqueRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(newContent,
+            @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)"""))
+        {
+            if (!uniqueRoutes.Add(m.Groups[1].Value))
+                return (false,
+                    $"Duplicate route \"{m.Groups[1].Value}\" in result — LLM likely " +
+                    "copied an entire existing method instead of inserting the new code. " +
+                    "Use a precise insertion anchor or insertAfter instead.", 1);
+        }
+
+        // Detect empty placeholder classes/structs — the LLM creates them when it
+        // doesn't know a type exists. These exist already in the project; grep for them.
+        var emptyDecls = Regex.Matches(newContent,
+            @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\{\s*(?:\/\*[\s\S]*?\*\/)?\s*\}|" +
+            @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\n\s*\{\s*\n\s*\}")
+            .Cast<Match>().ToList();
+        if (emptyDecls.Count > 0)
+        {
+            var names = emptyDecls.Select(m => m.Value.Trim()).Distinct().ToList();
+            return (false,
+                $"Edit introduces empty type(s): {string.Join(", ", names)}. These types already exist in the project — " +
+                "find their definition and use the existing type instead of creating a stub.", 1);
+        }
+
+        // Detect collapsed SQL whitespace: tokens like 'INTERVAL15' or '=1' where a
+        // space was removed between an SQL keyword/operator and a number/literal.
+        // Only check lines that look like SQL (contain SQL keywords).
+        var sqlKeywords = new[] { "SELECT", "FROM", "WHERE", "AND", "OR", "SET", "INSERT", "UPDATE",
+            "DELETE", "INTO", "VALUES", "JOIN", "ON", "LIKE", "BETWEEN", "IN", "ORDER", "GROUP",
+            "HAVING", "LIMIT", "OFFSET", "INTERVAL", "DATE_ADD", "DATE_SUB", "NOW", "CAST", "CONVERT",
+            "EXISTS", "NOT", "NULL", "IS", "AS", "CASE", "WHEN", "THEN", "ELSE", "END" };
+        var collapsedPat = new Regex(@"(?<=[a-zA-Z])\d", RegexOptions.Compiled);
+        foreach (var line in newContent.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length < 10) continue;
+            // Only check lines that contain an SQL keyword as a whole word
+            if (!sqlKeywords.Any(k => Regex.IsMatch(trimmed, @"\b" + Regex.Escape(k) + @"\b", RegexOptions.IgnoreCase))) continue;
+            var match = collapsedPat.Match(trimmed);
+            if (match.Success)
+            {
+                // Find the 3 chars before the match for context
+                var ctxIdx = Math.Max(0, match.Index - 3);
+                var ctxLen = Math.Min(trimmed.Length - ctxIdx, match.Index - ctxIdx + 2);
+                var ctx = trimmed.Substring(ctxIdx, ctxLen);
+                return (false,
+                    $"SQL whitespace collapsed: '{ctx}[digit]' — likely missing a space before '{match.Value}'. " +
+                    "Copy the exact whitespace from the original SQL. 'INTERVAL 15' is correct, 'INTERVAL15' is not.", 2);
+            }
+        }
+
         return (true, "Programmatic check passed", 10);
     }
 
@@ -6342,7 +6497,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return string.Join("\n", lines);
     }
 
-    /// <summary>Extract a C# method signature (attributes + declaration up to the body brace) for comparison.</summary>
+    /// <summary>Extract a C# method signature (attributes + return type + declaration) for comparison.</summary>
     private static string? ExtractMethodSignature(string code)
     {
         try
@@ -6352,8 +6507,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var method = root.DescendantNodes().OfType<MethodDeclarationSyntax>().FirstOrDefault();
             if (method == null) return null;
             var attrTexts = method.AttributeLists.Select(a => a.ToFullString().Trim());
-            // Return type intentionally excluded — changing it is a common, legitimate edit.
-            var declText = method.Identifier.Text +
+            var returnType = method.ReturnType.ToFullString().Trim();
+            var declText = returnType + " " + method.Identifier.Text +
                            method.TypeParameterList?.ToFullString() + "(" +
                            string.Join(", ", method.ParameterList.Parameters.Select(p =>
                                p.AttributeLists.Any()
@@ -6363,6 +6518,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             return string.Join(" ", attrTexts) + " " + declText;
         }
         catch { return null; }
+    }
+
+    /// <summary>Extract all method signatures from a C# file content for cross-edit comparison.</summary>
+    private static List<string> ExtractAllMethodSignatures(string code)
+    {
+        try
+        {
+            var tree = CSharpSyntaxTree.ParseText(code);
+            var root = tree.GetRoot();
+            return root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                .Select(m =>
+                {
+                    var attrTexts = m.AttributeLists.Select(a => a.ToFullString().Trim());
+                    var returnType = m.ReturnType.ToFullString().Trim();
+                    var declText = returnType + " " + m.Identifier.Text +
+                                   m.TypeParameterList?.ToFullString() + "(" +
+                                   string.Join(", ", m.ParameterList.Parameters.Select(p =>
+                                       p.AttributeLists.Any()
+                                           ? string.Join(" ", p.AttributeLists.Select(a => a.ToFullString().Trim())) + " " + p.ToFullString().Trim()
+                                           : p.ToFullString().Trim())) +
+                                   ")";
+                    return string.Join(" ", attrTexts) + " " + declText;
+                })
+                .ToList();
+        }
+        catch { return new List<string>(); }
     }
 
     private static string TruncateForLog(string s, int maxLen)
@@ -7775,9 +7956,8 @@ Respond with JSON only:
             var sec = content.IndexOf(oldString, idx + oldString.Length, StringComparison.Ordinal);
             if (sec >= 0) return (false, content,
                 "oldString appears more than once — use a longer unique anchor", null);
-            // Use ReplaceLineBlock to apply indentation correction (AutoIndentFromFile)
-            var startLine = content[..idx].Count(c => c == '\n');
-            return (true, ReplaceLineBlock(fileLines, startLine, oldLines.Length, newString), null, null);
+            // Direct splice: LLM already provided correct indentation; don't re-indent.
+            return (true, content[..idx] + newString + content[(idx + oldString.Length)..], null, null);
         }
 
         // ── S2: Trailing-whitespace-trimmed exact match ────────────────────
@@ -7999,11 +8179,21 @@ Respond with JSON only:
             }
         }
 
-        // HTML/template files use tag-based nesting
         if (IsHtmlLikeContent(replacement))
             return AutoIndentHtml(string.Join("\n", replLines), fileIndent);
 
-        return AutoIndentFromFile(string.Join("\n", replLines), fileIndent, fileLines, start);
+        var joined = string.Join("\n", replLines);
+        // Only apply brace-depth re-indentation when the replacement is flat
+        // (all non-empty lines at the same indent level = LLM collapsed structure).
+        // If it already has multiple indent levels, the LLM structured it correctly — keep it.
+        var distinctIndentDepths = replLines
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => GetLeadingWhitespace(l).Length)
+            .Distinct()
+            .Count();
+        return distinctIndentDepths <= 1 && replLines.Length > 2
+            ? AutoIndentFromFile(joined, fileIndent, fileLines, start)
+            : joined;
     }
     private static readonly HashSet<string> VoidHtmlElements = new(StringComparer.OrdinalIgnoreCase)
 {

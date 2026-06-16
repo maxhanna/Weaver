@@ -1786,7 +1786,7 @@
         if (item.done) return;
         // Match by planItemIndex from SSE step events (most precise)
         var doneSteps = vm.streamingSteps.filter(function (s) {
-          if (s.status !== 'done' && s.status !== 'skipped') return false;
+          if (s.status !== 'done' && s.status !== 'skipped' && s.status !== 'error') return false;
           if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
             return s.planItemIndex === item.index;
           }
@@ -2194,6 +2194,8 @@
                             if (!allDone) {
                               incomplete = true;
                               pushAgentLog('warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing');
+                            } else {
+                              incomplete = false;
                             }
                           }
 
@@ -2203,16 +2205,25 @@
                               pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
                               vm.moveCardToDone(card);
                             }
-                            if (incomplete && card.id === vm.activeCardId) {
-                              // Auto-restart: task isn't complete yet, keep working on this card
-                              var pendingCount = 0;
-                              if (vm.planItems) {
-                                pendingCount = vm.planItems.filter(function (pi) { return !pi.done; }).length;
-                              }
-                              pushAgentLog('info', 'Re-starting agent — ' + (pendingCount || 'quality') + ' issue(s) remain for this card');
-                              vm.executeAgent(card, true);
-                              return;
-                            }
+                    if (incomplete && card.id === vm.activeCardId) {
+                      // Increment iteration counter; bail if too many restarts
+                      card._agentIteration = (card._agentIteration || 0) + 1;
+                      var MAX_ITERATIONS = 5;
+                      if (card._agentIteration >= MAX_ITERATIONS) {
+                        pushAgentLog('warn', 'Max iterations (' + MAX_ITERATIONS + ') reached — stopping');
+                        incomplete = false;
+                      } else {
+                        var pendingCount = 0;
+                        if (vm.planItems) {
+                          pendingCount = vm.planItems.filter(function (pi) { return !pi.done; }).length;
+                        }
+                        pushAgentLog('info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (pendingCount || 'quality') + ' issue(s) remain for this card');
+                        $timeout(function () {
+                          vm.executeAgent(card, true);
+                        }, 1000);
+                        return;
+                      }
+                    }
                             if (vm.autoQueue) {
                               $timeout(function () {
                                 // First: prioritize any ready card in the todo column

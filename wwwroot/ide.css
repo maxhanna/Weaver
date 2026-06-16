@@ -305,6 +305,7 @@
     color: var(--text-muted, #666);
     font-size: 13px;
     gap: 8px;
+    background: var(--glass);
 }
 
 .ide-placeholder p {
@@ -371,6 +372,16 @@
     color: #ff8a80;
 }
 
+.ide-external-banner {
+    background: rgba(255, 167, 38, 0.12);
+    border-bottom: 1px solid rgba(255, 167, 38, 0.3);
+    color: #ffcc80;
+}
+
+.ide-external-banner strong {
+    color: #ffa726;
+}
+
 .ide-conflict-banner strong {
     color: #ff5252;
 }
@@ -383,6 +394,10 @@
 .ide-conflict-badge {
     color: #ff5252;
     font-weight: 600;
+}
+
+.ide-external-modified-badge {
+    color: #ffa726;
 }
 
 /* CodeMirror overrides */
@@ -649,26 +664,22 @@
 }
 
 /* Git Diff Viewer */
-.ide-diff-overlay {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    z-index: 1200;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.ide-diff-panel {
-    width: 640px;
-    max-width: 90vw;
-    max-height: 80vh;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+.ide-diff-content {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 16px 64px rgba(0,0,0,0.5);
     overflow: hidden;
+    min-height: 0;
+    background: #0d1117;
+}
+.ide-diff-content--full {
+    /* full flex layout for side-by-side */
+}
+.ide-diff-content--full .ide-diff-sbs {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
 }
 .ide-diff-header {
     display: flex;
@@ -907,19 +918,6 @@
 .ide-diff-file-action:hover {
     opacity: 1 !important;
     background: rgba(255,255,255,0.1);
-}
-
-/* Diff panel wide layout */
-.ide-diff-panel--wide {
-    width: 900px;
-    max-width: 95vw;
-    height: 80vh;
-}
-.ide-diff-panel--wide > div {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
 }
 
 /* Back button */

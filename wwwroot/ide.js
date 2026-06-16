@@ -1,6 +1,6 @@
 ﻿'use strict';
 
-angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
+angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $interval) {
   return {
     init: function(vm, $scope) {
       vm.ide = {
@@ -47,6 +47,63 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
 
 
       var _contentSyncDebounce = null;
+
+      // ── File-change polling ──────────────────────────────────────────────
+      var _pollInterval = null;
+      function startFileChangePolling() {
+        if (_pollInterval) return;
+        _pollInterval = $interval(function () {
+          if (!vm.ide.openTabs || vm.ide.openTabs.length === 0) return;
+          vm.ide.openTabs.forEach(function (tab) {
+            if (!tab.path || !tab.lastModified) return;
+            $http.get('/api/editor/check-modified', {
+              params: { project: vm.selectedProject || '', path: tab.path, since: tab.lastModified }
+            }).then(function (resp) {
+              var data = resp.data;
+              if (!data || !data.exists) return;
+              if (!data.modified) {
+                tab.lastModified = data.lastModified;
+                return;
+              }
+              // File was modified externally
+              if (tab.dirty) {
+                // User has unsaved changes — flag conflict, don't overwrite
+                tab.externalModified = true;
+                return;
+              }
+              // No unsaved changes — reload silently
+              $http.get('/api/editor/content', {
+                params: { project: vm.selectedProject || '', path: tab.path }
+              }).then(function (cr) {
+                var newContent = cr.data && cr.data.content !== undefined ? cr.data.content : (cr.data || '');
+                var wasCurrent = vm.ide.currentFile === tab.path;
+                tab.content = newContent;
+                tab.savedContent = newContent;
+                tab.dirty = false;
+                tab.lastModified = cr.data.lastModified || data.lastModified;
+                tab.lineCount = (newContent.match(/\n/g) || []).length + 1;
+                tab.externalModified = false;
+                if (wasCurrent) {
+                  vm.ide.dirty = false;
+                  if (vm._editor) {
+                    vm._editorIgnoreChange = true;
+                    var cursor = vm._editor.getCursor();
+                    vm._editor.setValue(newContent);
+                    vm._editor.setCursor(cursor);
+                    vm._editorIgnoreChange = false;
+                  }
+                }
+              });
+            });
+          });
+        }, 3000);
+      }
+      function stopFileChangePolling() {
+        if (_pollInterval) {
+          $interval.cancel(_pollInterval);
+          _pollInterval = null;
+        }
+      }
 
       vm.toggleSidebar = function() {
         vm.ide.showSidebar = !vm.ide.showSidebar;
@@ -109,7 +166,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           remoteContent: null,
           fileVersion: 0,
           conflict: false,
-          conflictContent: null
+          conflictContent: null,
+          lastModified: null,
+          externalModified: false
         };
         vm.ide.openTabs.push(tab);
         vm.ide.currentFile = path;
@@ -281,6 +340,8 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           tab.fileVersion = 0;
           tab.conflict = false;
           tab.conflictContent = null;
+          tab.lastModified = resp.data.lastModified || null;
+          tab.externalModified = false;
           vm.ide.dirty = false;
           vm.ide.lastSavedContent = content;
           vm.broadcastFileOpen(path, content);
@@ -295,6 +356,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           if (vm.bughostedStatus === 'connected') {
             $timeout(function() { vm.syncEditorState(); }, 50);
           }
+          startFileChangePolling();
         }, function(err) {
           tab.content = '// Error loading file: ' + (err.statusText || 'Unknown error');
           tab.savedContent = '';
@@ -319,15 +381,25 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
       var _origSwitchTab = vm.switchTab;
       vm.switchTab = function (path) {
         _origSwitchTab(path);
-        $timeout(function () {
-          if (vm.ide.currentTab) {
-            if (!vm._editor) {
-              initEditor();
-            } else {
-              setEditorContent(vm.ide.currentTab.content, path);
+        var tab = vm.ide.currentTab;
+        if (tab && (tab.type === 'file' || !tab.type)) {
+          $timeout(function () {
+            if (vm.ide.currentTab) {
+              if (!vm._editor) {
+                initEditor();
+              } else {
+                setEditorContent(vm.ide.currentTab.content, path);
+              }
             }
+          }, 50);
+        } else if (tab) {
+          // Non-file tab — destroy CodeMirror if it exists to free resources
+          if (vm._editor) {
+            var wrapper = vm._editor.getWrapperElement();
+            if (wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+            vm._editor = null;
           }
-        }, 50);
+        }
       };
 
       vm.saveFile = function() {
@@ -379,7 +451,9 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
           remoteContent: null,
           fileVersion: 0,
           conflict: false,
-          conflictContent: null
+          conflictContent: null,
+          lastModified: null,
+          externalModified: false
         };
         vm.ide.openTabs.push(tab);
         vm.ide.currentFile = fullPath;
@@ -439,16 +513,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.searchQuery = '';
         vm.ide.searchMatches = [];
         vm.ide.searchCurrentIdx = -1;
-        vm.ide.gitDiffVisible = false;
-        vm.ide.gitDiffData = null;
-        vm.ide.gitDiffError = '';
-        vm.ide.gitDiffView = 'list';
-        vm.ide.gitDiffFilePath = '';
-        vm.ide.gitDiffRows = [];
-        vm.ide.gitCommitMessage = '';
-        vm.ide.gitCommitResult = '';
-        vm.ide.gitCommitError = '';
-        vm.ide.gitPrUrl = '';
+        stopFileChangePolling();
         vm.showIDE = false;
       };
 
@@ -460,7 +525,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.ide.searchCurrentIdx = -1;
         $timeout(function () {
           var input = document.querySelector('.ide-search-input');
-          if (input) input.focus();
+          if (input) { input.focus(); input.select(); }
           if (vm._editor) {
             var sel = vm._editor.getSelection();
             if (sel) {
@@ -468,7 +533,12 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
               vm.doSearch();
             }
           }
-        }, 50);
+        });
+        // Force a second focus attempt after ng-if renders the DOM
+        $timeout(function () {
+          var input = document.querySelector('.ide-search-input');
+          if (input) input.focus();
+        }, 100);
       };
 
       vm.closeSearch = function () {
@@ -539,54 +609,90 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         }
       };
 
-      // ── Git Diff Viewer ───────────────────────────────────────────────
-      vm.showGitDiff = function () {
-        vm.ide.gitDiffVisible = true;
-        vm.ide.gitDiffLoading = true;
-        vm.ide.gitDiffData = null;
-        vm.ide.gitDiffError = '';
-        vm.ide.gitDiffView = 'list';
-        vm.ide.gitDiffFilePath = '';
-        vm.ide.gitDiffRows = [];
-        vm.ide.gitCommitMessage = '';
-        vm.ide.gitCommitResult = '';
-        vm.ide.gitCommitError = '';
-        vm.ide.gitPrUrl = '';
-        $http.get('/api/editor/git-diff', { params: { project: vm.selectedProject } }).then(function (resp) {
-          vm.ide.gitDiffLoading = false;
-          vm.ide.gitDiffData = resp.data;
-        }, function (err) {
-          vm.ide.gitDiffLoading = false;
-          vm.ide.gitDiffError = (err.data && err.data.error) || err.statusText || 'Failed to load git diff';
-        });
-      };
+      // ── Git Diff as IDE tabs ──────────────────────────────────────────
+      function _openGitTab(type, displayName, pathKey) {
+        // Reuse existing git tab with same pathKey, or create one
+        var existing = null;
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].gitTabKey === pathKey) { existing = vm.ide.openTabs[i]; break; }
+        }
+        if (existing) {
+          vm.switchTab(existing.path);
+          return existing;
+        }
+        var tab = {
+          type: type,
+          path: pathKey || '_git:' + type,
+          gitTabKey: pathKey || '_git:' + type,
+          displayName: displayName,
+          content: '',
+          savedContent: '',
+          dirty: false,
+          lineCount: 1,
+          remoteEditing: false,
+          gitData: null,
+          gitLoading: false,
+          gitError: '',
+          gitFilePath: '',
+          gitRows: [],
+          gitCommitMessage: '',
+          gitCommitResult: '',
+          gitCommitError: '',
+          gitCommitBusy: false,
+          gitCommitStatus: '',
+          gitPrUrl: '',
+          lastModified: null,
+          externalModified: false
+        };
+        vm.ide.openTabs.push(tab);
+        vm.ide.currentFile = tab.path;
+        vm.ide.currentTab = tab;
+        vm.ide.dirty = false;
+        return tab;
+      }
 
-      vm.closeGitDiff = function () {
-        vm.ide.gitDiffVisible = false;
-        vm.ide.gitDiffData = null;
-        vm.ide.gitDiffError = '';
-        vm.ide.gitDiffView = 'list';
-        vm.ide.gitDiffFilePath = '';
-        vm.ide.gitDiffRows = [];
-        vm.ide.gitCommitMessage = '';
-        vm.ide.gitCommitResult = '';
-        vm.ide.gitCommitError = '';
-        vm.ide.gitPrUrl = '';
+      vm.showGitDiff = function () {
+        var tab = _openGitTab('git-list', 'Source Control', '_git:list');
+        tab.gitLoading = true;
+        tab.gitData = null;
+        tab.gitError = '';
+        tab.gitCommitMessage = '';
+        tab.gitCommitResult = '';
+        tab.gitCommitError = '';
+        tab.gitPrUrl = '';
+        $http.get('/api/editor/git-diff', { params: { project: vm.selectedProject } }).then(function (resp) {
+          tab.gitLoading = false;
+          tab.gitData = resp.data;
+        }, function (err) {
+          tab.gitLoading = false;
+          tab.gitError = (err.data && err.data.error) || err.statusText || 'Failed to load git diff';
+        });
       };
 
       vm.showFileDiff = function (path) {
-        vm.ide.gitDiffView = 'diff';
-        vm.ide.gitDiffFilePath = path;
-        vm.ide.gitDiffLoading = true;
-        vm.ide.gitDiffRows = [];
+        var displayName = 'Diff: ' + (path.split('/').pop() || path);
+        var tab = _openGitTab('git-diff', displayName, '_git:diff:' + path);
+        tab.gitFilePath = path;
+        tab.gitLoading = true;
+        tab.gitRows = [];
+        tab.gitError = '';
         $http.get('/api/editor/git-diff-file', { params: { project: vm.selectedProject, path: path } }).then(function (resp) {
-          vm.ide.gitDiffLoading = false;
+          tab.gitLoading = false;
           var data = resp.data;
-          vm.ide.gitDiffRows = vm.computeLineDiff(data.oldContent || '', data.newContent || '');
+          tab.gitRows = vm.computeLineDiff(data.oldContent || '', data.newContent || '');
         }, function (err) {
-          vm.ide.gitDiffLoading = false;
-          vm.ide.gitDiffError = (err.data && err.data.error) || err.statusText || 'Failed to load file diff';
+          tab.gitLoading = false;
+          tab.gitError = (err.data && err.data.error) || err.statusText || 'Failed to load file diff';
         });
+      };
+
+      vm.backToSourceControl = function () {
+        // Close current diff-content tab if present, then open/reuse git-list tab
+        var curTab = vm.ide.currentTab;
+        if (curTab && curTab.type === 'git-diff') {
+          vm.closeTab(curTab.path);
+        }
+        vm.showGitDiff();
       };
 
       // ── Line diff algorithm (LCS-based) ───────────────────────────────
@@ -640,62 +746,70 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         vm.showGitDiff();
       };
 
+      function _findGitListTab() {
+        for (var i = 0; i < vm.ide.openTabs.length; i++) {
+          if (vm.ide.openTabs[i].type === 'git-list') return vm.ide.openTabs[i];
+        }
+        return null;
+      }
+
       function _doGitCommit(pushAfter, createPr) {
-        vm.ide.gitCommitResult = '';
-        vm.ide.gitCommitError = '';
-        vm.ide.gitPrUrl = '';
-        vm.ide.gitCommitBusy = true;
-        vm.ide.gitCommitStatus = 'Committing';
-        var payload = { project: vm.selectedProject, message: vm.ide.gitCommitMessage };
+        var tab = _findGitListTab() || vm.ide.currentTab;
+        tab.gitCommitResult = '';
+        tab.gitCommitError = '';
+        tab.gitPrUrl = '';
+        tab.gitCommitBusy = true;
+        tab.gitCommitStatus = 'Committing';
+        var payload = { project: vm.selectedProject, message: tab.gitCommitMessage };
         $http.post('/api/editor/git-commit', payload).then(function (resp) {
           if (resp.data.nothingToCommit) {
-            vm.ide.gitCommitBusy = false;
-            vm.ide.gitCommitError = 'Nothing to commit — no changes staged or unstaged';
+            tab.gitCommitBusy = false;
+            tab.gitCommitError = 'Nothing to commit — no changes staged or unstaged';
             return;
           }
           if (!resp.data.success) {
-            vm.ide.gitCommitBusy = false;
-            vm.ide.gitCommitError = resp.data.commitOutput || resp.data.error || 'Commit failed';
+            tab.gitCommitBusy = false;
+            tab.gitCommitError = resp.data.commitOutput || resp.data.error || 'Commit failed';
             return;
           }
           if (pushAfter || createPr) {
-            vm.ide.gitCommitStatus = 'Pushing';
+            tab.gitCommitStatus = 'Pushing';
             $http.post('/api/editor/git-push', payload).then(function (pushResp) {
               if (createPr) {
-                vm.ide.gitCommitStatus = 'Creating PR';
+                tab.gitCommitStatus = 'Creating PR';
                 $http.post('/api/editor/git-pr', payload).then(function (prResp) {
-                  vm.ide.gitCommitBusy = false;
+                  tab.gitCommitBusy = false;
                   if (prResp.data.success) {
-                    vm.ide.gitCommitResult = 'PR created successfully';
-                    vm.ide.gitPrUrl = prResp.data.prUrl || '';
-                    vm.ide.gitCommitMessage = '';
+                    tab.gitCommitResult = 'PR created successfully';
+                    tab.gitPrUrl = prResp.data.prUrl || '';
+                    tab.gitCommitMessage = '';
                     vm.showGitDiff();
                   } else {
-                    vm.ide.gitCommitError = prResp.data.prUrl || prResp.data.error || 'PR creation failed';
+                    tab.gitCommitError = prResp.data.prUrl || prResp.data.error || 'PR creation failed';
                   }
                 }, function (err) {
-                  vm.ide.gitCommitBusy = false;
-                  vm.ide.gitCommitError = 'PR creation failed: ' + (err.statusText || '');
+                  tab.gitCommitBusy = false;
+                  tab.gitCommitError = 'PR creation failed: ' + (err.statusText || '');
                 });
               } else {
-                vm.ide.gitCommitBusy = false;
-                vm.ide.gitCommitResult = 'Committed and pushed successfully';
-                vm.ide.gitCommitMessage = '';
+                tab.gitCommitBusy = false;
+                tab.gitCommitResult = 'Committed and pushed successfully';
+                tab.gitCommitMessage = '';
                 vm.showGitDiff();
               }
             }, function (err) {
-              vm.ide.gitCommitBusy = false;
-              vm.ide.gitCommitError = 'Push failed: ' + (err.statusText || '');
+              tab.gitCommitBusy = false;
+              tab.gitCommitError = 'Push failed: ' + (err.statusText || '');
             });
           } else {
-            vm.ide.gitCommitBusy = false;
-            vm.ide.gitCommitResult = 'Committed successfully';
-            vm.ide.gitCommitMessage = '';
+            tab.gitCommitBusy = false;
+            tab.gitCommitResult = 'Committed successfully';
+            tab.gitCommitMessage = '';
             vm.showGitDiff();
           }
         }, function (err) {
-          vm.ide.gitCommitBusy = false;
-          vm.ide.gitCommitError = (err.data && err.data.error) || err.statusText || 'Commit failed';
+          tab.gitCommitBusy = false;
+          tab.gitCommitError = (err.data && err.data.error) || err.statusText || 'Commit failed';
         });
       }
 
@@ -768,6 +882,31 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout) {
         if (vm.ide.currentFile === path) {
           vm.ide.dirty = false;
         }
+      };
+
+      vm.reloadExternalFile = function(path) {
+        var tab = vm.findTab(path);
+        if (!tab) return;
+        $http.get('/api/editor/content', { params: { project: vm.selectedProject || '', path: path } }).then(function(resp) {
+          var content = resp.data && resp.data.content !== undefined ? resp.data.content : (resp.data || '');
+          var wasCurrent = vm.ide.currentFile === path;
+          tab.content = content;
+          tab.savedContent = content;
+          tab.dirty = false;
+          tab.lastModified = resp.data.lastModified || null;
+          tab.externalModified = false;
+          tab.lineCount = (content.match(/\n/g) || []).length + 1;
+          if (wasCurrent) {
+            vm.ide.dirty = false;
+            if (vm._editor) {
+              vm._editorIgnoreChange = true;
+              var cursor = vm._editor.getCursor();
+              vm._editor.setValue(content);
+              vm._editor.setCursor(cursor);
+              vm._editorIgnoreChange = false;
+            }
+          }
+        });
       };
 
       vm.resolveConflict = function(path) {
