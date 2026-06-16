@@ -4,10 +4,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Weaver.Services
+namespace Weaver.Services;
+
+public class CalendarService
 {
-    public class CalendarService
-    {
         private readonly string _filePath;
         private readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
 
@@ -50,4 +50,3 @@ namespace Weaver.Services
             }
         }
     }
-}

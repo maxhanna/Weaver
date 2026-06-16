@@ -2,10 +2,10 @@ using Xunit;
 using System;
 using Weaver.Services;
 
-namespace MaestroBackend.UnitTests
+namespace MaestroBackend.UnitTests;
+
+public class DebugSkeletonTests
 {
-    public class DebugSkeletonTests
-    {
         [Fact]
         public void DumpSkeletons()
         {
@@ -39,4 +39,3 @@ namespace MaestroBackend.UnitTests
             Assert.True(true);
         }
     }
-}

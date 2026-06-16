@@ -2,6 +2,8 @@
 using Microsoft.AspNetCore.Mvc; 
 using Weaver.Services;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/[controller]")]
 public class BoardDataController : ControllerBase

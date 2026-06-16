@@ -3,12 +3,12 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using System.IO;
 
-namespace Weaver.Controllers
+namespace Weaver.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class FileHintsController : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class FileHintsController : ControllerBase
-    {
         private readonly string _filePath;
 
         public FileHintsController(IWebHostEnvironment env)
@@ -59,4 +59,3 @@ namespace Weaver.Controllers
             }
         }
     }
-}

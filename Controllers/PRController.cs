@@ -5,12 +5,12 @@ using System;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace Weaver.Controllers
+namespace Weaver.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class PRController : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class PRController : ControllerBase
-    {
         private readonly GitService _git;
         private readonly ILogger<PRController> _logger;
 
@@ -161,4 +161,3 @@ namespace Weaver.Controllers
         public string? Summary { get; set; }
         public string? OriginalBranch { get; set; }
     }
-}

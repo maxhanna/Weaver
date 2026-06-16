@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using Weaver.Services;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/config")]
 public class ConfigController : ControllerBase
@@ -109,3 +111,4 @@ public class ConfigController : ControllerBase
 }
 
 public class SetDefaultProjectRequest { public string ProjectPath { get; set; } = ""; }
+

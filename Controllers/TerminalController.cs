@@ -3,6 +3,8 @@ using Weaver.Services;
 using System.Linq;
 using System.Text.RegularExpressions;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/terminal")]
 public class TerminalController : ControllerBase
@@ -507,3 +509,4 @@ public class TerminalController : ControllerBase
         return m.Success ? m.Groups[1].Value : null;
     }
 }
+

@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.SignalR;
 using System.Collections.Concurrent;
 
-namespace Weaver.Hubs
-{
-    /// <summary>
+namespace Weaver.Hubs;
+
+/// <summary>
     /// SignalR hub for real-time co-editing of files.
     ///
     /// Flow:
@@ -180,4 +180,3 @@ namespace Weaver.Hubs
         public int? SelectionEndLine { get; set; }
         public int? SelectionEndColumn { get; set; }
     }
-}

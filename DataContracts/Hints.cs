@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class GlobalHintsStore
 {
     public Dictionary<string, ProjectHints> Projects { get; set; } = new(StringComparer.OrdinalIgnoreCase);

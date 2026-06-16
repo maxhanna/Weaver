@@ -11,6 +11,8 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Weaver.Services;
 using Weaver;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/agent")]
 public class AgentController : ControllerBase

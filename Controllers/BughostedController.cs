@@ -5,6 +5,8 @@ using System.Text;
 using System.IO.Compression;
 using Weaver.Services;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/bughosted")]
 public class BughostedController : ControllerBase
@@ -576,3 +578,4 @@ public class BughostedFsSaveRequest
     public string Content { get; set; } = "";
     public bool CreateIfMissing { get; set; } = true;
 }
+

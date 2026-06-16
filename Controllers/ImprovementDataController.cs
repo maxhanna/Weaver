@@ -1,12 +1,12 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 
-namespace Weaver.Controllers
+namespace Weaver.Controllers;
+
+[ApiController]
+[Route("api/improvementdata")]
+public class ImprovementDataController : ControllerBase
 {
-    [ApiController]
-    [Route("api/improvementdata")]
-    public class ImprovementDataController : ControllerBase
-    {
         private readonly IWebHostEnvironment _env;
         private readonly IConfiguration _config;
 
@@ -77,4 +77,3 @@ namespace Weaver.Controllers
             return Ok();
         }
     }
-}

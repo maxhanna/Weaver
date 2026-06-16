@@ -3,10 +3,10 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
-namespace Weaver.Services
+namespace Weaver.Services;
+
+public class GitResult
 {
-    public class GitResult
-    {
         public bool Success { get; set; }
         public string Output { get; set; } = string.Empty;
         public string Error { get; set; } = string.Empty;
@@ -105,4 +105,3 @@ namespace Weaver.Services
             return result;
         }
     }
-}
