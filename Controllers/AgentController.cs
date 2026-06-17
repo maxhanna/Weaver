@@ -1218,13 +1218,46 @@ public class AgentController : ControllerBase
                 var h = history[i];
                 sb.AppendLine($"\n--- Attempt {i + 1} — Error: {h.error} ---");
                 if (h.error.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
-                    h.error.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase))
+    h.error.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase))
                 {
                     sb.AppendLine("  ⚠ CRITICAL: Your newCode was IDENTICAL to the existing method — nothing changed.");
                     sb.AppendLine("  You reproduced code that is already in the file. This is NOT what CHANGE REQUIRED asks for.");
-                    sb.AppendLine("  You MUST write a DIFFERENT method body that implements the new functionality.");
-                    sb.AppendLine("  The existing method already fetches data. You need to ADD the new logic on top of it.");
-                    sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+
+                    // Check if a prior attempt wrote genuinely different code (but had the wrong signature)
+                    var priorDifferentAttempt = history
+                        .Take(i)
+                        .FirstOrDefault(prev =>
+                            prev.error.Contains("Method signature changed", StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrWhiteSpace(prev.@new));
+
+                    if (priorDifferentAttempt != default)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("  REMINDER — you wrote DIFFERENT code earlier (attempt 1) but had the wrong signature.");
+                        sb.AppendLine("  Use THAT logic, keeping the ORIGINAL method signature:");
+                        sb.AppendLine("  ```");
+                        sb.AppendLine($"  {priorDifferentAttempt.@new[..Math.Min(1000, priorDifferentAttempt.@new.Length)]}");
+                        sb.AppendLine("  ```");
+                        sb.AppendLine("  Change ONLY the first line to match the original return type. Keep all the body logic above.");
+                    }
+                    else
+                    {
+                        sb.AppendLine("  You MUST write a DIFFERENT method body that implements the new functionality.");
+                        sb.AppendLine("  The existing method already fetches data. ADD the new logic on top of it.");
+                        sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+                    }
+                }
+                else if (h.error.Contains("Method signature changed", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("  ⚠ Your new LOGIC was correct but you used the WRONG method signature.");
+                    if (!string.IsNullOrWhiteSpace(h.@new))
+                    {
+                        sb.AppendLine("  Your code (the LOGIC is RIGHT — keep it):");
+                        sb.AppendLine("  ```");
+                        sb.AppendLine($"  {h.@new[..Math.Min(1000, h.@new.Length)]}");
+                        sb.AppendLine("  ```");
+                        sb.AppendLine("  Reuse this EXACT body. Change ONLY the method signature (first line) to match the original return type.");
+                    }
                 }
                 else if (!string.IsNullOrWhiteSpace(h.old))
                 {
@@ -3177,27 +3210,17 @@ public class AgentController : ControllerBase
                 await EmitLog(emitSse, "warn",
                     $"Verify failed for {relPath}: {verifyReason}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", verifyReason));
-                if (string.Equals(
-                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
-                    AgentUtilities.NormalizeLineEndings(lastOld),
-                    StringComparison.Ordinal)) stuckCount++;
-                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 3) goto RecordFailure;
-                continue;
-            }
+                var isIdenticalError =
+    verifyReason.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
+    verifyReason.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase);
+                var trackBy = isIdenticalError
+                    ? AgentUtilities.NormalizeLineEndings(newStr ?? "")
+                    : AgentUtilities.NormalizeLineEndings(oldStr ?? "");
 
-            // hallucination guard
-            var declIssue = CheckForDroppedOrInventedDeclarations(oldStr!, newStr ?? "", fileContent, explorationContext);
-            if (declIssue != null)
-            {
-                await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {declIssue}", ct: ct);
-                history.Add((oldStr!, newStr ?? "", declIssue));
-                if (string.Equals(
-                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
-                    AgentUtilities.NormalizeLineEndings(lastOld),
-                    StringComparison.Ordinal)) stuckCount++;
-                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 3) goto RecordFailure;
+                if (string.Equals(trackBy, AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal))
+                    stuckCount++;
+                else { stuckCount = 0; lastOld = trackBy; }
+                if (stuckCount >= 3) goto RecordFailure; 
                 continue;
             }
 
@@ -3226,26 +3249,6 @@ public class AgentController : ControllerBase
                 Path.GetExtension(relPath).Equals(".jsx", StringComparison.OrdinalIgnoreCase))
             {
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
-            }
-
-            // C# signature preservation check — reject edits that change method
-            // attributes, return type, name, or parameters unless the LLM used
-            // an oldString that doesn't contain a method declaration.
-            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
-            {
-                var oldSig = ExtractMethodSignature(oldStr);
-                var newSig = ExtractMethodSignature(newStr);
-                if (oldSig != null && newSig != null &&
-                    !string.Equals(oldSig, newSig, StringComparison.Ordinal))
-                {
-                    var verr = $"Method signature changed: \"{TruncateForLog(oldSig, 80)}\" → \"{TruncateForLog(newSig, 80)}\". " +
-                               "Preserve attributes, return type, name, and parameters verbatim. Try again with oldString/newString targeting only the changed lines.";
-                    await EmitLog(emitSse, "warn",
-                        $"Verify failed for {relPath}: {verr}", ct: ct);
-                    history.Add((oldStr!, newStr ?? "", verr));
-                    if (stuckCount >= 3) goto RecordFailure;
-                    continue;
-                }
             }
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -6356,54 +6359,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "success", $"✔ Edited {relPath}", ct: ct);
         return (true, "", 10);
     }
-    private static readonly Regex SimpleDeclPattern = new(
-        @"^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+|const\s+|let\s+|var\s+)*([A-Za-z_]\w*)\s*[?!]?\s*(?::\s*[^=;\n]+)?\s*(?:=|;)",
-        RegexOptions.Multiline);
-
-    private static int CountWordOccurrences(string text, string word) =>
-        Regex.Matches(text ?? "", $@"\b{Regex.Escape(word)}\b").Count;
-
-    /// <summary>
-    /// Heuristic guard against renamed/hallucinated identifiers: if an edit drops a
-    /// declaration that ONLY existed inside oldString (removing it deletes it from the
-    /// whole file) while introducing a brand-new identifier that appears NOWHERE else
-    /// in the file or exploration context, the LLM likely invented or typo'd a name
-    /// instead of preserving the existing one.
-    /// </summary>
-    private static string? CheckForDroppedOrInventedDeclarations(
-     string oldStr, string newStr, string fileContent, string? explorationContext)
-    {
-        var oldDecls = SimpleDeclPattern.Matches(oldStr).Select(m => m.Groups[1].Value)
-            .Where(n => n != "this").ToHashSet(StringComparer.Ordinal);
-        var newDecls = SimpleDeclPattern.Matches(newStr).Select(m => m.Groups[1].Value)
-            .Where(n => n != "this").ToHashSet(StringComparer.Ordinal);
-
-        var dropped = oldDecls.Where(d =>
-            !newDecls.Contains(d) &&
-            CountWordOccurrences(fileContent, d) <= CountWordOccurrences(oldStr, d)).ToList();
-
-        var invented = newDecls.Where(d =>
-            !oldDecls.Contains(d) &&
-            CountWordOccurrences(fileContent, d) == 0 &&
-            (string.IsNullOrWhiteSpace(explorationContext) || CountWordOccurrences(explorationContext, d) == 0)).ToList();
-
-        if (dropped.Count == 0 || invented.Count == 0) return null;
-
-        // A full method/class rewrite legitimately introduces unrelated new locals
-        // (e.g. List<int> -> Dictionary<int,string> needs a brand-new "note" var
-        // that has nothing to do with the old "userIds"). Only flag when an
-        // invented name closely resembles a dropped one — that pattern is what
-        // actually indicates an accidental rename/typo.
-        var suspiciousRenames = invented
-            .Where(i => dropped.Any(d => ComputeLineSimilarity(i, d) >= 0.6))
-            .ToList();
-
-        if (suspiciousRenames.Count == 0) return null;
-
-        return $"This edit removes existing declaration(s) [{string.Join(", ", dropped)}] and introduces " +
-               $"unrecognized name(s) [{string.Join(", ", suspiciousRenames)}] that closely resemble them — " +
-               "looks like an accidental rename. Keep existing property/variable names exactly as-is.";
-    }
     private static (bool approved, string reason, int score) VerifyEdit(
         string oldString, string newString, string oldContent, string newContent)
     {
@@ -6463,25 +6418,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.Equals(normOld.Trim(), normNew.Trim(), StringComparison.Ordinal))
             return (false, "oldString and newString are identical after normalization", 3);
 
-        // Detect method signature changes across the edit — prevent the LLM
-        // from rewriting methods wholesale (changing return type, params, etc.)
-        // when it should only insert a few lines inside the existing body.
-        var oldSigs = ExtractAllMethodSignatures(oldContent);
-        var newSigs = ExtractAllMethodSignatures(newContent);
-        if (oldSigs.Count > 0 && newSigs.Count > 0)
-        {
-            var removed = oldSigs.Except(newSigs).ToList();
-            var added = newSigs.Except(oldSigs).ToList();
-            if (removed.Count == 1 && added.Count == 1)
-            {
-                // A method was replaced with a different signature — likely a rewrite
-                return (false,
-                    $"Method signature changed: was '{removed[0]}', became '{added[0]}'. " +
-                    "Do not rewrite existing methods. Insert the new code alongside the existing " +
-                    "method body (insertAfter or targeted addition).", 1);
-            }
-        }
-
         // Detect duplicate HTTP-method route attributes (the most common source
         // of LLM-produced method duplication — it copies a whole existing method
         // alongside the new one instead of doing a clean insertion).
@@ -6519,7 +6455,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             @"\bDAY\d", @"\bHOUR\d", @"\bMINUTE\d", @"\bSECOND\d",  // Time units
             @"\bLIMIT\d",             // LIMIT without space
             @"\bOFFSET\d",            // OFFSET without space
-            @"=\d{1,2}\b",            // Single/double-digit without space after = (e.g., "=1" instead of "= 1")
         };
         foreach (var line in newContent.Split('\n'))
         {
@@ -6549,16 +6484,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static string AutoFixSqlWhitespace(string content)
     {
         if (string.IsNullOrEmpty(content)) return content;
-        var result = content;
-        result = Regex.Replace(result, @"\bINTERVAL(\d)", "INTERVAL $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bDAY(\d)", "DAY $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bHOUR(\d)", "HOUR $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bMINUTE(\d)", "MINUTE $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bSECOND(\d)", "SECOND $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bLIMIT(\d)", "LIMIT $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"\bOFFSET(\d)", "OFFSET $1", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"(=)(\d{1,2}\b)", "$1 $2");
-        return result;
+        var lines = content.Split('\n');
+        var changed = false;
+        for (var li = 0; li < lines.Length; li++)
+        {
+            var trimmed = lines[li].Trim();
+            if (trimmed.Length < 10) continue;
+            // Skip URL lines — they can have =digits in query params that should not be touched
+            if (trimmed.Contains("://")) continue;
+            // Only fix lines that contain SQL keywords
+            if (!Regex.IsMatch(trimmed, @"\b(SELECT|FROM|WHERE|SET|INSERT|UPDATE|DELETE|JOIN|ORDER|GROUP|HAVING|INTERVAL|DATE_ADD|DATE_SUB|NOW)\b", RegexOptions.IgnoreCase))
+                continue;
+
+            var line = lines[li];
+            var ws = Regex.Match(line, @"^(\s*)").Groups[1].Value;
+            var body = line.Substring(ws.Length);
+
+            body = Regex.Replace(body, @"\bINTERVAL(\d)", "INTERVAL $1", RegexOptions.IgnoreCase);
+            body = Regex.Replace(body, @"\bINTERVAL(\w)", "INTERVAL $1", RegexOptions.IgnoreCase);
+            body = Regex.Replace(body, @"(?<![=!<>])=(?=\d)", "= ");
+
+            var newLine = ws + body;
+            if (newLine != lines[li])
+            {
+                lines[li] = newLine;
+                changed = true;
+            }
+        }
+        return changed ? string.Join("\n", lines) : content;
     }
 
     private static string StripLineLeadingWhitespace(string s)
