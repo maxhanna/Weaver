@@ -1080,11 +1080,15 @@ public class AgentController : ControllerBase
         sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
                       "If the change says \"instead of X use Y\", modify X to become Y. " +
                       "Do NOT keep the old X and also add Y next to it. " +
-                       "⚠ RULE: NEVER INVENT type names. Every type (class/record/struct/interface) referenced in newString MUST exist in the project. " +
-                       "The RELATED FILE CONTEXT section above shows type definitions found across the project. " +
-                       "If a type exists there (e.g. CalendarEntry, UserInfo), use it — do NOT invent a similar type with a different name. " +
-                       "If you need a type that is NOT in the context or project, define it in the same edit by including the full class definition. " +
-                       "Do NOT reference properties or call methods unless the type definition in the context shows they exist.");
+           "⚠ RULE: NEVER INVENT type names. Every type (class/record/struct/interface) referenced in newString MUST exist in the project. " +
+                        "The RELATED FILE CONTEXT section above shows type definitions found across the project. " +
+                        "If a type exists there (e.g. CalendarEntry, UserInfo), use it — do NOT invent a similar type with a different name. " +
+                        "If you need a type that is NOT in the context or project, define it in the same edit by including the full class definition. " +
+                        "⚠ RULE: NEVER INVENT property names. Every `.PropertyName` you access on an object MUST exactly match a property " +
+                        "defined in that type's class. Example: CalendarEntry has properties [Id, Type, Note, Date, Ownership] — NOT Title or Description. " +
+                        "Cross-reference EVERY property access against the type definition in AUTO-ENRICHED CONTEXT before writing newString. " +
+                        "If the class definition shows `string? Note { get; set; }` then use `.Note`, not `.Description`. " +
+                        "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -2759,7 +2763,12 @@ public class AgentController : ControllerBase
         await EmitLog(emitSse, "info",
             $"  📄 Auto-enriched context ({enrichment.Length:N0} chars)", new { enrichment }, ct: ct);
 
-        return explorationContext + "\n### AUTO-ENRICHED CONTEXT\n" + enrichment;
+        // Prepend a strong warning about property name accuracy directly before the type definitions
+        var propertyWarning = "\n⚠ CRITICAL: The type definitions below show the EXACT property names. " +
+            "Every `.PropertyName` you write in your edit MUST match these definitions exactly. " +
+            "For example, if CalendarEntry shows `Note` property, use `.Note` not `.Description`. " +
+            "If it shows `Type`, use `.Type` not `.Title`. Cross-reference EVERY property access.\n";
+        return explorationContext + "\n### AUTO-ENRICHED CONTEXT\n" + propertyWarning + enrichment;
     }
 
     // ── Exploration prompt builders ───────────────────────────────────────
@@ -3032,6 +3041,96 @@ public class AgentController : ControllerBase
         catch { /* non-critical */ }
     }
 
+
+    /// <summary>
+    /// Before executing a plan step, check if it combines multiple distinct changes
+    /// and should be decoupled into smaller sub-steps. Returns sub-steps or null.
+    /// Called inline during execution, not at plan-time.
+    /// </summary>
+    private async Task<List<PlanStep>?> CheckAndDecoupleStepAsync(
+        PlanStep step, int itemIdx, string projectRoot, bool emitSse,
+        CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
+    {
+        if (step == null || string.IsNullOrWhiteSpace(step.Change))
+            return null;
+        if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
+            return null;
+
+        // Quick heuristic: only check steps whose description suggests multiple actions
+        var ch = (step.Change ?? "").ToLowerInvariant();
+        if (!ch.Contains(" and ") && !ch.Contains(" & ") && !ch.Contains(", ") &&
+            !ch.Contains(" + "))
+            return null;
+
+        var relPath = step.File.Replace('\\', '/');
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        var sb = new StringBuilder();
+        sb.AppendLine("You are auditing ONE step of a code-change plan before execution.");
+        sb.AppendLine("Your job: detect if this step combines multiple distinct changes and should be split into separate steps.");
+        sb.AppendLine();
+        sb.AppendLine($"--- STEP ---");
+        sb.AppendLine($"File:   {step.File}");
+        sb.AppendLine($"Change: {step.Change}");
+        sb.AppendLine();
+        sb.AppendLine("Split if the change describes TWO OR MORE distinct edits:");
+        sb.AppendLine("  - Adding a property AND wiring it up in the template (2 files or 2 concerns)");
+        sb.AppendLine("  - Adding code AND removing old code (e.g. move = add + delete)");
+        sb.AppendLine("  - Changing logic AND adding UI elements");
+        sb.AppendLine("  - Adding a backend endpoint AND frontend code");
+        sb.AppendLine();
+        sb.AppendLine("Do NOT split if the step is a single coherent edit (e.g. \"Modify the X method to Y\").");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY valid JSON:");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"needsDecoupling\": false,");
+        sb.AppendLine("  \"decoupledSteps\": []");
+        sb.AppendLine("}");
+        sb.AppendLine("Each decoupledStep: { \"file\": \"...\", \"change\": \"...\" }");
+
+        if (System.IO.File.Exists(fullPath) && AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
+        {
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            sb.AppendLine();
+            sb.AppendLine("TARGET FILE CONTENT (first 3000 chars):");
+            sb.AppendLine("```");
+            sb.AppendLine(content.Length > 3000 ? content[..3000] + "\n..." : content);
+            sb.AppendLine("```");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("### ORIGINAL TASK ###");
+        sb.AppendLine(originalPrompt.Length > 500 ? originalPrompt[..500] + "..." : originalPrompt);
+
+        var (raw, _, _) = await CallLlmRawStreaming(
+            "You output ONLY valid JSON. Never add explanation.",
+            sb.ToString(), emitSse, ct, TimeSpan.FromSeconds(15), maxTokens: 1024);
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
+            using var doc = JsonDocument.Parse(cleaned);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("needsDecoupling", out var nd) || !nd.GetBoolean())
+                return null;
+            if (!root.TryGetProperty("decoupledSteps", out var dcArr) || dcArr.ValueKind != JsonValueKind.Array)
+                return null;
+
+            var result = new List<PlanStep>();
+            foreach (var el in dcArr.EnumerateArray())
+            {
+                var f = el.TryGetProperty("file", out var fEl) ? fEl.GetString() ?? "" : "";
+                var c = el.TryGetProperty("change", out var cEl) ? cEl.GetString() ?? "" : "";
+                if (!string.IsNullOrWhiteSpace(f) && !string.IsNullOrWhiteSpace(c))
+                    result.Add(new PlanStep { File = f, Change = c, Priority = step.Priority });
+            }
+            return result.Count > 0 ? result : null;
+        }
+        catch { return null; }
+    }
 
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
@@ -6485,6 +6584,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
 
+                // ── Per-step decoupling check: split into sub-steps if needed ──
+                var decoupledSubSteps = await CheckAndDecoupleStepAsync(
+                    item, itemIdx, projectRoot, emitSse, ct, allResults, cardId, prompt);
+                if (decoupledSubSteps?.Count > 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
+                        string.Join(" | ", decoupledSubSteps.Select(s => s.Change)), ct: ct);
+                    planItems.RemoveAt(itemIdx);
+                    planItems.InsertRange(itemIdx, decoupledSubSteps);
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                        await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+                    itemIdx--;
+                    continue;
+                }
+
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
                 var prevCount = allResults.Count;
                 stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
@@ -6734,6 +6849,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var strippedContent = StripLineLeadingWhitespace(normNewContent);
             if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
                 return (false, "newString not found after replacement", 4);
+        }
+
+        // Detect hallucinated property names: LLMs often use common names like Title,
+        // Description, StartTime, EndTime that don't exist on the actual model types.
+        // If a property name appears nowhere in the old file but the new code uses it,
+        // it's likely hallucinated.
+        var hallucinatedPropertyNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Title", "Description", "StartTime", "EndTime",
+            "UserId", "UserName", "EventTitle", "EventDescription",
+            "Summary", "Location", "Attendees", "Organizer"
+        };
+        var newlyIntroducedProps = hallucinatedPropertyNames
+            .Where(p => !Regex.IsMatch(normOldContent, $@"\b{Regex.Escape(p)}\b", RegexOptions.IgnoreCase))
+            .Where(p => Regex.IsMatch(normNewContent, $@"\.{Regex.Escape(p)}\b", RegexOptions.IgnoreCase))
+            .ToList();
+        if (newlyIntroducedProps.Count > 0)
+        {
+            return (false,
+                $"Newly introduced property(s) [{string.Join(", ", newlyIntroducedProps)}] not found in any " +
+                $"model, SQL column, or comment in the original file. These are common LLM hallucination names. " +
+                $"Cross-reference the type definition in AUTO-ENRICHED CONTEXT and use the EXACT property names " +
+                $"shown there (e.g. CalendarEntry uses 'Type' and 'Note', not 'Title' and 'Description').", 2);
         }
 
         // oldString should not appear as-frequently in the result
@@ -9303,14 +9441,14 @@ done = build OK; command = run this to fix; ask_user = need input";
 
             var userPrompt = $"Build command: {buildCmd}\nOutput:\n```\n{fresh}\n```\nIteration: {iteration}/{maxIter}";
             var (raw, err) = await CallLlmRawText(systemPrompt, userPrompt, ct);
-            if (string.IsNullOrWhiteSpace(raw)) { await EmitLog(emitSse, "warn", $"Build check LLM failed: {err}", ct: ct); break; }
+            if (string.IsNullOrWhiteSpace(raw)) { await EmitLog(emitSse, "warn", $"Build check LLM failed: {err}", new { raw }, ct: ct); break; }
 
             var decision = ParseBuildCheckResponse(raw);
-            if (decision == null) { await EmitLog(emitSse, "warn", "Could not parse build check response", ct: ct); break; }
+            if (decision == null) { await EmitLog(emitSse, "warn", "Could not parse build check response", new { raw, decision }, ct: ct); break; }
 
             switch (decision.Decision)
             {
-                case "done": await EmitLog(emitSse, "success", $"Build OK: {decision.Summary}", ct: ct); return true;
+                case "done": await EmitLog(emitSse, "success", $"Build OK: {decision.Summary}", new {raw, decision}, ct: ct); return true;
                 case "command":
                     if (!string.IsNullOrWhiteSpace(decision.Command))
                     {
