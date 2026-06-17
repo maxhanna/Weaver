@@ -138,7 +138,10 @@ public class AgentController : ControllerBase
             "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
             "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
             "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
-            "20. NEVER INVENT code: every variable, property, method, class, and component you reference in newString MUST already exist in the target file's codebase (or its imports). " +
+            "20. NEVER INVENT type names. Every type (class/record/struct/interface) you reference in newString MUST already exist in the project. " +
+                "The RELATED FILE CONTEXT / AUTO-ENRICHED CONTEXT sections show type definitions found across the project. " +
+                "Use those existing types — do NOT rename them or create similar ones. " +
+                "If you need a type not present in the context, define it fully (not as a stub) in the same edit. " +
             "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'), 'font-size:12px' → 'font-size:12px' is OK but '12pximportant' → '12px important'. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
                 "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
                 "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
@@ -1077,9 +1080,11 @@ public class AgentController : ControllerBase
         sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
                       "If the change says \"instead of X use Y\", modify X to become Y. " +
                       "Do NOT keep the old X and also add Y next to it. " +
-                      "⚠ RULE: NEVER INVENT code — every property, variable, method, and component in newString MUST already exist in this file. " +
-                      "Look at existing popupPanel/code sections in the target file; copy their exact structure and class names. " +
-                      "Do NOT reference properties like `title` or `description` or call methods like `executeCommand()` unless you can see they already exist in the file.");
+                       "⚠ RULE: NEVER INVENT type names. Every type (class/record/struct/interface) referenced in newString MUST exist in the project. " +
+                       "The RELATED FILE CONTEXT section above shows type definitions found across the project. " +
+                       "If a type exists there (e.g. CalendarEntry, UserInfo), use it — do NOT invent a similar type with a different name. " +
+                       "If you need a type that is NOT in the context or project, define it in the same edit by including the full class definition. " +
+                       "Do NOT reference properties or call methods unless the type definition in the context shows they exist.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -1177,7 +1182,8 @@ public class AgentController : ControllerBase
                 sb.AppendLine();
                 sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): "
                     + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods. "
-                    + "For SMALL changes (1-5 lines), use oldString/newString even for code files — copy lines verbatim from the excerpt above.");
+                    + "For SMALL changes (1-5 lines), use oldString/newString even for code files — copy lines verbatim from the excerpt above. "
+                    + "NEVER rewrite inline SQL queries — preserve them exactly as-is.");
                 sb.AppendLine("For ALL other file types: use oldString/newString — FORMAT C does not apply.");
             }
             else
@@ -1195,11 +1201,12 @@ public class AgentController : ControllerBase
         sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
                       "Include the line above/below for anchor context, repeat them unchanged in newString.");
         sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
-                      "with unchanged signature.");
+                      "with unchanged signature and preserve all inline SQL verbatim.");
         sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
         sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
         sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
-                      "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode.");
+                      "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode. " +
+                      "PRESERVE all existing inline SQL queries verbatim — never rewrite them.");
         sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
                       "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
                       "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
@@ -1244,7 +1251,35 @@ public class AgentController : ControllerBase
                     {
                         sb.AppendLine("  You MUST write a DIFFERENT method body that implements the new functionality.");
                         sb.AppendLine("  The existing method already fetches data. ADD the new logic on top of it.");
-                        sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+
+                        var priorSqlError = history
+                            .Take(i)
+                            .FirstOrDefault(prev =>
+                                prev.error.Contains("SQL table(s)", StringComparison.OrdinalIgnoreCase) &&
+                                !string.IsNullOrWhiteSpace(prev.old));
+
+                        if (priorSqlError != default)
+                        {
+                            var returnLine = FindLastReturnLine(priorSqlError.old);
+                            if (returnLine != null)
+                            {
+                                sb.AppendLine();
+                                sb.AppendLine("  PREVIOUS ATTEMPT failed because you changed the SQL tables.");
+                                sb.AppendLine("  Use oldString/newString anchored on the return statement to INSERT your");
+                                sb.AppendLine("  new code BEFORE it, leaving the existing SQL untouched:");
+                                sb.AppendLine($"  oldString: \"{returnLine.Trim()}\"");
+                                sb.AppendLine($"  newString: \"<your new code here>");
+                                sb.AppendLine($"{returnLine.Trim()}\"");
+                            }
+                            else
+                            {
+                                sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+                            }
+                        }
+                        else
+                        {
+                            sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+                        }
                     }
                 }
                 else if (h.error.Contains("Method signature changed", StringComparison.OrdinalIgnoreCase))
@@ -2050,6 +2085,18 @@ public class AgentController : ControllerBase
 
         var ctx = new StringBuilder();
         var filesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var normalizedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string AbsNormalize(string p)
+        {
+            try
+            {
+                var full = Path.IsPathRooted(p)
+                    ? Path.GetFullPath(p)
+                    : Path.GetFullPath(Path.Combine(projectRoot, p));
+                return full.Replace('\\', '/').TrimEnd('/');
+            }
+            catch { return p.Replace('\\', '/').TrimEnd('/'); }
+        }
 
         // ── Seed exploration with attached file content ───────────────────
         if (attachedFiles != null && attachedFiles.Count > 0)
@@ -2062,6 +2109,7 @@ public class AgentController : ControllerBase
                     var afPath = Path.GetFullPath(Path.Combine(projectRoot, af.TrimStart('/', '\\')));
                     if (System.IO.File.Exists(afPath) && filesRead.Add(afPath))
                     {
+                        normalizedPaths.Add(AbsNormalize(afPath));
                         var afContent = await System.IO.File.ReadAllTextAsync(afPath, ct);
                         var afRel = Path.GetRelativePath(projectRoot, afPath).Replace('\\', '/');
                         ctx.AppendLine($"--- {afRel} (attached) ---");
@@ -2115,6 +2163,7 @@ public class AgentController : ControllerBase
             ctx.AppendLine("```");
             ctx.AppendLine();
             filesRead.Add(relPath);
+            normalizedPaths.Add(AbsNormalize(relPath));
             await EmitLog(emitSse, "info", $"  📄 {relPath}", ct: ct);
         }
 
@@ -2171,7 +2220,7 @@ public class AgentController : ControllerBase
             var newlyRead = 0;
             foreach (var requested in parsed.FilesToRead.Take(3))
             {
-                if (filesRead.Contains(requested)) continue;
+                if (normalizedPaths.Contains(AbsNormalize(requested))) continue;
 
                 var fp = Path.GetFullPath(
                     Path.Combine(projectRoot, requested.Replace('/', Path.DirectorySeparatorChar)));
@@ -2214,6 +2263,7 @@ public class AgentController : ControllerBase
                             ctx.AppendLine();
                         }
                         filesRead.Add(correctPath);
+                        normalizedPaths.Add(AbsNormalize(correctPath));
                         await EmitLog(emitSse, "info",
                             $"  🔍 {requested} → {correctPath}", ct: ct);
                     }
@@ -2259,6 +2309,7 @@ public class AgentController : ControllerBase
                 ctx.AppendLine("```");
                 ctx.AppendLine();
                 filesRead.Add(requested);
+                normalizedPaths.Add(AbsNormalize(requested));
                 newlyRead++;
                 await EmitLog(emitSse, "info", $"  📄 {requested}", ct: ct);
             }
@@ -2376,7 +2427,7 @@ public class AgentController : ControllerBase
         }, emitSse, ct);
 
         await EmitLog(emitSse, "info",
-            $"  ✅ Exploration done — {filesRead.Count} file(s), confidence {confidence}%",
+            $"  ✅ Exploration done — {filesRead.Count} file(s), confidence {confidence}%", filesRead.ToList(),
             ct: ct);
 
         return new StepExplorationResult
@@ -2391,6 +2442,18 @@ public class AgentController : ControllerBase
             RoundsCompleted = roundsCompleted,
             LowConfidenceWarning = lowConfidenceWarning
         };
+    }
+
+    private static string NormalizePathForDedup(string path, string projectRoot)
+    {
+        try
+        {
+            var full = Path.IsPathRooted(path)
+                ? Path.GetFullPath(path)
+                : Path.GetFullPath(Path.Combine(projectRoot, path));
+            return full.Replace('\\', '/').TrimEnd('/');
+        }
+        catch { return path.Replace('\\', '/').TrimEnd('/'); }
     }
 
     /// <summary>
@@ -2429,6 +2492,274 @@ public class AgentController : ControllerBase
         var cleaned = raw.Trim().Trim('"').Trim();
         if (cleaned.Length > 250) cleaned = cleaned[..250] + "…";
         return cleaned;
+    }
+
+    /// <summary>
+    /// After exploration, auto-discover referenced types and SQL table schemas
+    /// from the project to enrich the edit context.  This catches gaps the
+    /// LLM exploration agent misses (type definitions, same-table SQL).
+    /// </summary>
+    private async Task<string> EnrichContextWithProjectTypesAndSql(
+        string projectRoot, string relPath, string stepChange, string explorationContext,
+        HashSet<string> alreadyRead, bool emitSse, CancellationToken ct)
+    {
+        var buf = new StringBuilder();
+        const int MaxEnrichChars = 6000;
+
+        var targetFullPath = Path.GetFullPath(
+            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!System.IO.File.Exists(targetFullPath)) return explorationContext;
+        var targetContent = await System.IO.File.ReadAllTextAsync(targetFullPath, Encoding.UTF8, ct);
+
+        // ── 1) Find the target METHOD body ──────────────────────────────
+        // Extract method name from step change (e.g. "Modify GetUsersWithCalendarNotificationsEnabled")
+        var methodNameMatch = Regex.Match(stepChange,
+            @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(\w+)\s*[\(<]?",
+            RegexOptions.IgnoreCase);
+        var methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
+
+        string? methodBody = null;
+        if (methodName != null)
+        {
+            // Find the method declaration and extract its body
+            var methodStartMatch = Regex.Match(targetContent,
+                $@"({Regex.Escape(methodName)}\s*\()", RegexOptions.IgnoreCase);
+            if (methodStartMatch.Success)
+            {
+                var startIdx = methodStartMatch.Index;
+                // Find the opening brace of this method (skip parameter list)
+                var searchFrom = startIdx + methodStartMatch.Length;
+                // Skip past the parameter list to find the opening {
+                var parenDepth = 1; // already consumed the opening ( in the regex
+                var braceIdx = -1;
+                for (var i = searchFrom; i < targetContent.Length; i++)
+                {
+                    if (targetContent[i] == '(') parenDepth++;
+                    else if (targetContent[i] == ')') parenDepth--;
+                    else if (targetContent[i] == '{' && parenDepth == 0)
+                    { braceIdx = i; break; }
+                }
+                if (braceIdx > 0)
+                {
+                    // Match the method body with brace counting
+                    var depth = 0;
+                    var endIdx = -1;
+                    for (var i = braceIdx; i < targetContent.Length; i++)
+                    {
+                        if (targetContent[i] == '{') depth++;
+                        else if (targetContent[i] == '}') { depth--; if (depth == 0) { endIdx = i; break; } }
+                    }
+                    if (endIdx > 0)
+                        methodBody = targetContent.Substring(braceIdx, endIdx - braceIdx + 1);
+                }
+            }
+        }
+
+        var searchScope = methodBody ?? targetContent; // fall back to full file
+
+        // ── 2) Extract SQL only from C# string literals inside the method ──
+        // Match @"..." (verbatim) and "..." (regular) string literals containing SQL keywords
+        var sqlStrings = new List<string>();
+        foreach (Match sm in Regex.Matches(searchScope,
+            @"@?""(?:[^""\\]*(?:\\.[^""\\]*)*)""", RegexOptions.Singleline))
+        {
+            var raw = sm.Value;
+            // Only keep strings that look like SQL queries
+            if (Regex.IsMatch(raw, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE)\b",
+                RegexOptions.IgnoreCase))
+                sqlStrings.Add(raw);
+        }
+
+        // Extract table names from the SQL strings
+        var tableNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Common English words that are NOT table names
+        var notTableWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "the", "and", "or", "not", "in", "on", "at", "to", "for", "of", "by",
+            "as", "is", "it", "an", "be", "has", "have", "are", "was", "were",
+            "from", "into", "with", "without", "using", "where", "when", "while",
+            "then", "than", "this", "that", "these", "those", "each", "all",
+            "both", "between", "after", "before", "above", "below", "under",
+            "over", "through", "during", "until", "since", "within", "about",
+            "join", "inner", "outer", "left", "right", "full", "cross", "natural",
+            "order", "group", "having", "limit", "offset", "set", "values",
+            "select", "insert", "update", "delete", "create", "alter", "drop",
+            "true", "false", "null", "default", "unique", "index", "key",
+            "primary", "foreign", "check", "cascade", "restrict", "action",
+            "count", "sum", "avg", "min", "max", "distinct", "exists", "case",
+            "when", "else", "then", "end", "cast", "convert", "coalesce",
+            "nullif", "date", "time", "timestamp", "year", "month", "day",
+            "hour", "minute", "second", "now", "utc_timestamp",
+            "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+            "decimal", "numeric", "float", "double", "real", "bit", "boolean",
+            "char", "varchar", "nvarchar", "text", "blob", "binary", "varbinary",
+            "enum", "set", "json", "geometry", "point", "linestring", "polygon",
+            "return", "returns", "declare", "begin", "end", "if", "else",
+            "iterate", "leave", "loop", "repeat", "while", "signal", "resignal",
+            "cursor", "handler", "continue", "exit", "undo", "condition",
+            "open", "close", "fetch", "into", "call", "rename", "truncate",
+            "start", "stop", "commit", "rollback", "savepoint", "release",
+            "lock", "unlock", "grant", "revoke", "analyze", "optimize",
+            "reorganize", "repair", "check", "checksum", "backup", "restore",
+            "utf8", "utf8mb4", "ascii", "latin1", "unicode",
+            "auto_increment", "unsigned", "signed", "zerofill",
+            "current_timestamp", "current_date", "current_time", "localtime",
+            "localtimestamp"
+        };
+
+        foreach (Match m in Regex.Matches(string.Join("\n", sqlStrings),
+            @"(?:FROM|JOIN|INTO|UPDATE|TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+`?(\w+(?:\.\w+)?)`?",
+            RegexOptions.IgnoreCase))
+        {
+            var rawTbl = m.Groups[1].Value;
+            // Handle schema.table → extract just the table name
+            var tbl = rawTbl.Contains('.') ? rawTbl.Split('.')[^1] : rawTbl;
+            if (tbl.Length > 2 && !notTableWords.Contains(tbl) &&
+                tbl[0] != '@' && !char.IsDigit(tbl[0]))
+                tableNames.Add(tbl);
+        }
+
+        // ── 3) Extract model type references only from the method body ───────
+        var skipTypes = new HashSet<string>(StringComparer.Ordinal) {
+            "string", "int", "bool", "long", "double", "float", "decimal", "char",
+            "byte", "short", "uint", "ulong", "ushort", "sbyte", "object", "void",
+            "Task", "ValueTask", "IEnumerable", "ICollection", "IList", "List",
+            "Dictionary", "HashSet", "Queue", "Stack", "Tuple", "Nullable",
+            "StringBuilder", "StringReader", "StringWriter",
+            "HttpResponseMessage", "HttpRequestMessage",
+            "ActionResult", "IActionResult", "OkResult", "OkObjectResult",
+            "BadRequestResult", "NotFoundResult", "StatusCodeResult",
+            "JsonResult", "FileResult", "ContentResult", "RedirectResult",
+            "ViewResult", "PartialViewResult", "IQueryable",
+            "Thread", "TaskCompletionSource", "CancellationToken",
+            "HttpClient", "HttpContext", "HttpRequest", "HttpResponse",
+            "Stream", "StreamReader", "StreamWriter", "MemoryStream",
+            "FileStream", "BinaryReader", "BinaryWriter", "TextReader", "TextWriter",
+            "DateTime", "DateTimeOffset", "TimeSpan", "Guid", "Uri", "Version",
+            "Regex", "Match", "Group", "Capture", "StringComparison",
+            "Encoding", "UTF8", "Unicode", "ASCII",
+            "Exception", "InvalidOperationException", "ArgumentNullException",
+            "ArgumentException", "IOException", "FormatException",
+            "Response", "Request", "Delegate", "Func", "Action", "Predicate",
+            "NameValueCollection", "IOrderedEnumerable",
+            "IServiceProvider", "IDisposable", "IAsyncDisposable",
+            "Startup", "Program", "MySqlConnection", "MySqlCommand", "MySqlDataReader",
+            "MySqlParameter", "MySqlTransaction", "MySqlException",
+            "SqlConnection", "SqlCommand", "SqlDataReader",
+            "NpgsqlConnection", "NpgsqlCommand", "NpgsqlDataReader",
+            "IConfiguration", "Log", "JsonDocument", "JsonNode", "JsonObject",
+            "JsonArray", "JsonValue", "JsonSerializer", "JsonSerializerOptions"
+        };
+        var serviceSuffixes = new[] { "Service", "Controller", "Handler", "Manager",
+            "Provider", "Factory", "Repository", "Helper", "Util", "Extension",
+            "Middleware", "Filter", "Attribute", "Converter", "Mapper", "Builder",
+            "Adapter", "Proxy", "Facade", "Strategy", "Observer", "Configuration",
+            "Options", "Settings" };
+
+        var typeRefs = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(searchScope,
+            @"(?:new\s+|:\s*|<\s*|,\s*|Task\s*<\s*|ValueTask\s*<\s*)" +
+            @"([A-Z][a-zA-Z0-9]+)" +
+            @"(?:\s*[>\[,;\)]|\s+\w|\s*\{|\s*\?)"))
+        {
+            var name = m.Groups[1].Value;
+            if (!skipTypes.Contains(name) && name.Length > 2 &&
+                !serviceSuffixes.Any(s => name.EndsWith(s, StringComparison.Ordinal)))
+                typeRefs.Add(name);
+        }
+
+        await EmitLog(emitSse, "info",
+            $"  🔎 Enrichment: {tableNames.Count} table(s) [{string.Join(", ", tableNames.Take(5))}], " +
+            $"{typeRefs.Count} model type(s) from method '{(methodName ?? "?")}'", new { typeRefs, tableNames }, ct: ct);
+
+        if (typeRefs.Count == 0 && tableNames.Count == 0)
+            return explorationContext;
+
+        var projectFiles = Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\")
+                     && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\"))
+            .ToList();
+
+        // ── 3) Same-table SQL from other files ──────────────────────────────
+        foreach (var tblName in tableNames)
+        {
+            if (buf.Length > MaxEnrichChars) break;
+            foreach (var pf in projectFiles)
+            {
+                if (buf.Length > MaxEnrichChars) break;
+                try
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(pf, Encoding.UTF8, ct);
+                    var rel = Path.GetRelativePath(projectRoot, pf).Replace('\\', '/');
+                    if (rel == relPath || alreadyRead.Contains(rel) || alreadyRead.Contains(pf))
+                        continue;
+
+                    // Extract SQL strings containing this table name
+                    var sqlFound = new List<string>();
+                    foreach (Match sm in Regex.Matches(content,
+                        @"@?""(?:[^""\\]*(?:\\.[^""\\]*)*)""", RegexOptions.Singleline))
+                    {
+                        var val = sm.Value;
+                        if (!Regex.IsMatch(val, @"\b(SELECT|INSERT|UPDATE|DELETE)\b",
+                            RegexOptions.IgnoreCase)) continue;
+                        if (Regex.IsMatch(val, @"\b" + Regex.Escape(tblName) + @"\b",
+                            RegexOptions.IgnoreCase))
+                        {
+                            // Format: trim the surrounding quotes, limit length
+                            var clean = val.Length > 300 ? val[..297] + "..." : val;
+                            sqlFound.Add(clean);
+                        }
+                    }
+                    if (sqlFound.Count == 0) continue;
+
+                    alreadyRead.Add(rel);
+                    buf.AppendLine($"### {rel}  (table: {tblName})");
+                    buf.AppendLine("```sql");
+                    foreach (var s in sqlFound.Take(5))
+                        buf.AppendLine(s);
+                    buf.AppendLine("```");
+                    buf.AppendLine();
+                }
+                catch { continue; }
+            }
+        }
+
+        // ── 4) Model type definitions ───────────────────────────────────────
+        foreach (var typeName in typeRefs.OrderByDescending(t => t.Length))
+        {
+            if (buf.Length > MaxEnrichChars) break;
+            foreach (var pf in projectFiles)
+            {
+                if (buf.Length > MaxEnrichChars) break;
+                try
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(pf, Encoding.UTF8, ct);
+                    if (Regex.IsMatch(content,
+                        $@"(?:class|record|struct)\s+{Regex.Escape(typeName)}\b"))
+                    {
+                        var rel = Path.GetRelativePath(projectRoot, pf).Replace('\\', '/');
+                        if (alreadyRead.Contains(rel) || alreadyRead.Contains(pf)) continue;
+                        alreadyRead.Add(rel);
+
+                        var excerpt = ExtractRelevantExcerpt(content, typeName, null, 600);
+                        buf.AppendLine($"### {rel}  (model: {typeName})");
+                        buf.AppendLine("```csharp");
+                        buf.AppendLine(excerpt);
+                        buf.AppendLine("```");
+                        buf.AppendLine();
+                        break;
+                    }
+                }
+                catch { continue; }
+            }
+        }
+
+        if (buf.Length == 0) return explorationContext;
+
+        var enrichment = buf.ToString();
+        await EmitLog(emitSse, "info",
+            $"  📄 Auto-enriched context ({enrichment.Length:N0} chars)", new { enrichment }, ct: ct);
+
+        return explorationContext + "\n### AUTO-ENRICHED CONTEXT\n" + enrichment;
     }
 
     // ── Exploration prompt builders ───────────────────────────────────────
@@ -2789,6 +3120,14 @@ public class AgentController : ControllerBase
 
         step = exploration.EnrichedStep;
         var explorationContext = exploration.ExplorationContext;
+        // Auto-enrich with type definitions and same-table SQL from the project
+        if (!string.IsNullOrWhiteSpace(explorationContext))
+        {
+            explorationContext = await EnrichContextWithProjectTypesAndSql(
+                projectRoot, relPath, step.Change, explorationContext,
+                new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
+                emitSse, ct);
+        }
 
         if (exploration.LowConfidenceWarning != null)
         {
@@ -3787,10 +4126,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
         "10. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
         "11. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
-        "12. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
-        "For reading project source files use _explore with the relative file path. " +
-        "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
-        "If you don't know which file contains the code, add an _explore step first.\n\n" +
+         "12. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
+         "For reading project source files use _explore with the relative file path. " +
+         "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
+         "If you don't know which file contains the code, add an _explore step first.\n" +
+         "13. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
+         "DO NOT re-describe existing functionality as something that needs to be built. " +
+         "BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" " +
+         "(the method already collects events — \"collect\" is wrong). " +
+         "GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" " +
+         "(describes only the missing logic). " +
+         "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n\n" +
          "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
@@ -6478,7 +6824,86 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
 
+        // Detect SQL table-name replacement: LLM often rewrites SQL from scratch with
+        // different tables. Run auto-fix first so whitespace differences don't false-fire.
+        var fixedOld = AutoFixSqlWhitespace(normOldContent);
+        var fixedNew = AutoFixSqlWhitespace(normNewContent);
+        var oldTables = ExtractSqlTableNames(fixedOld);
+        var newTables = ExtractSqlTableNames(fixedNew);
+        if (oldTables.Count > 0 && newTables.Count > 0)
+        {
+            var missingTables = oldTables.Where(t => !newTables.Contains(t)).ToList();
+            if (missingTables.Count > 0)
+            {
+                // Find a return statement in the original method body as anchor suggestion
+                var returnAnchor = FindLastReturnLine(normOld);
+                var anchorHint = returnAnchor != null
+                    ? $" Anchor on the return statement: oldString=\"{returnAnchor.Trim()}\""
+                    : "";
+                return (false,
+                    $"Edit replaces existing SQL table(s) [{string.Join(", ", missingTables.Take(3))}] with different tables. " +
+                    "Preserve the original query structure; only add the required logic." + anchorHint, 1);
+            }
+        }
+
         return (true, "Programmatic check passed", 10);
+    }
+
+    /// <summary>Find the last 'return ...;' line in a code fragment (e.g. a method body)
+    /// for use as an oldString anchor suggestion.</summary>
+    private static string? FindLastReturnLine(string code)
+    {
+        if (string.IsNullOrEmpty(code)) return null;
+        var lines = code.Split('\n', StringSplitOptions.None);
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            var trimmed = lines[i].Trim();
+            if (trimmed.StartsWith("return ") && trimmed.EndsWith(";"))
+                return lines[i];
+        }
+        return null;
+    }
+
+    /// <summary>Extract table names from inline SQL strings in C# source.</summary>
+    private static HashSet<string> ExtractSqlTableNames(string source)
+    {
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "the", "and", "or", "not", "in", "on", "at", "to", "for", "of", "by",
+            "as", "is", "it", "from", "join", "inner", "outer", "left", "right",
+            "where", "set", "values", "select", "insert", "update", "delete",
+            "order", "group", "having", "limit", "offset", "true", "false", "null",
+            "count", "sum", "avg", "min", "max", "distinct",
+            "date", "time", "year", "month", "day", "hour", "minute", "second",
+            "now", "between", "like", "exists", "case", "when", "then", "else", "end",
+            "return", "returns", "declare", "begin", "if", "else",
+            "start", "stop", "commit", "rollback", "savepoint",
+            "int", "integer", "bigint", "smallint", "tinyint",
+            "decimal", "numeric", "float", "double", "real",
+            "char", "varchar", "text", "blob", "binary",
+            "enum", "set", "json", "boolean", "bit",
+            "default", "unique", "index", "key", "primary", "foreign",
+            "cascade", "restrict", "action", "check",
+            "auto_increment", "unsigned", "signed", "zerofill",
+            "character", "collate", "charset", "engine", "row_format"
+        };
+        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match sm in Regex.Matches(source,
+            @"@?""(?:[^""\\]*(?:\\.[^""\\]*)*)""", RegexOptions.Singleline))
+        {
+            var val = sm.Value;
+            if (!Regex.IsMatch(val, @"\b(SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.IgnoreCase))
+                continue;
+            foreach (Match m in Regex.Matches(val,
+                @"(?:FROM|JOIN|INTO|UPDATE|TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+`?(\w+(?:\.\w+)?)`?",
+                RegexOptions.IgnoreCase))
+            {
+                var tbl = m.Groups[1].Value;
+                if (tbl.Contains('.')) tbl = tbl.Split('.')[^1];
+                if (tbl.Length > 2 && !skip.Contains(tbl) && !char.IsDigit(tbl[0]))
+                    tables.Add(tbl);
+            }
+        }
+        return tables;
     }
 
     private static string AutoFixSqlWhitespace(string content)
