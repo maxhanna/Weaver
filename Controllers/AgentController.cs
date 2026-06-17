@@ -1217,7 +1217,16 @@ public class AgentController : ControllerBase
             {
                 var h = history[i];
                 sb.AppendLine($"\n--- Attempt {i + 1} — Error: {h.error} ---");
-                if (!string.IsNullOrWhiteSpace(h.old))
+                if (h.error.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
+                    h.error.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("  ⚠ CRITICAL: Your newCode was IDENTICAL to the existing method — nothing changed.");
+                    sb.AppendLine("  You reproduced code that is already in the file. This is NOT what CHANGE REQUIRED asks for.");
+                    sb.AppendLine("  You MUST write a DIFFERENT method body that implements the new functionality.");
+                    sb.AppendLine("  The existing method already fetches data. You need to ADD the new logic on top of it.");
+                    sb.AppendLine("  Do NOT copy the existing body — extend it with the required new behavior.");
+                }
+                else if (!string.IsNullOrWhiteSpace(h.old))
                 {
                     sb.AppendLine($"  Your oldString was:");
                     sb.AppendLine($"  ```");
@@ -1319,7 +1328,7 @@ public class AgentController : ControllerBase
                     foreach (var item in ff.EnumerateArray())
                     {
                         if (item.ValueKind == JsonValueKind.String)
-                            lines.Add(item.GetString() ?? "");
+                            lines.Add(UnescapeString(item.GetString() ?? ""));
                     }
                     if (lines.Count > 0) body = string.Join("\n", lines);
                 }
@@ -1339,7 +1348,7 @@ public class AgentController : ControllerBase
                 var targetName = tnEl.GetString();
                 var newCodeStr = ncEl.ValueKind == JsonValueKind.String ? ncEl.GetString()
                     : ncEl.ValueKind == JsonValueKind.Array
-                        ? string.Join("\n", ncEl.EnumerateArray().Select(e => e.GetString() ?? ""))
+                        ? string.Join("\n", ncEl.EnumerateArray().Select(e => UnescapeString(e.GetString() ?? "")))
                         : null;
 
                 if (!string.IsNullOrWhiteSpace(targetType) && !string.IsNullOrWhiteSpace(targetName) && newCodeStr != null)
@@ -2296,7 +2305,7 @@ public class AgentController : ControllerBase
                 $"step description may be too vague for a reliable edit";
 
             var reDerived = await ReDeriveStepDescription(
-                step, originalPrompt, ctx.ToString(), refinedChange, ct);
+                step, originalPrompt, ctx.ToString(), refinedChange ?? step.Change ?? "", ct);
 
             if (!string.IsNullOrWhiteSpace(reDerived) &&
                 reDerived.Length > (refinedChange?.Length ?? 0) / 3)
@@ -3129,8 +3138,40 @@ public class AgentController : ControllerBase
                 continue;
             }
 
-            var (approved, verifyReason, _) =
-                VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent);
+            var (approved, verifyReason, _) = VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent);
+
+            if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
+            {
+                var correctedContent = AutoFixSqlWhitespace(newContent);
+                if (correctedContent != newContent)
+                {
+                    // Also fix newStr so the "newString not found after replacement" check
+                    // inside VerifyEdit doesn't false-fire: correctedContent now has
+                    // "INTERVAL 15" but the original newStr still has "INTERVAL15", so
+                    // normNewContent.Contains(normNew) would always return false.
+                    var correctedNewStr = AutoFixSqlWhitespace(newStr ?? "");
+                    (approved, verifyReason, _) =
+                        VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent);
+                    if (approved)
+                    {
+                        newContent = correctedContent;
+                        newStr = correctedNewStr;
+                        await EmitLog(emitSse, "info",
+                            $"SQL whitespace auto-corrected in {relPath}", ct: ct);
+                    }
+                    else if (verifyReason.Contains("identical", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // SQL whitespace was the only difference — after fixing it, code matches original.
+                        // The LLM reproduced the existing method without adding any new logic.
+                        verifyReason =
+                            "SQL whitespace auto-fix made your newCode IDENTICAL to the existing code — " +
+                            "you reproduced the original method body without implementing the new functionality. " +
+                            "Write a DIFFERENT method body that adds the logic described in CHANGE REQUIRED.";
+                        newStr = correctedNewStr; // keep for feedback context
+                    }
+                }
+            }
+
             if (!approved)
             {
                 await EmitLog(emitSse, "warn",
@@ -5435,7 +5476,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
         }
         
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
+        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
             steeringContext: steeringContext, attachedFiles: attachedFiles,
             cardId: cardId);
 
@@ -5498,7 +5539,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             allSteps.Add(new Dictionary<string, object?> { ["type"] = "verified_complete", ["status"] = "done" });
         }
 
-        return (allSteps, plan);
+        return (allSteps, plan ?? new AgentPlan());
     }
 
     private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default)
@@ -6299,6 +6340,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var (approved, verifyReason, score) =
             VerifyEdit(item.OldString!, item.NewString ?? "", content, newContent);
+        if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
+        {
+            var correctedContent = AutoFixSqlWhitespace(newContent);
+            if (correctedContent != newContent)
+            {
+                (approved, verifyReason, score) =
+                    VerifyEdit(item.OldString!, item.NewString ?? "", content, correctedContent);
+                if (approved) newContent = correctedContent;
+            }
+        }
         if (!approved) return (false, verifyReason, score);
 
         await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8);
@@ -6459,34 +6510,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 "find their definition and use the existing type instead of creating a stub.", 1);
         }
 
-        // Detect collapsed SQL whitespace: tokens like 'INTERVAL15' or '=1' where a
+        // Detect collapsed SQL whitespace: SPECIFIC patterns like 'INTERVAL15' or 'MINUTE1' where a
         // space was removed between an SQL keyword/operator and a number/literal.
-        // Only check lines that look like SQL (contain SQL keywords).
-        var sqlKeywords = new[] { "SELECT", "FROM", "WHERE", "AND", "OR", "SET", "INSERT", "UPDATE",
-            "DELETE", "INTO", "VALUES", "JOIN", "ON", "LIKE", "BETWEEN", "IN", "ORDER", "GROUP",
-            "HAVING", "LIMIT", "OFFSET", "INTERVAL", "DATE_ADD", "DATE_SUB", "NOW", "CAST", "CONVERT",
-            "EXISTS", "NOT", "NULL", "IS", "AS", "CASE", "WHEN", "THEN", "ELSE", "END" };
-        var collapsedPat = new Regex(@"(?<=[a-zA-Z])\d", RegexOptions.Compiled);
+        // Check only for specific SQL keywords that commonly appear before numbers.
+        var specificSqlPatterns = new[]
+        {
+            @"\bINTERVAL\d",          // INTERVAL followed by digit (should be "INTERVAL <number>")
+            @"\bDAY\d", @"\bHOUR\d", @"\bMINUTE\d", @"\bSECOND\d",  // Time units
+            @"\bLIMIT\d",             // LIMIT without space
+            @"\bOFFSET\d",            // OFFSET without space
+            @"=\d{1,2}\b",            // Single/double-digit without space after = (e.g., "=1" instead of "= 1")
+        };
         foreach (var line in newContent.Split('\n'))
         {
             var trimmed = line.Trim();
             if (trimmed.Length < 10) continue;
-            // Only check lines that contain an SQL keyword as a whole word
-            if (!sqlKeywords.Any(k => Regex.IsMatch(trimmed, @"\b" + Regex.Escape(k) + @"\b", RegexOptions.IgnoreCase))) continue;
-            var match = collapsedPat.Match(trimmed);
-            if (match.Success)
+            // Quick SQL check: must contain at least one known SQL keyword
+            if (!Regex.IsMatch(trimmed, @"\b(SELECT|FROM|WHERE|AND|INSERT|UPDATE|DELETE|JOIN|INTERVAL|DATE_ADD|LIMIT)\b", RegexOptions.IgnoreCase)) 
+                continue;
+            
+            // Check for specific collapsed-whitespace patterns
+            foreach (var pattern in specificSqlPatterns)
             {
-                // Find the 3 chars before the match for context
-                var ctxIdx = Math.Max(0, match.Index - 3);
-                var ctxLen = Math.Min(trimmed.Length - ctxIdx, match.Index - ctxIdx + 2);
-                var ctx = trimmed.Substring(ctxIdx, ctxLen);
-                return (false,
-                    $"SQL whitespace collapsed: '{ctx}[digit]' — likely missing a space before '{match.Value}'. " +
-                    "Copy the exact whitespace from the original SQL. 'INTERVAL 15' is correct, 'INTERVAL15' is not.", 2);
+                var match = Regex.Match(trimmed, pattern, RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    var ctx = match.Value;
+                    return (false,
+                        $"SQL whitespace collapsed: '{ctx}' — likely missing a space. " +
+                        "Copy the exact whitespace from the original SQL. 'INTERVAL 15' is correct, 'INTERVAL15' is not.", 2);
+                }
             }
         }
 
         return (true, "Programmatic check passed", 10);
+    }
+
+    private static string AutoFixSqlWhitespace(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return content;
+        var result = content;
+        result = Regex.Replace(result, @"\bINTERVAL(\d)", "INTERVAL $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bDAY(\d)", "DAY $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bHOUR(\d)", "HOUR $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bMINUTE(\d)", "MINUTE $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bSECOND(\d)", "SECOND $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bLIMIT(\d)", "LIMIT $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"\bOFFSET(\d)", "OFFSET $1", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"(=)(\d{1,2}\b)", "$1 $2");
+        return result;
     }
 
     private static string StripLineLeadingWhitespace(string s)
@@ -7819,8 +7891,56 @@ Respond with JSON only:
         return result;
     }
 
-    private static string CollapseWhitespace(string s) =>
-        string.Join(" ", s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    private static string CollapseWhitespace(string s)
+    {
+        // Don't collapse whitespace inside quoted strings (SQL, etc.)
+        var sb = new StringBuilder();
+        var inQuote = false;
+        var quoteChar = '\0';
+        var prevWasSpace = false;
+        
+        foreach (var c in s)
+        {
+            if ((c == '"' || c == '\'' || c == '`') && (sb.Length == 0 || sb[sb.Length - 1] != '\\'))
+            {
+                if (!inQuote) { inQuote = true; quoteChar = c; }
+                else if (c == quoteChar) { inQuote = false; }
+            }
+            
+            if (inQuote)
+            {
+                sb.Append(c);
+                prevWasSpace = false;
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (!prevWasSpace && sb.Length > 0) { sb.Append(' '); prevWasSpace = true; }
+            }
+            else
+            {
+                sb.Append(c);
+                prevWasSpace = false;
+            }
+        }
+        
+        return sb.ToString().Trim();
+    }
+
+    private static string UnescapeString(string s)
+    {
+        // Handle escaped newlines: "line1\\nline2" → "line1\nline2"
+        if (string.IsNullOrEmpty(s)) return s ?? "";
+        return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
+    }
+
+    private static bool IsSqlLike(string content)
+    {
+        // Detect if content contains SQL patterns to skip aggressive whitespace normalization
+        var lower = content.ToLower();
+        return lower.Contains("select ") || lower.Contains("insert ") || lower.Contains("update ") ||
+               lower.Contains("delete ") || lower.Contains("from ") || lower.Contains("where ") ||
+               lower.Contains("interval ") || lower.Contains("date_add") || lower.Contains("where ");
+    }
 
     private static int FindLineBlock(string[] fileLines, string[] patternLines, StringComparison cmp)
     {
@@ -7967,17 +8087,22 @@ Respond with JSON only:
         if (matchLine >= 0)
             return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
 
-        // ── S3: Whitespace-collapsed case-sensitive match ──────────────────
-        var wsOld = oldLines.Select(l => CollapseWhitespace(l)).ToArray();
-        var wsFile = fileLines.Select(l => CollapseWhitespace(l)).ToArray();
-        matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal);
-        if (matchLine >= 0)
-            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+        // ── S3: Whitespace-collapsed match (SKIPPED for SQL to preserve spacing) ───────
+        // Skip aggressive whitespace collapsing for SQL content where spacing is critical
+        var isSql = IsSqlLike(oldString) || IsSqlLike(content);
+        if (!isSql)
+        {
+            var wsOld = oldLines.Select(l => CollapseWhitespace(l)).ToArray();
+            var wsFile = fileLines.Select(l => CollapseWhitespace(l)).ToArray();
+            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal);
+            if (matchLine >= 0)
+                return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
 
-        // ── S4: Whitespace-collapsed case-insensitive match ────────────────
-        matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase);
-        if (matchLine >= 0)
-            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+            // ── S4: Whitespace-collapsed case-insensitive match ────────────────
+            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase);
+            if (matchLine >= 0)
+                return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+        }
 
         // ── Guard: reject oldStrings that are too short or generic for fuzzy strategies ──
         var meaningfulChars = oldLines.Sum(l => l.Trim().Length);

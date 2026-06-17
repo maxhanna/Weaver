@@ -11,7 +11,7 @@
       <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()"
         ng-if="vm.ide.conflictFiles && Object.keys(vm.ide.conflictFiles).length" title="Resolve all conflicts">⚠
         Resolve</button>
-      <button class="ide-panel-btn" ng-click="vm.closeIDE()" title="Close IDE">✕</button>
+      <button class="ide-panel-btn" ng-click="vm.showIDE = false; vm.saveSettings();" title="Close IDE">✕</button>
     </div>
   </div>
   <div class="ide-panel-body">
