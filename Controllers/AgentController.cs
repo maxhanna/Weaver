@@ -1088,7 +1088,14 @@ public class AgentController : ControllerBase
                         "defined in that type's class. Example: CalendarEntry has properties [Id, Type, Note, Date, Ownership] — NOT Title or Description. " +
                         "Cross-reference EVERY property access against the type definition in AUTO-ENRICHED CONTEXT before writing newString. " +
                         "If the class definition shows `string? Note { get; set; }` then use `.Note`, not `.Description`. " +
-                        "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`.");
+                        "If the class definition shows `string? Type { get; set; }` then use `.Type`, not `.Title`." +
+                        "⚠ RULE: When adding pagination, filtering, or controls for a NEW data type (e.g., YouTube results), " +
+                        "create a NEW method dedicated to that data type. Do NOT repurpose an existing method that uses different " +
+                        "property names (e.g., `currentPage`/`totalPages`) and calls different APIs (`searchUrl`). " +
+                        "For example, if YouTube pagination needs `onYoutubePageChange`, create it — do NOT reuse `onPageChange` " +
+                        "because `onPageChange` sets `this.currentPage` and calls `this.searchUrl()`, which are specific to " +
+                        "crawler search results. A new method for YouTube would set `this.youtubeCurrentPage` and filter " +
+                        "`this.youtubeResults` locally without calling `searchUrl`.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -3058,9 +3065,20 @@ public class AgentController : ControllerBase
 
         // Quick heuristic: only check steps whose description suggests multiple actions
         var ch = (step.Change ?? "").ToLowerInvariant();
-        if (!ch.Contains(" and ") && !ch.Contains(" & ") && !ch.Contains(", ") &&
-            !ch.Contains(" + "))
-            return null;
+        var hasMultipleConcerns =
+            ch.Contains(" and ") || ch.Contains(" & ") ||
+            ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
+            ch.Contains(" move ") || ch.StartsWith("move ") ||
+            // property/field combined with method/logic
+            (ch.ContainsAny("propert", "field", "variable", "global") &&
+             ch.ContainsAny("method", "function", "logic", "implement", "handler", "control")) ||
+            // "add X, implement Y" style
+            Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
+            // pagination / navigation / sort with controls
+            Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
+            // more than one comma-separated noun phrase
+            (ch.Split(',').Length >= 3 && ch.Length > 40);
+        if (!hasMultipleConcerns) return null;
 
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -3078,6 +3096,12 @@ public class AgentController : ControllerBase
         sb.AppendLine("  - Adding code AND removing old code (e.g. move = add + delete)");
         sb.AppendLine("  - Changing logic AND adding UI elements");
         sb.AppendLine("  - Adding a backend endpoint AND frontend code");
+        sb.AppendLine("  - WRAPPING content in a new container/tag (needs open + close = 2 edits)");
+        sb.AppendLine();
+        sb.AppendLine("Also check the TARGET FILE CONTENT below: if it introduces new method calls,");
+        sb.AppendLine("property references, or component bindings that would need implementation in a");
+        sb.AppendLine("DIFFERENT file (e.g. .ts, .js, .cs), add a separate step for that file.");
+        sb.AppendLine("Example: HTML adds (click)=\"toggleKanbanCollapse()\" → add step in .ts to implement it.");
         sb.AppendLine();
         sb.AppendLine("Do NOT split if the step is a single coherent edit (e.g. \"Modify the X method to Y\").");
         sb.AppendLine();
@@ -3092,10 +3116,38 @@ public class AgentController : ControllerBase
         {
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             sb.AppendLine();
-            sb.AppendLine("TARGET FILE CONTENT (first 3000 chars):");
-            sb.AppendLine("```");
-            sb.AppendLine(content.Length > 3000 ? content[..3000] + "\n..." : content);
-            sb.AppendLine("```");
+            // Search for content relevant to this step's change description
+            var changeKeywords = (step.Change ?? "")
+                .Split(new[] { ' ', ',', '.', '(', ')', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(w => w.Trim().ToLowerInvariant())
+                .Where(w => w.Length > 3)
+                .Distinct()
+                .ToList();
+            var relevantIdx = -1;
+            if (changeKeywords.Count > 0)
+            {
+                relevantIdx = changeKeywords
+                    .Select(kw => content.IndexOf(kw, StringComparison.OrdinalIgnoreCase))
+                    .FirstOrDefault(idx => idx >= 0);
+            }
+            if (relevantIdx > 3000)
+            {
+                var start = Math.Max(0, relevantIdx - 1500);
+                var previewLen = Math.Min(4500, content.Length - start);
+                sb.AppendLine("TARGET FILE CONTENT (relevant excerpt around step's target area):");
+                sb.AppendLine("```");
+                sb.AppendLine((start > 0 ? "...\n" : "") +
+                    content.Substring(start, previewLen) +
+                    (start + previewLen < content.Length ? "\n..." : ""));
+                sb.AppendLine("```");
+            }
+            else
+            {
+                sb.AppendLine("TARGET FILE CONTENT (first 4500 chars):");
+                sb.AppendLine("```");
+                sb.AppendLine(content.Length > 4500 ? content[..4500] + "\n..." : content);
+                sb.AppendLine("```");
+            }
         }
 
         sb.AppendLine();
@@ -3385,18 +3437,22 @@ public class AgentController : ControllerBase
                 $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                 ct: ct);
 
-            // Detect no-op edit: if old and new are functionally identical, skip
+            // Detect no-op edit: if old and new are functionally identical, treat as error.
+            // A "skipped" status would make doneIndices count the step as completed, causing the
+            // quality-check loop to enter "genuinely missing work" → return empty → "stopping"
+            // even though the LLM produced zero actual changes. The LLM was asked to make a
+            // change and failed — that's an error, triggering a retry via hasIncomplete.
             if (!string.IsNullOrWhiteSpace(oldStr) &&
                 AgentUtilities.NormalizeLineEndings(oldStr) == AgentUtilities.NormalizeLineEndings(newStr ?? ""))
             {
-                await EmitLog(emitSse, "info", $"⏭ No change needed: {relPath}", ct: ct);
+                await EmitLog(emitSse, "error", $"No-op edit for {relPath}: LLM produced no change", ct: ct);
                 var r = new Dictionary<string, object?>
                 {
                     ["index"] = stepIndex,
                     ["type"] = "edit",
-                    ["status"] = "skipped",
+                    ["status"] = "error",
                     ["path"] = relPath,
-                    ["reason"] = "already done",
+                    ["error"] = "LLM produced a no-op edit — oldString and newString are identical. The LLM failed to produce the required change.",
                     ["planItemIndex"] = planItemIndex
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
@@ -3663,18 +3719,32 @@ public class AgentController : ControllerBase
             }
 
             if (!string.IsNullOrWhiteSpace(newStr) &&
-                !newContent.Contains(
-                    AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
+    !newContent.Contains(
+        AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
-                var strippedNew = StripLineLeadingWhitespace(newStr);
-                var strippedContent = StripLineLeadingWhitespace(newContent);
-                if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
+                // Strip leading whitespace AND trailing whitespace per line,
+                // same as VerifyEdit does internally — handles IndentReplacement re-indentation
+                var trimmedNew = string.Join("\n",
+                    StripLineLeadingWhitespace(AgentUtilities.NormalizeLineEndings(newStr))
+                        .Split('\n').Select(l => l.TrimEnd()));
+                var trimmedContent = string.Join("\n",
+                    StripLineLeadingWhitespace(newContent)
+                        .Split('\n').Select(l => l.TrimEnd()));
+                if (!trimmedContent.Contains(trimmedNew, StringComparison.Ordinal))
                 {
                     var verr = "Replacement produced mismatched content — " +
                                "oldString matched wrong location";
                     await EmitLog(emitSse, "warn",
                         $"Verify failed for {relPath}: {verr}", step, ct: ct);
                     history.Add((oldStr!, newStr, verr));
+
+                    // ← ADD stuckCount tracking so this aborts after 3 identical failures
+                    if (string.Equals(
+                        AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                        AgentUtilities.NormalizeLineEndings(lastOld),
+                        StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 3) goto RecordFailure;
                     continue;
                 }
             }
@@ -3704,6 +3774,13 @@ public class AgentController : ControllerBase
                     await EmitLog(emitSse, "info",
                         $"Appended missing type(s): {string.Join(", ", missing)}", ct: ct);
                 }
+            }
+
+            // Post-edit style fix: check for spacing issues in the new content and fix via LLM
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
+            {
+                newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
@@ -3800,8 +3877,109 @@ public class AgentController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Post-edit style pass: scans the applied newStr for common spacing issues
+    /// (missing spaces around operators, colons, etc.) and calls the LLM to fix them.
+    /// Returns the (possibly unchanged) content.
+    /// </summary>
+    private async Task<string> PostEditStyleFixAsync(
+        string fullPath, string relPath, string content, string appliedNewStr,
+        bool emitSse, CancellationToken ct)
+    {
+        // Check for common spacing issues in the applied edit: e.g. `-1)` or `*5` or `:5`
+        // We look only in the changed region to keep the LLM call focused.
+        var hasSpacingIssue = false;
+        var needleLines = appliedNewStr.Split('\n');
+        // Build a compact excerpt of lines in the file that contain the new string lines
+        var fileLines = content.Split('\n');
+        var excerptStart = -1;
+        var excerptEnd = -1;
+        foreach (var nLine in needleLines)
+        {
+            var trimmed = nLine.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+            for (var i = 0; i < fileLines.Length; i++)
+            {
+                if (fileLines[i].Contains(trimmed, StringComparison.Ordinal))
+                {
+                    if (excerptStart < 0 || i < excerptStart) excerptStart = i;
+                    if (i > excerptEnd) excerptEnd = i;
+                    // Check this line for spacing issues
+                    if (Regex.IsMatch(fileLines[i], @"\(\w+\s*[+\-*/%]\d") ||  // `(page -1` no space before digit
+                        Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%]\s*\d") ||  // `5*5` `5 *5` `5* 5` missing spaces
+                        Regex.IsMatch(fileLines[i], @"(?<![=!<>])=(?!=)\d"))    // `=1` no space after = (but not ==, !=, <=, >=)
+                    {
+                        hasSpacingIssue = true;
+                    }
+                    break;
+                }
+            }
+        }
+        if (!hasSpacingIssue || excerptStart < 0)
+            return content;
+
+        // Send excerpt to LLM for fixing
+        var contextWindowStart = Math.Max(0, excerptStart - 3);
+        var contextWindowEnd = Math.Min(fileLines.Length, excerptEnd + 4);
+        var excerpt = string.Join("\n", fileLines[contextWindowStart..contextWindowEnd]);
+
+        var sysPrompt = "You are a meticulous code formatter. Fix spacing issues in the code excerpt below: " +
+                        "ensure proper spacing around operators (+, -, *, /, %, =, etc.) and colons in " +
+                        "TypeScript/JavaScript/HTML/CSS. Output ONLY a JSON object with an array of fixes: " +
+                        "{\"fixes\":[{\"oldString\":\"...\",\"newString\":\"...\"}]}. " +
+                        "Each fix must be an exact substring from the excerpt. Do NOT change logic or add/remove code.";
+
+        var userMsg = $"### FILE ###\n{relPath}\n\n### EXCERPT WITH SPACING ISSUES ###\n```\n{excerpt}\n```\n\n" +
+                      "Fix spacing issues. Return JSON with oldString/newString pairs.";
+
+        var (raw, _, error) = await CallLlmRawStreaming(sysPrompt, userMsg, emitSse, ct,
+            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 1024);
+
+        if (string.IsNullOrWhiteSpace(raw))
+            return content;
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```")) cleaned = cleaned.TrimStart('`').Trim();
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            if (!doc.RootElement.TryGetProperty("fixes", out var fixesArr) || fixesArr.ValueKind != JsonValueKind.Array)
+                return content;
+
+            var fixedContent = content;
+            var fixCount = 0;
+            foreach (var fix in fixesArr.EnumerateArray())
+            {
+                var oldStr = fix.TryGetProperty("oldString", out var oEl) ? oEl.GetString() : null;
+                var newStr = fix.TryGetProperty("newString", out var nEl) ? nEl.GetString() : null;
+                if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr) || oldStr == newStr)
+                    continue;
+                if (!fixedContent.Contains(oldStr, StringComparison.Ordinal))
+                    continue;
+                fixedContent = fixedContent.Replace(oldStr, newStr);
+                fixCount++;
+            }
+
+            if (fixCount > 0)
+            {
+                await System.IO.File.WriteAllTextAsync(fullPath, fixedContent, Encoding.UTF8, ct);
+                await EmitLog(emitSse, "info",
+                    $"Style fix: applied {fixCount} spacing fix(es) in {relPath}", ct: ct);
+            }
+            return fixedContent;
+        }
+        catch
+        {
+            return content;
+        }
+    }
+
     private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct,
-        string summary = "", int score = 0)
+        string summary = "", int score = 0, bool append = false)
     {
         if (string.IsNullOrWhiteSpace(cardId) || planSteps == null || planSteps.Count == 0)
             return;
@@ -3827,12 +4005,25 @@ public class AgentController : ControllerBase
                         continue;
 
                     var planItems = new JsonArray();
+                    var existingItems = cardObj["_plan"]?.AsObject()?["items"] as JsonArray;
+                    if (append && existingItems != null)
+                    {
+                        // Preserve existing plan items, mark them as done
+                        foreach (var existing in existingItems)
+                        {
+                            if (existing is JsonObject eo)
+                            {
+                                eo["done"] = true;
+                                planItems.Add(eo.DeepClone());
+                            }
+                        }
+                    }
                     for (var i = 0; i < planSteps.Count; i++)
                     {
                         var s = planSteps[i];
                         planItems.Add(new JsonObject
                         {
-                            ["index"] = i,
+                            ["index"] = planItems.Count,
                             ["file"] = s.File,
                             ["change"] = s.Change,
                             ["priority"] = s.Priority,
@@ -5958,10 +6149,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var freshContext = freshSb.Length > 100
                 ? freshSb.ToString()
                 : AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
-            // Include verification failures as steering so the LLM knows what to fix
-            var verifySteering = steeringContext;
+            // Append verification gaps to freshContext so the replanner knows what's still missing.
+            // We include only the gap descriptions (issues/reason), not any wrong-approach artifact
+            // names from the original file that the task was meant to replace.
             if (!string.IsNullOrWhiteSpace(verificationDetails))
-                verifySteering = $"Fix these issues:\n{verificationDetails}\n\n{(string.IsNullOrWhiteSpace(steeringContext) ? "" : steeringContext)}";
+            {
+                freshContext = freshContext + "\n### GAPS REMAINING FROM VERIFICATION ###\n" + verificationDetails;
+            }
+            var verifySteering = !string.IsNullOrWhiteSpace(steeringContext)
+                ? steeringContext
+                : null;
             var replan = await AnalyzePromptAndPlanCodeChanges(
                 prompt, freshContext, projectRoot, emitSse, ct, verifySteering);
             if (replan != null && replan.Plan.Count > 0)
@@ -5971,9 +6168,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await SendSse(Response, "plan",
                         new { thinking = replan.Thinking, summary = $"Re-plan: {replan.Summary}", items = replan.Plan }, ct);
 
-                // Persist to boarddata so step progress is tracked in the card
+                // Persist to boarddata so step progress is tracked in the card — append to existing steps, don't replace
                 await PersistBoardDataPlanAsync(cardId, replan.Plan, emitSse, ct,
-                    summary: $"Re-plan: {replan.Summary}", score: replan.Score);
+                    summary: $"Re-plan: {replan.Summary}", score: replan.Score, append: true);
 
                 await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
                     steeringContext: verifySteering, cardId: cardId);
@@ -5990,7 +6187,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (allSteps, plan ?? new AgentPlan());
     }
 
-    private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default)
+    private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object additionalData = null)
     {
         var qId = Guid.NewGuid().ToString();
         var pending = new PendingQuestion
@@ -6007,7 +6204,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             id = qId,
             question = pending.Question,
-            fields = pending.Fields.Select(f => new { f.Key, f.Label, f.Type, f.DefaultValue }).ToList()
+            fields = pending.Fields.Select(f => new { f.Key, f.Label, f.Type, f.DefaultValue }).ToList(),
+            additionalData
         }, ct);
 
         try
@@ -6225,9 +6423,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine();
         sb.AppendLine("Based on the original task above and the current state of all modified files and their type definitions,");
         sb.AppendLine("check for ALL of the following:");
-        sb.AppendLine("1. Is the original task fully implemented?");
+        sb.AppendLine("1. Is the original task fully implemented? Evaluate ONLY against what the original task asks for.");
+        sb.AppendLine("   Ignore existing code that predates this task — the task may be meant to REPLACE it.");
+        sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
+        sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
+        sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
         sb.AppendLine("2. Do ALL property accesses in the code exist on their respective types/interfaces?");
-        sb.AppendLine("   (e.g. obj.someProperty — does 'someProperty' exist in the type of 'obj'?)");
         sb.AppendLine("3. Are ALL referenced methods, functions, and classes defined or imported?");
         sb.AppendLine("4. Are ALL imports present for every type used?");
         sb.AppendLine("5. Would the code compile without errors?");
@@ -6596,6 +6797,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     planItems.InsertRange(itemIdx, decoupledSubSteps);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+                    // Send a "plan" SSE event so the frontend immediately shows the updated steps
+                    var planItemsJson = new JsonArray();
+                    for (var pi = 0; pi < planItems.Count; pi++)
+                    {
+                        planItemsJson.Add(new JsonObject
+                        {
+                            ["index"] = pi,
+                            ["file"] = planItems[pi].File,
+                            ["change"] = planItems[pi].Change,
+                            ["priority"] = planItems[pi].Priority,
+                            ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict && dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal && piiVal == pi && dict.TryGetValue("status", out var st) && st is string stStr && stStr == "done")
+                        });
+                    }
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps.Count} sub-steps",
+                        summary = "Plan updated after decoupling",
+                        items = planItemsJson
+                    }, ct);
                     itemIdx--;
                     continue;
                 }
@@ -6608,11 +6828,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     itemIdx, cardId, attachedFiles);
 
                 var stepSkipped = false;
+                string? status = null;
                 if (allResults.Count > prevCount &&
                     allResults[^1] is Dictionary<string, object?> lastDict2 &&
                     lastDict2.TryGetValue("status", out var st2))
                 {
-                    var status = st2?.ToString();
+                    status = st2?.ToString();
                     if (status == "error")
                     {
                         await EmitLog(emitSse, "error",
@@ -6624,12 +6845,230 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 }
 
+                // After successful HTML edit, detect references to undefined methods and add steps
+                if (status == "done" && planFile.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Only scan the newStr from the edit itself — never the whole file,
+                    // so we only flag methods the edit INTRODUCED, not inherited ones.
+                    var editNewStr = allResults.Count > prevCount &&
+                        allResults[^1] is Dictionary<string, object?> lastEditDict
+                        ? lastEditDict.GetValueOrDefault("newStringPreview")?.ToString()
+                        : null;
+                    if (!string.IsNullOrWhiteSpace(editNewStr))
+                    {
+                        // Extract function names from Angular event bindings in the edit's newStr
+                        var funcMatches = Regex.Matches(editNewStr,
+                            @"\(\w+\)=\""[^\""]*?(\w+)\s*\(");
+                        if (funcMatches.Count > 0)
+                        {
+                            // Find corresponding .ts file (same directory, same base name)
+                            var htmlFullPath2 = Path.GetFullPath(
+                                Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
+                            var baseDir = Path.GetDirectoryName(htmlFullPath2) ?? "";
+                            var nameNoExt = Path.GetFileNameWithoutExtension(planFile);
+                            var tsPath = Path.Combine(baseDir, nameNoExt + ".ts");
+                            var tsContent = System.IO.File.Exists(tsPath)
+                                ? await System.IO.File.ReadAllTextAsync(tsPath, Encoding.UTF8, ct)
+                                : "";
+
+                            var missingSteps = new List<PlanStep>();
+                            var seenMethods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (System.Text.RegularExpressions.Match m in funcMatches)
+                            {
+                                var funcName = m.Groups[1].Value;
+                                // Skip common Angular lifecycle hooks, built-in DOM events, etc.
+                                if (funcName is "ngOnInit" or "ngOnDestroy" or "ngAfterViewInit" or "ngOnChanges" or "ngDoCheck" or "ngAfterContentInit" or "ngAfterContentChecked" or "ngAfterViewChecked" or "toggle" or "open" or "close" or "preventDefault" or "stopPropagation" or "console")
+                                    continue;
+                                // Skip if already seen in this batch (e.g. same method referenced in two buttons)
+                                if (!seenMethods.Add(funcName))
+                                    continue;
+                                // Check if function exists in local .ts or anywhere in the project
+                                var foundInProject = false;
+                                if (!string.IsNullOrWhiteSpace(tsContent))
+                                {
+                                    var methodRx = new Regex($@"\b{Regex.Escape(funcName)}\s*[=:(<]|\b(get|set)\s+{Regex.Escape(funcName)}\b");
+                                    if (methodRx.IsMatch(tsContent))
+                                        foundInProject = true;
+                                }
+                                if (!foundInProject)
+                                {
+                                    var (grepPath, _) = await GrepProjectForDefinitionAsync(
+                                        projectRoot, funcName, planFile, ct);
+                                    if (grepPath != null)
+                                        foundInProject = true;
+                                }
+                                if (foundInProject)
+                                {
+                                    // Even if the function exists, check if the arguments passed in the HTML
+                                    // reference properties that don't match the method body — this catches
+                                    // the LLM reusing a generic method (e.g. onPageChange) for a different
+                                    // data type (e.g., YouTube pagination) where a new method is needed.
+                                    var argsText = "";
+                                    try
+                                    {
+                                        // Extract argument text from the function call in editNewStr
+                                        var callStart = m.Index + m.Length;
+                                        if (callStart > 0 && callStart < (editNewStr?.Length ?? 0))
+                                        {
+                                            var remaining = editNewStr.Substring(callStart);
+                                            var closeParen = remaining.IndexOf(')');
+                                            if (closeParen >= 0)
+                                                argsText = remaining.Substring(0, closeParen).Trim();
+                                        }
+                                    }
+                                    catch { /* best-effort */ }
+                                    if (!string.IsNullOrWhiteSpace(argsText) && !string.IsNullOrWhiteSpace(tsContent))
+                                    {
+                                        // Extract property-like words from the arguments (camelCase words that aren't numbers/operators)
+                                        var argProps = Regex.Matches(argsText, @"\b[a-z]+[a-zA-Z0-9]*\b")
+                                            .Cast<Match>().Select(x => x.Value)
+                                            .Where(x => !Regex.IsMatch(x, @"^\d+$"))
+                                            .Distinct().ToList();
+                                        // Extract this.xxx property references from the method body
+                                        var methodBodyProps = Regex.Matches(tsContent, @"\bthis\.([a-zA-Z_]\w*)")
+                                            .Cast<Match>().Select(x => x.Value)
+                                            .Distinct().ToHashSet(StringComparer.OrdinalIgnoreCase);
+                                        // If args reference properties the method body doesn't use,
+                                        // the LLM probably reused the wrong method — flag it.
+                                        var mismatchedArgs = argProps
+                                            .Where(a => !a.Contains("this.") &&
+                                                !methodBodyProps.Any(b =>
+                                                    b.EndsWith("." + a, StringComparison.OrdinalIgnoreCase)))
+                                            .ToList();
+                                        if (mismatchedArgs.Count > 0 && mismatchedArgs.Count >= argProps.Count / 2)
+                                        {
+                                            // Generate a more specific method name by replacing the qualifier
+                                            var newFuncName = funcName;
+                                            // Try to extract a data type qualifier from mismatched args
+                                            var youtubeArg = mismatchedArgs
+                                                .FirstOrDefault(a => a.IndexOf("youtube", StringComparison.OrdinalIgnoreCase) >= 0
+                                                    || a.IndexOf("yt", StringComparison.OrdinalIgnoreCase) >= 0);
+                                            if (youtubeArg != null)
+                                            {
+                                                // The existing method is being called with YouTube-specific args —
+                                                // a separate youtube method is needed
+                                                var prefix = funcName.StartsWith("on", StringComparison.OrdinalIgnoreCase) ? "onYoutube" : "youtube";
+                                                var suffix = funcName.Length > 2 && char.IsUpper(funcName[2]) ? funcName.Substring(2) : funcName;
+                                                newFuncName = prefix + char.ToUpper(suffix[0]) + suffix.Substring(1);
+                                                // Don't skip — create the missing method step below
+                                                foundInProject = false;
+                                                funcName = newFuncName;
+                                            }
+                                        }
+                                    }
+                                    if (foundInProject)
+                                        continue;
+                                }
+                                // Avoid duplicating steps already in the plan
+                                if (planItems.Any(p => p.File != null && p.File.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) &&
+                                    p.Change != null && p.Change.Contains(funcName, StringComparison.OrdinalIgnoreCase)))
+                                    continue;
+
+                                var relDir2 = Path.GetDirectoryName(planFile)?.Replace('\\', '/') ?? "";
+                                var relTsPath2 = string.IsNullOrWhiteSpace(relDir2)
+                                    ? nameNoExt + ".ts"
+                                    : relDir2 + "/" + nameNoExt + ".ts";
+                                missingSteps.Add(new PlanStep
+                                {
+                                    File = relTsPath2,
+                                    Change = $"Implement the missing {funcName}() method referenced in {Path.GetFileName(planFile)}",
+                                    Priority = item.Priority
+                                });
+                            }
+
+                            if (missingSteps.Count > 0)
+                            {
+                                planItems.InsertRange(itemIdx + 1, missingSteps);
+                                await EmitLog(emitSse, "info",
+                                    $"Added {missingSteps.Count} step(s) for missing method(s): " +
+                                    string.Join(", ", missingSteps.Select(s => s.Change)), ct: ct);
+                                var planItemsJson2 = new JsonArray();
+                                for (var pi = 0; pi < planItems.Count; pi++)
+                                {
+                                    planItemsJson2.Add(new JsonObject
+                                    {
+                                        ["index"] = pi,
+                                        ["file"] = planItems[pi].File ?? "",
+                                        ["change"] = planItems[pi].Change ?? "",
+                                        ["priority"] = planItems[pi].Priority,
+                                        ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict && dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal2 && piiVal2 == pi && dict.TryGetValue("status", out var st2b) && st2b is string stStr2b && stStr2b == "done")
+                                    });
+                                }
+                                if (emitSse)
+                                    await SendSse(Response, "plan", new
+                                    {
+                                        thinking = $"Added {missingSteps.Count} step(s) for missing method(s) referenced in HTML",
+                                        summary = $"Added {missingSteps.Count} step(s)",
+                                        items = planItemsJson2
+                                    }, ct);
+                                if (!string.IsNullOrWhiteSpace(cardId))
+                                    await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+                            }
+                        }
+                    }
+                }
+                // ── Post-edit reflection: find missing methods/classes and add steps ──
+                if (status is "done" or "modified")
+                {
+                    var lastEditResult = allResults.Count > prevCount
+                        ? allResults[^1] as Dictionary<string, object?> : null;
+                    var appliedNewStr = lastEditResult?.GetValueOrDefault("newStringPreview")?.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(appliedNewStr))
+                    {
+                        // Re-read the file from disk so we have the current full content for context
+                        var currentFullPath = Path.GetFullPath(
+                            Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
+                        string currentContent = "";
+                        try
+                        {
+                            currentContent = await System.IO.File.ReadAllTextAsync(
+                            currentFullPath, Encoding.UTF8, ct);
+                        }
+                        catch { /* skip on read failure */ }
+
+                        var reflectedSteps = await ReflectOnAppliedEditAsync(
+                            planFile, appliedNewStr, currentContent,
+                            projectRoot, planItems, emitSse, ct);
+
+                        if (reflectedSteps.Count > 0)
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"  ➕ Reflection added {reflectedSteps.Count} step(s): " +
+                                string.Join(" | ", reflectedSteps.Select(s => s.Change)), ct: ct);
+
+                            // Insert immediately after the current step so they run next
+                            planItems.InsertRange(itemIdx + 1, reflectedSteps);
+
+                            // Persist the expanded plan to boarddata and emit to frontend
+                            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
+                                summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
+                                append: true);
+
+                            if (emitSse)
+                                await SendSse(Response, "plan", new
+                                {
+                                    thinking = $"Reflection after editing {planFile}",
+                                    summary = $"Added {reflectedSteps.Count} follow-up step(s)",
+                                    items = planItems.Select((p, i) => new
+                                    {
+                                        index = i,
+                                        file = p.File,
+                                        change = p.Change,
+                                        priority = p.Priority,
+                                        done = false
+                                    }).ToList()
+                                }, ct);
+                        }
+                    }
+                }
+
                 // Step was skipped (already done / irrelevant) or succeeded —
                 // check if more work remains by re-running the planner
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                     stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
-                continue;
+                continue; 
             }
 
             if (string.IsNullOrWhiteSpace(planFile))
@@ -6847,7 +7286,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // Indentation may have been adjusted — retry with leading whitespace stripped from each line
             var strippedNew = StripLineLeadingWhitespace(normNew);
             var strippedContent = StripLineLeadingWhitespace(normNewContent);
-            if (!strippedContent.Contains(strippedNew, StringComparison.Ordinal))
+            // AutoIndentHtml uses Trim() internally so trailing whitespace is also lost;
+            // trim trailing from both to avoid false mismatch.
+            var trimmedNew = string.Join("\n", strippedNew.Split('\n').Select(l => l.TrimEnd()));
+            var trimmedContent = string.Join("\n", strippedContent.Split('\n').Select(l => l.TrimEnd()));
+            if (!trimmedContent.Contains(trimmedNew, StringComparison.Ordinal))
                 return (false, "newString not found after replacement", 4);
         }
 
@@ -6984,6 +7427,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
 
+        // Detect Angular template global references that don't work
+        // In Angular templates, Math, window, console, JSON, parseInt, etc. are NOT accessible.
+        if (IsAngularTemplate(newContent))
+        {
+            var bannedInAngular = new[] { "Math.min(", "Math.max(", "Math.floor(", "Math.ceil(",
+                "Math.round(", "Math.random(", "parseInt(", "parseFloat(", "JSON.parse", "JSON.stringify" };
+            foreach (var banned in bannedInAngular)
+            {
+                if (newContent.Contains(banned, StringComparison.OrdinalIgnoreCase))
+                {
+                    var match = Regex.Match(newContent, $@"\b{Regex.Escape(banned[..^1])}\s*\(", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                        return (false,
+                            $"Angular template uses `{match.Value}()` which is not available in Angular templates. " +
+                            "Only component properties and methods are accessible in template expressions. " +
+                            $"Move this logic to the component's .ts file.", 2);
+                }
+            }
+        }
+
         return (true, "Programmatic check passed", 10);
     }
 
@@ -7000,6 +7463,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return lines[i];
         }
         return null;
+    }
+
+    /// <summary>Check if content looks like an Angular HTML template (has Angular-specific syntax).</summary>
+    private static bool IsAngularTemplate(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || content.Length < 20)
+            return false;
+        return Regex.IsMatch(content, @"\*ng(If|For|Switch)") ||
+               Regex.IsMatch(content, @"\(click\)|\(change\)|\(keydown\)|\(submit\)|\(focus\)|\(blur\)") ||
+               (content.Contains("{{") && content.Contains("}}"));
     }
 
     /// <summary>Extract table names from inline SQL strings in C# source.</summary>
@@ -8031,6 +8504,284 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return results.Cast<object>().ToList();
     }
 
+
+    /// <summary>
+    /// After a successful edit, scans the newly added code for method calls, property
+    /// accesses, and class references. Greps the project to check if each symbol is
+    /// defined elsewhere. If anything is genuinely missing, asks the LLM to generate
+    /// the minimum follow-up steps needed to implement it.
+    /// </summary>
+    private async Task<List<PlanStep>> ReflectOnAppliedEditAsync(
+        string relPath,
+        string newStr,
+        string fullFileContent,
+        string projectRoot,
+        List<PlanStep> existingPlanSteps,
+        bool emitSse,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(newStr)) return new List<PlanStep>();
+
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var codeExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".cs", ".ts", ".js", ".tsx", ".jsx", ".html" };
+        if (!codeExts.Contains(ext)) return new List<PlanStep>();
+
+        // Step 1: Extract symbols referenced in the new code
+        var candidates = ExtractReferencedSymbolsFromCode(newStr, ext);
+        if (candidates.Count == 0) return new List<PlanStep>();
+
+        // Step 2: Filter out symbols already defined in the current file or in plan steps
+        var toCheck = candidates
+            .Where(sym => !fullFileContent.Contains(sym, StringComparison.Ordinal))
+            .Where(sym => !existingPlanSteps.Any(s =>
+                s.Change?.Contains(sym, StringComparison.OrdinalIgnoreCase) == true))
+            .Distinct()
+            .Take(12)
+            .ToList();
+
+        if (toCheck.Count == 0) return new List<PlanStep>();
+
+        // Step 3: Grep project for each symbol definition
+        var grepCtx = new StringBuilder();
+        var missing = new List<string>();
+
+        foreach (var sym in toCheck)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (foundIn, snippet) = await GrepProjectForDefinitionAsync(
+                projectRoot, sym, relPath, ct);
+
+            if (foundIn != null)
+                grepCtx.AppendLine($"  '{sym}' → found in {foundIn}: {snippet}");
+            else
+                missing.Add(sym);
+        }
+
+        if (missing.Count == 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"  ✓ Reflection: all {toCheck.Count} referenced symbol(s) already defined", ct: ct);
+            return new List<PlanStep>();
+        }
+
+        await EmitLog(emitSse, "info",
+            $"  🔍 Reflection: {missing.Count} potentially missing symbol(s): {string.Join(", ", missing)}", ct: ct);
+
+        // Step 4: Ask the LLM to generate steps for genuinely missing symbols
+        var sb = new StringBuilder();
+        sb.AppendLine($"FILE JUST EDITED: {relPath}");
+        sb.AppendLine();
+        sb.AppendLine("NEW CODE ADDED:");
+        sb.AppendLine("```");
+        sb.AppendLine(newStr.Length > 2500 ? newStr[..2500] + "\n// ... (truncated)" : newStr);
+        sb.AppendLine("```");
+        sb.AppendLine();
+        sb.AppendLine("SYMBOLS REFERENCED BUT NOT FOUND IN THE PROJECT (via grep):");
+        foreach (var sym in missing)
+            sb.AppendLine($"  - {sym}");
+        sb.AppendLine();
+        if (grepCtx.Length > 0)
+        {
+            sb.AppendLine("SYMBOLS THAT WERE FOUND (for context):");
+            sb.AppendLine(grepCtx.ToString());
+        }
+        sb.AppendLine("CURRENT PLAN STEPS (do NOT duplicate any of these):");
+        foreach (var step in existingPlanSteps.Take(8))
+            sb.AppendLine($"  - {step.File}: {step.Change}");
+        sb.AppendLine();
+        sb.AppendLine("TASK: For each missing symbol that genuinely needs to be implemented:");
+        sb.AppendLine("  1. Decide which file it belongs in (same file, or a companion .ts/.cs file)");
+        sb.AppendLine("  2. Write one specific plan step to implement it");
+        sb.AppendLine("Do NOT create steps for standard library items, Angular lifecycle hooks,");
+        sb.AppendLine("or anything where the absence is intentional (e.g. a placeholder).");
+        sb.AppendLine("If nothing is actually missing, return {\"steps\": []}.");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY JSON (no markdown):");
+        sb.AppendLine("{\"steps\": [{\"file\": \"rel/path.ext\", \"change\": \"precise description\"}]}");
+
+        var (raw, _, _) = await CallLlmRaw(
+            "You detect missing code implementations after an edit. Output ONLY JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 512);
+
+        if (string.IsNullOrWhiteSpace(raw)) return new List<PlanStep>();
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            if (!doc.RootElement.TryGetProperty("steps", out var arr) ||
+                arr.ValueKind != JsonValueKind.Array)
+                return new List<PlanStep>();
+
+            var result = new List<PlanStep>();
+            foreach (var el in arr.EnumerateArray())
+            {
+                var file = el.TryGetProperty("file", out var f) ? f.GetString() : null;
+                var change = el.TryGetProperty("change", out var c) ? c.GetString() : null;
+                if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change)) continue;
+
+                // Deduplicate against existing steps
+                var changePrefix = change[..Math.Min(40, change.Length)];
+                if (existingPlanSteps.Any(s =>
+                    string.Equals(s.File, file, StringComparison.OrdinalIgnoreCase) &&
+                    (s.Change ?? "").Contains(changePrefix, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                result.Add(new PlanStep { File = file, Change = change, Priority = 1 });
+            }
+            return result;
+        }
+        catch { return new List<PlanStep>(); }
+    }
+
+    /// <summary>
+    /// Extracts method calls, property accesses, and class references from newly added
+    /// code. Results are filtered to exclude well-known built-ins and framework symbols.
+    /// </summary>
+    private static List<string> ExtractReferencedSymbolsFromCode(string code, string ext)
+    {
+        var symbols = new HashSet<string>(StringComparer.Ordinal);
+
+        if (ext is ".html" or ".htm")
+        {
+            // Angular event bindings: (click)="methodName()"
+            foreach (Match m in Regex.Matches(code,
+                @"\(\w+\)=""([A-Za-z_]\w*)\s*\("))
+                symbols.Add(m.Groups[1].Value);
+
+            // Angular structural directives referencing component properties
+            foreach (Match m in Regex.Matches(code,
+                @"\*ngFor=""let \w+ of ([A-Za-z_]\w*)"))
+                symbols.Add(m.Groups[1].Value);
+
+            // Property bindings: [disabled]="expression" — grab first identifier
+            foreach (Match m in Regex.Matches(code,
+                @"\[[\w-]+\]=""([A-Za-z_]\w*)"))
+                symbols.Add(m.Groups[1].Value);
+
+            // Two-way binding: [(ngModel)]="prop"
+            foreach (Match m in Regex.Matches(code,
+                @"\[\(ngModel\)\]=""([A-Za-z_]\w*)"))
+                symbols.Add(m.Groups[1].Value);
+
+            // Interpolation: {{ symbol }}
+            foreach (Match m in Regex.Matches(code,
+                @"\{\{\s*([A-Za-z_]\w*)\s*(?:\||\}\})"))
+                symbols.Add(m.Groups[1].Value);
+        }
+        else if (ext is ".ts" or ".js" or ".tsx" or ".jsx")
+        {
+            // this.method() and this.property
+            foreach (Match m in Regex.Matches(code, @"this\.([A-Za-z_]\w*)\b"))
+                symbols.Add(m.Groups[1].Value);
+        }
+        else if (ext == ".cs")
+        {
+            // Method calls (non-this for public API calls within same class)
+            foreach (Match m in Regex.Matches(code, @"\bthis\.([A-Za-z_]\w*)\s*[(\[]"))
+                symbols.Add(m.Groups[1].Value);
+        }
+
+        // Strip well-known built-ins so we don't generate steps for them
+        var builtins = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        // Lifecycle
+        "ngOnInit","ngOnDestroy","ngAfterViewInit","ngOnChanges","ngDoCheck",
+        "ngAfterContentInit","ngAfterContentChecked","ngAfterViewChecked","constructor",
+        // JS/TS primitives
+        "length","name","value","type","id","url","href","src","target","key","index",
+        "push","pop","shift","unshift","splice","slice","map","filter","reduce","find",
+        "some","every","includes","indexOf","join","split","trim","toLowerCase","toUpperCase",
+        "toString","parseInt","parseFloat","JSON","Math","Object","Array","String","Number",
+        "Boolean","Promise","console","log","error","warn","Date","Error","typeof","instanceof",
+        // RxJS
+        "subscribe","next","error","complete","pipe","tap","catchError","takeUntil",
+        // Angular common
+        "ngModel","ngClass","ngStyle","ngIf","ngFor","ngSwitch","trackBy","async",
+        "markForCheck","detectChanges","emit","getValue","patchValue","reset","get","set",
+        // C# common
+        "ToString","GetType","Equals","GetHashCode","Dispose","Task","List","Dictionary",
+        "Console","String","Int32","Boolean","DateTime","Guid","Path","File","Directory",
+    };
+
+        return symbols
+            .Where(s => s.Length >= 3 && !builtins.Contains(s) && !char.IsUpper(s[0]))
+            .Distinct()
+            .ToList();
+    }
+
+    /// <summary>
+    /// Greps the project for a definition of <paramref name="symbol"/> (method, property,
+    /// or class declaration). Returns (relPath, snippet) if found, or (null, null) if missing.
+    /// Skips build artifacts, the file that was just edited, and files > 300 KB.
+    /// </summary>
+    private async Task<(string? foundInPath, string? snippet)> GrepProjectForDefinitionAsync(
+        string projectRoot, string symbol, string excludeRelPath, CancellationToken ct)
+    {
+        var defPatterns = new[]
+        {
+        // TS/JS method or property definition
+        new Regex($@"^\s*(?:(?:public|private|protected|readonly|static|async|override|get|set)\s+)*{Regex.Escape(symbol)}\s*[=(:(<]", RegexOptions.Multiline),
+        // C# member
+        new Regex($@"\b(?:public|private|protected|internal)\b[^{{}}]*\b{Regex.Escape(symbol)}\s*[({{;]", RegexOptions.Multiline),
+        // Angular @Input / @Output property
+        new Regex($@"@(?:Input|Output)\(\)[^;]*\b{Regex.Escape(symbol)}\b", RegexOptions.Multiline),
+    };
+
+        var skipDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "node_modules", ".git", "bin", "obj", "dist", ".angular", "packages" };
+        var codeExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".cs", ".ts", ".js", ".tsx", ".jsx" };
+
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(
+                projectRoot, "*.*", SearchOption.AllDirectories))
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                if (string.Equals(rel, excludeRelPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (skipDirs.Any(d => rel.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase) ||
+                    rel.Contains("/" + d + "/", StringComparison.OrdinalIgnoreCase))) continue;
+                if (!codeExts.Contains(Path.GetExtension(file).ToLowerInvariant())) continue;
+
+                FileInfo fi;
+                try { fi = new FileInfo(file); } catch { continue; }
+                if (fi.Length > 300_000) continue;
+
+                string content;
+                try { content = await System.IO.File.ReadAllTextAsync(file, Encoding.UTF8, ct); }
+                catch { continue; }
+
+                foreach (var rx in defPatterns)
+                {
+                    var m = rx.Match(content);
+                    if (!m.Success) continue;
+
+                    var lineNo = content[..m.Index].Count(c => c == '\n') + 1;
+                    var line = m.Value.Trim();
+                    if (line.Length > 80) line = line[..80] + "…";
+                    return (rel, $"line {lineNo}: {line}");
+                }
+            }
+        }
+        catch { /* non-critical */ }
+
+        return (null, null);
+    }
+
+    
     private async Task ExecuteEditStep(
         AgentStep step, string projectRoot, Dictionary<string, object?> result,
         Dictionary<string, string>? contentCache = null)
@@ -9465,7 +10216,7 @@ done = build OK; command = run this to fix; ask_user = need input";
                     var answer = await AskUserAsync(userQuestion, new List<QuestionField>
                     {
                         new() { Key = "buildResponse", Label = decision.Summary ?? "", Type = "text", DefaultValue = "" }
-                    }, ct);
+                    }, ct, new {raw, decision});
                     var userResponse = answer.GetValueOrDefault("buildResponse", "").Trim();
                     if (!string.IsNullOrWhiteSpace(userResponse))
                     {
