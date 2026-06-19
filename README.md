@@ -21,6 +21,23 @@ dotnet run
 
 The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
 
+## FAQ
+
+### Where to Start
+
+1. Open the options popup (top right of screen)
+2. Click on both 'projects' and 'settings' and configure the application
+3. Start by adding a card in the kanban, adding files for context and then pressing start
+
+`llamaUrl` specifies the address of your local llama.cpp server or Ollama instance. By default, Weaver looks for the server at `http://localhost:8080`. If your server runs on a different port or address, update this setting by opening the settings panel or in `weaverconfig.json` to ensure Weaver can connect to your LLM backend.
+
+### Force File Edits
+In cases where the edit pipeline isn't being chosen,
+Employ 'Fix the' keywords to force the agent to make file edits. 
+For example, phrase your request as 'Fix the README.md file to add a new section about forced edits' 
+or 'Fix the configuration section to clarify the llamaUrl setting'. 
+This mechanism ensures that the standard edit pipeline is automatically selected.
+
 ## Configuration
 
 `weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
