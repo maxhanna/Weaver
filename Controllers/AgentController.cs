@@ -131,7 +131,11 @@ public class AgentController : ControllerBase
                 "NOT SUPPORTED (use oldString/newString): .html .css .json .yaml .toml .xml .svg .md .sql .sh .py .lua .ex\n" +
             "12b. targetType='class': ONLY to REPLACE the ENTIRE class body. " +
                 "To add a single property/field, use oldString/newString instead.\n" +
-            "13. oldString STRICT LIMIT: MAXIMUM 10 lines. Outputting more than 10 lines causes UNIQUE ANCHOR matching to fail — the system CANNOT find 20+ lines verbatim.\n" +
+            "13. oldString STRICT LIMIT: MAXIMUM 10 lines — APPLIES ONLY to oldString/newString format." +
+                "FORMAT C (targetType/targetName/newCode) is EXEMPT from this limit: the system extracts " +
+                "the entire method body from the AST automatically. You SHOULD use FORMAT C for any " +
+                "method longer than 10 lines. Do NOT truncate newCode to fit 10 lines — output the " +
+                "complete replacement method body." +
             "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
             "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
             "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
@@ -147,7 +151,12 @@ public class AgentController : ControllerBase
                 "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
                 "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
                 "(like `selectedCommand.command`, not `selectedCommand.title`; `cancelCommand()`, not `executeCommand()`). " +
-                "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit.";
+                "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit." +
+            "22. FORMAT C + INLINE SQL: When using FORMAT C to replace a C# method that contains" +
+                "inline SQL (verbatim @\"...\" strings), you MUST copy the SQL verbatim from the file" +
+                "into newCode.Do NOT reformat, re-indent, or \"clean up\" SQL inside @\"...\" strings —" +
+                "every space inside the string literal is significant.The system will NOT normalize" +
+                "whitespace inside verbatim strings.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -996,7 +1005,10 @@ public class AgentController : ControllerBase
             .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
             .Distinct()
             .ToList();
-        if (distinctIndents.Count <= 1 && !IsWhitespaceSignificant(filePath))
+        if (distinctIndents.Count <= 1
+            && !IsWhitespaceSignificant(filePath)
+            && !shifted.Contains("@\"", StringComparison.Ordinal)   
+            && !shifted.Contains("\"\"\"", StringComparison.Ordinal)) 
             return ReindentByBraceDepth(shifted, baseIndent, DetectIndentUnit(oldSource));
 
         return shifted;
@@ -1057,12 +1069,12 @@ public class AgentController : ControllerBase
     /// The LLM sees the real file content and outputs delimiter-format diff.
     /// </summary>
     private async Task<(string? oldStr, string? newStr, bool fullFile,
-     string? fullContent, bool alreadyDone, string? error)>
-     ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
-         CancellationToken ct,
-         List<(string old, string @new, string error)>? history = null,
-         string? explorationContext = null,
-         string? targetSymbol = null)
+      string? fullContent, bool alreadyDone, string? error, bool fromFormatC)>
+      ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
+          CancellationToken ct,
+          List<(string old, string @new, string error)>? history = null,
+          string? explorationContext = null,
+          string? targetSymbol = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -1366,8 +1378,8 @@ public class AgentController : ControllerBase
         var (raw, _, _) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 8192);
 
         if (string.IsNullOrWhiteSpace(raw))
-            return (null, null, false, null, false, "LLM returned empty response");
-
+            return (null, null, false, null, false, "LLM returned empty response", false);
+            
         string? oldStr = null, newStr = null;
 
         // Try JSON first
@@ -1393,8 +1405,7 @@ public class AgentController : ControllerBase
 
             // Already done
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
-                return (null, null, false, null, true, null);
-
+                return (null, null, false, null, true, null, false);
             // Full file (string or array)
             if (jRoot.TryGetProperty("fullFile", out var ff))
             {
@@ -1414,7 +1425,7 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(body))
                 {
                     body = StripFullFileFence(body);
-                    return (null, null, true, body, false, null);
+                    return (null, null, true, body, false, null, false);
                 }
             }
 
@@ -1443,7 +1454,7 @@ public class AgentController : ControllerBase
                         var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (fullStr == null)
                             return (null, null, false, null, false,
-                                $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}");
+                                $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}", false);
 
                         if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1456,13 +1467,13 @@ public class AgentController : ControllerBase
                             if (lastBrace >= 0)
                             {
                                 newStr = fullStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + fullStr[lastBrace..];
-                                return (fullStr, newStr, false, null, false, null);
+                                return (fullStr, newStr, false, null, false, null, true);
                             }
                         }
 
                         var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
-                        return (fullStr, newStr, false, null, false, null);
+                        return (fullStr, newStr, false, null, false, null, true);
                     }
                     else
                     {
@@ -1485,7 +1496,7 @@ public class AgentController : ControllerBase
                                     "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
                                     "For adding properties/fields, use oldString/newString format instead: " +
                                     "set oldString to the last 1-2 existing lines before the class closing brace, " +
-                                    "and newString to those lines plus the new property line.");
+                                    "and newString to those lines plus the new property line.", false);
                             }
                             if (isClassTarget)
                             {
@@ -1501,7 +1512,7 @@ public class AgentController : ControllerBase
                                         "To ADD a method: use insertAfter:true with targetType='method' and an existing method name. " +
                                         "To ADD a property/field: use oldString/newString — set oldString to the last 1-2 lines " +
                                         "before the closing brace (e.g. the isMenuPanelOpen declaration), " +
-                                        "and newString to those same lines followed by the new property.");
+                                        "and newString to those same lines followed by the new property.", false);
                                 }
 
                                 // C# only: strip the class declaration wrapper so newCode body
@@ -1518,7 +1529,7 @@ public class AgentController : ControllerBase
                                         // FIXED: classHeader + new body + }, not old-body + new body + }
                                         var classHeader = astOldStr[..(openBrace + 1)];
                                         var mergedStr = classHeader.TrimEnd() + "\n" + bodyIndented.TrimEnd() + "\n" + astOldStr[lastBrace..];
-                                        return (astOldStr, mergedStr, false, null, false, null);
+                                        return (astOldStr, mergedStr, false, null, false, null, true);
                                     }
                                 }
                             }
@@ -1527,7 +1538,10 @@ public class AgentController : ControllerBase
                             // the indentation adjustment shifts from a normalized base
                             // (0 indent for root, 4 spaces per level) to the file's level
                             var fmtNewCode = newCodeStr;
-                            if (string.Equals(Path.GetExtension(relPath), ".cs", StringComparison.OrdinalIgnoreCase))
+                            if (string.Equals(Path.GetExtension(relPath), ".cs", StringComparison.OrdinalIgnoreCase)
+                                && !fmtNewCode.Contains("@\"", StringComparison.Ordinal)   // ← never normalize verbatim strings
+                                && !fmtNewCode.Contains("/*", StringComparison.Ordinal)    // ← never strip block comments
+                                && !fmtNewCode.Contains("///", StringComparison.Ordinal))  // ← never strip XML doc comments
                             {
                                 try
                                 {
@@ -1537,9 +1551,9 @@ public class AgentController : ControllerBase
                                 catch { }
                             }
                             var indented = AutoIndentCode(astOldStr, fmtNewCode, relPath);
-                            return (astOldStr, indented, false, null, false, null);
+                            return (astOldStr, indented, false, null, false, null, true);
                         }
-                        return (null, null, false, null, false, $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}");
+                        return (null, null, false, null, false, $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}", false);
                     }
                 }
             }
@@ -1570,25 +1584,25 @@ public class AgentController : ControllerBase
             }
 
             if (!string.IsNullOrWhiteSpace(oldStr))
-                return (oldStr, newStr ?? "", false, null, false, null);
+                return (oldStr, newStr ?? "", false, null, false, null, false);
 
-            return (null, null, false, null, false, "JSON has no oldString, targetType, fullFile, or alreadyDone field");
+            return (null, null, false, null, false, "JSON has no oldString, targetType, fullFile, or alreadyDone field", false);
         }
         catch
         {
             // Fallback: legacy delimiter format
             if (raw.Contains(D_DONE, StringComparison.OrdinalIgnoreCase))
-                return (null, null, false, null, true, null);
+                return (null, null, false, null, true, null, false);
 
             var ffS = raw.IndexOf(D_FULL, StringComparison.OrdinalIgnoreCase);
             var ffE = raw.IndexOf(D_FULL_END, StringComparison.OrdinalIgnoreCase);
             if (ffS >= 0)
             {
                 if (ffE < ffS)
-                    return (null, null, false, null, false, "Response truncated — FULL_FILE not closed.");
+                    return (null, null, false, null, false, "Response truncated — FULL_FILE not closed.", false);
                 var body = raw[(ffS + D_FULL.Length)..ffE];
                 body = StripFullFileFence(body);
-                return (null, null, true, body, false, null);
+                return (null, null, true, body, false, null, false);
             }
 
             // Regex fallback: try to extract oldString/newString from malformed JSON
@@ -1606,7 +1620,7 @@ public class AgentController : ControllerBase
                 {
                     oldStr = string.Join("\n", oldLines);
                     newStr = string.Join("\n", newLines);
-                    return (oldStr, newStr ?? "", false, null, false, null);
+                    return (oldStr, newStr ?? "", false, null, false, null, false);
                 }
             }
 
@@ -1618,7 +1632,7 @@ public class AgentController : ControllerBase
             {
                 oldStr = osStrMatch.Groups[1].Value;
                 newStr = osStrMatch.Groups[2].Value;
-                return (oldStr, newStr ?? "", false, null, false, null);
+                return (oldStr, newStr ?? "", false, null, false, null, false);
             }
 
             // FORMAT C fallback: extract targetType/targetName/newCode from malformed JSON
@@ -1670,12 +1684,12 @@ public class AgentController : ControllerBase
                         if (insertAfter)
                         {
                             var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null); }
+                            if (fullStr != null) { var indented = AutoIndentCode(fullStr, newCodeStr, relPath); newStr = fullStr + "\n" + indented; return (fullStr, newStr, false, null, false, null, true); }
                         }
                         else
                         {
                             var (astOldStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
-                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null); }
+                            if (astOldStr != null) { var indented = AutoIndentCode(astOldStr, newCodeStr, relPath); return (astOldStr, indented, false, null, false, null, true); }
                         }
                     }
                 }
@@ -1687,17 +1701,18 @@ public class AgentController : ControllerBase
             var nE = raw.IndexOf(D_NEW_END, StringComparison.OrdinalIgnoreCase);
 
             if (oS < 0)
-                return (null, null, false, null, false, "No edit markers found — check LLM output");
+                return (null, null, false, null, false, "No edit markers found — check LLM output", false);
             if (oE < 0 || nS < 0 || nE < 0)
-                return (null, null, false, null, false, "Response truncated — markers not closed");
+                return (null, null, false, null, false, "Response truncated — markers not closed", false);
 
             oldStr = raw[(oS + D_OLD.Length)..oE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
             newStr = raw[(nS + D_NEW.Length)..nE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
 
             if (string.IsNullOrWhiteSpace(oldStr))
-                return (null, null, false, null, false, "OLD section is empty");
+                return (null, null, false, null, false, "OLD section is empty", false);
 
-            return (oldStr, newStr, false, null, false, null);
+            return (oldStr, newStr, false, null, false, null, false);
+
         }
     }
 
@@ -3313,6 +3328,7 @@ public class AgentController : ControllerBase
             string? oldStr = null, newStr = null, resolveError = null;
             bool fullFile = false, alreadyDone = false;
             string? fullContent = null;
+            bool fromFormatC = false;
 
             // Attempt 0: use plan-provided (or AST-resolved) oldString directly
             if (attempt == 0 && !string.IsNullOrWhiteSpace(planOldStr) && !planOldTried)
@@ -3342,7 +3358,7 @@ public class AgentController : ControllerBase
 
                 // Pass the rich exploration context so the edit-resolve LLM
                 // has far better information than just the file excerpt
-                (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError) =
+                (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
                     await ResolveEditForStep(
                         step, projectRoot, emitSse, ct, history,
                         explorationContext: explorationContext,
@@ -3350,7 +3366,7 @@ public class AgentController : ControllerBase
 
                 if (resolveError == null)
                 {
-                    var fmt = fullFile ? "fullFile" : alreadyDone ? "alreadyDone" : "oldString/newString";
+                    var fmt = fullFile ? "fullFile" : alreadyDone ? "alreadyDone" : fromFormatC ? "FORMAT C" : "oldString/newString";
                     var oldLen = oldStr?.Length ?? 0;
                     var newLen = newStr?.Length ?? 0;
                     await EmitLog(emitSse, "info",
@@ -3459,9 +3475,9 @@ public class AgentController : ControllerBase
                 allResults.Add(r);
                 return stepIndex + 1;
             }
-
             // Detect replacement-when-insertion-was-intended: oldString >> newString
-            if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) &&
+            if (!fromFormatC &&
+                !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) &&
                 oldStr.Length > newStr.Length * 4 &&
                 !oldStr.TrimStart().StartsWith('}') &&
                 oldStr.Length > 200)
@@ -3515,7 +3531,7 @@ public class AgentController : ControllerBase
                         else
                         {
                             var (approved2, _, _) =
-                                VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2);
+                                VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2, fromFormatC);
                             if (approved2)
                             {
                                 await System.IO.File.WriteAllTextAsync(
@@ -3627,8 +3643,8 @@ public class AgentController : ControllerBase
             }
 
             // Content-shrink check: if newString is drastically shorter than oldString,
-            // the LLM likely dropped the method body by accident (e.g. old=96L, new="}")
-            if (!string.IsNullOrEmpty(newStr) && (double)newStr.Length / oldStr!.Length < 0.1)
+            var shrinkThreshold = fromFormatC ? 0.02 : 0.1;
+            if (!string.IsNullOrEmpty(newStr) && (double)newStr.Length / oldStr!.Length < shrinkThreshold)
             {
                 var err = $"newString too short ({(double)newStr.Length / oldStr.Length:P1} of oldString length) — possible content deletion";
                 await EmitLog(emitSse, "warn",
@@ -3665,7 +3681,7 @@ public class AgentController : ControllerBase
                 continue;
             }
 
-            var (approved, verifyReason, _) = VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent);
+            var (approved, verifyReason, _) = VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
 
             if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
@@ -3678,7 +3694,7 @@ public class AgentController : ControllerBase
                     // normNewContent.Contains(normNew) would always return false.
                     var correctedNewStr = AutoFixSqlWhitespace(newStr ?? "");
                     (approved, verifyReason, _) =
-                        VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent);
+                        VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent, fromFormatC);
                     if (approved)
                     {
                         newContent = correctedContent;
@@ -7260,7 +7276,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (true, "", 10);
     }
     private static (bool approved, string reason, int score) VerifyEdit(
-        string oldString, string newString, string oldContent, string newContent)
+        string oldString, string newString, string oldContent, string newContent, bool fromFormatC = false)
     {
         if (oldContent == newContent) return (false, "Edit produced no change", 3);
 
@@ -7299,10 +7315,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // If a property name appears nowhere in the old file but the new code uses it,
         // it's likely hallucinated.
         var hallucinatedPropertyNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "Title", "Description", "StartTime", "EndTime",
-            "UserId", "UserName", "EventTitle", "EventDescription",
-            "Summary", "Location", "Attendees", "Organizer"
+        { 
+            "EventTitle", "EventDescription",   // almost always should be Title/Description on an Event type
+            "UserName", "UserEmail",            // usually just Email or Username
+            "Attendees", "Organizer",           // rarely used; usually People/Owner
         };
         var newlyIntroducedProps = hallucinatedPropertyNames
             .Where(p => !Regex.IsMatch(normOldContent, $@"\b{Regex.Escape(p)}\b", RegexOptions.IgnoreCase))
@@ -7348,17 +7364,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // Detect duplicate HTTP-method route attributes (the most common source
         // of LLM-produced method duplication — it copies a whole existing method
         // alongside the new one instead of doing a clean insertion).
-        var uniqueRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(newContent,
-            @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)"""))
+        if (!fromFormatC)
         {
-            if (!uniqueRoutes.Add(m.Groups[1].Value))
-                return (false,
-                    $"Duplicate route \"{m.Groups[1].Value}\" in result — LLM likely " +
-                    "copied an entire existing method instead of inserting the new code. " +
-                    "Use a precise insertion anchor or insertAfter instead.", 1);
+            var uniqueRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match m in Regex.Matches(newContent,
+                @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)"""))
+            {
+                if (!uniqueRoutes.Add(m.Groups[1].Value))
+                    return (false,
+                        $"Duplicate route \"{m.Groups[1].Value}\" in result — LLM likely " +
+                        "copied an entire existing method instead of inserting the new code. " +
+                        "Use a precise insertion anchor or insertAfter instead.", 1);
+            }
         }
-
         // Detect empty placeholder classes/structs — the LLM creates them when it
         // doesn't know a type exists. These exist already in the project; grep for them.
         var emptyDecls = Regex.Matches(newContent,
