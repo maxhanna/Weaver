@@ -369,12 +369,11 @@ public class AgentController : ControllerBase
             if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
             {
-                // ── General: JS/TS/Java/PHP/C-family access-modifier prefix ─────
+                // ── General: JS/TS/Java/PHP/C-family access-modifier prefix ───── 
                 patterns.Add(("Method/function",
                     new Regex(
-                        $@"^\s*(?:(?:async|export|default)\s+)?(?:(?:public|private|protected|internal|static|override|abstract|virtual|sealed|final|open|inline|suspend)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?\s+)?\b{Regex.Escape(targetName)}\s*\([^)]*\)\s*(?::\s*[^{{;]+)?\s*(?:{{|=>)",
+                        $@"^\s*(?:(?:async|export|default|public|private|protected|static|override|abstract|get|set|readonly)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?\s+)?\b{Regex.Escape(targetName)}\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{{;]+?)?\s*(?:{{|=>)",
                         RegexOptions.Multiline)));
-
                 // ── Go: func [( receiver )] Name( ───────────────────────────────
                 if (ext == ".go")
                     patterns.Add(("Go function",
@@ -1583,6 +1582,17 @@ public class AgentController : ControllerBase
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
             }
 
+            // HARD ENFORCEMENT: oldString must be ≤ 15 lines (array format adds a few blank lines)
+            if (oldStr != null && oldStr.Split('\n').Length > 15)
+            {
+                var lineCounts = oldStr.Split('\n').Length;
+                return (null, null, false, null, false,
+                    $"oldString is {lineCounts} lines long — STRICT MAXIMUM is 10 lines. " +
+                    "You MUST use FORMAT C (targetType='method', targetName='MethodName') for methods longer than 10 lines. " +
+                    "If FORMAT C failed because the method name is wrong, look at the file content, find the exact method name, and use FORMAT C with the correct name. " +
+                    "Do NOT output a massive oldString.", false);
+            }
+
             if (!string.IsNullOrWhiteSpace(oldStr))
                 return (oldStr, newStr ?? "", false, null, false, null, false);
 
@@ -1620,6 +1630,15 @@ public class AgentController : ControllerBase
                 {
                     oldStr = string.Join("\n", oldLines);
                     newStr = string.Join("\n", newLines);
+
+                    // HARD ENFORCEMENT in fallback parser too
+                    if (oldStr.Split('\n').Length > 15)
+                    {
+                        return (null, null, false, null, false,
+                            $"oldString is {oldStr.Split('\n').Length} lines long — STRICT MAXIMUM is 10 lines. " +
+                            "You MUST use FORMAT C (targetType='method', targetName='MethodName') for methods longer than 10 lines.", false);
+                    }
+
                     return (oldStr, newStr ?? "", false, null, false, null, false);
                 }
             }
