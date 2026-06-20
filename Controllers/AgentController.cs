@@ -3944,18 +3944,27 @@ public class AgentController : ControllerBase
             }
 
             // ── Deterministic auto-format of edited region (Patch 5) ──────────
-            // Fixes FOUR common LLM formatting regressions in the lines that
-            // were just inserted/modified, using a character-by-character
-            // scanner that tracks string and comment state:
+            // Runs TWO passes over the edited region, both scoped to lines that
+            // appear in `newStr` (unrelated lines are never touched). Runs BEFORE
+            // PostEditStyleFixAsync so the LLM only handles residual issues.
+            //
+            // Pass 1 — spacing fixes (character-by-character scanner tracking
+            // string and comment state):
             //   1. Missing space after ','  ("indices,0" -> "indices, 0")
             //   2. Missing space after ':'  ("{a:1}" -> "{a: 1}")
             //   3. Missing space after ';'  ("for(i=0;i<10;)" -> "for(i=0; i<10;)")
             //   4. Missing space around '='  ("pitch: number =0" -> "pitch: number = 0")
             //      Skips compound operators (==, ===, !=, <=, >=, =>, +=, -=, ...) and
             //      HTML/JSX attributes (class="foo") so existing markup is never mangled.
-            // Scoped to the edited region only — unrelated lines are never
-            // touched. Runs BEFORE PostEditStyleFixAsync so the LLM only
-            // handles residual issues.
+            //
+            // Pass 2 — stray closing-delimiter dedent:
+            //   5. Over-indented standalone `)` / `]` / `}` lines aligned to the
+            //      indent of the line that opened their group. Closes the regression
+            //      where a multi-line function signature's `  ) {` gets pushed in
+            //      to body-indent instead of staying at signature-indent. Only
+            //      fires when the line is JUST whitespace + closing delimiter
+            //      (+ optional `;` `,` `{`) and the opener is found by a
+            //      string/comment-aware backwards scan.
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
                   or ".css" or ".scss" or ".less" or ".html" or ".json"
@@ -3967,7 +3976,7 @@ public class AgentController : ControllerBase
                 {
                     await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                     await EmitLog(emitSse, "info",
-                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons/equals)", ct: ct);
+                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons/equals + closing-dedent)", ct: ct);
                 }
             }
 
@@ -4365,6 +4374,7 @@ public class AgentController : ControllerBase
 
         if (editedLineIndices.Count == 0) return content;
 
+        // ── Pass 1: spacing fixes (commas/colons/semicolons/equals) ──
         var changed = false;
         for (var i = 0; i < fileLines.Length; i++)
         {
@@ -4377,7 +4387,248 @@ public class AgentController : ControllerBase
             }
         }
 
+        // ── Pass 2: stray closing-paren / closing-bracket / closing-brace dedent ──
+        // Fixes the regression where a line like `  ) {` (the close-paren of a
+        // multi-line function signature) gets over-indented to match the body
+        // indent instead of the signature indent. Only safe to apply when the
+        // line is JUST whitespace + a single closing delimiter (optionally
+        // followed by `;`, `,`, `)`, `]`, `}`, or ` {`), so we never touch
+        // lines that have meaningful content.
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            if (!editedLineIndices.Contains(i)) continue;
+            var fixedLine = FixStrayClosingParens(fileLines, i);
+            if (fixedLine != fileLines[i])
+            {
+                fileLines[i] = fixedLine;
+                changed = true;
+            }
+        }
+
         return changed ? string.Join("\n", fileLines) : content;
+    }
+
+    /// <summary>
+    /// Fix over-indented standalone closing delimiters (`)`, `]`, `}`) by aligning
+    /// them to the indent of the line that opened their group.
+    ///
+    /// Targets the LLM regression where a multi-line function signature like
+    ///   private drawMesh(
+    ///     mesh: CityMesh | CityMesh[],
+    ///     ...
+    ///     pitch: number = 0
+    ///   ) {                ← over-indented to body-level (should be 0-indent)
+    /// gets the closing `)` pushed in to match the parameter indent or the body
+    /// indent, instead of the signature indent.
+    ///
+    /// SAFE BY CONSTRUCTION — the line is only rewritten if ALL of these hold:
+    ///   1. After trimming, the line starts with `)`, `]`, or `}` (a single
+    ///      closing delimiter).
+    ///   2. The rest of the line (after that delimiter) is empty OR is only
+    ///      one of: `;`, `,`, `)`, `]`, `}`, ` {`, `; {`, `, {`, `) {`, `] {`, `} {`.
+    ///      (i.e. we allow `} else {`, `} else if (...) {` etc. by NOT matching
+    ///      those — only the bare forms above are rewritten.)
+    ///   3. The opener for this delimiter can be found by scanning UPWARDS
+    ///      through the file, tracking paren/bracket/brace depth while
+    ///      respecting string and comment state.
+    ///   4. The opener's line has a strictly smaller indent than the current
+    ///      line. (If the current line is already at the opener's indent or
+    ///      less, there's nothing to fix.)
+    ///
+    /// The rewrite replaces the current line's leading whitespace with the
+    /// opener line's leading whitespace. Everything after the leading
+    /// whitespace is preserved character-for-character.
+    ///
+    /// Multi-line strings/comments are tracked across lines so a `(` inside a
+    /// verbatim string `@"..."` or block comment `/* ... */` never counts as
+    /// an opener.
+    /// </summary>
+    private static string FixStrayClosingParens(string[] fileLines, int idx)
+    {
+        var line = fileLines[idx];
+        if (string.IsNullOrEmpty(line)) return line;
+
+        var trimmed = line.TrimStart();
+        if (trimmed.Length == 0) return line;
+
+        // Must START with a closing delimiter.
+        char closeCh;
+        if (trimmed[0] == ')') closeCh = ')';
+        else if (trimmed[0] == ']') closeCh = ']';
+        else if (trimmed[0] == '}') closeCh = '}';
+        else return line;
+
+        char openCh = closeCh == ')' ? '(' : (closeCh == ']' ? '[' : '{');
+
+        // After the closing delimiter, only allow a tiny set of safe suffixes.
+        var suffix = trimmed.Substring(1);
+        if (!IsSafeCloseSuffix(suffix)) return line;
+
+        // Scan UPWARDS from idx-1, tracking depth for openCh/closeCh.
+        // We must end with depth 0 at the opener line. State carries across
+        // lines for strings and comments.
+        //
+        // IMPORTANT: when scanning upward, each line is scanned RIGHT-TO-LEFT.
+        // This is because the close delimiter on `line[idx]` is the LAST thing
+        // before our scan starts, so the next delimiter we encounter going
+        // backwards must be processed in reverse order. Scanning a line
+        // left-to-right while going up would invert the depth bookkeeping.
+        //
+        // String/comment state tracking also runs right-to-left, which requires
+        // care: a string-closing delimiter (`"`, `'`, `` ` ``) encountered while
+        // scanning backward means we just EXITED a string, so we flip into
+        // string mode and continue until we find the matching opener. Block
+        // comments (`*/ ... /*`) work the same way.
+        var depth = 1; // we already have one closeCh on the current line
+        var inStrDq = false; var inStrSq = false; var inTmpl = false;
+        var inLineCmt = false; var inBlockCmt = false;
+        var openerLineIdx = -1;
+
+        for (var li = idx - 1; li >= 0; li--)
+        {
+            var upLine = fileLines[li];
+            if (string.IsNullOrEmpty(upLine))
+            {
+                // Blank line resets line-comment state (block comments persist).
+                inLineCmt = false;
+                continue;
+            }
+
+            // Scan this line right-to-left, tracking string/comment state.
+            // lastOpenerCharIdx records the LEFTMOST opener at depth 0 we
+            // encountered on this line (since we're going right-to-left, the
+            // leftmost one is the last one we hit before reaching col 0).
+            var localInLineCmt = inLineCmt;
+            var localInBlockCmt = inBlockCmt;
+            var localInDq = inStrDq; var localInSq = inStrSq; var localInTmpl = inTmpl;
+            var lastOpenerCharIdx = -1;
+            var foundOpenerOnThisLine = false;
+
+            for (var ci = upLine.Length - 1; ci >= 0; ci--)
+            {
+                var c = upLine[ci];
+                var next = (ci + 1 < upLine.Length) ? upLine[ci + 1] : '\0';
+                var prev = (ci > 0) ? upLine[ci - 1] : '\0';
+
+                // ── String state (scanning backward) ──
+                // When we hit a quote while NOT in a string, we are about to
+                // ENTER the string (going backward). When we hit a quote while
+                // IN a string, we are EXITING it. Escapes (\X) are tricky
+                // backward: if we see a `\` at position ci-1 followed by our
+                // quote at ci, the quote is escaped and shouldn't toggle state.
+                if (localInDq || localInSq || localInTmpl)
+                {
+                    if (c == '\\' && prev != '\\')
+                    {
+                        // Skip the escaped char (going backward, the char before `\`
+                        // is what was escaped). We just continue; the `\` itself
+                        // doesn't toggle string state.
+                        ci--;
+                        continue;
+                    }
+                    if (localInDq && c == '"' && prev != '\\') localInDq = false;
+                    else if (localInSq && c == '\'' && prev != '\\') localInSq = false;
+                    else if (localInTmpl && c == '`' && prev != '\\') localInTmpl = false;
+                    continue;
+                }
+
+                // ── Block comment (scanning backward: `*/` opens, `/*` closes) ──
+                if (localInBlockCmt)
+                {
+                    if (c == '*' && prev == '/')
+                    {
+                        // `/*` — exiting block comment going backward
+                        localInBlockCmt = false;
+                        ci--; // consume the `/` too
+                    }
+                    continue;
+                }
+                // Detect `*/` (entering block comment going backward)
+                if (c == '/' && prev == '*')
+                {
+                    localInBlockCmt = true;
+                    ci--; // consume the `*` too
+                    continue;
+                }
+
+                // ── Line comment (scanning backward) ──
+                // A `//` going backward means everything to the LEFT of it on
+                // this line is a comment. So once we see `//`, we stop scanning
+                // this line entirely (the rest is comment, no delimiters count).
+                if (c == '/' && prev == '/')
+                {
+                    // Everything from ci-1 leftward is a line comment. Stop.
+                    break;
+                }
+
+                // ── Quote entering string (backward) ──
+                if (c == '"') { localInDq = true; continue; }
+                if (c == '\'') { localInSq = true; continue; }
+                if (c == '`') { localInTmpl = true; continue; }
+
+                // ── Depth tracking (only outside strings/comments) ──
+                if (c == openCh)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        lastOpenerCharIdx = ci;
+                        foundOpenerOnThisLine = true;
+                    }
+                }
+                else if (c == closeCh)
+                {
+                    depth++;
+                }
+            }
+
+            // Carry comment/string state to the next line up.
+            // Line comments do NOT carry (they end at newline).
+            inLineCmt = false;
+            inBlockCmt = localInBlockCmt;
+            inStrDq = localInDq; inStrSq = localInSq; inTmpl = localInTmpl;
+
+            if (foundOpenerOnThisLine && depth == 0)
+            {
+                openerLineIdx = li;
+                break;
+            }
+
+            // If depth went negative without finding an opener, something is
+            // weird (unbalanced file) — bail out without rewriting.
+            if (depth < 0) return line;
+        }
+
+        if (openerLineIdx < 0) return line;
+
+        var openerLine = fileLines[openerLineIdx];
+        var openerIndent = GetLeadingWhitespace(openerLine);
+        var currentIndent = GetLeadingWhitespace(line);
+
+        // Only dedent — never indent. If the current line is already at or
+        // below the opener's indent, leave it alone.
+        if (currentIndent.Length <= openerIndent.Length) return line;
+
+        // Rebuild: opener indent + original content after the current leading whitespace.
+        return openerIndent + line[currentIndent.Length..];
+    }
+
+    /// <summary>
+    /// Returns true if `suffix` (the text after a leading `)`, `]`, or `}`)
+    /// is one of the safe trailers we're willing to dedent. Anything else
+    /// (e.g. ` else {`, ` while (...)`, `).foo()`, ` => expr`) means the line
+    /// has meaningful content beyond the closing delimiter and must not be
+    /// touched.
+    /// </summary>
+    private static bool IsSafeCloseSuffix(string suffix)
+    {
+        if (string.IsNullOrEmpty(suffix)) return true;
+        // Allow trailing whitespace-only.
+        if (suffix.Trim().Length == 0) return true;
+        // Bare punctuation trailers (no identifier or expression afterward).
+        var s = suffix.Trim();
+        return s is ";" or "," or ")" or "]" or "}"
+            or "{" or "; {" or ", {" or ") {" or "] {" or "} {" or ";{" or ",{" or "){" or "]{" or "}{";
     }
 
     /// <summary>
