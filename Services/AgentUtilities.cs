@@ -365,6 +365,14 @@ public static class AgentUtilities
 
     public static string NormalizeLineEndings(string s) => s.Replace("\r\n", "\n");
 
+    public static string StripLineLeadingWhitespace(string s)
+    {
+        var lines = s.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+            lines[i] = lines[i].TrimStart();
+        return string.Join("\n", lines);
+    }
+
     public static string Truncate(string s, int max) => s.Length <= max ? s : s.Substring(0, max) + "\n[Preview ended; omitted remainder is not code.]";
 
     public static string NormalizeUiStatus(string? status) => status switch

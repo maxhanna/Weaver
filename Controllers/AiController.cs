@@ -21,6 +21,14 @@ public class AiController : ControllerBase
         _configFile = configFile;
     }
 
+    private async Task<string> GetBaseURL()
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        return string.IsNullOrWhiteSpace(cfg.llamaUrl)
+            ? (_config.GetValue<string>("Ai:BaseUrl") ?? "http://localhost:8080")
+            : cfg.llamaUrl;
+    }
+
     [HttpPost("generate")]
     public async Task<IActionResult> Generate([FromBody] JsonElement payload)
     {

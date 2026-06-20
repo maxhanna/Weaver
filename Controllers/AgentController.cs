@@ -233,157 +233,6 @@ public class AgentController : ControllerBase
     // ═══════════════════════════════════════════════════════════════════════
     //  EDIT RESOLUTION  (two-phase: plan describes WHAT, resolve finds HOW)
     // ═══════════════════════════════════════════════════════════════════════
-    /// <summary>
-    /// For large files, returns a "skeleton" of the file, keeping the structural header
-    /// and the excerpt most likely to contain the relevant edit target, while replacing
-    /// other large blocks with method/class signatures.
-    /// </summary>
-    private static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000)
-    {
-        const int RadiusLines = 60;
-        var lines = fileContent.Split('\n');
-
-        // ── Step 1: Always include structural header (imports + declaration) ──
-        var structEnd = 0;
-        var foundClassLine = -1;
-        for (var i = 0; i < Math.Min(lines.Length, 80); i++)
-        {
-            var trimmed = lines[i].TrimStart();
-            if (trimmed.StartsWith("import ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("using ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("require(", StringComparison.Ordinal) ||
-                trimmed.StartsWith("const ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("var ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("let ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("#include", StringComparison.Ordinal) ||
-                trimmed.StartsWith("from ", StringComparison.Ordinal) ||
-                trimmed.StartsWith("export ", StringComparison.Ordinal) ||
-                trimmed == "")
-                structEnd = i + 1;
-            else if (trimmed.StartsWith("@Component", StringComparison.Ordinal) ||
-                     trimmed.StartsWith("@Injectable", StringComparison.Ordinal) ||
-                     trimmed.StartsWith("@Directive", StringComparison.Ordinal) ||
-                     trimmed.StartsWith("@Pipe", StringComparison.Ordinal) ||
-                     trimmed.StartsWith("@NgModule", StringComparison.Ordinal) ||
-                     trimmed.StartsWith("public ") || trimmed.StartsWith("internal ") ||
-                     trimmed.StartsWith("abstract class") || trimmed.StartsWith("class ") ||
-                     trimmed.StartsWith("interface ") || trimmed.StartsWith("enum ") ||
-                     trimmed.StartsWith("struct ") || trimmed.StartsWith("record ") ||
-                     trimmed.StartsWith("function ") || trimmed.StartsWith("export function"))
-            {
-                foundClassLine = i;
-                structEnd = i + 1;
-            }
-        }
-        if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
-
-        // ── Step 2: Find the target region ──
-        var targetStart = -1;
-        var targetEnd = -1;
-
-        if (!string.IsNullOrWhiteSpace(planOldString))
-        {
-            var anchor = planOldString.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length >= 8);
-            if (anchor != null)
-            {
-                for (var i = structEnd; i < lines.Length; i++)
-                {
-                    if (!lines[i].Contains(anchor, StringComparison.OrdinalIgnoreCase)) continue;
-                    targetStart = Math.Max(structEnd, i - 15);
-                    targetEnd = Math.Min(lines.Length, i + planOldString.Split('\n').Length + RadiusLines);
-                    break;
-                }
-            }
-        }
-
-        if (targetStart < 0)
-        {
-            var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant()).Where(kw => kw.Length >= 5).ToList();
-            if (keywords.Count > 0)
-            {
-                // Prefer lines that look like a method/function definition containing
-                // the keyword, over arbitrary keyword occurrences (e.g. route attr, comment).
-                var methodPattern = new[] { "public ", "private ", "protected ", "internal ",
-                    "static ", "async ", "function ", "def ", "fun " };
-                var bestLine = -1;
-                for (var i = structEnd; i < lines.Length; i++)
-                {
-                    if (!keywords.Any(kw => lines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
-                        continue;
-                    // If this line also looks like a method declaration, prefer it
-                    if (methodPattern.Any(p => lines[i].TrimStart().StartsWith(p, StringComparison.Ordinal)))
-                    {
-                        bestLine = i;
-                        break; // method declaration match is best — stop
-                    }
-                    if (bestLine < 0) bestLine = i;
-                }
-                if (bestLine >= 0)
-                {
-                    targetStart = Math.Max(structEnd, bestLine - 20);
-                    targetEnd = Math.Min(lines.Length, bestLine + RadiusLines);
-                }
-            }
-        }
-
-        // ── Step 3: Assemble with Skeleton ──
-        var header = string.Join('\n', lines.Take(structEnd));
-        
-        if (targetStart < 0)
-        {
-            // No target found: provide skeleton of the entire body
-            var bodySkeleton = GetSkeletonForRange(lines, structEnd, lines.Length);
-            return header + "\n" + bodySkeleton;
-        }
-
-        var preSkeleton = GetSkeletonForRange(lines, structEnd, targetStart);
-        var excerpt = string.Join('\n', lines.Skip(targetStart).Take(targetEnd - targetStart));
-        var postSkeleton = GetSkeletonForRange(lines, targetEnd, lines.Length);
-
-        var result = new StringBuilder();
-        result.AppendLine(header);
-        if (!string.IsNullOrWhiteSpace(preSkeleton)) result.AppendLine(preSkeleton);
-        result.AppendLine(excerpt);
-        if (!string.IsNullOrWhiteSpace(postSkeleton)) result.AppendLine(postSkeleton);
-
-        return result.ToString();
-    }
-
-    /// <summary>
-    /// Scans a range of lines for class, method, and property signatures, 
-    /// returning a condensed "skeleton" view for the LLM.
-    /// </summary>
-    private static string GetSkeletonForRange(string[] allLines, int start, int end)
-    {
-        if (start >= end) return "";
-        var skeleton = new StringBuilder();
-        var sigRegex = new Regex(@"^\s*(?:(?:public|private|protected|internal|static|async|export|default|readonly|virtual|override|abstract|sealed|final|open|inline|suspend|fn|func|def)\s+)*" +
-                                 @"(?:(?:class|interface|struct|record|enum|function|method|property|fn|func|def)\s+)?\b([A-Za-z_][A-Za-z0-9_]*)\b\s*[({<]", RegexOptions.Compiled);
-
-        int omittedCount = 0;
-        for (int i = start; i < end; i++)
-        {
-            var line = allLines[i];
-            if (sigRegex.IsMatch(line))
-            {
-                if (omittedCount > 0)
-                {
-                    skeleton.AppendLine($"... [{omittedCount} lines omitted]");
-                    omittedCount = 0;
-                }
-                var sig = line.Split('{')[0].TrimEnd();
-                skeleton.AppendLine($"{sig} {{ ... }}");
-            }
-            else
-            {
-                omittedCount++;
-            }
-        }
-        if (omittedCount > 0) skeleton.AppendLine($"... [{omittedCount} lines omitted]");
-        
-        return skeleton.ToString();
-    }
-
     /// <summary>Use Roslyn to find a C# AST node and return its exact source text as oldString.</summary>
     private (string? oldStr, string? error) AstResolveEdit(string fullPath, string targetType, string targetName, bool returnTail = false)
     {
@@ -2857,7 +2706,7 @@ public class AgentController : ControllerBase
                         if (alreadyRead.Contains(rel) || alreadyRead.Contains(pf)) continue;
                         alreadyRead.Add(rel);
 
-                        var excerpt = ExtractRelevantExcerpt(content, typeName, null, 600);
+                        var excerpt = AgentUtilities.ExtractRelevantExcerpt(content, typeName, null, 600);
                         buf.AppendLine($"### {rel}  (model: {typeName})");
                         buf.AppendLine("```csharp");
                         buf.AppendLine(excerpt);
@@ -3883,10 +3732,10 @@ public class AgentController : ControllerBase
                 // Strip leading whitespace AND trailing whitespace per line,
                 // same as VerifyEdit does internally — handles IndentReplacement re-indentation
                 var trimmedNew = string.Join("\n",
-                    StripLineLeadingWhitespace(AgentUtilities.NormalizeLineEndings(newStr))
+                    AgentUtilities.StripLineLeadingWhitespace(AgentUtilities.NormalizeLineEndings(newStr))
                         .Split('\n').Select(l => l.TrimEnd()));
                 var trimmedContent = string.Join("\n",
-                    StripLineLeadingWhitespace(newContent)
+                    AgentUtilities.StripLineLeadingWhitespace(newContent)
                         .Split('\n').Select(l => l.TrimEnd()));
                 if (!trimmedContent.Contains(trimmedNew, StringComparison.Ordinal))
                 {
@@ -6054,7 +5903,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             .Where(f => allFiles.Any(a => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)))
             .Take(4).ToList();
 
-        var heuristicCandidates = ApplyTaskTypeHeuristics(prompt, allFiles);
+        var heuristicCandidates = AgentUtilities.ApplyTaskTypeHeuristics(prompt, allFiles);
         var candidatePool = hintedFiles
             .Concat(heuristicCandidates)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -6120,52 +5969,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             $"Phase 1 complete — {allSteps.Count} step(s), {toRead.Count} file(s) read", ct: ct);
         return (sb.ToString(), allSteps);
     }
-
-    private static List<string> ApplyTaskTypeHeuristics(string prompt, List<string> allFiles)
-    {
-        var lower = prompt.ToLowerInvariant();
-        var isStyle = Regex.IsMatch(lower, @"\b(style|css|color|theme|layout|spacing|font|design|ui|ux|brand|visual|margin|padding|border|shadow|panel|card)\b");
-        var isHtml = Regex.IsMatch(lower, @"\b(html|template|page|view|markup|modal|popup|section|div)\b");
-        var isJs = Regex.IsMatch(lower, @"\b(javascript|script|function|event|click|toggle|show|hide|angular|react|vue|component|state|behavior)\b");
-        var isBackend = Regex.IsMatch(lower, @"\b(api|endpoint|controller|service|database|model|route|logic|backend|server|c#|csharp|dotnet)\b");
-        var isConfig = Regex.IsMatch(lower, @"\b(config|setting|option|appsettings|environment|json)\b");
-        var keywords = AgentUtilities.ExtractMeaningfulKeywords(lower);
-
-        var scored = allFiles.Select(f =>
-        {
-            var ext = Path.GetExtension(f).ToLowerInvariant();
-            var nameLow = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
-            var pathLow = f.ToLowerInvariant();
-            var score = 0;
-            if (isStyle) { if (ext is ".css" or ".scss" or ".sass") score += 120; else if (ext is ".html") score += 60; else if (ext is ".js") score += 20; }
-            if (isHtml) { if (ext is ".html" or ".htm") score += 120; else if (ext is ".css") score += 50; else if (ext is ".js") score += 30; }
-            if (isJs) { if (ext is ".js" or ".ts" or ".jsx" or ".tsx") score += 120; else if (ext is ".html") score += 40; }
-            if (isBackend) { if (ext == ".cs") score += 120; else if (ext == ".json") score += 30; }
-            if (isConfig) { if (ext is ".json" or ".yaml" or ".yml") score += 120; }
-            foreach (var kw in keywords) if (nameLow.Contains(kw)) score += 50;
-            if ((isStyle || isHtml || isJs) && pathLow.StartsWith("wwwroot/")) score += 25;
-            if (nameLow.Contains("agentcontroller")) score -= 200;
-            if (nameLow == "filehints") score -= 200;
-            if (pathLow.EndsWith(".min.js") || pathLow.EndsWith(".min.css")) score -= 300;
-            if (ext is ".dll" or ".exe" or ".pdb" or ".nupkg" or ".lock") score -= 1000;
-            return (file: f, score);
-        })
-        .Where(x => x.score > 0).OrderByDescending(x => x.score).Take(50).Select(x => x.file).ToList();
-
-        if (scored.Count == 0)
-            scored = allFiles.Where(f =>
-            {
-                var name = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
-                var ext = Path.GetExtension(f).ToLowerInvariant();
-                return name is "index" or "app" or "main" or "program" or "startup" or "styles" or "global" or "layout"
-                    && ext is ".html" or ".js" or ".ts" or ".css" or ".cs";
-            }).Take(10).ToList();
-
-        return scored;
-    }
-
-    private static List<string> ExtractMeaningfulKeywords(string lower) =>
-        AgentUtilities.ExtractMeaningfulKeywords(lower);
 
     private async Task<List<string>> SelectRelevantFilesWithLlm(
         string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
@@ -8537,8 +8340,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             !normNewContent.Contains(normNew, StringComparison.Ordinal))
         {
             // Indentation may have been adjusted — retry with leading whitespace stripped from each line
-            var strippedNew = StripLineLeadingWhitespace(normNew);
-            var strippedContent = StripLineLeadingWhitespace(normNewContent);
+            var strippedNew = AgentUtilities.StripLineLeadingWhitespace(normNew);
+            var strippedContent = AgentUtilities.StripLineLeadingWhitespace(normNewContent);
             // AutoIndentHtml uses Trim() internally so trailing whitespace is also lost;
             // trim trailing from both to avoid false mismatch.
             var trimmedNew = string.Join("\n", strippedNew.Split('\n').Select(l => l.TrimEnd()));
@@ -8578,9 +8381,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10 && !normNew.Contains(normOld))
         {
             // Strip leading whitespace from each line for indentation-aware comparison
-            var strippedOld = StripLineLeadingWhitespace(normOld);
-            var strippedOldContent = StripLineLeadingWhitespace(normOldContent);
-            var strippedNewContent = StripLineLeadingWhitespace(normNewContent);
+            var strippedOld = AgentUtilities.StripLineLeadingWhitespace(normOld);
+            var strippedOldContent = AgentUtilities.StripLineLeadingWhitespace(normOldContent);
+            var strippedNewContent = AgentUtilities.StripLineLeadingWhitespace(normNewContent);
 
             var oldCount = 0; var newCount = 0; var pos = 0;
             while ((pos = strippedOldContent.IndexOf(strippedOld, pos, StringComparison.Ordinal)) >= 0)
@@ -8803,14 +8606,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
         return changed ? string.Join("\n", lines) : content;
-    }
-
-    private static string StripLineLeadingWhitespace(string s)
-    {
-        var lines = s.Split('\n');
-        for (var i = 0; i < lines.Length; i++)
-            lines[i] = lines[i].TrimStart();
-        return string.Join("\n", lines);
     }
 
     /// <summary>Extract a C# method signature (attributes + return type + declaration) for comparison.</summary>
