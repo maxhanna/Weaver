@@ -2143,6 +2143,41 @@ public class AgentController : ControllerBase
             catch { return p.Replace('\\', '/').TrimEnd('/'); }
         }
 
+        // ── Canonical relative-path helper (Patch 7) ──────────────────────
+        // Returns the path as a project-relative string with forward slashes,
+        // e.g. "src/app/grandtheft/grandtheft-renderer.ts". Falls back to the
+        // input (with backslashes -> forward slashes) if path resolution fails.
+        // Used by AddFileRead() so filesRead never accumulates duplicate
+        // entries for the same file in different string forms.
+        string RelNormalize(string p)
+        {
+            try
+            {
+                var full = Path.IsPathRooted(p)
+                    ? Path.GetFullPath(p)
+                    : Path.GetFullPath(Path.Combine(projectRoot, p));
+                if (full.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
+                    return Path.GetRelativePath(projectRoot, full).Replace('\\', '/');
+                return full.Replace('\\', '/').TrimEnd('/');
+            }
+            catch { return p.Replace('\\', '/').TrimEnd('/'); }
+        }
+
+        // Add a file to both filesRead (canonical relative form) and
+        // normalizedPaths (absolute form). Returns true if added, false if
+        // already present. ALWAYS use this instead of filesRead.Add() /
+        // normalizedPaths.Add() directly so the two collections stay in sync
+        // and never contain duplicate entries for the same file.
+        bool AddFileRead(string path)
+        {
+            var rel = RelNormalize(path);
+            var abs = AbsNormalize(path);
+            var addedToFiles = filesRead.Add(rel);
+            normalizedPaths.Add(abs);
+            return addedToFiles;
+        }
+
+
         // ── Seed exploration with attached file content ───────────────────
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
@@ -2152,9 +2187,8 @@ public class AgentController : ControllerBase
                 try
                 {
                     var afPath = Path.GetFullPath(Path.Combine(projectRoot, af.TrimStart('/', '\\')));
-                    if (System.IO.File.Exists(afPath) && filesRead.Add(afPath))
+                    if (System.IO.File.Exists(afPath) && AddFileRead(afPath))
                     {
-                        normalizedPaths.Add(AbsNormalize(afPath));
                         var afContent = await System.IO.File.ReadAllTextAsync(afPath, ct);
                         var afRel = Path.GetRelativePath(projectRoot, afPath).Replace('\\', '/');
                         ctx.AppendLine($"--- {afRel} (attached) ---");
@@ -2207,8 +2241,7 @@ public class AgentController : ControllerBase
             ctx.AppendLine(excerpt);
             ctx.AppendLine("```");
             ctx.AppendLine();
-            filesRead.Add(relPath);
-            normalizedPaths.Add(AbsNormalize(relPath));
+            AddFileRead(relPath);
             await EmitLog(emitSse, "info", $"  📄 {relPath}", ct: ct);
         }
 
@@ -2265,7 +2298,12 @@ public class AgentController : ControllerBase
             var newlyRead = 0;
             foreach (var requested in parsed.FilesToRead.Take(3))
             {
-                if (normalizedPaths.Contains(AbsNormalize(requested))) continue;
+                // Dedup against BOTH the absolute form (normalizedPaths) and
+                // the canonical relative form (filesRead, which now stores
+                // RelNormalize output). Either match means we've already read
+                // this file — skip it.
+                if (normalizedPaths.Contains(AbsNormalize(requested)) ||
+                    filesRead.Contains(RelNormalize(requested))) continue;
 
                 var fp = Path.GetFullPath(
                     Path.Combine(projectRoot, requested.Replace('/', Path.DirectorySeparatorChar)));
@@ -2307,8 +2345,7 @@ public class AgentController : ControllerBase
                             ctx.AppendLine($"⚠ `{requested}` resolved to `{correctPath}` (skipped — context budget exhausted)");
                             ctx.AppendLine();
                         }
-                        filesRead.Add(correctPath);
-                        normalizedPaths.Add(AbsNormalize(correctPath));
+                        AddFileRead(correctPath);
                         await EmitLog(emitSse, "info",
                             $"  🔍 {requested} → {correctPath}", ct: ct);
                     }
@@ -2353,8 +2390,7 @@ public class AgentController : ControllerBase
                 ctx.AppendLine(excerpt);
                 ctx.AppendLine("```");
                 ctx.AppendLine();
-                filesRead.Add(requested);
-                normalizedPaths.Add(AbsNormalize(requested));
+                AddFileRead(requested);
                 newlyRead++;
                 await EmitLog(emitSse, "info", $"  📄 {requested}", ct: ct);
             }
