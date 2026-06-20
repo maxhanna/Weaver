@@ -147,7 +147,7 @@ public class AgentController : ControllerBase
                 "The RELATED FILE CONTEXT / AUTO-ENRICHED CONTEXT sections show type definitions found across the project. " +
                 "Use those existing types — do NOT rename them or create similar ones. " +
                 "If you need a type not present in the context, define it fully (not as a stub) in the same edit. " +
-            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'), 'font-size:12px' → 'font-size:12px' is OK but '12pximportant' → '12px important'. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
+            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors to watch for: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'); 'font-size:12px' is OK but '12pximportant' should be '12px important'; 'pitch: number =0' should be 'pitch: number = 0' (space on BOTH sides of '=' in assignments and default parameters); 'useTextureLoc,1)' should be 'useTextureLoc, 1)' (space after every comma, even when followed by ')'); '[0, -2,0]' should be '[0, -2, 0]' (space after comma inside arrays/tuples); 'Apply180°' in a comment should be 'Apply 180°' (space between a word and a number). NEVER collapse '==', '===', '!=', '<=', '>=', '=>', '+=', '-=', '*=', '/=' into spaced forms — those are compound operators and stay together. HTML/JSX attributes like class=\"foo\" stay glued to their value. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
                 "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
                 "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
                 "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
@@ -3944,12 +3944,15 @@ public class AgentController : ControllerBase
             }
 
             // ── Deterministic auto-format of edited region (Patch 5) ──────────
-            // Fixes three common LLM formatting regressions in the lines that
+            // Fixes FOUR common LLM formatting regressions in the lines that
             // were just inserted/modified, using a character-by-character
             // scanner that tracks string and comment state:
             //   1. Missing space after ','  ("indices,0" -> "indices, 0")
             //   2. Missing space after ':'  ("{a:1}" -> "{a: 1}")
             //   3. Missing space after ';'  ("for(i=0;i<10;)" -> "for(i=0; i<10;)")
+            //   4. Missing space around '='  ("pitch: number =0" -> "pitch: number = 0")
+            //      Skips compound operators (==, ===, !=, <=, >=, =>, +=, -=, ...) and
+            //      HTML/JSX attributes (class="foo") so existing markup is never mangled.
             // Scoped to the edited region only — unrelated lines are never
             // touched. Runs BEFORE PostEditStyleFixAsync so the LLM only
             // handles residual issues.
@@ -3964,7 +3967,7 @@ public class AgentController : ControllerBase
                 {
                     await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                     await EmitLog(emitSse, "info",
-                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons)", ct: ct);
+                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons/equals)", ct: ct);
                 }
             }
 
@@ -4316,25 +4319,47 @@ public class AgentController : ControllerBase
 
         var fileLines = content.Split('\n');
 
-        // Collect needles (trimmed, non-empty, min 5 chars to avoid
-        // matching trivially short fragments like "{" or "0").
-        var needles = appliedNewStr.Split('\n')
+        // Collect needles — trimmed, non-empty lines from the APPLIED newStr.
+        // No Take(N) cap: every edited line should get spacing fixes, otherwise
+        // long replacements (e.g. a 50-line method body) leave lines 11+ unformatted,
+        // which is exactly the regression we see on `this.gl.uniform1i(...,1);`.
+        // Min length 3 (was 5) so short edited lines like `});` or `},` are matched.
+        var needleSet = appliedNewStr.Split('\n')
             .Select(l => l.Trim())
-            .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 5)
-            .Take(10)
-            .ToList();
+            .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 3)
+            .ToHashSet(StringComparer.Ordinal);
 
-        if (needles.Count == 0) return content;
+        if (needleSet.Count == 0) return content;
 
-        // Find which file lines contain any needle — those are the
+        // Long needles (>= 12 chars) also serve as substring anchors — this catches
+        // the case where the file line has trailing punctuation the LLM omitted
+        // (e.g. needle `foo(a, b)` matches file line `foo(a, b);`).
+        var longNeedles = needleSet.Where(n => n.Length >= 12).ToList();
+
+        // Find which file lines match any needle — those are the
         // "edited region" lines that get formatting fixes.
+        // Primary path is O(1) HashSet lookup on the trimmed file line;
+        // substring fallback only runs for lines that missed the equality probe.
         var editedLineIndices = new HashSet<int>();
-        foreach (var needle in needles)
+        for (var i = 0; i < fileLines.Length; i++)
         {
-            for (var i = 0; i < fileLines.Length; i++)
+            var trimmedFileLine = fileLines[i].Trim();
+            if (trimmedFileLine.Length < 3) continue;
+            if (needleSet.Contains(trimmedFileLine))
             {
-                if (fileLines[i].Contains(needle, StringComparison.Ordinal))
-                    editedLineIndices.Add(i);
+                editedLineIndices.Add(i);
+                continue;
+            }
+            if (longNeedles.Count > 0)
+            {
+                foreach (var needle in longNeedles)
+                {
+                    if (trimmedFileLine.Contains(needle, StringComparison.Ordinal))
+                    {
+                        editedLineIndices.Add(i);
+                        break;
+                    }
+                }
             }
         }
 
@@ -4356,7 +4381,7 @@ public class AgentController : ControllerBase
     }
 
     /// <summary>
-    /// Fix missing spaces after ',', ':', and ';' in a single line of code.
+    /// Fix missing spaces after ',', ':', ';', and '=' in a single line of code.
     /// Uses a character-by-character scanner that tracks:
     ///   - Double-quote strings  ("...")
     ///   - Single-quote strings  ('...')
@@ -4364,6 +4389,9 @@ public class AgentController : ControllerBase
     ///   - Line comments          (// ...)
     ///   - Block comments         (/* ... */ — single-line portion)
     /// Punctuation inside any of these is never touched.
+    /// The '=' rule skips compound operators (==, ===, !=, <=, >=, =>, +=, -=, *=, /=, ...)
+    /// and HTML/JSX attribute syntax (class="foo") by bailing out when the next
+    /// char after '=' is a quote.
     /// </summary>
     private static string FixLineSpacing(string line)
     {
@@ -4500,6 +4528,71 @@ public class AgentController : ControllerBase
                 {
                     var after = line[i];
                     if (after != ';' && after != ')'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 4: '=' — insert spaces around standalone '=' (not part of ==, ===,
+            // !=, <=, >=, =>, +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=, <<=, ??=, etc.).
+            // Catches common LLM regressions like:
+            //   "pitch: number =0" -> "pitch: number = 0"
+            //   "let x=y"           -> "let x = y"
+            //   "for(i=0;i<n;i++)"  -> "for(i = 0; i<n; i++)"   (the '<' rule is out of scope)
+            // Skips:
+            //   - "==" / "===" : next char is '='
+            //   - "!=" / "<=" / ">=" / "+=" / "-=" / "*=" / "/=" / "%=" / "&=" / "|=" / "^="
+            //     / "??=" / ":=" : prev char is an operator char
+            //   - "=>" (arrow): next char is '>'
+            //   - HTML / JSX attributes (class="foo", onClick={...}) : next char is a
+            //     quote (" ' `) — bail out completely so we don't insert space before
+            //     '=' either. This is conservative: JS `x="foo"` (rare LLM defect)
+            //     won't be fixed, but HTML/JSX attributes are never mangled.
+            if (c == '=')
+            {
+                const string operatorPrevChars = "!<>=+-*/%&|^~?:";
+                var isOperatorContext = prev != '\0' && operatorPrevChars.IndexOf(prev) >= 0;
+                var nextChar = (i + 1 < line.Length) ? line[i + 1] : '\0';
+                var isHtmlAttributeLike =
+                    nextChar == '"' || nextChar == '\'' || nextChar == '`';
+
+                // HTML/JSX attribute: leave the whole '=' run untouched.
+                if (isHtmlAttributeLike)
+                {
+                    sb.Append(c);
+                    i++;
+                    continue;
+                }
+
+                // Insert space BEFORE '=' if prev is identifier-end (alnum, ) ] _ $)
+                // and not in operator context. Use sb's last char (not `prev`) so we
+                // don't double-insert a space that a previous rule just added.
+                if (!isOperatorContext && sb.Length > 0)
+                {
+                    var lastChar = sb[sb.Length - 1];
+                    if (lastChar != ' ' && lastChar != '\t'
+                        && (char.IsLetterOrDigit(lastChar) || lastChar == ')' || lastChar == ']'
+                            || lastChar == '_' || lastChar == '$'))
+                    {
+                        sb.Append(' ');
+                    }
+                }
+
+                sb.Append(c);
+                i++;
+
+                // Insert space AFTER '=' if next is not '=', '>', quote, whitespace,
+                // or end-of-line. ('==' and '=>' are already excluded; quote exclusion
+                // here is redundant given the HTML-attribute bail above, but kept for
+                // safety in case the bail is ever removed.)
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != '=' && after != '>'
+                        && after != '"' && after != '\'' && after != '`'
                         && after != ' ' && after != '\t' && after != '\r' && after != '\n')
                     {
                         sb.Append(' ');
