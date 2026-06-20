@@ -3576,11 +3576,26 @@ public class AgentController : ControllerBase
                         ct: ct);
                     history.Add((oldStr!, newStr, wipeReason));
                     // ── Record abandoned edit in project knowledge (Patch 4) ──
-                    _ = RecordEditOutcomeAsync(
-                        projectRoot, relPath, step.Change, prompt ?? step.Change,
-                        oldStr, newStr,
-                        outcome: "abandoned", reason: wipeReason,
-                        emitSse, ct);
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await RecordEditOutcomeAsync(
+                            projectRoot, relPath, step.Change, prompt ?? step.Change,
+                            oldStr, newStr,
+                            outcome: "abandoned", reason: wipeReason,
+                            emitSse: false, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            try
+                            {
+                                await EmitLog(false, "warn",
+                                $"Knowledge save failed (wipe-abandon): {ex.Message}", ct: CancellationToken.None);
+                            }
+                            catch { /* swallow */ }
+                        }
+                    }, CancellationToken.None);
                     if (string.Equals(
                         AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
                         AgentUtilities.NormalizeLineEndings(lastOld),
@@ -3997,11 +4012,26 @@ public class AgentController : ControllerBase
                     }
                     history.Add((oldStr!, newStr, $"LLM verify abandoned: {llmGateReason}"));
                     // ── Record abandoned edit in project knowledge (Patch 4) ──
-                    _ = RecordEditOutcomeAsync(
-                        projectRoot, relPath, step.Change, prompt ?? step.Change,
-                        oldStr, newStr,
-                        outcome: "abandoned", reason: $"LLM verify: {llmGateReason}",
-                        emitSse, ct);
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await RecordEditOutcomeAsync(
+                            projectRoot, relPath, step.Change, prompt ?? step.Change,
+                            oldStr, newStr,
+                            outcome: "abandoned", reason: $"LLM verify: {llmGateReason}",
+                            emitSse: false, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            try
+                            {
+                                await EmitLog(false, "warn",
+                                $"Knowledge save failed (verify-abandon): {ex.Message}", ct: CancellationToken.None);
+                            }
+                            catch { /* swallow */ }
+                        }
+                    }, CancellationToken.None);
                     // Track consecutive abandons so we don't loop forever.
                     if (string.Equals(
                         AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
@@ -4041,10 +4071,25 @@ public class AgentController : ControllerBase
             // Fire-and-forget; never blocks the edit pipeline. The save method
             // asks the LLM to summarize what worked, then dedups against the
             // existing knowledge file.
-            _ = RecordEditOutcomeAsync(
-                projectRoot, relPath, step.Change, prompt ?? step.Change,
-                oldStr, newStr, outcome: "success", reason: "",
-                emitSse, ct);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RecordEditOutcomeAsync(
+                    projectRoot, relPath, step.Change, prompt ?? step.Change,
+                    oldStr, newStr, outcome: "success", reason: "",
+                    emitSse: false, ct);
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        await EmitLog(false, "warn",
+                        $"Knowledge save failed (success): {ex.Message}", ct: CancellationToken.None);
+                    }
+                    catch { /* swallow — never break the main flow */ }
+                }
+            }, CancellationToken.None);
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
             var result = new Dictionary<string, object?>();
@@ -4071,11 +4116,26 @@ public class AgentController : ControllerBase
         // ── Record failed edit in project knowledge (Patch 4) ──────────
         // All retries exhausted — record what didn't work so the planner
         // avoids the same approach next time.
-        _ = RecordEditOutcomeAsync(
-            projectRoot, step.File, step.Change, prompt ?? step.Change,
-            step.OldString, step.NewString,
-            outcome: "failure", reason: lastErr,
-            emitSse, ct);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RecordEditOutcomeAsync(
+                projectRoot, step.File, step.Change, prompt ?? step.Change,
+                step.OldString, step.NewString,
+                outcome: "failure", reason: lastErr,
+                emitSse: false, ct);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    await EmitLog(false, "warn",
+                    $"Knowledge save failed (failure): {ex.Message}", ct: CancellationToken.None);
+                }
+                catch { /* swallow */ }
+            }
+        }, CancellationToken.None);
 
         await EmitLog(emitSse, "error",
             $"✗ All resolve attempts failed for {relPath}: {lastErr}", ct: ct);
@@ -4567,6 +4627,67 @@ public class AgentController : ControllerBase
     }
 
     /// <summary>
+    /// Ensure the per-project edit-knowledge file exists on disk. Creates it
+    /// with an empty default structure if it doesn't. Called at the start of
+    /// every CodeEdit task (Patch 9) so the file is visible from the very
+    /// first task, even before any edit outcomes have been recorded.
+    /// Never throws — failures are logged and swallowed.
+    /// </summary>
+    private async Task EnsureEditKnowledgeFileExistsAsync(
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var path = GetEditKnowledgeFilePath(projectRoot);
+            if (System.IO.File.Exists(path)) return;
+
+            // Build the empty default structure
+            var projectName = Path.GetFileName(projectRoot.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var empty = new ProjectEditKnowledge
+            {
+                ProjectName = projectName,
+                LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                Version = 1,
+                Do = new List<string>(),
+                Dont = new List<string>(),
+                Patterns = new Dictionary<string, List<string>>(StringComparer.Ordinal),
+                RecentFailures = new List<ProjectEditFailure>()
+            };
+
+            // Ensure the data/ directory exists
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            // Atomic-ish write: write to a temp file then rename
+            var tmp = path + ".tmp";
+            var json = JsonSerializer.Serialize(empty, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = null
+            });
+            await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, ct);
+            if (System.IO.File.Exists(path))
+                System.IO.File.Replace(tmp, path, null);
+            else
+                System.IO.File.Move(tmp, path);
+
+            await EmitLog(emitSse, "info",
+                $"Created edit knowledge file for project: {projectName}", ct: ct);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Failed to create edit knowledge file: {ex.Message}", ct: ct);
+            }
+            catch { /* swallow — never break the main flow */ }
+        }
+    }
+
+    /// <summary>
     /// Format the knowledge object as a compact, LLM-friendly header for
     /// prepending to the discovery context. Empty sections are omitted.
     /// </summary>
@@ -4636,9 +4757,21 @@ public class AgentController : ControllerBase
         string? newStr,
         string outcome,           // "success" | "abandoned" | "failure"
         string reason,
-        bool emitSse,
-        CancellationToken ct)
+        bool emitSse,             // IGNORED — always false (background task)
+        CancellationToken ct)     // IGNORED — we use our own CTS
     {
+        // ── Patch 8: detach from the main agent's SSE stream and cancellation ──
+        // The knowledge save is a fire-and-forget background task. It must NEVER
+        // write to the HTTP SSE response stream (which would corrupt the main
+        // agent's concurrent streaming and cause "Stream read error: network
+        // error" on the frontend). It also must survive the main agent's
+        // connection dropping — so we use our own CancellationToken with a
+        // 2-minute timeout instead of the passed-in ct.
+        const bool bgEmitSse = false;
+        using var bgCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bgCts.CancelAfter(TimeSpan.FromMinutes(2));
+        var bgCt = bgCts.Token;
+
         try
         {
             var path = GetEditKnowledgeFilePath(projectRoot);
@@ -4648,7 +4781,7 @@ public class AgentController : ControllerBase
             // Per-project lock
             var sem = _editKnowledgeLocks.GetOrAdd(
                 path, _ => new SemaphoreSlim(1, 1));
-            await sem.WaitAsync(ct);
+            await sem.WaitAsync(bgCt);
             try
             {
                 // Load existing
@@ -4657,7 +4790,7 @@ public class AgentController : ControllerBase
                 {
                     try
                     {
-                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, ct);
+                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, bgCt);
                         k = (string.IsNullOrWhiteSpace(raw)
                                 ? null
                                 : JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
@@ -4703,12 +4836,12 @@ public class AgentController : ControllerBase
                     = await SummarizeEditOutcomeAsync(
                         originalPrompt, stepChange, relPath ?? "", fileExt,
                         oldStr ?? "", newStr ?? "", outcome, reason,
-                        k, emitSse, ct);
+                        k, bgEmitSse, bgCt);
 
                 if (!string.IsNullOrWhiteSpace(summary))
                 {
-                    await EmitLog(emitSse, "info",
-                        $"Edit knowledge [{outcome}]: {summary}", ct: ct);
+                    await EmitLog(bgEmitSse, "info",
+                        $"Edit knowledge [{outcome}]: {summary}", ct: bgCt);
                 }
 
                 // Merge new bullets into the existing lists, capping at the
@@ -4758,7 +4891,7 @@ public class AgentController : ControllerBase
                     WriteIndented = true,
                     PropertyNamingPolicy = null
                 });
-                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, ct);
+                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, bgCt);
                 if (System.IO.File.Exists(path))
                     System.IO.File.Replace(tmp, path, null);
                 else
@@ -4773,8 +4906,8 @@ public class AgentController : ControllerBase
         {
             try
             {
-                await EmitLog(emitSse, "warn",
-                    $"Failed to record edit knowledge: {ex.Message}", ct: ct);
+                await EmitLog(bgEmitSse, "warn",
+                    $"Failed to record edit knowledge: {ex.Message}", ct: bgCt);
             }
             catch { /* swallow — never let knowledge persistence break the edit */ }
         }
@@ -4797,6 +4930,11 @@ public class AgentController : ControllerBase
             string oldStr, string newStr, string outcome, string reason,
             ProjectEditKnowledge existing, bool emitSse, CancellationToken ct)
     {
+        // ── Patch 8: NEVER write to SSE from the knowledge-save LLM call ──
+        // This method is only called from RecordEditOutcomeAsync (a background
+        // fire-and-forget task). Writing to the SSE response stream here would
+        // corrupt the main agent's concurrent streaming. Override to false.
+        emitSse = false;
         var existingDo = existing.Do != null && existing.Do.Count > 0
             ? string.Join("\n", existing.Do.Take(15).Select(b => $"  + {b}"))
             : "  (none)";
@@ -7586,6 +7724,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // and accumulates short point-form bullets about what edit patterns
         // worked / didn't work for this specific project.
         var editKnowledge = await LoadProjectEditKnowledgeAsync(projectRoot, emitSse, ct);
+
+        // ── Patch 9: ensure the knowledge file exists on disk ────────────
+        // If LoadProjectEditKnowledgeAsync returned null, the file doesn't
+        // exist yet (or is unreadable). Create it now with an empty default
+        // structure so it's ready for later edits. This makes the file
+        // visible on disk from the very first CodeEdit task, even before any
+        // edit outcomes have been recorded.
+        if (editKnowledge == null)
+        {
+            await EnsureEditKnowledgeFileExistsAsync(projectRoot, emitSse, ct);
+            // Reload so editKnowledge is non-null for the rest of this method
+            editKnowledge = await LoadProjectEditKnowledgeAsync(projectRoot, emitSse, ct);
+        }
+
         var editKnowledgeHeader = editKnowledge != null
             ? FormatEditKnowledgeForContext(editKnowledge)
             : "";
