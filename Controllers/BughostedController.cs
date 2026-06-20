@@ -581,7 +581,7 @@ public class BughostedController : ControllerBase
 
             var id = req.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 0;
             var type = req.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "";
-            var path = req.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : "";
+            var path = req.TryGetProperty("path", out var pathProp) ? (pathProp.GetString() ?? "") : "";
             var content = req.TryGetProperty("content", out var cProp) ? cProp.GetString() : null;
 
             if (id == 0 || string.IsNullOrWhiteSpace(type)) continue;
