@@ -1166,8 +1166,29 @@ public class AgentController : ControllerBase
                               "The excerpt above is the ONLY portion shown; your oldString MUST appear in it.");
         }
         else if (ext is ".css" or ".scss" or ".sass")
+        {
             sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
-                          "(e.g. '0px 1px' must stay as two tokens with a space).");
+                          "(e.g. '0px 1px' must stay as two tokens with a space; 'rgba(255, 255, 255, 0.06)' must keep spaces after every comma).");
+            // ── Existing-selector hint ──
+            // The #1 CSS editing anti-pattern is adding a NEW rule with a selector
+            // that already exists in the file (e.g. adding a second .kanban-board
+            // rule when one already exists). List the existing top-level selectors
+            // so the LLM knows what to MODIFY instead of ADD.
+            if (fileExists && !string.IsNullOrWhiteSpace(fileContent))
+            {
+                var existingSelectors = ExtractTopLevelCssSelectors(fileContent);
+                if (existingSelectors.Count > 0)
+                {
+                    sb.AppendLine("⚠ EXISTING CSS SELECTORS in this file — MODIFY these rules, do NOT add new rules with the same selector:");
+                    foreach (var s in existingSelectors.Take(20))
+                        sb.AppendLine($"    • {s}");
+                    if (existingSelectors.Count > 20)
+                        sb.AppendLine($"    • ... and {existingSelectors.Count - 20} more");
+                    sb.AppendLine("  If the change asks you to update one of these (e.g. 'make .kanban-board wrap'), " +
+                                  "set oldString to the EXISTING rule's body and modify it. Do NOT add a duplicate rule.");
+                }
+            }
+        }
         else if (ext is ".ts" or ".tsx" or ".js" or ".jsx")
             sb.AppendLine("⚠ TS/JS FILE: preserve ALL indentation exactly — " +
                           "methods inside a class body MUST be indented, nested blocks " +
@@ -4004,6 +4025,28 @@ public class AgentController : ControllerBase
                 }
             }
 
+            // ── Post-edit CSS duplicate-selector merge (deterministic, runs BEFORE formatting) ──
+            // Detects when the LLM ADDED a CSS rule whose selector already exists
+            // in the file (e.g. adding a new `.kanban-board` rule when one already
+            // exists at line ~370). Merges the duplicate's properties into the
+            // first occurrence (later wins for same property) and removes the
+            // duplicate. This is the #1 CSS editing anti-pattern — the LLM sees
+            // an existing rule but chooses to add a new one instead of modifying it.
+            // Rules inside @media blocks are NOT merged with top-level rules.
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                (fileExt is ".css" or ".scss" or ".less"))
+            {
+                var (mergedCss, mergeWarnings) = MergeDuplicateCssRules(newContent);
+                if (mergedCss != newContent)
+                {
+                    newContent = mergedCss;
+                    foreach (var w in mergeWarnings)
+                        await EmitLog(emitSse, "warn", w, ct: ct);
+                    await EmitLog(emitSse, "info",
+                        $"Merged duplicate CSS selectors in {relPath}", ct: ct);
+                }
+            }
+
             // ── Post-edit CSS region formatting (deterministic, runs BEFORE LLM pass) ──
             // Fixes two LLM-generated CSS defects in the rule block(s) touched by the edit:
             //   * Missing space after ':' in declarations   ("flex:1;" -> "flex: 1;")
@@ -5623,6 +5666,397 @@ public class AgentController : ControllerBase
             else break;
         }
         return sb.ToString();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  CSS DUPLICATE-SELECTOR MERGE
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Extracts top-level CSS selectors from a file. Used to warn the LLM about
+    /// existing rules so it MODIFY them instead of adding duplicates. Returns
+    /// selectors in source order, including <c>:host</c>, class selectors, id
+    /// selectors, element selectors, and comma-separated selector lists.
+    /// Selectors inside <c>@media</c> blocks are NOT included (they have
+    /// different cascade semantics and the LLM shouldn't modify them via
+    /// top-level oldString).
+    /// </summary>
+    private static List<string> ExtractTopLevelCssSelectors(string css)
+    {
+        var selectors = new List<string>();
+        if (string.IsNullOrWhiteSpace(css)) return selectors;
+
+        var i = 0;
+        var depth = 0;
+        var selectorStart = 0;
+
+        while (i < css.Length)
+        {
+            var c = css[i];
+
+            // Skip comments
+            if (c == '/' && i + 1 < css.Length && css[i + 1] == '*')
+            {
+                var end = css.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                var endPos = end >= 0 ? end + 2 : css.Length;
+                if (depth == 0) selectorStart = endPos;
+                i = endPos;
+                continue;
+            }
+
+            // Skip strings
+            if (c == '"' || c == '\'')
+            {
+                i++;
+                while (i < css.Length && css[i] != c)
+                {
+                    if (css[i] == '\\') i += 2;
+                    else i++;
+                }
+                i++;
+                continue;
+            }
+
+            // Top-level rule
+            if (c == '{' && depth == 0)
+            {
+                var selector = css[selectorStart..i].Trim();
+                if (!string.IsNullOrWhiteSpace(selector))
+                    selectors.Add(selector);
+                // Skip the body
+                var bodyDepth = 1;
+                var j = i + 1;
+                while (j < css.Length && bodyDepth > 0)
+                {
+                    if (css[j] == '{') bodyDepth++;
+                    else if (css[j] == '}') bodyDepth--;
+                    j++;
+                }
+                i = j;
+                selectorStart = i;
+                continue;
+            }
+
+            // At-rule block — skip entirely (don't include inner selectors)
+            if (c == '@' && depth == 0)
+            {
+                var j = i;
+                while (j < css.Length && css[j] != '{' && css[j] != ';') j++;
+                if (j < css.Length && css[j] == ';')
+                {
+                    i = j + 1;
+                    selectorStart = i;
+                    continue;
+                }
+                // Block at-rule — skip the whole block
+                var blockDepth = 1;
+                var k = j + 1;
+                while (k < css.Length && blockDepth > 0)
+                {
+                    if (css[k] == '{') blockDepth++;
+                    else if (css[k] == '}') blockDepth--;
+                    k++;
+                }
+                i = k;
+                selectorStart = i;
+                continue;
+            }
+
+            i++;
+        }
+
+        return selectors;
+    }
+
+    /// <summary>
+    /// Detects duplicate top-level CSS selectors and merges their properties
+    /// into the first occurrence (later wins for same property name). Returns
+    /// the merged CSS and a list of warning messages.
+    ///
+    /// This fixes the #1 CSS editing anti-pattern: the LLM sees an existing
+    /// rule (e.g. <c>.kanban-board</c>) but ADDS a new rule with the same
+    /// selector instead of modifying the existing one. The result is two
+    /// rules with the same selector, which is confusing and fragile (cascade
+    /// order determines which one wins, not intent).
+    ///
+    /// Algorithm:
+    ///   1. Parse the CSS into top-level rules (selector + body), tracking
+    ///      brace depth and skipping comments/strings. <c>@media</c> blocks
+    ///      are treated as opaque — inner rules are NOT merged with top-level
+    ///      rules (they have different cascade semantics).
+    ///   2. Normalize each selector (lowercase, collapse whitespace, normalize
+    ///      comma spacing) so <c>.foo, .bar</c> and <c>.foo,.bar</c> match.
+    ///   3. Find duplicates — first occurrence wins, later ones merge into it.
+    ///   4. Rebuild the CSS: for each first-occurrence rule with duplicates,
+    ///      parse properties from all occurrences (later overrides earlier),
+    ///      reconstruct the body, and emit the merged rule. Skip the duplicate
+    ///      rule bodies entirely.
+    ///
+    /// Property merge semantics:
+    ///   - Properties are identified by name (case-insensitive).
+    ///   - When the same property appears in multiple duplicates, the LAST
+    ///     occurrence's value wins (standard CSS cascade behavior).
+    ///   - Properties unique to a duplicate are appended to the first
+    ///     occurrence's body.
+    ///   - Indentation is preserved from the first occurrence's properties;
+    ///     new properties from duplicates use the duplicate's indent (or fall
+    ///     back to 2 spaces).
+    ///
+    /// Returns <c>(originalCss, emptyWarnings)</c> if no duplicates found.
+    /// </summary>
+    private static (string content, List<string> warnings) MergeDuplicateCssRules(string css)
+    {
+        var warnings = new List<string>();
+        if (string.IsNullOrWhiteSpace(css)) return (css, warnings);
+
+        // ── Parse CSS into top-level rules ──
+        var rules = new List<CssRule>();
+        var i = 0;
+        var depth = 0;
+        var selectorStart = 0;
+
+        while (i < css.Length)
+        {
+            var c = css[i];
+
+            // Skip comments — advance selectorStart past them so they don't
+            // become part of the next selector.
+            if (c == '/' && i + 1 < css.Length && css[i + 1] == '*')
+            {
+                var end = css.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                var endPos = end >= 0 ? end + 2 : css.Length;
+                if (depth == 0) selectorStart = endPos;
+                i = endPos;
+                continue;
+            }
+
+            // Skip strings
+            if (c == '"' || c == '\'')
+            {
+                i++;
+                while (i < css.Length && css[i] != c)
+                {
+                    if (css[i] == '\\') i += 2;
+                    else i++;
+                }
+                i++;
+                continue;
+            }
+
+            // Top-level rule start
+            if (c == '{' && depth == 0)
+            {
+                var selector = css[selectorStart..i].Trim();
+                var bodyStart = i + 1;
+                var bodyDepth = 1;
+                var j = bodyStart;
+                while (j < css.Length && bodyDepth > 0)
+                {
+                    if (css[j] == '{') bodyDepth++;
+                    else if (css[j] == '}') bodyDepth--;
+                    if (bodyDepth > 0) j++;
+                }
+                var body = css[bodyStart..j];
+                rules.Add(new CssRule
+                {
+                    Selector = selector,
+                    Body = body,
+                    Start = selectorStart,
+                    End = j + 1
+                });
+                i = j + 1;
+                selectorStart = i;
+                continue;
+            }
+
+            // At-rule block (@media, @keyframes, etc.) — treat as opaque
+            if (c == '@' && depth == 0)
+            {
+                var j = i;
+                while (j < css.Length && css[j] != '{' && css[j] != ';') j++;
+                if (j < css.Length && css[j] == ';')
+                {
+                    i = j + 1;
+                    selectorStart = i;
+                    continue;
+                }
+                // It's a block at-rule — find matching close brace
+                var blockDepth = 1;
+                var k = j + 1;
+                while (k < css.Length && blockDepth > 0)
+                {
+                    if (css[k] == '{') blockDepth++;
+                    else if (css[k] == '}') blockDepth--;
+                    if (blockDepth > 0) k++;
+                }
+                rules.Add(new CssRule
+                {
+                    Selector = css[selectorStart..(k + 1)],
+                    Body = "",
+                    Start = selectorStart,
+                    End = k + 1,
+                    IsAtRuleBlock = true
+                });
+                i = k + 1;
+                selectorStart = i;
+                continue;
+            }
+
+            i++;
+        }
+
+        // ── Find duplicate selectors ──
+        var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var duplicates = new List<(int firstIdx, int dupIdx)>();
+
+        for (var idx = 0; idx < rules.Count; idx++)
+        {
+            var rule = rules[idx];
+            if (rule.IsAtRuleBlock) continue;
+            // Normalize: lowercase, collapse whitespace, normalize comma spacing
+            var norm = Regex.Replace(
+                Regex.Replace(rule.Selector.ToLowerInvariant(), @"\s+", " ").Trim(),
+                @"\s*,\s*", ",").Trim();
+            if (seen.TryGetValue(norm, out var firstIdx))
+            {
+                duplicates.Add((firstIdx, idx));
+                var lineApprox = css[..rule.Start].Count(ch => ch == '\n') + 1;
+                warnings.Add($"Duplicate CSS selector '{rule.Selector}' — merging into first occurrence (line ~{lineApprox})");
+            }
+            else
+            {
+                seen[norm] = idx;
+            }
+        }
+
+        if (duplicates.Count == 0) return (css, warnings);
+
+        // ── Merge duplicates into first occurrences ──
+        var merges = new Dictionary<int, List<int>>();
+        foreach (var (firstIdx, dupIdx) in duplicates)
+        {
+            if (!merges.ContainsKey(firstIdx)) merges[firstIdx] = new List<int>();
+            merges[firstIdx].Add(dupIdx);
+        }
+
+        var skipIndices = new HashSet<int>();
+        foreach (var kvp in merges)
+            foreach (var di in kvp.Value)
+                skipIndices.Add(di);
+
+        var result = new StringBuilder(css.Length);
+        var lastEnd = 0;
+
+        for (var idx = 0; idx < rules.Count; idx++)
+        {
+            var rule = rules[idx];
+            if (skipIndices.Contains(idx))
+            {
+                // Skip the duplicate — advance lastEnd past it so the
+                // text-between-rules capture for the NEXT rule doesn't
+                // include the skipped rule's content.
+                lastEnd = rule.End;
+                continue;
+            }
+
+            // Add text before this rule (comments, whitespace, etc.)
+            result.Append(css[lastEnd..rule.Start]);
+
+            if (merges.TryGetValue(idx, out var dupIndices))
+            {
+                // ── Merge properties from duplicates ──
+                var propMap = new Dictionary<string, (string value, string indent)>(StringComparer.OrdinalIgnoreCase);
+                var propOrder = new List<string>();
+
+                // Parse first occurrence's properties
+                foreach (var (prop, value, indent) in ParseCssProperties(rule.Body))
+                {
+                    if (!propMap.ContainsKey(prop)) propOrder.Add(prop);
+                    propMap[prop] = (value, indent);
+                }
+
+                // Merge in duplicates (later wins)
+                foreach (var dupIdx in dupIndices)
+                {
+                    foreach (var (prop, value, indent) in ParseCssProperties(rules[dupIdx].Body))
+                    {
+                        if (!propMap.ContainsKey(prop)) propOrder.Add(prop);
+                        propMap[prop] = (value, indent.Length > 0 ? indent : "  ");
+                    }
+                }
+
+                // Rebuild body
+                var bodySb = new StringBuilder();
+                foreach (var prop in propOrder)
+                {
+                    var (value, indent) = propMap[prop];
+                    bodySb.Append(indent);
+                    bodySb.Append(prop);
+                    bodySb.Append(": ");
+                    bodySb.Append(value);
+                    bodySb.Append(";\n");
+                }
+                // Remove trailing newline (the closing brace goes on its own line)
+                if (bodySb.Length > 0 && bodySb[bodySb.Length - 1] == '\n')
+                    bodySb.Length--;
+
+                result.Append(rule.Selector);
+                result.Append(" {\n");
+                result.Append(bodySb);
+                result.Append("\n}");
+            }
+            else
+            {
+                // Keep the rule as-is
+                result.Append(css[rule.Start..rule.End]);
+            }
+
+            lastEnd = rule.End;
+        }
+
+        // Add trailing text
+        result.Append(css[lastEnd..]);
+
+        return (result.ToString(), warnings);
+    }
+
+    /// <summary>
+    /// Parse CSS property declarations from a rule body. Returns a list of
+    /// (property, value, indent) tuples. Skips comments and blank lines.
+    /// </summary>
+    private static List<(string prop, string value, string indent)> ParseCssProperties(string body)
+    {
+        var props = new List<(string, string, string)>();
+        if (string.IsNullOrWhiteSpace(body)) return props;
+
+        foreach (var line in body.Split('\n'))
+        {
+            var stripped = line.Trim();
+            if (string.IsNullOrWhiteSpace(stripped)) continue;
+            if (stripped.StartsWith("/*") || stripped.StartsWith("//")) continue;
+            if (!stripped.EndsWith(';')) continue;
+
+            var colonIdx = IndexOfFirstColonOutsideParensCss(stripped);
+            if (colonIdx <= 0) continue;
+
+            var prop = stripped[..colonIdx].Trim();
+            // Value is everything between colon and the trailing ';'
+            var value = stripped[(colonIdx + 1)..].TrimEnd(';').Trim();
+            var indent = LeadingWhitespaceCss(line);
+            props.Add((prop, value, indent));
+        }
+
+        return props;
+    }
+
+    /// <summary>Internal model for CSS rule parsing.</summary>
+    private sealed class CssRule
+    {
+        public string Selector { get; set; } = "";
+        public string Body { get; set; } = "";
+        public int Start { get; set; }
+        public int End { get; set; }
+        public bool IsAtRuleBlock { get; set; }
     }
 
     private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct,
@@ -11668,7 +12102,17 @@ Respond with JSON only:
         return content[..Math.Max(lastBalanced, content.Length / 2)];
     }
 
-    /// <summary>Apply a fullFile replacement: continuation, indent correction, write, and SSE. Only for NEW files.</summary>
+    /// <summary>Apply a fullFile replacement: continuation, indent correction, write, and SSE.</summary>
+    /// <remarks>
+    /// Historically only used for NEW files. Now also used for EXISTING files when
+    /// the strategy ladder escalates to fullFile after 3+ failed oldString attempts
+    /// (see <c>allowFullFileEscalation</c> in <see cref="ResolveAndApplyEdit"/>).
+    /// When used for existing files, the SAME formatting passes that run on the
+    /// normal edit path are applied here — otherwise escalated edits would skip
+    /// <see cref="FormatCssEditedRegion"/>, <see cref="AutoFormatEditedRegion"/>,
+    /// and <see cref="MergeDuplicateCssRules"/>, producing regressions like
+    /// <c>rgba(255,255,255,0.06)</c> (missing spaces) and duplicate CSS rules.
+    /// </remarks>
     private async Task<int> ApplyFullFile(string fullContent, PlanStep step, string fullPath, string relPath,
         string projectRoot, int stepIndex, int planItemIndex, string? cardId, bool emitSse, CancellationToken ct,
         List<object> allResults)
@@ -11685,6 +12129,58 @@ Respond with JSON only:
         if (existingLines != null && existingLines.Length > 0)
             fullContent = AutoIndentFullFile(fullContent, existingLines);
 
+        // ── Post-edit formatting passes (mirror the normal edit path) ──
+        // When fullFile is used as a strategy-ladder escalation for an EXISTING
+        // file, the LLM's full-content output needs the same deterministic
+        // formatting fixes that the normal edit path applies. Without these,
+        // escalated edits regress on spacing (commas/colons/equals) and
+        // duplicate CSS rules.
+        //
+        // We pass `fullContent` as the `appliedNewStr` parameter to
+        // AutoFormatEditedRegion so ALL lines in the file are considered
+        // "edited" and get formatting fixes. This is slightly more aggressive
+        // than the normal path (which only fixes lines in the edit region),
+        // but it's the right call for fullFile since the LLM rewrote the
+        // entire file.
+        var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
+
+        // CSS/SCSS/LESS: merge duplicate selectors FIRST (before formatting),
+        // so the formatting passes run on the merged result.
+        if (fileExt is ".css" or ".scss" or ".less")
+        {
+            var (merged, mergeWarnings) = MergeDuplicateCssRules(fullContent);
+            if (merged != fullContent)
+            {
+                fullContent = merged;
+                foreach (var w in mergeWarnings)
+                    await EmitLog(emitSse, "warn", w, ct: ct);
+                await EmitLog(emitSse, "info",
+                    $"Merged duplicate CSS selectors in {relPath} (fullFile path)", ct: ct);
+            }
+        }
+
+        // CSS region formatting (property spacing/indentation)
+        if (fileExt is ".css" or ".scss" or ".less")
+        {
+            var before = fullContent;
+            fullContent = FormatCssEditedRegion(fullContent, fullContent);
+            if (fullContent != before)
+                await EmitLog(emitSse, "info",
+                    $"CSS region formatted in {relPath} (fullFile path)", ct: ct);
+        }
+
+        // General auto-format (commas/colons/semicolons/equals + closing-dedent)
+        if (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
+            or ".css" or ".scss" or ".less" or ".html" or ".json"
+            or ".vue" or ".svelte")
+        {
+            var before = fullContent;
+            fullContent = AutoFormatEditedRegion(fullContent, fullContent);
+            if (fullContent != before)
+                await EmitLog(emitSse, "info",
+                    $"Auto-formatted full file in {relPath} (commas/colons/semicolons/equals + closing-dedent)", ct: ct);
+        }
+
         await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
         await EmitLog(emitSse, "success", $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
         var r = new Dictionary<string, object?>();
@@ -11694,6 +12190,11 @@ Respond with JSON only:
         if (emitSse) await SendSse(Response, "step", r, ct);
         allResults.Add(r);
         await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+
+        // ── FileHints augmentation (same as normal edit path) ──
+        try { _fileHints.LearnFromAppliedEdit(projectRoot, fullPath, fullContent); }
+        catch { /* never let hint-learning crash the edit pipeline */ }
+
         return stepIndex + 1;
     }
 
