@@ -10439,6 +10439,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
             if (contentCache != null) contentCache[targetPath] = content;
             PopulateEditResult(result, "modified", step.Path!, null, newString, newString);
+
+            // ── FileHints augmentation ──
+            // Learn canonical (class/method → file) hints from the applied edit.
+            // The manager does its own pertinence filtering (skips test/gen/
+            // build files, skips private/override/constructor/generic names,
+            // first-write-wins for canonical home). Safe to call on every edit.
+            try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
+            catch { /* never let hint-learning crash the edit pipeline */ }
             return;
         }
 
@@ -10464,6 +10472,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
+
+        // ── FileHints augmentation ──
+        // Learn canonical (class/method → file) hints from the applied edit.
+        // We pass `newString` (the LLM-produced edit, pre-AutoFormat) because
+        // the formatter only changes spacing/indentation, not symbol
+        // declarations. The manager does its own pertinence filtering — safe
+        // to call on every successful edit.
+        try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
+        catch { /* never let hint-learning crash the edit pipeline */ }
     }
 
     private static List<string> GetPlanSizeViolations(AgentPlan plan)
