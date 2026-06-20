@@ -3539,6 +3539,12 @@ public class AgentController : ControllerBase
                         },
                         ct: ct);
                     history.Add((oldStr!, newStr, wipeReason));
+                    // ── Record abandoned edit in project knowledge (Patch 4) ──
+                    _ = RecordEditOutcomeAsync(
+                        projectRoot, relPath, step.Change, prompt ?? step.Change,
+                        oldStr, newStr,
+                        outcome: "abandoned", reason: wipeReason,
+                        emitSse, ct);
                     if (string.Equals(
                         AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
                         AgentUtilities.NormalizeLineEndings(lastOld),
@@ -3833,7 +3839,15 @@ public class AgentController : ControllerBase
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
             }
 
+            // ── Snapshot the file BEFORE the edit is committed ───────────────
+            // Captured here so the LLM verify-and-decide gate below can revert
+            // deterministically if it decides to abandon the edit. `fileContent`
+            // is the in-memory copy we read earlier; we re-write it from disk
+            // on revert so any concurrent external modification is also undone.
+            var preEditContent = fileContent;
+
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+
 
             // Post-edit: append stubs for any missing C# types referenced in the edit
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
@@ -3869,12 +3883,132 @@ public class AgentController : ControllerBase
                 }
             }
 
+            // ── Deterministic auto-format of edited region (Patch 5) ──────────
+            // Fixes three common LLM formatting regressions in the lines that
+            // were just inserted/modified, using a character-by-character
+            // scanner that tracks string and comment state:
+            //   1. Missing space after ','  ("indices,0" -> "indices, 0")
+            //   2. Missing space after ':'  ("{a:1}" -> "{a: 1}")
+            //   3. Missing space after ';'  ("for(i=0;i<10;)" -> "for(i=0; i<10;)")
+            // Scoped to the edited region only — unrelated lines are never
+            // touched. Runs BEFORE PostEditStyleFixAsync so the LLM only
+            // handles residual issues.
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
+                  or ".css" or ".scss" or ".less" or ".html" or ".json"
+                  or ".vue" or ".svelte"))
+            {
+                var beforeAutoFmt = newContent;
+                newContent = AutoFormatEditedRegion(newContent, newStr);
+                if (newContent != beforeAutoFmt)
+                {
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "info",
+                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons)", ct: ct);
+                }
+            }
+
             // Post-edit style fix: check for spacing issues in the new content and fix via LLM
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
             {
                 newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
+
+            // ── LLM-driven per-step verify-and-decide gate ───────────────────
+            // After all deterministic checks pass and the file is written, ask
+            // the LLM to make a keep/abandon decision. The LLM sees:
+            //   * the original task prompt
+            //   * the step description
+            //   * the diff (oldStr / newStr)
+            //   * a small context window around the edit in the new file
+            // If it returns "abandon", we RESTORE the pre-edit snapshot to disk
+            // and continue the retry loop — the LLM gets another shot at a
+            // better edit. If it returns "keep", we fall through to mark the
+            // step complete. After 2 consecutive "abandon" decisions on the
+            // same step, we treat the step as failed and let the existing
+            // re-plan machinery take over.
+            //
+            // NOTE: variable names use the `llmGate` prefix to avoid colliding
+            // with `verifyReason` declared in the enclosing scope at the
+            // VerifyEdit(...) call above. C# disallows a local named
+            // `verifyReason` when an enclosing block already has one in scope.
+            if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent))
+            {
+                var (llmGateDecision, llmGateReason) = await LlmVerifyEditStepAsync(
+                    relPath, prompt ?? step.Change, step.Change,
+                    oldStr!, newStr!, preEditContent, newContent,
+                    emitSse, ct);
+
+                if (llmGateDecision == "abandon")
+                {
+                    // Real revert: write the original content back to disk.
+                    await System.IO.File.WriteAllTextAsync(fullPath, preEditContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "warn",
+                        $"⟲ LLM verify: ABANDON edit on {relPath} — {llmGateReason}. Reverted to pre-edit state; retrying.",
+                        new { step, reason = llmGateReason }, ct: ct);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "step", new
+                        {
+                            index = stepIndex,
+                            type = "edit",
+                            status = "verify-abandoned",
+                            path = relPath,
+                            reason = llmGateReason,
+                            planItemIndex
+                        }, ct);
+                    }
+                    history.Add((oldStr!, newStr, $"LLM verify abandoned: {llmGateReason}"));
+                    // ── Record abandoned edit in project knowledge (Patch 4) ──
+                    _ = RecordEditOutcomeAsync(
+                        projectRoot, relPath, step.Change, prompt ?? step.Change,
+                        oldStr, newStr,
+                        outcome: "abandoned", reason: $"LLM verify: {llmGateReason}",
+                        emitSse, ct);
+                    // Track consecutive abandons so we don't loop forever.
+                    if (string.Equals(
+                        AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                        AgentUtilities.NormalizeLineEndings(lastOld),
+                        StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2)
+                    {
+                        await EmitLog(emitSse, "error",
+                            $"LLM verify abandoned {stuckCount}x in a row for {relPath} — treating as failure",
+                            ct: ct);
+                        goto RecordFailure;
+                    }
+                    continue;
+                }
+                else if (llmGateDecision == "keep")
+                {
+                    await EmitLog(emitSse, "info",
+                        $"✓ LLM verify: KEEP edit on {relPath} — {llmGateReason}", ct: ct);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "step", new
+                        {
+                            index = stepIndex,
+                            type = "edit",
+                            status = "verify-kept",
+                            path = relPath,
+                            reason = llmGateReason,
+                            planItemIndex
+                        }, ct);
+                    }
+                }
+                // llmGateDecision == "error" / null -> default to keep (don't block on infra)
+            }
+
+            // ── Record successful edit in project knowledge (Patch 4) ─────────
+            // Fire-and-forget; never blocks the edit pipeline. The save method
+            // asks the LLM to summarize what worked, then dedups against the
+            // existing knowledge file.
+            _ = RecordEditOutcomeAsync(
+                projectRoot, relPath, step.Change, prompt ?? step.Change,
+                oldStr, newStr, outcome: "success", reason: "",
+                emitSse, ct);
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
             var result = new Dictionary<string, object?>();
@@ -3897,6 +4031,16 @@ public class AgentController : ControllerBase
 
     RecordFailure:
         var lastErr = history.Count > 0 ? history[^1].error : "resolve failed";
+
+        // ── Record failed edit in project knowledge (Patch 4) ──────────
+        // All retries exhausted — record what didn't work so the planner
+        // avoids the same approach next time.
+        _ = RecordEditOutcomeAsync(
+            projectRoot, step.File, step.Change, prompt ?? step.Change,
+            step.OldString, step.NewString,
+            outcome: "failure", reason: lastErr,
+            emitSse, ct);
+
         await EmitLog(emitSse, "error",
             $"✗ All resolve attempts failed for {relPath}: {lastErr}", ct: ct);
         var fail = new Dictionary<string, object?>
@@ -4069,6 +4213,814 @@ public class AgentController : ControllerBase
         {
             return content;
         }
+    }
+
+    /// <summary>
+    /// Deterministically auto-formats the edited region of a code file.
+    /// Fixes three common LLM formatting regressions by scanning each
+    /// edited line character-by-character, tracking string and comment
+    /// state so that commas/colons/semicolons inside strings or comments
+    /// are never touched:
+    ///
+    ///   1. Missing space after ','  ("indices,0" -> "indices, 0")
+    ///      — skips when next char is ')', ']', '}' (trailing comma) or
+    ///        whitespace or end-of-line.
+    ///   2. Missing space after ':'  ("{a:1}" -> "{a: 1}", "let x:number"
+    ///      -> "let x: number")
+    ///      — skips "::" (C# qualified names, TS scope), end-of-line
+    ///        colons (case labels, default:), and URLs (handled by string
+    ///        state).
+    ///   3. Missing space after ';'  ("for(i=0;i<10;)" -> "for(i=0; i<10;)")
+    ///      — skips ";;", ";)", and end-of-line semicolons.
+    ///
+    /// Only lines that contain a needle from the applied newStr are
+    /// processed — unrelated lines are left byte-for-byte unchanged.
+    /// </summary>
+    private string AutoFormatEditedRegion(string content, string appliedNewStr)
+    {
+        if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
+            return content;
+
+        var fileLines = content.Split('\n');
+
+        // Collect needles (trimmed, non-empty, min 5 chars to avoid
+        // matching trivially short fragments like "{" or "0").
+        var needles = appliedNewStr.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 5)
+            .Take(10)
+            .ToList();
+
+        if (needles.Count == 0) return content;
+
+        // Find which file lines contain any needle — those are the
+        // "edited region" lines that get formatting fixes.
+        var editedLineIndices = new HashSet<int>();
+        foreach (var needle in needles)
+        {
+            for (var i = 0; i < fileLines.Length; i++)
+            {
+                if (fileLines[i].Contains(needle, StringComparison.Ordinal))
+                    editedLineIndices.Add(i);
+            }
+        }
+
+        if (editedLineIndices.Count == 0) return content;
+
+        var changed = false;
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            if (!editedLineIndices.Contains(i)) continue;
+            var fixedLine = FixLineSpacing(fileLines[i]);
+            if (fixedLine != fileLines[i])
+            {
+                fileLines[i] = fixedLine;
+                changed = true;
+            }
+        }
+
+        return changed ? string.Join("\n", fileLines) : content;
+    }
+
+    /// <summary>
+    /// Fix missing spaces after ',', ':', and ';' in a single line of code.
+    /// Uses a character-by-character scanner that tracks:
+    ///   - Double-quote strings  ("...")
+    ///   - Single-quote strings  ('...')
+    ///   - Template literals      (`...`)
+    ///   - Line comments          (// ...)
+    ///   - Block comments         (/* ... */ — single-line portion)
+    /// Punctuation inside any of these is never touched.
+    /// </summary>
+    private static string FixLineSpacing(string line)
+    {
+        if (string.IsNullOrEmpty(line))
+            return line;
+
+        // Quick exit: if none of the target chars are present, skip.
+        if (!line.Contains(',') && !line.Contains(':') && !line.Contains(';'))
+            return line;
+
+        var sb = new StringBuilder(line.Length + 4);
+        var i = 0;
+        var inStringDouble = false;
+        var inStringSingle = false;
+        var inTemplate = false;
+        var inLineComment = false;
+        var inBlockComment = false;
+
+        while (i < line.Length)
+        {
+            var c = line[i];
+            var next = (i + 1 < line.Length) ? line[i + 1] : '\0';
+            var prev = (i > 0) ? line[i - 1] : '\0';
+
+            // ── Block comment (single-line portion of /* ... */) ──
+            if (inBlockComment)
+            {
+                sb.Append(c);
+                if (c == '*' && next == '/')
+                {
+                    sb.Append(next);
+                    i += 2;
+                    inBlockComment = false;
+                    continue;
+                }
+                i++;
+                continue;
+            }
+
+            // ── Line comment (// ... to end of line) ──
+            if (inLineComment)
+            {
+                sb.Append(c);
+                i++;
+                continue;
+            }
+
+            // ── Inside a string literal ──
+            if (inStringDouble || inStringSingle || inTemplate)
+            {
+                sb.Append(c);
+                // Handle escape sequences: \X -> append both chars
+                if (c == '\\' && next != '\0')
+                {
+                    sb.Append(next);
+                    i += 2;
+                    continue;
+                }
+                // Check for closing delimiter
+                if (inStringDouble && c == '"') inStringDouble = false;
+                else if (inStringSingle && c == '\'') inStringSingle = false;
+                else if (inTemplate && c == '`') inTemplate = false;
+                i++;
+                continue;
+            }
+
+            // ── Not in string or comment — check for state transitions ──
+            if (c == '/' && next == '/')
+            {
+                inLineComment = true;
+                sb.Append(c);
+                i++;
+                continue;
+            }
+            if (c == '/' && next == '*')
+            {
+                inBlockComment = true;
+                sb.Append(c);
+                i++;
+                continue;
+            }
+            if (c == '"') { inStringDouble = true; sb.Append(c); i++; continue; }
+            if (c == '\'') { inStringSingle = true; sb.Append(c); i++; continue; }
+            if (c == '`') { inTemplate = true; sb.Append(c); i++; continue; }
+
+            // ── Not in string or comment — apply spacing fixes ──
+
+            // Rule 1: ',' followed by non-whitespace, non-')', ']', '}' -> insert space
+            if (c == ',')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != ' ' && after != '\t' && after != '\r' && after != '\n'
+                        && after != ')' && after != ']' && after != '}')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 2: ':' — insert space after if:
+            //   - not part of '::' (prev != ':' and next != ':')
+            //   - next is not whitespace, not end-of-line
+            //   - (URLs like "http://" are handled by string state above)
+            if (c == ':')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    // Skip "::" — don't insert space inside double-colon
+                    if (prev != ':' && after != ':'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 3: ';' — insert space after if:
+            //   - next is not ';', ')', whitespace, or end-of-line
+            //   - (catches "for(i=0;i<10;)" -> "for(i=0; i<10;)")
+            if (c == ';')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != ';' && after != ')'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            sb.Append(c);
+            i++;
+        }
+
+        return sb.ToString();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Patch 4 — Per-project edit-knowledge persistence
+    //  File: <projectRoot>/data/.project_<safeName>_edit_knowledge.json
+    //  Loaded at start of every CodeEdit task (UnifiedPipeline only).
+    //  Saved after every edit outcome (success / abandoned / failure).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// In-memory representation of the per-project edit-knowledge file.
+    /// Kept deliberately small and point-form. Lists are capped on save.
+    /// </summary>
+    public class ProjectEditKnowledge
+    {
+        public string ProjectName { get; set; } = "";
+        public string LastUpdated { get; set; } = "";
+        public int Version { get; set; } = 1;
+        public List<string> Do { get; set; } = new();
+        public List<string> Dont { get; set; } = new();
+        public Dictionary<string, List<string>> Patterns { get; set; } = new(StringComparer.Ordinal);
+        public List<ProjectEditFailure> RecentFailures { get; set; } = new();
+    }
+
+    public class ProjectEditFailure
+    {
+        public string Ts { get; set; } = "";
+        public string File { get; set; } = "";
+        public string Reason { get; set; } = "";
+        public string Outcome { get; set; } = "";  // "failure" | "abandoned"
+    }
+
+    // Per-project save serialization. Prevents two concurrent edits to the
+    // same project from clobbering each other's knowledge updates.
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _editKnowledgeLocks
+        = new(StringComparer.Ordinal);
+
+    private const int MaxKnowledgeDoEntries = 30;
+    private const int MaxKnowledgeDontEntries = 30;
+    private const int MaxKnowledgePatternsPerExt = 30;
+    private const int MaxRecentFailures = 10;
+
+    /// <summary>
+    /// Build the on-disk path for a project's edit-knowledge file.
+    /// Format: <projectRoot>/data/.project_<safeName>_edit_knowledge.json
+    /// </summary>
+    private static string GetEditKnowledgeFilePath(string projectRoot)
+    {
+        var projectName = Path.GetFileName(projectRoot.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var safeName = new StringBuilder();
+        foreach (var ch in projectName)
+        {
+            if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-')
+                safeName.Append(ch);
+            else
+                safeName.Append('_');
+        }
+        if (safeName.Length == 0) safeName.Append("default");
+        var dir = Path.Combine(projectRoot, "data");
+        return Path.Combine(dir, $".project_{safeName}_edit_knowledge.json");
+    }
+
+    /// <summary>
+    /// Load the per-project edit-knowledge file. Returns null if the file
+    /// doesn't exist or is unreadable. Never throws.
+    /// </summary>
+    private async Task<ProjectEditKnowledge?> LoadProjectEditKnowledgeAsync(
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var path = GetEditKnowledgeFilePath(projectRoot);
+            if (!System.IO.File.Exists(path)) return null;
+            var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, ct);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var k = JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+            return k;
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn",
+                $"Failed to load edit knowledge: {ex.Message}", ct: ct);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Format the knowledge object as a compact, LLM-friendly header for
+    /// prepending to the discovery context. Empty sections are omitted.
+    /// </summary>
+    private static string FormatEditKnowledgeForContext(ProjectEditKnowledge k)
+    {
+        if (k == null) return "";
+        var sb = new StringBuilder();
+        sb.AppendLine("### PRIOR EDIT KNOWLEDGE FOR THIS PROJECT ###");
+        sb.AppendLine($"Project: {k.ProjectName}  |  Last updated: {k.LastUpdated}");
+        sb.AppendLine("These are accumulated lessons from prior edits in this project.");
+        sb.AppendLine("USE them — don't repeat mistakes that are already recorded here.");
+        sb.AppendLine();
+
+        if (k.Do != null && k.Do.Count > 0)
+        {
+            sb.AppendLine("DO (patterns that worked):");
+            foreach (var b in k.Do) sb.AppendLine($"  + {b}");
+            sb.AppendLine();
+        }
+        if (k.Dont != null && k.Dont.Count > 0)
+        {
+            sb.AppendLine("DON'T (patterns that failed or broke things):");
+            foreach (var b in k.Dont) sb.AppendLine($"  - {b}");
+            sb.AppendLine();
+        }
+        if (k.Patterns != null && k.Patterns.Count > 0)
+        {
+            sb.AppendLine("FILE-TYPE PATTERNS:");
+            foreach (var (ext, bullets) in k.Patterns)
+            {
+                if (bullets == null || bullets.Count == 0) continue;
+                sb.AppendLine($"  {ext}:");
+                foreach (var b in bullets) sb.AppendLine($"    + {b}");
+            }
+            sb.AppendLine();
+        }
+        if (k.RecentFailures != null && k.RecentFailures.Count > 0)
+        {
+            sb.AppendLine("RECENT FAILURES (avoid repeating):");
+            foreach (var f in k.RecentFailures)
+            {
+                sb.AppendLine($"  [{f.Ts}] {f.File} — {f.Outcome}: {f.Reason}");
+            }
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Record an edit outcome to the project's knowledge file.
+    /// Called after every edit in ResolveAndApplyEdit:
+    ///   - outcome == "success"   -> the edit was applied and LLM-verified
+    ///   - outcome == "abandoned" -> a guard or LLM verify rejected the edit
+    ///   - outcome == "failure"   -> all retries exhausted, step failed
+    ///
+    /// The method asks the LLM to summarize the outcome into 1-2 short
+    /// point-form bullets, then merges them with the existing knowledge
+    /// (deduping via LLM judgment). File I/O is serialized per-project.
+    /// Never throws — failures are logged and swallowed.
+    /// </summary>
+    private async Task RecordEditOutcomeAsync(
+        string projectRoot,
+        string relPath,
+        string stepChange,
+        string originalPrompt,
+        string? oldStr,
+        string? newStr,
+        string outcome,           // "success" | "abandoned" | "failure"
+        string reason,
+        bool emitSse,
+        CancellationToken ct)
+    {
+        try
+        {
+            var path = GetEditKnowledgeFilePath(projectRoot);
+            var projectName = Path.GetFileName(projectRoot.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+            // Per-project lock
+            var sem = _editKnowledgeLocks.GetOrAdd(
+                path, _ => new SemaphoreSlim(1, 1));
+            await sem.WaitAsync(ct);
+            try
+            {
+                // Load existing
+                ProjectEditKnowledge k;
+                if (System.IO.File.Exists(path))
+                {
+                    try
+                    {
+                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, ct);
+                        k = (string.IsNullOrWhiteSpace(raw)
+                                ? null
+                                : JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
+                                {
+                                    PropertyNameCaseInsensitive = true
+                                })) ?? new ProjectEditKnowledge();
+                    }
+                    catch
+                    {
+                        k = new ProjectEditKnowledge();
+                    }
+                }
+                else
+                {
+                    k = new ProjectEditKnowledge();
+                }
+                if (string.IsNullOrEmpty(k.ProjectName)) k.ProjectName = projectName;
+                if (k.Do == null) k.Do = new List<string>();
+                if (k.Dont == null) k.Dont = new List<string>();
+                if (k.Patterns == null) k.Patterns = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                if (k.RecentFailures == null) k.RecentFailures = new List<ProjectEditFailure>();
+
+                // Append to recentFailures (FIFO, capped). Always done — this
+                // is a log, not a deduplicated learning.
+                if (outcome != "success")
+                {
+                    k.RecentFailures.Add(new ProjectEditFailure
+                    {
+                        Ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                        File = relPath ?? "",
+                        Reason = TruncateForLlm(reason, 200),
+                        Outcome = outcome
+                    });
+                    while (k.RecentFailures.Count > MaxRecentFailures)
+                        k.RecentFailures.RemoveAt(0);
+                }
+
+                // Ask the LLM to summarize this outcome into 1-2 short bullets
+                // and decide whether they're genuinely new (don't duplicate
+                // existing knowledge).
+                var fileExt = Path.GetExtension(relPath ?? "").ToLowerInvariant();
+                var (newDoBullets, newDontBullets, newPatternBullets, summary)
+                    = await SummarizeEditOutcomeAsync(
+                        originalPrompt, stepChange, relPath ?? "", fileExt,
+                        oldStr ?? "", newStr ?? "", outcome, reason,
+                        k, emitSse, ct);
+
+                if (!string.IsNullOrWhiteSpace(summary))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Edit knowledge [{outcome}]: {summary}", ct: ct);
+                }
+
+                // Merge new bullets into the existing lists, capping at the
+                // configured max. We trust the LLM to have already deduped
+                // against the existing knowledge it was shown.
+                foreach (var b in newDoBullets)
+                {
+                    if (string.IsNullOrWhiteSpace(b)) continue;
+                    if (k.Do.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
+                    k.Do.Add(b);
+                    while (k.Do.Count > MaxKnowledgeDoEntries) k.Do.RemoveAt(0);
+                }
+                foreach (var b in newDontBullets)
+                {
+                    if (string.IsNullOrWhiteSpace(b)) continue;
+                    if (k.Dont.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
+                    k.Dont.Add(b);
+                    while (k.Dont.Count > MaxKnowledgeDontEntries) k.Dont.RemoveAt(0);
+                }
+                if (!string.IsNullOrEmpty(fileExt) && newPatternBullets.Count > 0)
+                {
+                    if (!k.Patterns.TryGetValue(fileExt, out var list))
+                    {
+                        list = new List<string>();
+                        k.Patterns[fileExt] = list;
+                    }
+                    foreach (var b in newPatternBullets)
+                    {
+                        if (string.IsNullOrWhiteSpace(b)) continue;
+                        if (list.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
+                        list.Add(b);
+                        while (list.Count > MaxKnowledgePatternsPerExt) list.RemoveAt(0);
+                    }
+                }
+
+                k.LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                // Ensure the data/ directory exists
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                // Atomic-ish write: write to a temp file then rename
+                var tmp = path + ".tmp";
+                var json = JsonSerializer.Serialize(k, new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    PropertyNamingPolicy = null
+                });
+                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, ct);
+                if (System.IO.File.Exists(path))
+                    System.IO.File.Replace(tmp, path, null);
+                else
+                    System.IO.File.Move(tmp, path);
+            }
+            finally
+            {
+                sem.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Failed to record edit knowledge: {ex.Message}", ct: ct);
+            }
+            catch { /* swallow — never let knowledge persistence break the edit */ }
+        }
+    }
+
+    /// <summary>
+    /// Ask the LLM to summarize an edit outcome into 1-2 short point-form
+    /// bullets for each relevant section (do / dont / patterns), given the
+    /// existing knowledge for dedup judgment.
+    ///
+    /// Returns:
+    ///   newDoBullets       — bullets to append to k.Do
+    ///   newDontBullets     — bullets to append to k.Dont
+    ///   newPatternBullets  — bullets to append to k.Patterns[ext]
+    ///   summary            — one-line human-readable summary for logging
+    /// </summary>
+    private async Task<(List<string> doBullets, List<string> dontBullets, List<string> patternBullets, string summary)>
+        SummarizeEditOutcomeAsync(
+            string originalPrompt, string stepChange, string relPath, string fileExt,
+            string oldStr, string newStr, string outcome, string reason,
+            ProjectEditKnowledge existing, bool emitSse, CancellationToken ct)
+    {
+        var existingDo = existing.Do != null && existing.Do.Count > 0
+            ? string.Join("\n", existing.Do.Take(15).Select(b => $"  + {b}"))
+            : "  (none)";
+        var existingDont = existing.Dont != null && existing.Dont.Count > 0
+            ? string.Join("\n", existing.Dont.Take(15).Select(b => $"  - {b}"))
+            : "  (none)";
+
+        var sysPrompt =
+            "You are maintaining a small, deduplicated knowledge file for a software project. " +
+            "Your job: given the outcome of a single code edit, decide if it teaches a NEW lesson " +
+            "worth recording. If yes, output 1-2 short point-form bullets for each relevant section. " +
+            "If the lesson is already covered by the existing knowledge, return empty lists — " +
+            "do NOT duplicate or rephrase existing bullets.\n\n" +
+            "STRICT OUTPUT FORMAT — JSON only, no prose, no markdown fences:\n" +
+            "{\n" +
+            "  \"summary\": \"one short sentence describing the outcome\",\n" +
+            "  \"do\": [\"short bullet\", ...],            // patterns that worked — only if outcome==success\n" +
+            "  \"dont\": [\"short bullet\", ...],          // anti-patterns to avoid — only if outcome!=success\n" +
+            "  \"patterns\": [\"short bullet\", ...]       // file-type-specific notes (e.g. 'getRocketMesh uses meshCache')\n" +
+            "}\n\n" +
+            "RULES:\n" +
+            " * Each bullet MUST be <= 15 words, point-form, no preamble.\n" +
+            " * Each bullet MUST be a GENERAL lesson, not a one-off fact about a specific variable.\n" +
+            " * BAD bullet: 'changed scale from 1.0 to 2.0 in getRocketMesh' (too specific)\n" +
+            " * GOOD bullet: 'scale mesh size by editing the numeric args to addBox, not by rewriting the method'\n" +
+            " * If outcome==success, prefer filling 'do' and 'patterns'. Leave 'dont' empty.\n" +
+            " * If outcome!=success, prefer filling 'dont' and 'patterns'. Leave 'do' empty.\n" +
+            " * If the lesson is already covered by EXISTING KNOWLEDGE below, return EMPTY lists.\n" +
+            " * Return at most 2 bullets per list. Quality over quantity.";
+
+        var userMsg =
+            $"### TASK PROMPT ###\n{TruncateForLlm(originalPrompt, 400)}\n\n" +
+            $"### STEP ###\n{TruncateForLlm(stepChange, 300)}\n\n" +
+            $"### FILE ###\n{relPath} (ext: {fileExt})\n\n" +
+            $"### OUTCOME ###\n{outcome}\n" +
+            (string.IsNullOrWhiteSpace(reason) ? "" : $"REASON: {TruncateForLlm(reason, 300)}\n") +
+            $"\n### OLD CODE ###\n```\n{TruncateForLlm(oldStr, 800)}\n```\n\n" +
+            $"### NEW CODE ###\n```\n{TruncateForLlm(newStr, 800)}\n```\n\n" +
+            $"### EXISTING KNOWLEDGE (do NOT duplicate these) ###\n" +
+            $"DO:\n{existingDo}\n\nDON'T:\n{existingDont}\n\n" +
+            "Decide: what new bullets (if any) should be added? Output JSON only.";
+
+        try
+        {
+            var (raw, _, error) = await CallLlmRawStreaming(
+                sysPrompt, userMsg, emitSse, ct,
+                requestTimeout: TimeSpan.FromMinutes(1),
+                maxTokens: 512);
+
+            if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
+                return (new List<string>(), new List<string>(), new List<string>(),
+                    $"(LLM summarize skipped: {error ?? "empty"})");
+
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                cleaned = cleaned.TrimStart('`');
+                var nl = cleaned.IndexOf('\n');
+                if (nl >= 0) cleaned = cleaned[(nl + 1)..];
+                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
+            }
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb < 0 || lb <= fb)
+                return (new List<string>(), new List<string>(), new List<string>(),
+                    $"(LLM summarize: no JSON)");
+            cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            var root = doc.RootElement;
+
+            var summary = root.TryGetProperty("summary", out var sEl)
+                ? sEl.GetString()?.Trim() ?? ""
+                : "";
+
+            var doBullets = new List<string>();
+            var dontBullets = new List<string>();
+            var patternBullets = new List<string>();
+
+            if (root.TryGetProperty("do", out var doEl) && doEl.ValueKind == JsonValueKind.Array)
+                foreach (var b in doEl.EnumerateArray())
+                {
+                    var s = b.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) doBullets.Add(s);
+                }
+            if (root.TryGetProperty("dont", out var dontEl) && dontEl.ValueKind == JsonValueKind.Array)
+                foreach (var b in dontEl.EnumerateArray())
+                {
+                    var s = b.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) dontBullets.Add(s);
+                }
+            if (root.TryGetProperty("patterns", out var pEl) && pEl.ValueKind == JsonValueKind.Array)
+                foreach (var b in pEl.EnumerateArray())
+                {
+                    var s = b.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) patternBullets.Add(s);
+                }
+
+            return (doBullets, dontBullets, patternBullets, summary);
+        }
+        catch (Exception ex)
+        {
+            return (new List<string>(), new List<string>(), new List<string>(),
+                $"(LLM summarize failed: {ex.Message})");
+        }
+    }
+
+    /// <summary>
+    /// LLM-driven per-step verify-and-decide gate.
+    ///
+    /// After all deterministic checks (no-op, shrink, prefix-leak,
+    /// functionality-wipe, VerifyEdit, replacement-mismatch) pass and the
+    /// file has been written to disk, this method asks the LLM to make a
+    /// keep/abandon decision on the just-applied edit.
+    ///
+    /// The LLM receives:
+    ///   * the original task prompt (so it can judge intent, not just syntax)
+    ///   * the step description
+    ///   * the diff region (oldStr / newStr)
+    ///   * a small context window (10 lines) around the edit in the new file
+    ///
+    /// Returns one of:
+    ///   ("keep",    reason) — accept the edit; caller marks step complete.
+    ///   ("abandon", reason) — revert the edit; caller restores pre-edit
+    ///                          snapshot and retries.
+    ///   ("error",   reason) — infra failure (LLM unreachable, malformed
+    ///                          JSON). Caller defaults to "keep" so we don't
+    ///                          block on network/JSON issues.
+    /// </summary>
+    private async Task<(string decision, string reason)> LlmVerifyEditStepAsync(
+        string relPath,
+        string originalPrompt,
+        string stepChange,
+        string oldStr,
+        string newStr,
+        string preEditContent,
+        string postEditContent,
+        bool emitSse,
+        CancellationToken ct)
+    {
+        // Build a focused context window around the edit location in the
+        // POST-edit file. We find the first non-empty line of newStr and
+        // center a 10-line window on it.
+        var anchor = newStr.Split('\n')
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l)) ?? "";
+        var postLines = postEditContent.Split('\n');
+        var anchorIdx = -1;
+        if (!string.IsNullOrEmpty(anchor))
+        {
+            for (var i = 0; i < postLines.Length; i++)
+            {
+                if (postLines[i].Contains(anchor, StringComparison.Ordinal))
+                {
+                    anchorIdx = i;
+                    break;
+                }
+            }
+        }
+        var ctxStart = Math.Max(0, anchorIdx - 5);
+        var ctxEnd = Math.Min(postLines.Length, anchorIdx + 5);
+        var contextWindow = anchorIdx >= 0
+            ? string.Join("\n", postLines[ctxStart..ctxEnd])
+            : "(anchor not found in post-edit file)";
+
+        var sysPrompt =
+            "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
+            "Your job is to decide whether to KEEP the edit (it correctly implements the step " +
+            "without breaking existing functionality) or ABANDON it (it broke something, changed " +
+            "the wrong thing, introduced undefined references, deleted guards/caches, or otherwise " +
+            "missed the intent of the step).\n\n" +
+            "STRICT OUTPUT FORMAT — output ONLY a JSON object, no prose, no markdown fences:\n" +
+            "{\"decision\":\"keep\"|\"abandon\", \"reason\":\"one short sentence\"}\n\n" +
+            "DECISION RULES:\n" +
+            " * Return \"keep\" if the edit correctly implements the step AND preserves all existing " +
+            "  functionality (caches, guards, return types, call-site contracts).\n" +
+            " * Return \"abandon\" if ANY of these are true:\n" +
+            "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
+            "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
+            "    - The edit changed the method signature (return type, name, or parameter list).\n" +
+            "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
+            "    - The edit replaced existing logic instead of extending/tweaking it, when the " +
+            "      step only asked for a small change.\n" +
+            "    - The edit is functionally a no-op (old and new do the same thing).\n" +
+            "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
+            " * Be conservative: if you're unsure, return \"abandon\" with a clear reason. The " +
+            "  agent will retry with your feedback.\n" +
+            " * Do NOT consider style/whitespace issues — those are handled by other passes.";
+
+        var userMsg =
+            $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
+            $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
+            $"### FILE ###\n{relPath}\n\n" +
+            $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" +
+            $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
+            $"### POST-EDIT CONTEXT WINDOW (10 lines around the edit) ###\n```\n{contextWindow}\n```\n\n" +
+            "Decide: keep or abandon? Output JSON only.";
+
+        try
+        {
+            var (raw, _, error) = await CallLlmRawStreaming(
+                sysPrompt, userMsg, emitSse, ct,
+                requestTimeout: TimeSpan.FromMinutes(2),
+                maxTokens: 256);
+
+            if (!string.IsNullOrWhiteSpace(error))
+                return ("error", $"LLM call failed: {error}");
+            if (string.IsNullOrWhiteSpace(raw))
+                return ("error", "LLM returned empty response");
+
+            // Strip markdown fences if present.
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                cleaned = cleaned.TrimStart('`');
+                // Remove optional language tag like "json"
+                var firstNewline = cleaned.IndexOf('\n');
+                if (firstNewline >= 0) cleaned = cleaned[(firstNewline + 1)..];
+                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
+            }
+            // Find the outermost JSON object.
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb < 0 || lb <= fb)
+                return ("error", $"No JSON object found in LLM response: {TruncateForLlm(cleaned, 200)}");
+            cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned);
+            var decision = doc.RootElement.TryGetProperty("decision", out var dEl)
+                ? dEl.GetString()?.ToLowerInvariant().Trim() ?? ""
+                : "";
+            var reason = doc.RootElement.TryGetProperty("reason", out var rEl)
+                ? rEl.GetString()?.Trim() ?? ""
+                : "";
+
+            if (decision != "keep" && decision != "abandon")
+                return ("error", $"LLM returned unknown decision '{decision}'");
+
+            return (decision, reason);
+        }
+        catch (Exception ex)
+        {
+            return ("error", $"Exception during LLM verify: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Truncate a string for inclusion in an LLM prompt. If the string
+    /// exceeds <paramref name="maxChars"/>, keeps the first half and the
+    /// last quarter with an ellipsis marker in the middle.
+    /// </summary>
+    private static string TruncateForLlm(string s, int maxChars)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length <= maxChars) return s ?? "";
+        var headLen = (int)(maxChars * 0.6);
+        var tailLen = maxChars - headLen - 20;
+        if (tailLen < 0) tailLen = 0;
+        return s.Substring(0, headLen) +
+               $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
+               (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
     }
 
     /// <summary>
@@ -6591,12 +7543,41 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? steeringContext = null,
         string? cardId = null)
     {
+        // ── Load per-project edit knowledge (Patch 4) ─────────────────────
+        // CodeEdit tasks only — this method is only called from UnifiedPipeline,
+        // which is the CodeEdit route. Command-pipeline tasks skip this entirely.
+        // The knowledge file lives at <projectRoot>/data/.project_<safeName>_edit_knowledge.json
+        // and accumulates short point-form bullets about what edit patterns
+        // worked / didn't work for this specific project.
+        var editKnowledge = await LoadProjectEditKnowledgeAsync(projectRoot, emitSse, ct);
+        var editKnowledgeHeader = editKnowledge != null
+            ? FormatEditKnowledgeForContext(editKnowledge)
+            : "";
+        if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+        {
+            await EmitLog(emitSse, "info",
+                $"Loaded edit knowledge for project: {editKnowledge!.ProjectName} " +
+                $"({editKnowledge.Do.Count} do, {editKnowledge.Dont.Count} dont, " +
+                $"{editKnowledge.Patterns.Count} pattern categories, " +
+                $"{editKnowledge.RecentFailures.Count} recent failures)", ct: ct);
+        }
+
         var allSteps = new List<object>();
 
         // Phase 1: Discover
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
+
+        // Prepend edit-knowledge header to the discovery context so the planner
+        // sees it on every planning iteration. Putting it AFTER the discovery
+        // context keeps file content primary; the knowledge header is a
+        // focused, short summary that won't blow up the token budget.
+        if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
+        {
+            discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
+        }
+
 
         // Context review (let user trim files before planning)
         if (emitSse && !skipContextReview)
@@ -6792,7 +7773,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (allSteps, plan ?? new AgentPlan());
     }
 
-    private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object additionalData = null)
+    private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object? additionalData = null)
     {
         var qId = Guid.NewGuid().ToString();
         var pending = new PendingQuestion
@@ -7515,7 +8496,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         var callStart = m.Index + m.Length;
                                         if (callStart > 0 && callStart < (editNewStr?.Length ?? 0))
                                         {
-                                            var remaining = editNewStr.Substring(callStart);
+                                            var remaining = editNewStr!.Substring(callStart);
                                             var closeParen = remaining.IndexOf(')');
                                             if (closeParen >= 0)
                                                 argsText = remaining.Substring(0, closeParen).Trim();
