@@ -44,3 +44,5 @@ This mechanism ensures that the standard edit pipeline is automatically selected
 
 
 Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+
+![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)

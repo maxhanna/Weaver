@@ -3811,6 +3811,25 @@ public class AgentController : ControllerBase
                 }
             }
 
+            // ── Post-edit CSS region formatting (deterministic, runs BEFORE LLM pass) ──
+            // Fixes two LLM-generated CSS defects in the rule block(s) touched by the edit:
+            //   * Missing space after ':' in declarations   ("flex:1;" -> "flex: 1;")
+            //   * Inconsistent property indentation          (" flex:1;" -> "  flex: 1;")
+            // Only the enclosing rule block(s) of the edited region are rewritten, so
+            // unrelated parts of the file stay byte-for-byte identical.
+            if (!string.IsNullOrWhiteSpace(newStr) &&
+                (fileExt is ".css" or ".scss" or ".less"))
+            {
+                var beforeCssFmt = newContent;
+                newContent = FormatCssEditedRegion(newContent, newStr);
+                if (newContent != beforeCssFmt)
+                {
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "info",
+                        $"CSS region formatted: fixed property spacing/indentation in {relPath}", ct: ct);
+                }
+            }
+
             // Post-edit style fix: check for spacing issues in the new content and fix via LLM
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
@@ -4011,6 +4030,260 @@ public class AgentController : ControllerBase
         {
             return content;
         }
+    }
+
+    /// <summary>
+    /// Deterministically reformats the CSS rule block(s) touched by the applied
+    /// edit. Fixes two specific LLM-generated defects:
+    ///   1. Missing space after ':' in declarations  (e.g. "flex:1;" -> "flex: 1;")
+    ///   2. Inconsistent indentation of properties inside a rule block
+    ///      (e.g. 1-space indent when the rest of the file uses 2-space indent).
+    /// Only the enclosing rule block(s) of the edited region are rewritten, so
+    /// unrelated parts of the file are left byte-for-byte unchanged.
+    /// Handles .css / .scss / .less / .sass.  Preserves:
+    ///   * Selectors, nested rules, @media / @include / @if / @each blocks
+    ///   * Comments (// and /* */)
+    ///   * SCSS variables ($var), mixins, parent selectors (&)
+    ///   * URL literals (url(http://...)) — the ':' inside URLs is untouched
+    /// </summary>
+    private string FormatCssEditedRegion(string content, string appliedNewStr)
+    {
+        if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
+            return content;
+
+        var fileLines = content.Split('\n');
+
+        // ── Detect the file's dominant property-indent step ────────────────
+        // Sample every property line in the file, compute its delta vs. its
+        // enclosing rule's indent, and pick the most common step. This makes
+        // the formatter inherit the project's existing convention (2-space,
+        // 4-space, or tab) instead of forcing a hardcoded value.
+        var stepCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 1; i < fileLines.Length; i++)
+        {
+            var line = fileLines[i];
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+            if (trimmed.Contains('{')) continue;            // selector or nested rule
+            if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") ||
+                trimmed.StartsWith("*")   || trimmed.StartsWith("&") ||
+                trimmed.StartsWith("@")) continue;          // comment / parent-ref / directive
+            if (!trimmed.Contains(':')) continue;            // not a declaration
+            if (trimmed.Contains("://")) continue;           // URL — false positive
+
+            // Walk backward to the nearest preceding rule-open line.
+            for (var j = i - 1; j >= 0; j--)
+            {
+                if (!fileLines[j].Contains('{')) continue;
+                var ruleLeading = LeadingWhitespaceCss(fileLines[j]);
+                var propLeading = LeadingWhitespaceCss(line);
+                if (propLeading.Length > ruleLeading.Length)
+                {
+                    var step = propLeading.Substring(ruleLeading.Length);
+                    if (!stepCounts.ContainsKey(step)) stepCounts[step] = 0;
+                    stepCounts[step]++;
+                }
+                break;
+            }
+        }
+        var dominantStep = stepCounts.Count > 0
+            ? stepCounts.OrderByDescending(k => k.Value).First().Key
+            : "  "; // sensible default: 2 spaces
+
+        // ── Locate the edited region's enclosing rule block(s) ─────────────
+        // Use the first non-empty trimmed line of the applied newStr as the
+        // anchor. (VerifyEdit may have re-indented the inserted text, so we
+        // match on trimmed content rather than the raw string.)
+        var anchor = appliedNewStr.Split('\n')
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (string.IsNullOrEmpty(anchor))
+            return content;
+
+        var editLine = -1;
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            if (fileLines[i].Contains(anchor, StringComparison.Ordinal))
+            {
+                editLine = i;
+                break;
+            }
+        }
+        if (editLine < 0) return content;
+
+        // Find every rule block the edit touches. An edit may span multiple
+        // sibling rules; we format each one independently.
+        var rulesToFormat = new HashSet<(int start, int end)>();
+        var visited = new HashSet<int>();
+        for (var i = editLine; i < fileLines.Length; i++)
+        {
+            if (!fileLines[i].Contains(anchor, StringComparison.Ordinal) && i != editLine)
+            {
+                // Stop once we've passed the last edited line. We detect this
+                // by scanning a small window: if neither this line nor the
+                // previous few lines contain any needle from appliedNewStr,
+                // we're past the edit.
+                var anyNeedleHere = false;
+                foreach (var needle in appliedNewStr.Split('\n').Select(l => l.Trim())
+                            .Where(l => !string.IsNullOrWhiteSpace(l)).Take(3))
+                {
+                    if (fileLines[i].Contains(needle, StringComparison.Ordinal))
+                    {
+                        anyNeedleHere = true;
+                        break;
+                    }
+                }
+                if (!anyNeedleHere && i - editLine > 30) break;
+            }
+
+            if (visited.Contains(i)) continue;
+            var (ruleStart, ruleEnd) = FindEnclosingRuleCss(fileLines, i);
+            if (ruleStart < 0 || ruleEnd <= ruleStart) continue;
+            rulesToFormat.Add((ruleStart, ruleEnd));
+            for (var k = ruleStart; k <= ruleEnd; k++) visited.Add(k);
+        }
+
+        if (rulesToFormat.Count == 0)
+        {
+            // Fallback: the edit may have INSERTED a new rule whose '{' line
+            // is itself part of the edit. Format just the anchor's enclosing
+            // block by scanning forward for the nearest '{'.
+            var (rs, re) = FindEnclosingRuleCss(fileLines, editLine);
+            if (rs >= 0 && re > rs) rulesToFormat.Add((rs, re));
+        }
+
+        if (rulesToFormat.Count == 0) return content;
+
+        // ── Reformat each touched rule block ───────────────────────────────
+        var newLines = (string[])fileLines.Clone();
+        foreach (var (start, end) in rulesToFormat)
+        {
+            var ruleIndent = LeadingWhitespaceCss(fileLines[start]);
+            var propertyIndent = ruleIndent + dominantStep;
+
+            for (var i = start + 1; i < end; i++)
+            {
+                var line = fileLines[i];
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    newLines[i] = line; // preserve blank lines
+                    continue;
+                }
+
+                var trimmed = line.TrimStart();
+
+                // Skip non-property lines: comments, nested selectors, directives
+                if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") ||
+                    trimmed.StartsWith("*")   || trimmed.StartsWith("@"))
+                    continue;
+                if (trimmed.StartsWith("&")) continue;        // SCSS parent ref
+                if (trimmed.Contains('{')) continue;          // nested rule on same line
+                if (trimmed.Contains("://")) continue;        // URL line
+                if (!trimmed.Contains(':')) continue;         // not a declaration
+                // Skip pseudo-class / combinators spanning multiple lines
+                if (trimmed.StartsWith(":") || trimmed.StartsWith(">") ||
+                    trimmed.StartsWith("+") || trimmed.StartsWith("~") ||
+                    trimmed.StartsWith("*"))
+                    continue;
+
+                // Find the first ':' that's outside parens (so we don't split
+                // on the ':' inside url(...) or :nth-child(...)).
+                var colonIdx = IndexOfFirstColonOutsideParensCss(trimmed);
+                if (colonIdx < 0) continue;
+
+                var prop = trimmed.Substring(0, colonIdx).TrimEnd();
+                var rest = trimmed.Substring(colonIdx + 1);
+
+                // Split off any trailing // comment so we don't reformat inside it
+                string trailingComment = "";
+                var commentIdx = rest.IndexOf("//");
+                if (commentIdx >= 0)
+                {
+                    trailingComment = " " + rest.Substring(commentIdx).TrimEnd();
+                    rest = rest.Substring(0, commentIdx);
+                }
+
+                var value = rest.Trim();
+                if (value.Length == 0) continue;              // nothing to format
+
+                newLines[i] = propertyIndent + prop + ": " + value +
+                              (trailingComment.Length > 0 ? trailingComment : "");
+            }
+        }
+
+        return string.Join("\n", newLines);
+    }
+
+    /// <summary>
+    /// Walks backward from <paramref name="fromLine"/> to find the nearest
+    /// unmatched '{' (the enclosing rule's open brace), then walks forward to
+    /// find its matching '}'. Returns (-1, -1) if no enclosing rule is found.
+    /// </summary>
+    private static (int start, int end) FindEnclosingRuleCss(string[] lines, int fromLine)
+    {
+        if (lines == null || lines.Length == 0 || fromLine < 0 || fromLine >= lines.Length)
+            return (-1, -1);
+
+        // Walk backward to find the enclosing rule-open line.
+        var ruleStart = -1;
+        var depth = 0;
+        for (var i = fromLine; i >= 0; i--)
+        {
+            foreach (var ch in lines[i])
+            {
+                if (ch == '}') depth++;
+                else if (ch == '{')
+                {
+                    if (depth > 0) depth--;
+                    else { ruleStart = i; goto FoundOpen; }
+                }
+            }
+        }
+    FoundOpen:
+        if (ruleStart < 0) return (-1, -1);
+
+        // Walk forward to the matching close brace.
+        depth = 0;
+        var foundOpen = false;
+        for (var i = ruleStart; i < lines.Length; i++)
+        {
+            foreach (var ch in lines[i])
+            {
+                if (ch == '{') { depth++; foundOpen = true; }
+                else if (ch == '}') depth--;
+            }
+            if (foundOpen && depth == 0)
+                return (ruleStart, i);
+        }
+        return (-1, -1);
+    }
+
+    /// <summary>Index of the first ':' that is NOT inside parentheses.</summary>
+    private static int IndexOfFirstColonOutsideParensCss(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return -1;
+        var depth = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (c == '(') depth++;
+            else if (c == ')') depth = Math.Max(0, depth - 1);
+            else if (c == ':' && depth == 0) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>Leading whitespace (spaces + tabs) of a line.</summary>
+    private static string LeadingWhitespaceCss(string line)
+    {
+        if (string.IsNullOrEmpty(line)) return "";
+        var sb = new StringBuilder();
+        foreach (var ch in line)
+        {
+            if (ch == ' ' || ch == '\t') sb.Append(ch);
+            else break;
+        }
+        return sb.ToString();
     }
 
     private async Task PersistBoardDataPlanAsync(string? cardId, List<PlanStep> planSteps, bool emitSse, CancellationToken ct,
