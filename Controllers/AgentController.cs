@@ -7017,6 +7017,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("current file content above.");
         sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
         sb.AppendLine("reuse existing names exactly, character for character.");
+        sb.AppendLine();
+        sb.AppendLine("SCOPE DISCIPLINE — the #1 replan failure mode is scope drift:");
+        sb.AppendLine("  * Do NOT reinterpret the original task. Read '## Original task' literally and stay on that topic.");
+        sb.AppendLine("  * Do NOT pivot to a different approach. If the EXISTING PLAN (✓ DONE steps) chose approach X,");
+        sb.AppendLine("    your new step must EXTEND X, not replace it with approach Y. If you think X is wrong, return");
+        sb.AppendLine("    an EMPTY plan — the user will steer, not the replanner.");
+        sb.AppendLine("  * Do NOT add new files, features, refactors, or improvements the user did not ask for.");
+        sb.AppendLine("  * If a step in the EXISTING PLAN added a property/variable/CSS-rule/method, that name NOW EXISTS");
+        sb.AppendLine("    in the file. Reuse it. Do NOT introduce a parallel mechanism (e.g. if step 1 added");
+        sb.AppendLine("    --kanban-board-flex-wrap, do NOT add a separate collapsedColumns property to do the same job).");
+        sb.AppendLine("  * If the verification gaps can be closed by EDITING the code that step 1 already added, do that —");
+        sb.AppendLine("    do not add a second step that lives in a different file.");
+        sb.AppendLine();
         sb.AppendLine("Add at most 1 new step. If everything is done or you are unsure, return an EMPTY plan with no steps.");
         return sb.ToString();
     }
@@ -7452,56 +7465,75 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!taskComplete)
         {
             await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
-            // Re-read all touched files from disk so the planner sees current code, not stale
-            // step outputs. BuildDiscoveryTextFromSteps misses edit steps (no "output" field),
-            // leaving context empty and causing the planner to fall back to _web_search.
-            var touchedPaths = allSteps.OfType<Dictionary<string, object?>>()
-                .Select(s => s.GetValueOrDefault("path")?.ToString())
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            var freshSb = new StringBuilder("ONLY use paths that appear below. Do NOT invent paths.\n\n");
-            foreach (var rp in touchedPaths.Take(10))
+            // ── INCREMENTAL REPLAN (not a fresh plan) ──
+            //
+            // Historically this branch called AnalyzePromptAndPlanCodeChanges, which
+            // generates a BRAND-NEW plan from scratch using only the touched file
+            // contents + verification gaps as context. That had three failure modes:
+            //
+            //   (1) PLAN-WIPING: ExecutePlan was called with `replan` directly, so
+            //       the original plan + all its (already-applied) steps were
+            //       discarded from the active plan object.
+            //   (2) FORGETTING PRIOR EDITS: the fresh-context prompt only carried
+            //       file contents — it never told the LLM "you already added
+            //       --kanban-board-flex-wrap: wrap to the CSS, please reuse it".
+            //       So the LLM invented a parallel approach (e.g. toggle buttons
+            //       + collapsedColumns property) that ignored the CSS variable
+            //       it had just added one round earlier.
+            //   (3) SCOPE DRIFT: with no existing-plan context, the LLM's new plan
+            //       could pivot to a totally different interpretation of the task
+            //       (the kanban "wrap on mobile" task became "implement collapse
+            //       toggles" — a different feature).
+            //
+            // Fix: use GenerateReplanStepsAsync (the lightweight, INCREMENTAL
+            // replanner already used by the AssessCompletion branch at line ~6677).
+            // Its BuildReplanPrompt includes:
+            //   * the EXISTING plan with per-step status (✓ DONE / ✗ FAILED / …),
+            //   * the ORIGINAL user task verbatim,
+            //   * the current file contents (so the LLM sees prior edits),
+            //   * the verification gaps (so the LLM knows what's still missing),
+            //   * and a "STOP AND THINK" guard that returns an EMPTY plan if the
+            //     current files already satisfy the task.
+            //
+            // The returned steps are then MERGED into the existing plan via
+            // MergePlans (preserving all original steps) and only the NEW steps
+            // are executed (completedStepIndices skips already-done ones).
+            var replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                steeringContext, projectRoot, emitSse, ct,
+                attachedFiles: attachedFiles, qualityCheckReason: verificationDetails);
+
+            if (replanSteps != null && replanSteps.Count > 0)
             {
-                var fp2 = Path.GetFullPath(
-                    Path.Combine(projectRoot, rp!.Replace('/', Path.DirectorySeparatorChar)));
-                if (!System.IO.File.Exists(fp2)) continue;
-                try
-                {
-                    var fc2 = await System.IO.File.ReadAllTextAsync(fp2, Encoding.UTF8, ct);
-                    freshSb.AppendLine($"### read {rp}");
-                    freshSb.AppendLine($"```\n{fc2}\n```\n");
-                }
-                catch { /* skip unreadable files */ }
-            }
-            var freshContext = freshSb.Length > 100
-                ? freshSb.ToString()
-                : AgentUtilities.BuildDiscoveryTextFromSteps(allSteps);
-            // Append verification gaps to freshContext so the replanner knows what's still missing.
-            // We include only the gap descriptions (issues/reason), not any wrong-approach artifact
-            // names from the original file that the task was meant to replace.
-            if (!string.IsNullOrWhiteSpace(verificationDetails))
-            {
-                freshContext = freshContext + "\n### GAPS REMAINING FROM VERIFICATION ###\n" + verificationDetails;
-            }
-            var verifySteering = !string.IsNullOrWhiteSpace(steeringContext)
-                ? steeringContext
-                : null;
-            var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, freshContext, projectRoot, emitSse, ct, verifySteering);
-            if (replan != null && replan.Plan.Count > 0)
-            {
-                // Emit plan SSE so the frontend card shows the new step(s)
+                // Merge new steps into the EXISTING plan — do NOT replace it.
+                // This preserves the original plan's history (so board cards show
+                // the full sequence) and lets completedStepIndices correctly skip
+                // already-applied steps during execution.
+                var originalStepCount = plan?.Plan?.Count ?? 0;
+                plan = MergePlans(plan ?? new AgentPlan(),
+                    new AgentPlan { Plan = replanSteps, Summary = "Re-plan: added steps", Score = 0 });
+
                 if (emitSse)
                     await SendSse(Response, "plan",
-                        new { thinking = replan.Thinking, summary = $"Re-plan: {replan.Summary}", items = replan.Plan }, ct);
+                        new { thinking = plan.Thinking, summary = "Re-plan: added steps", items = plan.Plan }, ct);
 
-                // Persist to boarddata so step progress is tracked in the card — append to existing steps, don't replace
-                await PersistBoardDataPlanAsync(cardId, replan.Plan, emitSse, ct,
-                    summary: $"Re-plan: {replan.Summary}", score: replan.Score, append: true);
+                await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
+                    summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: true);
 
-                await ExecutePlan(prompt, projectRoot, emitSse, freshContext, replan, ct, allSteps,
-                    steeringContext: verifySteering, cardId: cardId);
+                // Mark every ORIGINAL step as completed (they were already executed
+                // in the first ExecutePlan call above). Only the new tail steps
+                // will be re-run. This is the same pattern used at line ~6690.
+                var mergedDone = new HashSet<int>();
+                for (var i = 0; i < originalStepCount && i < plan.Plan.Count; i++)
+                    mergedDone.Add(i);
+
+                await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
+                    steeringContext: steeringContext, attachedFiles: attachedFiles,
+                    completedStepIndices: mergedDone, cardId: cardId);
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn",
+                    "Re-plan returned no additional steps — stopping with verification gaps unresolved.", ct: ct);
             }
         }
         else
