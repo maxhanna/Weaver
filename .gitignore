@@ -1,10 +1,6 @@
 ﻿**/bin/
 **/bin/
 **/obj/
-**/publish/
+**/publish/ 
+data/* 
 weaverconfig.json
-filehints.json
-data/.calendardata
-improvementdata.json
-data/board.json
-data/board.json.bak

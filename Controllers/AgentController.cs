@@ -23,6 +23,7 @@ public class AgentController : ControllerBase
     private readonly ConfigFileService _configFile;
     private readonly EmailService _emailService;
     private readonly BoardDataService _boardData;
+    private readonly EditKnowledgeService _editKnowledge;
     private const int MAX_COMMAND_ITERATIONS = 30;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
@@ -166,6 +167,23 @@ public class AgentController : ControllerBase
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
         _boardData = boardData;
+        var weaverDataDir = Path.Combine(_env.ContentRootPath, "data");
+        _editKnowledge = new EditKnowledgeService(
+            weaverDataDir,
+            llmCaller: async (sys, usr, ct) =>
+            {
+                var (raw, _, err) = await CallLlmRawStreaming(sys, usr, false, ct,
+                    requestTimeout: TimeSpan.FromMinutes(1), maxTokens: 512);
+                return (raw, err);
+            },
+            logger: (lvl, msg) =>
+            {
+                Task.Run(async () =>
+                {
+                    try { await EmitLog(false, lvl, msg, ct: CancellationToken.None); }
+                    catch { /* swallow */ }
+                });
+            });
     }
 
     private string ResolveWorkspaceRoot()
@@ -3575,26 +3593,17 @@ public class AgentController : ControllerBase
                         },
                         ct: ct);
                     history.Add((oldStr!, newStr, wipeReason));
-                    // ── Record abandoned edit in project knowledge (Patch 4) ──
+                    // ── Record abandoned edit in project knowledge ──
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await RecordEditOutcomeAsync(
+                            await _editKnowledge.RecordOutcomeAsync(
                             projectRoot, relPath, step.Change, prompt ?? step.Change,
                             oldStr, newStr,
-                            outcome: "abandoned", reason: wipeReason,
-                            emitSse: false, ct);
+                            outcome: "abandoned", reason: wipeReason, ct);
                         }
-                        catch (Exception ex)
-                        {
-                            try
-                            {
-                                await EmitLog(false, "warn",
-                                $"Knowledge save failed (wipe-abandon): {ex.Message}", ct: CancellationToken.None);
-                            }
-                            catch { /* swallow */ }
-                        }
+                        catch { /* swallow */ }
                     }, CancellationToken.None);
                     if (string.Equals(
                         AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
@@ -4011,26 +4020,17 @@ public class AgentController : ControllerBase
                         }, ct);
                     }
                     history.Add((oldStr!, newStr, $"LLM verify abandoned: {llmGateReason}"));
-                    // ── Record abandoned edit in project knowledge (Patch 4) ──
+                    // ── Record abandoned edit in project knowledge ──
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await RecordEditOutcomeAsync(
+                            await _editKnowledge.RecordOutcomeAsync(
                             projectRoot, relPath, step.Change, prompt ?? step.Change,
                             oldStr, newStr,
-                            outcome: "abandoned", reason: $"LLM verify: {llmGateReason}",
-                            emitSse: false, ct);
+                            outcome: "abandoned", reason: $"LLM verify: {llmGateReason}", ct);
                         }
-                        catch (Exception ex)
-                        {
-                            try
-                            {
-                                await EmitLog(false, "warn",
-                                $"Knowledge save failed (verify-abandon): {ex.Message}", ct: CancellationToken.None);
-                            }
-                            catch { /* swallow */ }
-                        }
+                        catch { /* swallow */ }
                     }, CancellationToken.None);
                     // Track consecutive abandons so we don't loop forever.
                     if (string.Equals(
@@ -4067,28 +4067,16 @@ public class AgentController : ControllerBase
                 // llmGateDecision == "error" / null -> default to keep (don't block on infra)
             }
 
-            // ── Record successful edit in project knowledge (Patch 4) ─────────
-            // Fire-and-forget; never blocks the edit pipeline. The save method
-            // asks the LLM to summarize what worked, then dedups against the
-            // existing knowledge file.
+            // ── Record successful edit in project knowledge ───────────────
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await RecordEditOutcomeAsync(
+                    await _editKnowledge.RecordOutcomeAsync(
                     projectRoot, relPath, step.Change, prompt ?? step.Change,
-                    oldStr, newStr, outcome: "success", reason: "",
-                    emitSse: false, ct);
+                    oldStr, newStr, outcome: "success", reason: "", ct);
                 }
-                catch (Exception ex)
-                {
-                    try
-                    {
-                        await EmitLog(false, "warn",
-                        $"Knowledge save failed (success): {ex.Message}", ct: CancellationToken.None);
-                    }
-                    catch { /* swallow — never break the main flow */ }
-                }
+                catch { /* swallow */ }
             }, CancellationToken.None);
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
@@ -4113,28 +4101,17 @@ public class AgentController : ControllerBase
     RecordFailure:
         var lastErr = history.Count > 0 ? history[^1].error : "resolve failed";
 
-        // ── Record failed edit in project knowledge (Patch 4) ──────────
-        // All retries exhausted — record what didn't work so the planner
-        // avoids the same approach next time.
+        // ── Record failed edit in project knowledge ───────────────────
         _ = Task.Run(async () =>
         {
             try
             {
-                await RecordEditOutcomeAsync(
+                await _editKnowledge.RecordOutcomeAsync(
                 projectRoot, step.File, step.Change, prompt ?? step.Change,
                 step.OldString, step.NewString,
-                outcome: "failure", reason: lastErr,
-                emitSse: false, ct);
+                outcome: "failure", reason: lastErr, ct);
             }
-            catch (Exception ex)
-            {
-                try
-                {
-                    await EmitLog(false, "warn",
-                    $"Knowledge save failed (failure): {ex.Message}", ct: CancellationToken.None);
-                }
-                catch { /* swallow */ }
-            }
+            catch { /* swallow */ }
         }, CancellationToken.None);
 
         await EmitLog(emitSse, "error",
@@ -4538,509 +4515,7 @@ public class AgentController : ControllerBase
         return sb.ToString();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Patch 4 — Per-project edit-knowledge persistence
-    //  File: <projectRoot>/data/.project_<safeName>_edit_knowledge.json
-    //  Loaded at start of every CodeEdit task (UnifiedPipeline only).
-    //  Saved after every edit outcome (success / abandoned / failure).
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// In-memory representation of the per-project edit-knowledge file.
-    /// Kept deliberately small and point-form. Lists are capped on save.
-    /// </summary>
-    public class ProjectEditKnowledge
-    {
-        public string ProjectName { get; set; } = "";
-        public string LastUpdated { get; set; } = "";
-        public int Version { get; set; } = 1;
-        public List<string> Do { get; set; } = new();
-        public List<string> Dont { get; set; } = new();
-        public Dictionary<string, List<string>> Patterns { get; set; } = new(StringComparer.Ordinal);
-        public List<ProjectEditFailure> RecentFailures { get; set; } = new();
-    }
-
-    public class ProjectEditFailure
-    {
-        public string Ts { get; set; } = "";
-        public string File { get; set; } = "";
-        public string Reason { get; set; } = "";
-        public string Outcome { get; set; } = "";  // "failure" | "abandoned"
-    }
-
-    // Per-project save serialization. Prevents two concurrent edits to the
-    // same project from clobbering each other's knowledge updates.
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _editKnowledgeLocks
-        = new(StringComparer.Ordinal);
-
-    private const int MaxKnowledgeDoEntries = 30;
-    private const int MaxKnowledgeDontEntries = 30;
-    private const int MaxKnowledgePatternsPerExt = 30;
-    private const int MaxRecentFailures = 10;
-
-    /// <summary>
-    /// Build the on-disk path for a project's edit-knowledge file.
-    /// Format: <projectRoot>/data/.project_<safeName>_edit_knowledge.json
-    /// </summary>
-    private static string GetEditKnowledgeFilePath(string projectRoot)
-    {
-        var projectName = Path.GetFileName(projectRoot.TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        var safeName = new StringBuilder();
-        foreach (var ch in projectName)
-        {
-            if (char.IsLetterOrDigit(ch) || ch == '_' || ch == '-')
-                safeName.Append(ch);
-            else
-                safeName.Append('_');
-        }
-        if (safeName.Length == 0) safeName.Append("default");
-        var dir = Path.Combine(projectRoot, "data");
-        return Path.Combine(dir, $".project_{safeName}_edit_knowledge.json");
-    }
-
-    /// <summary>
-    /// Load the per-project edit-knowledge file. Returns null if the file
-    /// doesn't exist or is unreadable. Never throws.
-    /// </summary>
-    private async Task<ProjectEditKnowledge?> LoadProjectEditKnowledgeAsync(
-        string projectRoot, bool emitSse, CancellationToken ct)
-    {
-        try
-        {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            if (!System.IO.File.Exists(path)) return null;
-            var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, ct);
-            if (string.IsNullOrWhiteSpace(raw)) return null;
-            var k = JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-            return k;
-        }
-        catch (Exception ex)
-        {
-            await EmitLog(emitSse, "warn",
-                $"Failed to load edit knowledge: {ex.Message}", ct: ct);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Ensure the per-project edit-knowledge file exists on disk. Creates it
-    /// with an empty default structure if it doesn't. Called at the start of
-    /// every CodeEdit task (Patch 9) so the file is visible from the very
-    /// first task, even before any edit outcomes have been recorded.
-    /// Never throws — failures are logged and swallowed.
-    /// </summary>
-    private async Task EnsureEditKnowledgeFileExistsAsync(
-        string projectRoot, bool emitSse, CancellationToken ct)
-    {
-        try
-        {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            if (System.IO.File.Exists(path)) return;
-
-            // Build the empty default structure
-            var projectName = Path.GetFileName(projectRoot.TrimEnd(
-                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            var empty = new ProjectEditKnowledge
-            {
-                ProjectName = projectName,
-                LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                Version = 1,
-                Do = new List<string>(),
-                Dont = new List<string>(),
-                Patterns = new Dictionary<string, List<string>>(StringComparer.Ordinal),
-                RecentFailures = new List<ProjectEditFailure>()
-            };
-
-            // Ensure the data/ directory exists
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
-            // Atomic-ish write: write to a temp file then rename
-            var tmp = path + ".tmp";
-            var json = JsonSerializer.Serialize(empty, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = null
-            });
-            await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, ct);
-            if (System.IO.File.Exists(path))
-                System.IO.File.Replace(tmp, path, null);
-            else
-                System.IO.File.Move(tmp, path);
-
-            await EmitLog(emitSse, "info",
-                $"Created edit knowledge file for project: {projectName}", ct: ct);
-        }
-        catch (Exception ex)
-        {
-            try
-            {
-                await EmitLog(emitSse, "warn",
-                    $"Failed to create edit knowledge file: {ex.Message}", ct: ct);
-            }
-            catch { /* swallow — never break the main flow */ }
-        }
-    }
-
-    /// <summary>
-    /// Format the knowledge object as a compact, LLM-friendly header for
-    /// prepending to the discovery context. Empty sections are omitted.
-    /// </summary>
-    private static string FormatEditKnowledgeForContext(ProjectEditKnowledge k)
-    {
-        if (k == null) return "";
-        var sb = new StringBuilder();
-        sb.AppendLine("### PRIOR EDIT KNOWLEDGE FOR THIS PROJECT ###");
-        sb.AppendLine($"Project: {k.ProjectName}  |  Last updated: {k.LastUpdated}");
-        sb.AppendLine("These are accumulated lessons from prior edits in this project.");
-        sb.AppendLine("USE them — don't repeat mistakes that are already recorded here.");
-        sb.AppendLine();
-
-        if (k.Do != null && k.Do.Count > 0)
-        {
-            sb.AppendLine("DO (patterns that worked):");
-            foreach (var b in k.Do) sb.AppendLine($"  + {b}");
-            sb.AppendLine();
-        }
-        if (k.Dont != null && k.Dont.Count > 0)
-        {
-            sb.AppendLine("DON'T (patterns that failed or broke things):");
-            foreach (var b in k.Dont) sb.AppendLine($"  - {b}");
-            sb.AppendLine();
-        }
-        if (k.Patterns != null && k.Patterns.Count > 0)
-        {
-            sb.AppendLine("FILE-TYPE PATTERNS:");
-            foreach (var (ext, bullets) in k.Patterns)
-            {
-                if (bullets == null || bullets.Count == 0) continue;
-                sb.AppendLine($"  {ext}:");
-                foreach (var b in bullets) sb.AppendLine($"    + {b}");
-            }
-            sb.AppendLine();
-        }
-        if (k.RecentFailures != null && k.RecentFailures.Count > 0)
-        {
-            sb.AppendLine("RECENT FAILURES (avoid repeating):");
-            foreach (var f in k.RecentFailures)
-            {
-                sb.AppendLine($"  [{f.Ts}] {f.File} — {f.Outcome}: {f.Reason}");
-            }
-            sb.AppendLine();
-        }
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Record an edit outcome to the project's knowledge file.
-    /// Called after every edit in ResolveAndApplyEdit:
-    ///   - outcome == "success"   -> the edit was applied and LLM-verified
-    ///   - outcome == "abandoned" -> a guard or LLM verify rejected the edit
-    ///   - outcome == "failure"   -> all retries exhausted, step failed
-    ///
-    /// The method asks the LLM to summarize the outcome into 1-2 short
-    /// point-form bullets, then merges them with the existing knowledge
-    /// (deduping via LLM judgment). File I/O is serialized per-project.
-    /// Never throws — failures are logged and swallowed.
-    /// </summary>
-    private async Task RecordEditOutcomeAsync(
-        string projectRoot,
-        string relPath,
-        string stepChange,
-        string originalPrompt,
-        string? oldStr,
-        string? newStr,
-        string outcome,           // "success" | "abandoned" | "failure"
-        string reason,
-        bool emitSse,             // IGNORED — always false (background task)
-        CancellationToken ct)     // IGNORED — we use our own CTS
-    {
-        // ── Patch 8: detach from the main agent's SSE stream and cancellation ──
-        // The knowledge save is a fire-and-forget background task. It must NEVER
-        // write to the HTTP SSE response stream (which would corrupt the main
-        // agent's concurrent streaming and cause "Stream read error: network
-        // error" on the frontend). It also must survive the main agent's
-        // connection dropping — so we use our own CancellationToken with a
-        // 2-minute timeout instead of the passed-in ct.
-        const bool bgEmitSse = false;
-        using var bgCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        bgCts.CancelAfter(TimeSpan.FromMinutes(2));
-        var bgCt = bgCts.Token;
-
-        try
-        {
-            var path = GetEditKnowledgeFilePath(projectRoot);
-            var projectName = Path.GetFileName(projectRoot.TrimEnd(
-                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-
-            // Per-project lock
-            var sem = _editKnowledgeLocks.GetOrAdd(
-                path, _ => new SemaphoreSlim(1, 1));
-            await sem.WaitAsync(bgCt);
-            try
-            {
-                // Load existing
-                ProjectEditKnowledge k;
-                if (System.IO.File.Exists(path))
-                {
-                    try
-                    {
-                        var raw = await System.IO.File.ReadAllTextAsync(path, Encoding.UTF8, bgCt);
-                        k = (string.IsNullOrWhiteSpace(raw)
-                                ? null
-                                : JsonSerializer.Deserialize<ProjectEditKnowledge>(raw, new JsonSerializerOptions
-                                {
-                                    PropertyNameCaseInsensitive = true
-                                })) ?? new ProjectEditKnowledge();
-                    }
-                    catch
-                    {
-                        k = new ProjectEditKnowledge();
-                    }
-                }
-                else
-                {
-                    k = new ProjectEditKnowledge();
-                }
-                if (string.IsNullOrEmpty(k.ProjectName)) k.ProjectName = projectName;
-                if (k.Do == null) k.Do = new List<string>();
-                if (k.Dont == null) k.Dont = new List<string>();
-                if (k.Patterns == null) k.Patterns = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-                if (k.RecentFailures == null) k.RecentFailures = new List<ProjectEditFailure>();
-
-                // Append to recentFailures (FIFO, capped). Always done — this
-                // is a log, not a deduplicated learning.
-                if (outcome != "success")
-                {
-                    k.RecentFailures.Add(new ProjectEditFailure
-                    {
-                        Ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                        File = relPath ?? "",
-                        Reason = TruncateForLlm(reason, 200),
-                        Outcome = outcome
-                    });
-                    while (k.RecentFailures.Count > MaxRecentFailures)
-                        k.RecentFailures.RemoveAt(0);
-                }
-
-                // Ask the LLM to summarize this outcome into 1-2 short bullets
-                // and decide whether they're genuinely new (don't duplicate
-                // existing knowledge).
-                var fileExt = Path.GetExtension(relPath ?? "").ToLowerInvariant();
-                var (newDoBullets, newDontBullets, newPatternBullets, summary)
-                    = await SummarizeEditOutcomeAsync(
-                        originalPrompt, stepChange, relPath ?? "", fileExt,
-                        oldStr ?? "", newStr ?? "", outcome, reason,
-                        k, bgEmitSse, bgCt);
-
-                if (!string.IsNullOrWhiteSpace(summary))
-                {
-                    await EmitLog(bgEmitSse, "info",
-                        $"Edit knowledge [{outcome}]: {summary}", ct: bgCt);
-                }
-
-                // Merge new bullets into the existing lists, capping at the
-                // configured max. We trust the LLM to have already deduped
-                // against the existing knowledge it was shown.
-                foreach (var b in newDoBullets)
-                {
-                    if (string.IsNullOrWhiteSpace(b)) continue;
-                    if (k.Do.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
-                    k.Do.Add(b);
-                    while (k.Do.Count > MaxKnowledgeDoEntries) k.Do.RemoveAt(0);
-                }
-                foreach (var b in newDontBullets)
-                {
-                    if (string.IsNullOrWhiteSpace(b)) continue;
-                    if (k.Dont.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
-                    k.Dont.Add(b);
-                    while (k.Dont.Count > MaxKnowledgeDontEntries) k.Dont.RemoveAt(0);
-                }
-                if (!string.IsNullOrEmpty(fileExt) && newPatternBullets.Count > 0)
-                {
-                    if (!k.Patterns.TryGetValue(fileExt, out var list))
-                    {
-                        list = new List<string>();
-                        k.Patterns[fileExt] = list;
-                    }
-                    foreach (var b in newPatternBullets)
-                    {
-                        if (string.IsNullOrWhiteSpace(b)) continue;
-                        if (list.Contains(b, StringComparer.OrdinalIgnoreCase)) continue;
-                        list.Add(b);
-                        while (list.Count > MaxKnowledgePatternsPerExt) list.RemoveAt(0);
-                    }
-                }
-
-                k.LastUpdated = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                // Ensure the data/ directory exists
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                // Atomic-ish write: write to a temp file then rename
-                var tmp = path + ".tmp";
-                var json = JsonSerializer.Serialize(k, new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    PropertyNamingPolicy = null
-                });
-                await System.IO.File.WriteAllTextAsync(tmp, json, Encoding.UTF8, bgCt);
-                if (System.IO.File.Exists(path))
-                    System.IO.File.Replace(tmp, path, null);
-                else
-                    System.IO.File.Move(tmp, path);
-            }
-            finally
-            {
-                sem.Release();
-            }
-        }
-        catch (Exception ex)
-        {
-            try
-            {
-                await EmitLog(bgEmitSse, "warn",
-                    $"Failed to record edit knowledge: {ex.Message}", ct: bgCt);
-            }
-            catch { /* swallow — never let knowledge persistence break the edit */ }
-        }
-    }
-
-    /// <summary>
-    /// Ask the LLM to summarize an edit outcome into 1-2 short point-form
-    /// bullets for each relevant section (do / dont / patterns), given the
-    /// existing knowledge for dedup judgment.
-    ///
-    /// Returns:
-    ///   newDoBullets       — bullets to append to k.Do
-    ///   newDontBullets     — bullets to append to k.Dont
-    ///   newPatternBullets  — bullets to append to k.Patterns[ext]
-    ///   summary            — one-line human-readable summary for logging
-    /// </summary>
-    private async Task<(List<string> doBullets, List<string> dontBullets, List<string> patternBullets, string summary)>
-        SummarizeEditOutcomeAsync(
-            string originalPrompt, string stepChange, string relPath, string fileExt,
-            string oldStr, string newStr, string outcome, string reason,
-            ProjectEditKnowledge existing, bool emitSse, CancellationToken ct)
-    {
-        // ── Patch 8: NEVER write to SSE from the knowledge-save LLM call ──
-        // This method is only called from RecordEditOutcomeAsync (a background
-        // fire-and-forget task). Writing to the SSE response stream here would
-        // corrupt the main agent's concurrent streaming. Override to false.
-        emitSse = false;
-        var existingDo = existing.Do != null && existing.Do.Count > 0
-            ? string.Join("\n", existing.Do.Take(15).Select(b => $"  + {b}"))
-            : "  (none)";
-        var existingDont = existing.Dont != null && existing.Dont.Count > 0
-            ? string.Join("\n", existing.Dont.Take(15).Select(b => $"  - {b}"))
-            : "  (none)";
-
-        var sysPrompt =
-            "You are maintaining a small, deduplicated knowledge file for a software project. " +
-            "Your job: given the outcome of a single code edit, decide if it teaches a NEW lesson " +
-            "worth recording. If yes, output 1-2 short point-form bullets for each relevant section. " +
-            "If the lesson is already covered by the existing knowledge, return empty lists — " +
-            "do NOT duplicate or rephrase existing bullets.\n\n" +
-            "STRICT OUTPUT FORMAT — JSON only, no prose, no markdown fences:\n" +
-            "{\n" +
-            "  \"summary\": \"one short sentence describing the outcome\",\n" +
-            "  \"do\": [\"short bullet\", ...],            // patterns that worked — only if outcome==success\n" +
-            "  \"dont\": [\"short bullet\", ...],          // anti-patterns to avoid — only if outcome!=success\n" +
-            "  \"patterns\": [\"short bullet\", ...]       // file-type-specific notes (e.g. 'getRocketMesh uses meshCache')\n" +
-            "}\n\n" +
-            "RULES:\n" +
-            " * Each bullet MUST be <= 15 words, point-form, no preamble.\n" +
-            " * Each bullet MUST be a GENERAL lesson, not a one-off fact about a specific variable.\n" +
-            " * BAD bullet: 'changed scale from 1.0 to 2.0 in getRocketMesh' (too specific)\n" +
-            " * GOOD bullet: 'scale mesh size by editing the numeric args to addBox, not by rewriting the method'\n" +
-            " * If outcome==success, prefer filling 'do' and 'patterns'. Leave 'dont' empty.\n" +
-            " * If outcome!=success, prefer filling 'dont' and 'patterns'. Leave 'do' empty.\n" +
-            " * If the lesson is already covered by EXISTING KNOWLEDGE below, return EMPTY lists.\n" +
-            " * Return at most 2 bullets per list. Quality over quantity.";
-
-        var userMsg =
-            $"### TASK PROMPT ###\n{TruncateForLlm(originalPrompt, 400)}\n\n" +
-            $"### STEP ###\n{TruncateForLlm(stepChange, 300)}\n\n" +
-            $"### FILE ###\n{relPath} (ext: {fileExt})\n\n" +
-            $"### OUTCOME ###\n{outcome}\n" +
-            (string.IsNullOrWhiteSpace(reason) ? "" : $"REASON: {TruncateForLlm(reason, 300)}\n") +
-            $"\n### OLD CODE ###\n```\n{TruncateForLlm(oldStr, 800)}\n```\n\n" +
-            $"### NEW CODE ###\n```\n{TruncateForLlm(newStr, 800)}\n```\n\n" +
-            $"### EXISTING KNOWLEDGE (do NOT duplicate these) ###\n" +
-            $"DO:\n{existingDo}\n\nDON'T:\n{existingDont}\n\n" +
-            "Decide: what new bullets (if any) should be added? Output JSON only.";
-
-        try
-        {
-            var (raw, _, error) = await CallLlmRawStreaming(
-                sysPrompt, userMsg, emitSse, ct,
-                requestTimeout: TimeSpan.FromMinutes(1),
-                maxTokens: 512);
-
-            if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
-                return (new List<string>(), new List<string>(), new List<string>(),
-                    $"(LLM summarize skipped: {error ?? "empty"})");
-
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
-            {
-                cleaned = cleaned.TrimStart('`');
-                var nl = cleaned.IndexOf('\n');
-                if (nl >= 0) cleaned = cleaned[(nl + 1)..];
-                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
-            }
-            var fb = cleaned.IndexOf('{');
-            var lb = cleaned.LastIndexOf('}');
-            if (fb < 0 || lb <= fb)
-                return (new List<string>(), new List<string>(), new List<string>(),
-                    $"(LLM summarize: no JSON)");
-            cleaned = cleaned[fb..(lb + 1)];
-
-            using var doc = JsonDocument.Parse(cleaned);
-            var root = doc.RootElement;
-
-            var summary = root.TryGetProperty("summary", out var sEl)
-                ? sEl.GetString()?.Trim() ?? ""
-                : "";
-
-            var doBullets = new List<string>();
-            var dontBullets = new List<string>();
-            var patternBullets = new List<string>();
-
-            if (root.TryGetProperty("do", out var doEl) && doEl.ValueKind == JsonValueKind.Array)
-                foreach (var b in doEl.EnumerateArray())
-                {
-                    var s = b.GetString()?.Trim();
-                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) doBullets.Add(s);
-                }
-            if (root.TryGetProperty("dont", out var dontEl) && dontEl.ValueKind == JsonValueKind.Array)
-                foreach (var b in dontEl.EnumerateArray())
-                {
-                    var s = b.GetString()?.Trim();
-                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) dontBullets.Add(s);
-                }
-            if (root.TryGetProperty("patterns", out var pEl) && pEl.ValueKind == JsonValueKind.Array)
-                foreach (var b in pEl.EnumerateArray())
-                {
-                    var s = b.GetString()?.Trim();
-                    if (!string.IsNullOrWhiteSpace(s) && s.Length <= 200) patternBullets.Add(s);
-                }
-
-            return (doBullets, dontBullets, patternBullets, summary);
-        }
-        catch (Exception ex)
-        {
-            return (new List<string>(), new List<string>(), new List<string>(),
-                $"(LLM summarize failed: {ex.Message})");
-        }
-    }
+    // ── Edit knowledge (recorded in EditKnowledgeService) ──
 
     /// <summary>
     /// LLM-driven per-step verify-and-decide gate.
@@ -7717,30 +7192,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string? steeringContext = null,
         string? cardId = null)
     {
-        // ── Load per-project edit knowledge (Patch 4) ─────────────────────
-        // CodeEdit tasks only — this method is only called from UnifiedPipeline,
-        // which is the CodeEdit route. Command-pipeline tasks skip this entirely.
-        // The knowledge file lives at <projectRoot>/data/.project_<safeName>_edit_knowledge.json
-        // and accumulates short point-form bullets about what edit patterns
-        // worked / didn't work for this specific project.
-        var editKnowledge = await LoadProjectEditKnowledgeAsync(projectRoot, emitSse, ct);
+        // ── Load per-project edit knowledge (EditKnowledgeService) ────────
+        var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
 
-        // ── Patch 9: ensure the knowledge file exists on disk ────────────
-        // If LoadProjectEditKnowledgeAsync returned null, the file doesn't
-        // exist yet (or is unreadable). Create it now with an empty default
-        // structure so it's ready for later edits. This makes the file
-        // visible on disk from the very first CodeEdit task, even before any
-        // edit outcomes have been recorded.
         if (editKnowledge == null)
         {
-            await EnsureEditKnowledgeFileExistsAsync(projectRoot, emitSse, ct);
-            // Reload so editKnowledge is non-null for the rest of this method
-            editKnowledge = await LoadProjectEditKnowledgeAsync(projectRoot, emitSse, ct);
+            await _editKnowledge.EnsureExistsAsync(projectRoot, ct);
+            editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
         }
 
-        var editKnowledgeHeader = editKnowledge != null
-            ? FormatEditKnowledgeForContext(editKnowledge)
-            : "";
+        var editKnowledgeHeader = EditKnowledgeService.FormatForContext(editKnowledge);
         if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
         {
             await EmitLog(emitSse, "info",
