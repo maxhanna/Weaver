@@ -1388,6 +1388,73 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine();
+        // ── STRATEGY LADDER ─────────────────────────────────────────────────
+        // Each successive retry escalates to a more directive strategy so the
+        // LLM cannot just regenerate the same broken oldString. The history
+        // block above already shows what failed; the directives below FORCE
+        // a different approach.
+        //
+        // Strategy 0 (history.Count == 0): no special directive — LLM uses
+        //   its own judgment within the system prompt rules.
+        //
+        // Strategy 1 (history.Count == 1): VERBATIM_COPY — instruct the LLM
+        //   to copy the EXACT file lines from the snippet we showed (the
+        //   "EXACT lines from the file" block from BuildExactMatchBlock)
+        //   character-for-character, including every space and comma.
+        //
+        // Strategy 2 (history.Count == 2): SINGLE_LINE_ANCHOR — instruct the
+        //   LLM to drop multi-line oldStrings entirely and pick the SINGLE
+        //   most-distinctive line in the target region as oldString, with
+        //   one line of surrounding context only.
+        //
+        // Strategy 3+ (history.Count >= 3): LINE_RANGE_REPLACEMENT — instruct
+        //   the LLM to switch to a totally different edit format: identify
+        //   the target by line number range and produce a fullFile replacement.
+        //   This bypasses oldString matching entirely.
+        //
+        // Without this ladder, the LLM would happily regenerate the same
+        // broken oldString 4-5 times in a row, wasting tokens and time before
+        // the stuckCount check finally aborts.
+        if (history?.Count > 0)
+        {
+            sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
+            if (history.Count == 1)
+            {
+                sb.AppendLine("  STRATEGY: VERBATIM_COPY.");
+                sb.AppendLine("  • Do NOT retype oldString from memory — the file content above is authoritative.");
+                sb.AppendLine("  • Open the FILE CONTENT block, find the EXACT lines you want to replace, and");
+                sb.AppendLine("    copy them character-for-character into oldString. Include every space, comma,");
+                sb.AppendLine("    and indentation character. The DIFF hints above show what you got wrong.");
+                sb.AppendLine("  • If the file shows 'rgba(255, 255, 255, 0.03)' (with spaces), your oldString MUST");
+                sb.AppendLine("    contain 'rgba(255, 255, 255, 0.03)' — NOT 'rgba(255,255,255,0.03)'.");
+            }
+            else if (history.Count == 2)
+            {
+                sb.AppendLine("  STRATEGY: SINGLE_LINE_ANCHOR.");
+                sb.AppendLine("  • Drop your multi-line oldString. Pick the SINGLE most distinctive line in the");
+                sb.AppendLine("    target region (longest line with the most unique tokens) as your oldString.");
+                sb.AppendLine("  • Add ONE line above OR below for anchor context — no more.");
+                sb.AppendLine("  • Example: if you want to add a flex-wrap property to a .kanban-board rule,");
+                sb.AppendLine("    use `  display: flex;` as oldString and `  display: flex;\\n  flex-wrap: wrap;` as newString.");
+                sb.AppendLine("  • DO NOT include the entire rule block — that's what failed last time.");
+            }
+            else // history.Count >= 3
+            {
+                sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
+                sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
+                sb.AppendLine("  • Look at the FILE CONTENT block. Identify the line numbers of the region to replace.");
+                sb.AppendLine("  • Output a JSON object with this exact shape:");
+                sb.AppendLine("    {");
+                sb.AppendLine("      \"fullFile\": [\"...entire file content with your changes applied...\"]");
+                sb.AppendLine("    }");
+                sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
+                sb.AppendLine("    Do NOT omit any lines — this is a full-file replacement.");
+                sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine();
         sb.AppendLine("Output the edit now:");
 
         if (emitSse)
@@ -3456,7 +3523,7 @@ public class AgentController : ControllerBase
 
                 if (resolveError == lastResolveError) resolveStuckCount++;
                 else { resolveStuckCount = 0; lastResolveError = resolveError; }
-                if (resolveStuckCount >= 3)
+                if (resolveStuckCount >= 2)
                 {
                     await EmitLog(emitSse, "error",
                         $"LLM keeps failing to produce valid edit output — aborting {relPath}",
@@ -3488,13 +3555,26 @@ public class AgentController : ControllerBase
             if (fullFile && fullContent != null)
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
-                if (fileAlreadyExists)
+                // fullFile for EXISTING files is normally rejected — the LLM
+                // should use targeted oldString/newString edits. BUT the strategy
+                // ladder in ResolveEditForStep escalates to fullFile after 3+
+                // failed attempts (see "STRATEGY: LINE_RANGE_REPLACEMENT" in
+                // the prompt). In that case, allow the fullFile replacement
+                // through — it's the only way to escape a stuck oldString loop.
+                var allowFullFileEscalation = history.Count >= 3 && fileAlreadyExists;
+                if (fileAlreadyExists && !allowFullFileEscalation)
                 {
                     var e = "LLM incorrectly used fullFile for existing file — " +
                             "use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
                     continue;
+                }
+                if (allowFullFileEscalation)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"⚠ Strategy escalation: accepting fullFile replacement for existing file {relPath} " +
+                        $"(after {history.Count} failed oldString attempts)", ct: ct);
                 }
                 if (fullContent.Length > cfg8.maxFullFileTokens * 4)
                 {
@@ -3610,7 +3690,7 @@ public class AgentController : ControllerBase
                         AgentUtilities.NormalizeLineEndings(lastOld),
                         StringComparison.Ordinal)) stuckCount++;
                     else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                    if (stuckCount >= 3) goto RecordFailure;
+                    if (stuckCount >= 2) goto RecordFailure;
                     continue;
                 }
             }
@@ -3747,7 +3827,7 @@ public class AgentController : ControllerBase
                     AgentUtilities.NormalizeLineEndings(lastOld),
                     StringComparison.Ordinal)) stuckCount++;
                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 3)
+                if (stuckCount >= 2)
                 {
                     await EmitLog(emitSse, "error",
                         $"LLM keeps producing the same oldString — aborting {relPath}",
@@ -3779,7 +3859,7 @@ public class AgentController : ControllerBase
                     AgentUtilities.NormalizeLineEndings(lastOld),
                     StringComparison.Ordinal)) stuckCount++;
                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 3) goto RecordFailure;
+                if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
 
@@ -3801,7 +3881,7 @@ public class AgentController : ControllerBase
                     AgentUtilities.NormalizeLineEndings(lastOld),
                     StringComparison.Ordinal)) stuckCount++;
                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 3) goto RecordFailure;
+                if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
 
@@ -3854,7 +3934,7 @@ public class AgentController : ControllerBase
                 if (string.Equals(trackBy, AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal))
                     stuckCount++;
                 else { stuckCount = 0; lastOld = trackBy; }
-                if (stuckCount >= 3) goto RecordFailure;
+                if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
 
@@ -3884,7 +3964,7 @@ public class AgentController : ControllerBase
                         AgentUtilities.NormalizeLineEndings(lastOld),
                         StringComparison.Ordinal)) stuckCount++;
                     else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                    if (stuckCount >= 3) goto RecordFailure;
+                    if (stuckCount >= 2) goto RecordFailure;
                     continue;
                 }
             }
@@ -4080,13 +4160,31 @@ public class AgentController : ControllerBase
             }
 
             // ── Record successful edit in project knowledge ───────────────
+            // When the edit succeeded on a retry (attempt > 0), include a
+            // reason that summarizes WHY the prior attempts failed — this
+            // becomes a self-recorded "tip" the agent can read on future
+            // edits to the same file/extension.
+            var successReason = "";
+            if (attempt > 0 && history.Count > 0)
+            {
+                // Summarize the failure history into a compact reason.
+                // Take the most recent failure's error message (that's the
+                // one the LLM had to overcome).
+                var lastFailure = history[history.Count - 1];
+                var failSummary = lastFailure.error;
+                // Truncate to keep the tip focused
+                if (failSummary.Length > 200) failSummary = failSummary[..200] + "…";
+                successReason = $"Succeeded on attempt {attempt + 1} after {history.Count} failure(s). " +
+                                $"Last failure: {failSummary}. " +
+                                $"Strategy that worked: {(attempt == 1 ? "VERBATIM_COPY" : attempt == 2 ? "SINGLE_LINE_ANCHOR" : "LINE_RANGE_REPLACEMENT")}.";
+            }
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _editKnowledge.RecordOutcomeAsync(
                     projectRoot, relPath, step.Change, prompt ?? step.Change,
-                    oldStr, newStr, outcome: "success", reason: "", ct);
+                    oldStr, newStr, outcome: "success", reason: successReason, ct);
                 }
                 catch { /* swallow */ }
             }, CancellationToken.None);
@@ -11092,11 +11190,34 @@ Respond with JSON only:
             .ToList();
         if (oldLines.Count == 0 || fileLines.Length == 0) return null;
 
+        // ── Trivial-line filter ─────────────────────────────────────────────
+        // Many short CSS/JS lines like "overflow-x: auto;", "padding: 16px;",
+        // "}", "});", ".kanban-board {" are extremely common and would surface
+        // as "(100% match) line 983" — completely unrelated to where the
+        // LLM's oldString was actually trying to match (e.g. line 42).
+        // We filter out file lines whose meaningful content (trimmed, alnum-only)
+        // is < 12 chars OR matches a known-generic pattern.
+        bool IsTrivialLine(string line)
+        {
+            var t = line.Trim();
+            if (t.Length < 12) return true;
+            // Strip non-alphanumeric for "meaningful content" length
+            var meaningful = new string(t.Where(char.IsLetterOrDigit).ToArray());
+            if (meaningful.Length < 12) return true;
+            // CSS rules with just a property:value where value is short
+            if (Regex.IsMatch(t, @"^\s*[\w-]+\s*:\s*[\w\d#.()-]+\s*;?\s*$"))
+            {
+                // e.g. "overflow-x: auto;" or "padding: 16px;" or "color: red;"
+                return true;
+            }
+            return false;
+        }
+
         var results = new List<(int fileIdx, double score, string line)>();
         for (var fi = 0; fi < fileLines.Length; fi++)
         {
             var fLine = fileLines[fi];
-            if (fLine.Trim().Length < 8) continue;  // skip short file lines too
+            if (IsTrivialLine(fLine)) continue;
             var bestSim = oldLines.Max(o => ComputeLineSimilarity(fLine, o));
             if (bestSim >= 0.50)
                 results.Add((fi, bestSim, fLine));
@@ -11110,9 +11231,92 @@ Respond with JSON only:
             .ToList();
         if (best.Count == 0) return null;
 
-        var detail = best.Select(b =>
-            $"  ({(b.score * 100):F0}% match) line {b.fileIdx + 1}: {b.line}");
-        return string.Join('\n', detail);
+        // ── Character-level diff hint ───────────────────────────────────────
+        // For each of the top results, find the LLM's oldString line that
+        // best matches it and show a SIDE-BY-SIDE comparison so the LLM can
+        // see EXACTLY which characters differ (whitespace, commas, etc.).
+        var sb = new StringBuilder();
+        foreach (var b in best)
+        {
+            sb.AppendLine($"  ({(b.score * 100):F0}% match) line {b.fileIdx + 1}: {b.line}");
+
+            // Find the LLM line that matched this file line best
+            var llmLine = oldLines
+                .OrderByDescending(o => ComputeLineSimilarity(b.line, o))
+                .FirstOrDefault();
+            if (llmLine != null && llmLine != b.line.Trim())
+            {
+                // Show a focused diff — find the first and last differing char
+                var fileTrimmed = b.line.Trim();
+                var diff = DescribeLineDiff(llmLine, fileTrimmed);
+                if (diff != null)
+                    sb.AppendLine($"    └ DIFF: {diff}");
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Produce a one-line human-readable description of the differences
+    /// between two strings, focused on the kinds of differences that cause
+    /// oldString-not-found failures: missing spaces after commas/colons,
+    /// different quote styles, different whitespace inside parens, etc.
+    /// Returns null if no meaningful difference is found.
+    /// </summary>
+    private static string? DescribeLineDiff(string llm, string file)
+    {
+        if (string.Equals(llm, file, StringComparison.Ordinal)) return null;
+
+        var diffs = new List<string>();
+
+        // Whitespace after commas: "rgba(255,255,255)" vs "rgba(255, 255, 255)"
+        var llmNoCommaSpace = Regex.Replace(llm, @",\s*", ",");
+        var fileNoCommaSpace = Regex.Replace(file, @",\s*", ",");
+        if (llmNoCommaSpace == fileNoCommaSpace && llm != file)
+            diffs.Add("the file has spaces after commas that you omitted — e.g. 'rgba(255,255,255)' should be 'rgba(255, 255, 255)'");
+
+        // Whitespace after colons: "padding:16px" vs "padding: 16px"
+        var llmNoColonSpace = Regex.Replace(llm, @":\s*", ":");
+        var fileNoColonSpace = Regex.Replace(file, @":\s*", ":");
+        if (llmNoColonSpace == fileNoColonSpace && llmNoCommaSpace != fileNoCommaSpace)
+            diffs.Add("the file has spaces after colons that you omitted — e.g. 'padding:16px' should be 'padding: 16px'");
+
+        // Whitespace around equals: "x=0" vs "x = 0"
+        var llmNoEqSpace = Regex.Replace(llm, @"\s*=\s*", "=");
+        var fileNoEqSpace = Regex.Replace(file, @"\s*=\s*", "=");
+        if (llmNoEqSpace == fileNoEqSpace && llmNoCommaSpace != fileNoCommaSpace && llmNoColonSpace != fileNoColonSpace)
+            diffs.Add("the file has spaces around '=' that you omitted — e.g. 'x=0' should be 'x = 0'");
+
+        // Whitespace inside parens: "foo(a, b)" vs "foo( a, b )"
+        var llmNoParenSpace = Regex.Replace(llm, @"\(\s+", "(").Replace(")", " )").Replace(") )", "))");
+        var fileNoParenSpace = Regex.Replace(file, @"\(\s+", "(").Replace(")", " )").Replace(") )", "))");
+        if (llmNoParenSpace == fileNoParenSpace && llm != file
+            && llmNoCommaSpace == fileNoCommaSpace && llmNoColonSpace == fileNoColonSpace)
+            diffs.Add("the file has different whitespace inside parens");
+
+        // Generic catch-all: show first differing position
+        if (diffs.Count == 0)
+        {
+            var minLen = Math.Min(llm.Length, file.Length);
+            var firstDiff = -1;
+            for (var i = 0; i < minLen; i++)
+            {
+                if (llm[i] != file[i]) { firstDiff = i; break; }
+            }
+            if (firstDiff >= 0)
+            {
+                var ctx = Math.Max(0, firstDiff - 8);
+                var llmCtx = llm.Substring(ctx, Math.Min(20, llm.Length - ctx));
+                var fileCtx = file.Substring(ctx, Math.Min(20, file.Length - ctx));
+                diffs.Add($"first difference at position {firstDiff}: you wrote '{llmCtx}' but file has '{fileCtx}'");
+            }
+            else
+            {
+                diffs.Add($"length differs: you wrote {llm.Length} chars, file has {file.Length} chars");
+            }
+        }
+
+        return string.Join("; ", diffs);
     }
 
     /// <summary>Find where oldString fuzzily matches the file and return the verbatim file lines for copying.</summary>
