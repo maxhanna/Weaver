@@ -98,9 +98,26 @@ public class BoardDataService
         }
     }
 
-    public async Task<string?> LoadRawAsync()
+    public async Task<string?> LoadRawAsync(int maxRetries = 5, int baseDelayMs = 200)
     {
         if (!File.Exists(_filePath)) return null;
+
+        for (var attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                return await File.ReadAllTextAsync(_filePath);
+            }
+            catch (IOException) when (attempt < maxRetries)
+            {
+                var delay = baseDelayMs * (1 << (attempt - 1));
+                _logger.LogWarning("LoadRawAsync attempt {Attempt}/{MaxRetries} failed (file locked), retrying in {Delay}ms",
+                    attempt, maxRetries, delay);
+                await Task.Delay(delay);
+            }
+        }
+
+        // Last attempt — let it throw
         return await File.ReadAllTextAsync(_filePath);
     }
 } 

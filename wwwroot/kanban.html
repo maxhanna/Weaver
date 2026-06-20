@@ -20,7 +20,8 @@
     <button ng-click="vm.showDone = !vm.showDone" class="{{vm.showDone ? 'active' : 'ghost'}}" style="margin-left:4px;">
       ✅ ({{vm.cardsForProject('done').length}})
     </button>
-  </div>
+    <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" style="margin-left:4px;">✕</button>
+    </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
     <!-- TODO column -->

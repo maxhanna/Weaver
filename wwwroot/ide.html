@@ -1,15 +1,17 @@
 ﻿<div class="ide-panel">
-  <div class="ide-panel-header">
+  <div class="ide-panel-header" ng-mousedown="vm.startDrag($event)">
+    <span class="ide-drag-handle" title="Drag to reposition">⠿</span>
     <span class="ide-panel-title">📝 IDE</span>
     <div class="ide-panel-controls">
       <span class="ide-shared-badge" ng-if="vm.bughostedStatus === 'connected'" title="Shared editing active">🌐</span>
       <button class="ide-panel-btn" ng-click="vm.openFileBrowser()" title="Open File">📂</button>
+      <button class="ide-panel-btn" ng-click="vm.showGitDiff()" title="Show git diff of edited files">🐱</button>
       <button class="ide-panel-btn" ng-click="vm.saveFile()" ng-disabled="!vm.ide.dirty" title="Save File">💾</button>
       <button class="ide-panel-btn" ng-click="vm.newFile()" title="New File">➕</button>
       <button class="ide-panel-btn" ng-click="vm.resolveAllConflicts()"
         ng-if="vm.ide.conflictFiles && Object.keys(vm.ide.conflictFiles).length" title="Resolve all conflicts">⚠
         Resolve</button>
-      <button class="ide-panel-btn" ng-click="vm.closeIDE()" title="Close IDE">✕</button>
+      <button class="ide-panel-btn" ng-click="vm.showIDE = false; vm.saveSettings();" title="Close IDE">✕</button>
     </div>
   </div>
   <div class="ide-panel-body">
@@ -61,27 +63,152 @@
           </div>
         </div>
         <div class="ide-editor-actions">
+          <button class="ide-panel-btn" ng-click="vm.openSearch()" title="Search (Ctrl+F)">🔍</button>
           <button class="ide-panel-btn" ng-click="vm.toggleSidebar()" title="Toggle sidebar">▶</button>
         </div>
       </div>
-      <div class="ide-editor-content" ng-if="vm.ide.currentFile && vm.ide.currentTab">
+      <!-- ── File editor content ── -->
+      <div class="ide-editor-content" ng-if="vm.ide.currentTab && (vm.ide.currentTab.type === 'file' || !vm.ide.currentTab.type)">
         <div class="ide-conflict-banner" ng-if="vm.ide.currentTab.conflict">
           <strong>⚠ Edit Conflict</strong>
           <span>Remote user edited this file while you had unsaved changes.</span>
           <button ng-click="vm.resolveConflict(vm.ide.currentFile)" class="ide-panel-btn">Resolve</button>
         </div>
-        <textarea class="ide-textarea" ng-model="vm.ide.currentTab.content" ng-change="vm.onContentChange()"
-          ng-model-options="{debounce: 200}" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"
-          placeholder="Editing {{vm.ide.currentFile}}..."></textarea>
-        <div class="ide-cursor-info" ng-if="vm.ide.currentTab">
+        <div class="ide-conflict-banner ide-external-banner" ng-if="vm.ide.currentTab.externalModified && !vm.ide.currentTab.conflict">
+          <strong>⚠ External Change</strong>
+          <span>File was modified outside the IDE. Save to overwrite or reload to see changes.</span>
+          <button ng-click="vm.reloadExternalFile(vm.ide.currentFile)" class="ide-panel-btn">Reload</button>
+        </div>
+        <div class="ide-search-panel" ng-if="vm.ide.searchVisible">
+          <div class="ide-search-row">
+            <input type="text" class="ide-search-input" ng-model="vm.ide.searchQuery"
+              ng-change="vm.doSearch()" placeholder="Search in file..."
+              ng-keydown="vm.onSearchKeydown($event)" />
+            <span class="ide-search-count" ng-if="vm.ide.searchQuery">
+              <span ng-if="vm.ide.searchMatches.length">{{vm.ide.searchCurrentIdx + 1}}/{{vm.ide.searchMatches.length}}</span>
+              <span ng-if="!vm.ide.searchMatches.length">0/0</span>
+            </span>
+            <button class="ide-search-btn" ng-click="vm.searchPrev()" title="Previous match (Shift+Enter)">▲</button>
+            <button class="ide-search-btn" ng-click="vm.searchNext()" title="Next match (Enter)">▼</button>
+            <button class="ide-search-btn ide-search-close" ng-click="vm.closeSearch()" title="Close search (Esc)">✕</button>
+          </div>
+        </div>
+        <div class="ide-codemirror-container" ng-class="{'ide-textarea--shared': vm.ide.currentTab.remoteEditing}"></div>
+        <div class="ide-cursor-info">
           <span>Lines: {{vm.ide.currentTab.lineCount}}</span>
           <span class="ide-dirty-indicator" ng-if="vm.ide.dirty">● unsaved</span>
           <span class="ide-syncing-indicator" ng-if="vm.ide.syncing">⟳ syncing...</span>
           <span class="ide-shared-editing-indicator" ng-if="vm.ide.currentTab.remoteEditing"
             title="Remote user has this file open and is editing it">👥 shared editing</span>
           <span class="ide-conflict-badge" ng-if="vm.ide.currentTab.conflict">⚠ conflict</span>
+          <span class="ide-conflict-badge ide-external-modified-badge" ng-if="vm.ide.currentTab.externalModified && !vm.ide.currentTab.conflict">⚠ external change</span>
         </div>
       </div>
+
+      <!-- ── Git source control list tab ── -->
+      <div class="ide-editor-content" ng-if="vm.ide.currentTab && vm.ide.currentTab.type === 'git-list'">
+        <div class="ide-diff-content">
+          <div class="ide-diff-header">
+            <span class="ide-diff-title">🔀 Source Control</span>
+            <span class="ide-diff-branch" title="Current branch" ng-if="vm.ide.currentTab.gitData">⎇ {{vm.ide.currentTab.gitData.branch}}</span>
+            <div class="ide-diff-actions">
+              <button class="ide-panel-btn" ng-click="vm.showGitDiff()" title="Refresh">↻</button>
+            </div>
+          </div>
+
+          <!-- Commit section -->
+          <div class="ide-diff-commit-section" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitData">
+            <input type="text" class="ide-commit-input" ng-model="vm.ide.currentTab.gitCommitMessage"
+              placeholder="Commit message..." ng-keydown="$event.key==='Enter' && vm.gitCommit()" />
+            <div class="ide-commit-actions">
+              <button class="ide-commit-btn" ng-click="vm.gitCommit()"
+                ng-disabled="!vm.ide.currentTab.gitCommitMessage || vm.ide.currentTab.gitCommitBusy">Commit</button>
+              <button class="ide-commit-btn ide-commit-btn--push" ng-click="vm.gitCommitAndPush()"
+                ng-disabled="!vm.ide.currentTab.gitCommitMessage || vm.ide.currentTab.gitCommitBusy">Commit &amp; Push</button>
+              <button class="ide-commit-btn ide-commit-btn--pr" ng-click="vm.gitCreatePr()"
+                ng-disabled="!vm.ide.currentTab.gitCommitMessage || vm.ide.currentTab.gitCommitBusy">Create PR</button>
+            </div>
+            <div class="ide-commit-status" ng-if="vm.ide.currentTab.gitCommitBusy">⏳ {{vm.ide.currentTab.gitCommitStatus}}...</div>
+            <div class="ide-commit-result success" ng-if="vm.ide.currentTab.gitCommitResult && !vm.ide.currentTab.gitCommitError">{{vm.ide.currentTab.gitCommitResult}}</div>
+            <div class="ide-commit-result error" ng-if="vm.ide.currentTab.gitCommitError">{{vm.ide.currentTab.gitCommitError}}</div>
+            <div class="ide-commit-pr-url" ng-if="vm.ide.currentTab.gitPrUrl">
+              <a href="{{vm.ide.currentTab.gitPrUrl}}" target="_blank" rel="noopener noreferrer">🔗 {{vm.ide.currentTab.gitPrUrl}}</a>
+            </div>
+          </div>
+
+          <div class="ide-diff-loading" ng-if="vm.ide.currentTab.gitLoading">Loading...</div>
+          <div class="ide-diff-empty" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitData && !vm.ide.currentTab.gitData.hasChanges">
+            No uncommitted changes.
+          </div>
+          <div class="ide-diff-error" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitError">
+            {{vm.ide.currentTab.gitError}}
+          </div>
+          <div class="ide-diff-body" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitData && vm.ide.currentTab.gitData.hasChanges">
+            <!-- Staged files -->
+            <div class="ide-diff-staged" ng-if="vm.ide.currentTab.gitData.staged && vm.ide.currentTab.gitData.staged.length">
+              <div class="ide-diff-section-label ide-diff-section-label--staged">Staged changes ({{vm.ide.currentTab.gitData.staged.length}})</div>
+              <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.currentTab.gitData.staged track by file.path">
+                <span class="ide-diff-file-status">✓</span>
+                <span class="ide-diff-file-path" ng-click="vm.openFile(file.path)">{{file.path}}</span>
+                <span class="ide-diff-file-action" ng-click="vm.showFileDiff(file.path)" title="View diff">⇔</span>
+              </div>
+            </div>
+            <!-- Modified files -->
+            <div class="ide-diff-files" ng-if="vm.ide.currentTab.gitData.files.length">
+              <div class="ide-diff-section-label">Modified ({{vm.ide.currentTab.gitData.files.length}})</div>
+              <div class="ide-diff-file-row modified" ng-repeat="file in vm.ide.currentTab.gitData.files track by file.path">
+                <span class="ide-diff-file-status">M</span>
+                <span class="ide-diff-file-path" ng-click="vm.openFile(file.path)">{{file.path}}</span>
+                <span class="ide-diff-file-action" ng-click="vm.showFileDiff(file.path)" title="View diff">⇔</span>
+              </div>
+            </div>
+            <!-- Untracked files -->
+            <div class="ide-diff-untracked" ng-if="vm.ide.currentTab.gitData.untracked.length">
+              <div class="ide-diff-section-label">Untracked ({{vm.ide.currentTab.gitData.untracked.length}})</div>
+              <div class="ide-diff-file-row untracked" ng-repeat="f in vm.ide.currentTab.gitData.untracked track by $index">
+                <span class="ide-diff-file-status">U</span>
+                <span class="ide-diff-file-path" ng-click="vm.openFile(f)">{{f}}</span>
+                <span class="ide-diff-file-action" ng-click="vm.showFileDiff(f)" title="View diff">⇔</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Side-by-side diff tab ── -->
+      <div class="ide-editor-content" ng-if="vm.ide.currentTab && vm.ide.currentTab.type === 'git-diff'">
+        <div class="ide-diff-content ide-diff-content--full">
+          <div class="ide-diff-header">
+            <button class="ide-panel-btn" ng-click="vm.backToSourceControl()" title="Back to source control">← Back</button>
+            <span class="ide-diff-title">{{vm.ide.currentTab.gitFilePath || vm.ide.currentTab.displayName}}</span>
+            <div class="ide-diff-actions">
+              <button class="ide-panel-btn" ng-click="vm.showFileDiff(vm.ide.currentTab.gitFilePath)" title="Refresh">↻</button>
+            </div>
+          </div>
+          <div class="ide-diff-loading" ng-if="vm.ide.currentTab.gitLoading">Loading diff...</div>
+          <div class="ide-diff-error" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitError">{{vm.ide.currentTab.gitError}}</div>
+          <div class="ide-diff-sbs" ng-if="!vm.ide.currentTab.gitLoading && vm.ide.currentTab.gitRows">
+            <div class="ide-diff-sbs-header">
+              <div class="ide-diff-sbs-header-cell ide-diff-sbs-old">Before</div>
+              <div class="ide-diff-sbs-header-cell ide-diff-sbs-new">After</div>
+            </div>
+            <div class="ide-diff-sbs-body">
+              <div class="ide-diff-sbs-row" ng-repeat="row in vm.ide.currentTab.gitRows track by $index"
+                ng-class="'ide-diff-row--' + row.type">
+                <div class="ide-diff-sbs-cell ide-diff-sbs-old">
+                  <span class="ide-diff-lineno">{{row.oldNum}}</span>
+                  <span class="ide-diff-line-content">{{row.oldContent}}</span>
+                </div>
+                <div class="ide-diff-sbs-cell ide-diff-sbs-new">
+                  <span class="ide-diff-lineno">{{row.newNum}}</span>
+                  <span class="ide-diff-line-content">{{row.newContent}}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="ide-placeholder" ng-if="vm.ide.openTabs.length === 0">
         <p>Open a file from the sidebar to start editing</p>
         <p class="ide-shared-info" ng-if="vm.bughostedStatus === 'connected'">🌐 Shared editing via BugHosted active —
@@ -89,5 +216,4 @@
       </div>
     </div>
   </div>
-  <div class="ide-panel-resizer" ng-mousedown="vm.startResize($event)"></div>
 </div>

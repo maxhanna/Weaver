@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http.Features;
 using System.Text.Json;
 using System.Text;
 using System.IO.Compression;
@@ -205,7 +206,8 @@ public class BughostedController : ControllerBase
             session.Url = url;
             _sessions[session.ClientId] = session;
 
-            return Ok(new { clientId = session.ClientId, token = session.Token, user = session.User });
+            var weaverAddress = $"{Request.Scheme}://{Request.Host}";
+            return Ok(new { clientId = session.ClientId, token = session.Token, user = session.User, weaverAddress });
         }
         catch (Exception ex)
         {
@@ -371,6 +373,86 @@ public class BughostedController : ControllerBase
         }
     }
 
+    [HttpGet("events")]
+    public async Task Events([FromQuery] string clientId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
+        {
+            Response.StatusCode = 401;
+            return;
+        }
+
+        Response.ContentType = "text/event-stream";
+        Response.Headers["Cache-Control"] = "no-cache";
+        Response.Headers["X-Accel-Buffering"] = "no";
+        Response.Headers["Connection"] = "keep-alive";
+        var bufferingFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
+        bufferingFeature?.DisableBuffering();
+        await Response.Body.FlushAsync(ct);
+
+        var client = _clientFactory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
+        var seenIds = new HashSet<int>();
+        var keepAliveElapsed = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                pollCts.CancelAfter(TimeSpan.FromSeconds(10));
+                var httpReq = new HttpRequestMessage(HttpMethod.Get,
+                    $"{session.Url}/weaver/commands?token={session.Token}");
+                var httpRes = await client.SendAsync(httpReq, pollCts.Token);
+
+                if (httpRes.IsSuccessStatusCode)
+                {
+                    var body = await httpRes.Content.ReadAsStringAsync(pollCts.Token);
+                    var cmds = JsonSerializer.Deserialize<List<JsonElement>>(body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                    if (cmds != null)
+                    {
+                        foreach (var cmd in cmds)
+                        {
+                            var id = cmd.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 0;
+                            if (id != 0 && seenIds.Add(id))
+                            {
+                                await Response.WriteAsync($"event: command\ndata: {cmd.GetRawText()}\n\n", ct);
+                                await Response.Body.FlushAsync(ct);
+                                keepAliveElapsed = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (HttpRequestException) { }
+            catch (IOException) { break; }
+            catch (Exception ex) { Console.WriteLine($"SSE poll error: {ex.Message}"); }
+
+            if (ct.IsCancellationRequested) break;
+
+            // Process pending file requests (from the database table)
+            try
+            {
+                await ProcessPendingFileRequests(client, session, ct);
+            }
+            catch (Exception ex) { Console.WriteLine($"File request processing error: {ex.Message}"); }
+
+            keepAliveElapsed++;
+            if (keepAliveElapsed >= 30)
+            {
+                try { await Response.WriteAsync(":\n\n", ct); await Response.Body.FlushAsync(ct); }
+                catch { break; }
+                keepAliveElapsed = 0;
+            }
+
+            try { await Task.Delay(1000, ct); }
+            catch { break; }
+        }
+    }
+
     [HttpPost("commands/ack")]
     public async Task<IActionResult> AckCommand([FromBody] BughostedAckRequest req)
     {
@@ -380,13 +462,16 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var payload = JsonSerializer.Serialize(new
+            var ackPayload = new Dictionary<string, object?>
             {
-                token = session.Token,
-                commandId = req.CommandId,
-                status = req.Status,
-                result = req.Result
-            });
+                ["token"] = session.Token,
+                ["commandId"] = req.CommandId,
+                ["status"] = req.Status,
+                ["result"] = req.Result
+            };
+            if (!string.IsNullOrWhiteSpace(req.RequestId))
+                ackPayload["requestId"] = req.RequestId;
+            var payload = JsonSerializer.Serialize(ackPayload);
             var httpReq = new HttpRequestMessage(HttpMethod.Post, session.Url + "/weaver/commands/ack")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
@@ -471,6 +556,144 @@ public class BughostedController : ControllerBase
         return Ok(new { status = "logged_out" });
     } 
 
+    /// <summary>
+    /// Polls bughosted.com for pending file requests, processes them locally,
+    /// and fulfills them via the API.
+    /// </summary>
+    private async Task ProcessPendingFileRequests(HttpClient client, BughostedSession session, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(session.ClientId) || string.IsNullOrWhiteSpace(session.Token)) return;
+
+        var pendingUrl = $"{session.Url}/weaver/file-requests/pending?token={session.Token}";
+        var pendingRes = await client.GetAsync(pendingUrl, ct);
+        if (!pendingRes.IsSuccessStatusCode) return;
+
+        var body = await pendingRes.Content.ReadAsStringAsync(ct);
+        var requests = JsonSerializer.Deserialize<List<JsonElement>>(body,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (requests == null || requests.Count == 0) return;
+
+        var workspaceRoot = ResolveWorkspaceRoot();
+
+        foreach (var req in requests)
+        {
+            if (ct.IsCancellationRequested) break;
+
+            var id = req.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 0;
+            var type = req.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "";
+            var path = req.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : "";
+            var content = req.TryGetProperty("content", out var cProp) ? cProp.GetString() : null;
+
+            if (id == 0 || string.IsNullOrWhiteSpace(type)) continue;
+            if (type != "listing" && string.IsNullOrWhiteSpace(path)) continue;
+
+            string? resultJson = null;
+            string status = "fulfilled";
+
+            try
+            {
+                resultJson = ProcessFileRequestLocally(type, path, content, workspaceRoot);
+            }
+            catch (Exception ex)
+            {
+                resultJson = JsonSerializer.Serialize(new { error = ex.Message });
+                status = "error";
+            }
+
+            var fulfillPayload = JsonSerializer.Serialize(new
+            {
+                token = session.Token,
+                requestId = id,
+                status,
+                result = resultJson ?? "{}"
+            });
+            var fulfillContent = new StringContent(fulfillPayload, Encoding.UTF8, "application/json");
+            try
+            {
+                await client.PostAsync($"{session.Url}/weaver/file-requests/fulfill", fulfillContent, ct);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>
+    /// Processes a single file request locally (listing, content, or save).
+    /// Returns a JSON string representing the result.
+    /// </summary>
+    private string ProcessFileRequestLocally(string type, string path, string? content, string workspaceRoot)
+    {
+        var relativePath = (path ?? "").Trim().TrimStart('/', '\\');
+        var targetFull = Path.GetFullPath(Path.Combine(workspaceRoot, relativePath));
+
+        if (!IsInsideWorkspace(targetFull, workspaceRoot))
+            return JsonSerializer.Serialize(new { error = "Path outside workspace root" });
+
+        switch (type)
+        {
+            case "listing":
+            {
+                if (!Directory.Exists(targetFull))
+                    return JsonSerializer.Serialize(new { error = "Directory not found" });
+
+                var dirs = Directory.GetDirectories(targetFull)
+                    .Select(d => new
+                    {
+                        name = Path.GetFileName(d),
+                        path = Path.GetRelativePath(workspaceRoot, d).Replace('\\', '/'),
+                        isDirectory = true
+                    });
+
+                var files = Directory.GetFiles(targetFull)
+                    .Select(f => new
+                    {
+                        name = Path.GetFileName(f),
+                        path = Path.GetRelativePath(workspaceRoot, f).Replace('\\', '/'),
+                        isDirectory = false
+                    });
+
+                var entries = dirs.Concat(files)
+                    .OrderByDescending(x => x.isDirectory)
+                    .ThenBy(x => x.name);
+
+                return JsonSerializer.Serialize(new
+                {
+                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                    entries
+                });
+            }
+
+            case "content":
+            {
+                if (!System.IO.File.Exists(targetFull))
+                    return JsonSerializer.Serialize(new { error = "File not found" });
+
+                var fileContent = System.IO.File.ReadAllText(targetFull, Encoding.UTF8);
+                return JsonSerializer.Serialize(new
+                {
+                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                    content = fileContent
+                });
+            }
+
+            case "save":
+            {
+                var dir = Path.GetDirectoryName(targetFull);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                System.IO.File.WriteAllText(targetFull, content ?? string.Empty, Encoding.UTF8);
+                return JsonSerializer.Serialize(new
+                {
+                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                    written = true
+                });
+            }
+
+            default:
+                return JsonSerializer.Serialize(new { error = $"Unknown request type: {type}" });
+        }
+    }
+
     static string GetVersionFilePath()
     {
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Weaver");
@@ -543,6 +766,7 @@ public class BughostedAckRequest
     public int CommandId { get; set; }
     public string Status { get; set; } = "executed";
     public string? Result { get; set; }
+    public string? RequestId { get; set; }
 }
 
 public class BughostedLogoutRequest

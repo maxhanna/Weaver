@@ -3,7 +3,7 @@
 Weaver is an advanced agentic system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It is a tool for building AI-powered workflows (via Kanban board, Calendar, Cron jobs, etc) that can execute complex tasks autonomously. Create/Prioritize tasks and let Weaver take care of the rest. Weaver also acts as a remote connection which enables you to work with your agent remotely, share workspace, it features a built-in IDE for co-editing files, etc.
 
 
-Control your agent remotely on Bughosted.com
+Control your agent remotely on Bughosted.com/Weaver
 
 ## Requirements
 
@@ -21,37 +21,28 @@ dotnet run
 
 The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
 
+## FAQ
+
+### Where to Start
+
+1. Open the options popup (top right of screen)
+2. Click on both 'projects' and 'settings' and configure the application
+3. Start by adding a card in the kanban, adding files for context and then pressing start
+
+`llamaUrl` specifies the address of your local llama.cpp server or Ollama instance. By default, Weaver looks for the server at `http://localhost:8080`. If your server runs on a different port or address, update this setting by opening the settings panel or in `weaverconfig.json` to ensure Weaver can connect to your LLM backend.
+
+### Force File Edits
+In cases where the edit pipeline isn't being chosen,
+Employ 'Fix the' keywords to force the agent to make file edits. 
+For example, phrase your request as 'Fix the README.md file to add a new section about forced edits' 
+or 'Fix the configuration section to clarify the llamaUrl setting'. 
+This mechanism ensures that the standard edit pipeline is automatically selected.
+
 ## Configuration
 
 `weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server is at a different address
 
-## Agentic Orchestration Router
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ORCHESTRATION ROUTER                     │
-│  Analyzes prompt, classifies task type, routes to pipeline  │
-└─────────────────────────────────────────────────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┬─────────────┐
-        ↓                 ↓                 ↓             ↓
-   ┌─────────────┐  ┌──────────────┐  ┌──────────────┐ ┌──────────┐
-   │CODE EDIT    │  │COMMAND       │  │COMPOUND      │ │QUICK     │
-   │PIPELINE     │  │EXECUTION     │  │PIPELINE      │ │CHECK     │
-   │             │  │PIPELINE      │  │              │ │PIPELINE  │
-   │• Discovery  │  │• Parse cmd   │  │• Route ops   │ │• Status  │
-   │• Planning   │  │• Execute     │  │• Sequence    │ │• Ping    │
-   │• Editing    │  │• Capture out │  │• Combine     │ │• Health  │
-   │• Review     │  │• Format      │  │• Report      │ │          │
-   └─────────────┘  └──────────────┘  └──────────────┘ └──────────┘
-        │                 │                 │             │
-        └─────────────────┼─────────────────┴─────────────┘
-                          ↓
-                ┌─────────────────────┐
-                │ VERIFICATION        │
-                │ PIPELINE            │
-                │• Confirm task done  │
-                │• Build check        │
-                │• Return results     │
-                └─────────────────────┘
-```
+
 Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
+
+![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)

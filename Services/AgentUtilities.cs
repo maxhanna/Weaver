@@ -305,6 +305,8 @@ public static class AgentUtilities
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_explore", StringComparison.OrdinalIgnoreCase);
+    public static bool ContainsAny(this string s, params string[] terms) =>
+        terms.Any(t => s.Contains(t, StringComparison.Ordinal));
 
     public static string InferTargetFolder(string fileName, string projectRoot)
     {

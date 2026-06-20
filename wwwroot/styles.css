@@ -1737,7 +1737,7 @@ h3 .small.ghost:hover {
 
 .agent-resolve-streams {
 	margin: 4px 0;
-	background: #1a1a2e;
+	background: var(--surface);
 	border-radius: 4px;
 	padding: 4px 8px;
 }
