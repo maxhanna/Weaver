@@ -1,6 +1,11 @@
-﻿**/bin/
 **/bin/
 **/obj/
-**/publish/ 
-data/* 
+**/publish/
+data/*
 weaverconfig.json
+
+# Test output artifacts
+**/TestResults/
+*.trx
+**/TestResultsCoverage/
+*.cobertura.xml
