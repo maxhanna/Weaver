@@ -1010,14 +1010,14 @@ public class AgentController : ControllerBase
             }
         }
         var shifted = string.Join("\n", result);
-        
+
         var shiftedLines = shifted.Split('\n');
-        var distinctIndents = shiftedLines
-            .Where(l => !string.IsNullOrWhiteSpace(l))
-            .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
-            .Distinct()
-            .ToList();
-        if (distinctIndents.Count <= 1
+
+        // FIX: Use a string-aware indent counter so that verbatim strings (like SQL)
+        // don't mask flat C# code. If the C# code outside strings is flat, we must
+        // run ReindentByBraceDepth to restore proper brace-level indentation.
+        var distinctIndents = CountDistinctIndentsIgnoringStrings(shiftedLines);
+        if (distinctIndents <= 1
             && !IsWhitespaceSignificant(filePath))
         {
             // Pass the ORIGINAL newCode (before shifting) to ReindentByBraceDepth
@@ -1026,6 +1026,49 @@ public class AgentController : ControllerBase
         }
 
         return shifted;
+    }
+
+    /// <summary>
+    /// Counts the number of distinct indentation levels in a block of code,
+    /// ignoring lines that are inside verbatim strings or block comments.
+    /// This prevents verbatim string contents (like SQL) from masking
+    /// flat C# code that needs to be re-indented.
+    /// </summary>
+    private static int CountDistinctIndentsIgnoringStrings(string[] lines)
+    {
+        var indents = new HashSet<int>();
+        var inVerbatim = false;
+        var inBlockComment = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+            if (!inVerbatim && !inBlockComment)
+            {
+                indents.Add(line.Length - trimmed.Length);
+            }
+
+            // Update string/comment state for the NEXT line
+            if (inVerbatim)
+            {
+                // Simplified: if the line contains a quote, assume the verbatim string ends.
+                // This is a heuristic for indent detection and doesn't need to be a perfect parser.
+                if (trimmed.Contains("\"")) inVerbatim = false;
+            }
+            else if (inBlockComment)
+            {
+                if (trimmed.Contains("*/")) inBlockComment = false;
+            }
+            else
+            {
+                if (trimmed.Contains("@\"")) inVerbatim = true;
+                if (trimmed.Contains("/*")) inBlockComment = true;
+                if (trimmed.Contains("*/")) inBlockComment = false;
+            }
+        }
+        return indents.Count;
     }
 
     private static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
