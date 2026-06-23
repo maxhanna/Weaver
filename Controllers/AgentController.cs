@@ -185,77 +185,7 @@ public class AgentController : ControllerBase
                 });
             });
     }
-    /// <summary>
-    /// Pre-verification formatting: fixes SQL whitespace and general spacing
-    /// in the edited region BEFORE VerifyEdit runs. This prevents false rejections
-    /// for formatting issues that can be deterministically fixed.
-    ///
-    /// Key insight: FixLineSpacing correctly SKIPS string content (including
-    /// verbatim @"..." strings), but SQL inside verbatim strings STILL NEEDS
-    /// proper keyword-number spacing. This method fills that gap.
-    /// </summary>
-    private static string PreVerifyFormat(string content, string appliedNewStr, string relPath)
-    {
-        if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
-            return content;
-
-        var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
-        var changed = false;
-        var result = content;
-
-        // ── Fix SQL keyword spacing (works on ALL content, not just verbatim strings) ──
-        // These patterns are so specific (INTERVAL + digit) that false positives are
-        // essentially impossible outside of SQL.
-
-        // INTERVAL1 DAY → INTERVAL 1 DAY  (keyword + digit, no space)
-        var keywordDigit = new Regex(
-            @"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)(\d)",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        var fixed_ = keywordDigit.Replace(result, "$1 $2");
-        if (fixed_ != result) { result = fixed_; changed = true; }
-
-        // SELECT* → SELECT *  (keyword + asterisk)
-        var keywordStar = new Regex(
-            @"\b(SELECT|DELETE|DISTINCT|ALL)\*",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        fixed_ = keywordStar.Replace(result, "$1 *");
-        if (fixed_ != result) { result = fixed_; changed = true; }
-
-        // FROM( → FROM (  (keyword + paren — but NOT COUNT(, SUM( etc. which are functions)
-        var keywordParen = new Regex(
-            @"\b(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL|ANY|SOME)\(",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        fixed_ = keywordParen.Replace(result, "$1 (");
-        if (fixed_ != result) { result = fixed_; changed = true; }
-
-        // ── Fix general operator spacing in the edited region (same logic as
-        //    AutoFormatEditedRegion/FixLineSpacing, but run BEFORE verify) ──
-        var fileLines = result.Split('\n');
-        var needleSet = appliedNewStr.Split('\n')
-            .Select(l => l.Trim())
-            .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 3)
-            .ToHashSet(StringComparer.Ordinal);
-        var longNeedles = needleSet.Where(n => n.Length >= 12).ToList();
-
-        var editedIndices = new HashSet<int>();
-        for (var i = 0; i < fileLines.Length; i++)
-        {
-            var trimmed = fileLines[i].Trim();
-            if (trimmed.Length < 3) continue;
-            if (needleSet.Contains(trimmed)) { editedIndices.Add(i); continue; }
-            foreach (var n in longNeedles)
-                if (trimmed.Contains(n, StringComparison.Ordinal)) { editedIndices.Add(i); break; }
-        }
-
-        foreach (var idx in editedIndices)
-        {
-            if (idx < 0 || idx >= fileLines.Length) continue;
-            var fixedLine = FixLineSpacing(fileLines[idx]);
-            if (fixedLine != fileLines[idx]) { fileLines[idx] = fixedLine; changed = true; }
-        }
-
-        return changed ? string.Join("\n", fileLines) : content;
-    }
+    
     private string ResolveWorkspaceRoot()
     {
         var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
@@ -3975,24 +3905,7 @@ public class AgentController : ControllerBase
                 if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
-
-            // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
-            // formatting issues don't cause false rejections. The LLM frequently
-            // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
-            // it deterministically rather than retrying.
-            if (replaced && !string.IsNullOrWhiteSpace(newStr))
-            {
-                var formatted = PreVerifyFormat(newContent, newStr, relPath);
-                if (formatted != newContent)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Pre-verify format: fixed spacing in {relPath}", ct: ct);
-                    newContent = formatted;
-                    // Also fix newStr so VerifyEdit's "newString must be present in result" check passes
-                    newStr = PreVerifyFormat(newStr ?? "", newStr ?? "", relPath);
-                }
-            } 
-
+ 
             // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
             // formatting issues don't cause false rejections. The LLM frequently
             // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
@@ -9951,7 +9864,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var changed = false;
 
         // Find all verbatim strings @"..." and fix SQL inside them
-        // C# verbatim string syntax: @"" represents a literal "
         var verbatimRegex = new Regex(@"@""(?:[^""]|"""")*""", RegexOptions.Singleline);
         var matches = verbatimRegex.Matches(result);
         foreach (Match m in matches)
