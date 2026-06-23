@@ -982,17 +982,12 @@ public class AgentController : ControllerBase
         var newLines = newCode.Split('\n');
         if (newLines.Length <= 1) return newCode;
 
-        // Find the minimum leading whitespace across all non-empty lines in newCode
         var nonEmpty = newLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
         if (nonEmpty.Count == 0) return newCode;
         var minNewIndent = nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length);
 
-        // If the new code's minimum indent is already >= the old code's base,
-        // it's already properly indented — leave it alone
         if (minNewIndent >= baseIndentLen) return newCode;
 
-        // Shift: strip the common minimum from newCode, then prepend the old base indent.
-        // This preserves the relative indentation structure (try/catch nesting, etc.)
         var result = new List<string>();
         foreach (var line in newLines)
         {
@@ -1002,7 +997,6 @@ public class AgentController : ControllerBase
             }
             else
             {
-                // Strip up to minNewIndent chars of leading whitespace
                 var trimmed = line.Length > minNewIndent
                     ? line.Substring(minNewIndent)
                     : line.TrimStart();
@@ -1012,20 +1006,125 @@ public class AgentController : ControllerBase
         var shifted = string.Join("\n", result);
 
         var shiftedLines = shifted.Split('\n');
+        var distinctIndents = shiftedLines
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
+            .Distinct()
+            .ToList();
 
-        // FIX: Use a string-aware indent counter so that verbatim strings (like SQL)
-        // don't mask flat C# code. If the C# code outside strings is flat, we must
-        // run ReindentByBraceDepth to restore proper brace-level indentation.
-        var distinctIndents = CountDistinctIndentsIgnoringStrings(shiftedLines);
-        if (distinctIndents <= 1
+        if (distinctIndents.Count <= 1
             && !IsWhitespaceSignificant(filePath))
         {
-            // Pass the ORIGINAL newCode (before shifting) to ReindentByBraceDepth
-            // so that verbatim string contents are preserved at their original indentation.
+            var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
+
+            // FIX: Use HTML tag-based indentation for HTML/Razor files
+            if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
+            {
+                return ReindentHtmlTags(newCode, baseIndent, DetectIndentUnit(oldSource));
+            }
+
             return ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
         }
 
         return shifted;
+    }
+
+    /// <summary>
+    /// Re-indents HTML/Angular/Razor code based on tag depth. 
+    /// Properly handles multi-line tags, void elements (br, img, input), 
+    /// and self-closing tags.
+    /// </summary>
+    private static string ReindentHtmlTags(string code, string baseIndent, string indentUnit = "  ")
+    {
+        var lines = code.Split('\n');
+        var result = new List<string>();
+        var depth = 0;
+        var inTag = false;
+        var voidElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr" };
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                result.Add(line);
+                continue;
+            }
+
+            int lineDepthChange = 0;
+            bool startsWithClosing = trimmed.StartsWith("</");
+            int i = 0;
+
+            while (i < trimmed.Length)
+            {
+                if (inTag)
+                {
+                    var closeIdx = trimmed.IndexOf('>', i);
+                    if (closeIdx >= 0)
+                    {
+                        inTag = false;
+                        i = closeIdx + 1;
+                    }
+                    else
+                    {
+                        break; // Tag continues on next line
+                    }
+                }
+                else
+                {
+                    var openIdx = trimmed.IndexOf('<', i);
+                    if (openIdx >= 0)
+                    {
+                        if (openIdx + 1 < trimmed.Length && trimmed[openIdx + 1] == '/')
+                        {
+                            // Closing tag
+                            lineDepthChange--;
+                            var closeIdx = trimmed.IndexOf('>', openIdx);
+                            if (closeIdx >= 0) i = closeIdx + 1;
+                            else { inTag = true; break; }
+                        }
+                        else
+                        {
+                            // Opening tag
+                            var closeIdx = trimmed.IndexOf('>', openIdx);
+                            if (closeIdx >= 0)
+                            {
+                                if (trimmed[closeIdx - 1] != '/')
+                                {
+                                    var tagContent = trimmed.Substring(openIdx + 1, closeIdx - openIdx - 1);
+                                    var tagName = tagContent.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.TrimEnd('/');
+                                    if (tagName != null && !voidElements.Contains(tagName))
+                                    {
+                                        lineDepthChange++;
+                                    }
+                                }
+                                i = closeIdx + 1;
+                            }
+                            else
+                            {
+                                inTag = true;
+                                break; // Tag continues on next line
+                            }
+                        }
+                    }
+                    else break; // No more tags on this line
+                }
+            }
+
+            if (startsWithClosing && lineDepthChange < 0)
+            {
+                depth = Math.Max(0, depth - 1);
+                lineDepthChange++; // Consume the decrement for the starting tag
+            }
+
+            var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, depth));
+            result.Add(indent + trimmed);
+
+            depth = Math.Max(0, depth + lineDepthChange);
+        }
+
+        return string.Join("\n", result);
     }
 
     /// <summary>
