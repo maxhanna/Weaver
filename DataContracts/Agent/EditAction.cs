@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class EditAction
 {
     public string Path { get; set; } = "";

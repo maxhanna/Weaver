@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class AgentStep
 {
     public int Index { get; set; }

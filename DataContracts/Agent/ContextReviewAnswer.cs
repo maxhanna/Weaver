@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class ContextReviewAnswer
 {
     public string Id { get; set; } = "";

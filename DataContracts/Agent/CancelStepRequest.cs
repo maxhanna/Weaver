@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class CancelStepRequest
 {
     public string CardId { get; set; } = "";

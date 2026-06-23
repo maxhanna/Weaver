@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Weaver.Services;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/email")]
 public class EmailController : ControllerBase

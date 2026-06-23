@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class QuestionField
 {
     public string Key { get; set; } = "";

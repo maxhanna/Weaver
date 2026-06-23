@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace Weaver.Services
+namespace Weaver.Services;
+
+public class WeaverLogo
 {
-    public class WeaverLogo
-    {
         private static readonly string[] LogoLines = {
 @"                                                                                                  
                                                     +                                               
@@ -105,4 +105,3 @@ namespace Weaver.Services
             await Task.Delay(100);
         }
     }
-}

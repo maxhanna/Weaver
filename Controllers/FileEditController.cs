@@ -8,6 +8,8 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/editor")]
 public class FileEditController : ControllerBase

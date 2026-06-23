@@ -3,6 +3,8 @@ using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
+namespace Weaver.Services;
+
 public class BoardDataService
 {
     private readonly string _filePath;

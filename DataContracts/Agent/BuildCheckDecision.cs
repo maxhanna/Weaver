@@ -1,4 +1,6 @@
 
+namespace Weaver;
+
 class BuildCheckDecision
 {
     public string? Decision { get; set; }

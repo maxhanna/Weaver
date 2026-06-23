@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class PlanAuditResult
 {
     public List<AuditPlanStepResult> Steps { get; set; } = new();

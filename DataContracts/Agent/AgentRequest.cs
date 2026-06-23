@@ -1,4 +1,6 @@
 
+namespace Weaver;
+
 public class AgentRequest
 {
     public string Prompt { get; set; } = "";

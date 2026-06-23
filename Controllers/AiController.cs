@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using Weaver.Services;
 
+namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/ai")]
 public class AiController : ControllerBase
@@ -17,6 +19,14 @@ public class AiController : ControllerBase
         _clientFactory = cf;
         _config = config;
         _configFile = configFile;
+    }
+
+    private async Task<string> GetBaseURL()
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        return string.IsNullOrWhiteSpace(cfg.llamaUrl)
+            ? (_config.GetValue<string>("Ai:BaseUrl") ?? "http://localhost:8080")
+            : cfg.llamaUrl;
     }
 
     [HttpPost("generate")]
@@ -119,11 +129,5 @@ public class AiController : ControllerBase
         {
             return StatusCode(502, new { reachable = false, error = ex.Message });
         }
-    }
-
-    private async Task<string> GetBaseURL()
-    {
-        var cfg = await _configFile.LoadConfigAsync();
-        return cfg.llamaUrl;
     }
 }

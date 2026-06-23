@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class EditResult
 {
     public string Path { get; set; } = "";

@@ -1,3 +1,5 @@
+namespace Weaver;
+
 public class AgentResponse
 {
     public string Thinking { get; set; } = "";

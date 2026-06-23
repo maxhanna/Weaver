@@ -4,12 +4,12 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Threading.Tasks;
 
-namespace Weaver.Controllers
+namespace Weaver.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class CalendarController : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class CalendarController : ControllerBase
-    {
         private readonly CalendarService _svc;
         private readonly ILogger<CalendarController> _logger;
 
@@ -54,4 +54,3 @@ namespace Weaver.Controllers
             }
         }
     }
-}
