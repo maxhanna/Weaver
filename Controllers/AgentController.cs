@@ -1220,10 +1220,15 @@ public class AgentController : ControllerBase
                         "If the ORIGINAL USER REQUEST mentions 'under nicehash bot note', you MUST find the text containing 'NiceHash' and add the note there. " +
                         "If the request mentions 'instructions can be found in the user settings', your added text MUST include that instruction. " +
                         "Do NOT hallucinate generic text. Use the exact details from the ORIGINAL USER REQUEST." +
-                        "⚠ RULE: TEMPLATE LITERALS. If you need to add text inside a template literal (backtick string `...`), you MUST include the entire backtick string in oldString " +
-                        "and output the modified backtick string in newString. NEVER add a duplicate property above it. For example, to add a note to a `content: \\`...\\`` property, " +
-                        "include the whole `content: \\`...\\`` line in oldString, and output `content: \\`... (original text) ... (new note from original prompt)\\`` in newString.");
-
+                        "⚠ RULE: TEMPLATE LITERALS & PROPERTIES. " +
+                        "You CANNOT add a new property (like a second `content:` line) to an object that already has one. " +
+                        "If you need to add text to a backtick template literal (e.g. `content: \\`Some text\\``), you MUST:\n" +
+                        "  1. Set `oldString` to the ENTIRE existing property (e.g. `      content: \\`Crypto Hub does many...\\\n" +
+                        "      <ul>...</ul>\\\n" +
+                        "      <div>...NiceHash...</div>\\\n" +
+                        "      \\``)\n" +
+                        "  2. Set `newString` to that EXACT same property, but with your new text appended INSIDE the backticks before the closing \\`.\n" +
+                        "DO NOT take shortcuts. DO NOT add a new `content:` line above the existing one. ALWAYS modify the existing backtick block.");
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         var (langFamily, langSupportsFormatC, langHint) = GetLanguageProfile(ext);
@@ -3772,24 +3777,12 @@ public class AgentController : ControllerBase
             }
 
             // ── Functionality-wipe guard (deterministic, runs BEFORE write-to-disk) ──
-            // Catches three classes of LLM mistakes that the no-op / shrink / prefix
-            // checks above miss, and forces a retry WITHOUT touching the file:
-            //   A. Cached-state loss  — cache/guard lines (.has( / .get( / .set( /
-            //      return this.X;) present in oldString but missing from newString.
-            //   B. Signature change   — method/function signature line in oldString
-            //      has different tokens (return type, name, param count) in newString.
-            //   C. New-symbol invention — newString calls this.X(...) / X.Y(...) /
-            //      new X(...) where X does NOT appear anywhere in the file content.
-            // Concrete trigger case: a "make the rocket projectile a bit bigger"
-            // prompt caused the LLM to delete the meshCache guards, change the
-            // return type from CityMesh | CityMesh[] to CityMesh[], and invent
-            // this.createBoxMesh / this.createConeMesh calls. All three guards
-            // fire now and force a re-plan instead of corrupting the file.
             if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
                 var wipeReason = DetectFunctionalityWipe(
                     oldStr!, newStr!, fileContent, relPath);
 
+                // ── Duplicate property guard ──
                 if (wipeReason == null)
                 {
                     wipeReason = DetectDuplicatePropertyAddition(oldStr!, newStr!);
@@ -3798,33 +3791,21 @@ public class AgentController : ControllerBase
                 if (wipeReason != null)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"Functionality-wipe guard triggered for {relPath}: {wipeReason}",
-                        new
-                        {
-                            oldPreview = oldStr!.Length > 200 ? oldStr!.Substring(0, 200) + "..." : oldStr,
-                            newPreview = newStr!.Length > 200 ? newStr!.Substring(0, 200) + "..." : newStr
-                        },
+                        $"Guard triggered for {relPath}: {wipeReason}",
+                        new { oldPreview = oldStr!.Length > 200 ? oldStr!.Substring(0, 200) + "..." : oldStr, newPreview = newStr!.Length > 200 ? newStr!.Substring(0, 200) + "..." : newStr },
                         ct: ct);
                     history.Add((oldStr!, newStr, wipeReason));
-                    // ── Record abandoned edit in project knowledge ──
+
                     _ = Task.Run(async () =>
                     {
-                        try
-                        {
-                            await _editKnowledge.RecordOutcomeAsync(
-                            projectRoot, relPath, step.Change, prompt ?? step.Change,
-                            oldStr, newStr,
-                            outcome: "abandoned", reason: wipeReason, ct);
-                        }
-                        catch { /* swallow */ }
+                        try { await _editKnowledge.RecordOutcomeAsync(projectRoot, relPath, step.Change, prompt ?? step.Change, oldStr, newStr, outcome: "abandoned", reason: wipeReason, ct); }
+                        catch { }
                     }, CancellationToken.None);
-                    if (string.Equals(
-                        AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
-                        AgentUtilities.NormalizeLineEndings(lastOld),
-                        StringComparison.Ordinal)) stuckCount++;
+
+                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
                     else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                     if (stuckCount >= 2) goto RecordFailure;
-                    continue;
+                    continue; // Forces retry with feedback
                 }
             }
 
@@ -12477,6 +12458,7 @@ Respond with JSON only:
         }
         return string.Join("\n", lines);
     }
+
     /// <summary>
     /// Deterministic guard that detects if the LLM added a duplicate property 
     /// to an object literal (e.g., adding a second `content:` line instead of 
@@ -12484,16 +12466,10 @@ Respond with JSON only:
     /// </summary>
     private static string? DetectDuplicatePropertyAddition(string oldStr, string newStr)
     {
-        // Heuristic: count occurrences of `propertyName:` at the start of lines.
-        // We strip string contents first so we don't false-positive on text inside strings.
-
         string StripStrings(string s)
         {
-            // Remove backtick strings (non-greedy, multiline)
             s = Regex.Replace(s, @"`[^`]*`", "``", RegexOptions.Singleline);
-            // Remove double quote strings
             s = Regex.Replace(s, @"""[^""]*""", "\"\"", RegexOptions.Singleline);
-            // Remove single quote strings
             s = Regex.Replace(s, @"'[^']*'", "''", RegexOptions.Singleline);
             return s;
         }
@@ -12524,16 +12500,16 @@ Respond with JSON only:
         foreach (var kvp in newCounts)
         {
             oldCounts.TryGetValue(kvp.Key, out var oldVal);
-            // If newStr has more of this key than oldStr, and it has >1, it's a duplicate addition
             if (kvp.Value > oldVal && kvp.Value > 1)
             {
                 return $"DUPLICATE PROPERTY ADDITION — newString contains {kvp.Value} occurrences of property '{kvp.Key}' " +
                        $"but oldString only had {oldVal}. You added a duplicate property instead of modifying the existing one. " +
-                       "MODIFY the existing property value instead of adding a new one with the same name.";
+                       "MODIFY the existing property value instead of adding a new one with the same name. Include the ENTIRE existing backtick string in oldString.";
             }
         }
         return null;
     }
+
     /// <summary>Normalize spacing after colons in .ts/.js object literals.
     /// Ensures property:value pairs inside {...} have a space after the colon,
     /// matching the codebase convention. Avoids modifying already-correct
