@@ -31,6 +31,10 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 
 `llamaUrl` specifies the address of your OpenAI API compatible LLM endpoint. This can be any compatible server such as Ollama, llama.cpp, or other local/remote LLM services. By default, Weaver looks for the server at `http://localhost:8080`. If your server runs on a different port or address, update this setting by opening the settings panel or in `weaverconfig.json` to ensure Weaver can connect to your LLM backend.
 
+### What if the backend application won't close?
+
+If the backend application won't close, try closing the website first. Sometimes the backend process remains active even after closing the browser tab, so explicitly closing the website interface can help terminate the backend application properly.
+
 ### Force File Edits
 In cases where the edit pipeline isn't being chosen,
 Employ 'Fix the' keywords to force the agent to make file edits. 
