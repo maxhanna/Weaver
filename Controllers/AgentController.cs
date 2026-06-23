@@ -159,7 +159,11 @@ public class AgentController : ControllerBase
                 "inline SQL (verbatim @\"...\" strings), you MUST copy the SQL verbatim from the file" +
                 "into newCode.Do NOT reformat, re-indent, or \"clean up\" SQL inside @\"...\" strings —" +
                 "every space inside the string literal is significant.The system will NOT normalize" +
-                "whitespace inside verbatim strings.";
+                "whitespace inside verbatim strings." + 
+            "23. OBJECT LITERAL PROPERTIES: NEVER add a property to an object that already has that property. " +
+                "If the change requires updating an existing property (like a template literal or backtick string), " +
+                "you MUST include the entire existing property in oldString and output the MODIFIED version in newString. " +
+                "Do NOT output a second property with the same name — that creates invalid code and will be rejected.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -1196,7 +1200,10 @@ public class AgentController : ControllerBase
                         "`this.youtubeResults` locally without calling `searchUrl`." +
                         "⚠ RULE: LOCATION ACCURACY. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
                         "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. If there are multiple arrays with 'Crypto-Hub', " +
-                        "find the one named 'navigationItemDescriptions'. If the change mentions 'under nicehash bot note', find the text containing 'NiceHash' and add the note there.");
+                        "find the one named 'navigationItemDescriptions'. If the change mentions 'under nicehash bot note', find the text containing 'NiceHash' and add the note there." +
+                        "⚠ RULE: TEMPLATE LITERALS. If you need to add text inside a template literal (backtick string `...`), you MUST include the entire backtick string in oldString " +
+                        "and output the modified backtick string in newString. NEVER add a duplicate property above it. For example, to add a note to a `content: \\`...\\`` property, " +
+                        "include the whole `content: \\`...\\`` line in oldString, and output `content: \\`... (original text) ... (new note)\\`` in newString.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -3762,6 +3769,12 @@ public class AgentController : ControllerBase
             {
                 var wipeReason = DetectFunctionalityWipe(
                     oldStr!, newStr!, fileContent, relPath);
+
+                if (wipeReason == null)
+                {
+                    wipeReason = DetectDuplicatePropertyAddition(oldStr!, newStr!);
+                }
+
                 if (wipeReason != null)
                 {
                     await EmitLog(emitSse, "warn",
@@ -12444,7 +12457,63 @@ Respond with JSON only:
         }
         return string.Join("\n", lines);
     }
+    /// <summary>
+    /// Deterministic guard that detects if the LLM added a duplicate property 
+    /// to an object literal (e.g., adding a second `content:` line instead of 
+    /// modifying the existing template literal).
+    /// </summary>
+    private static string? DetectDuplicatePropertyAddition(string oldStr, string newStr)
+    {
+        // Heuristic: count occurrences of `propertyName:` at the start of lines.
+        // We strip string contents first so we don't false-positive on text inside strings.
 
+        string StripStrings(string s)
+        {
+            // Remove backtick strings (non-greedy, multiline)
+            s = Regex.Replace(s, @"`[^`]*`", "``", RegexOptions.Singleline);
+            // Remove double quote strings
+            s = Regex.Replace(s, @"""[^""]*""", "\"\"", RegexOptions.Singleline);
+            // Remove single quote strings
+            s = Regex.Replace(s, @"'[^']*'", "''", RegexOptions.Singleline);
+            return s;
+        }
+
+        var cleanOld = StripStrings(oldStr);
+        var cleanNew = StripStrings(newStr);
+
+        var keyRegex = new Regex(@"^\s*(?:'([^']+)'|""([^""]+)""|(\w+))\s*:", RegexOptions.Multiline);
+
+        var oldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in keyRegex.Matches(cleanOld))
+        {
+            var key = (m.Groups[1].Value ?? m.Groups[2].Value ?? m.Groups[3].Value).Trim();
+            if (string.IsNullOrEmpty(key)) continue;
+            if (!oldCounts.ContainsKey(key)) oldCounts[key] = 0;
+            oldCounts[key]++;
+        }
+
+        var newCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in keyRegex.Matches(cleanNew))
+        {
+            var key = (m.Groups[1].Value ?? m.Groups[2].Value ?? m.Groups[3].Value).Trim();
+            if (string.IsNullOrEmpty(key)) continue;
+            if (!newCounts.ContainsKey(key)) newCounts[key] = 0;
+            newCounts[key]++;
+        }
+
+        foreach (var kvp in newCounts)
+        {
+            oldCounts.TryGetValue(kvp.Key, out var oldVal);
+            // If newStr has more of this key than oldStr, and it has >1, it's a duplicate addition
+            if (kvp.Value > oldVal && kvp.Value > 1)
+            {
+                return $"DUPLICATE PROPERTY ADDITION — newString contains {kvp.Value} occurrences of property '{kvp.Key}' " +
+                       $"but oldString only had {oldVal}. You added a duplicate property instead of modifying the existing one. " +
+                       "MODIFY the existing property value instead of adding a new one with the same name.";
+            }
+        }
+        return null;
+    }
     /// <summary>Normalize spacing after colons in .ts/.js object literals.
     /// Ensures property:value pairs inside {...} have a space after the colon,
     /// matching the codebase convention. Avoids modifying already-correct
