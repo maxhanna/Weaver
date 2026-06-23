@@ -1193,7 +1193,10 @@ public class AgentController : ControllerBase
                         "For example, if YouTube pagination needs `onYoutubePageChange`, create it — do NOT reuse `onPageChange` " +
                         "because `onPageChange` sets `this.currentPage` and calls `this.searchUrl()`, which are specific to " +
                         "crawler search results. A new method for YouTube would set `this.youtubeCurrentPage` and filter " +
-                        "`this.youtubeResults` locally without calling `searchUrl`.");
+                        "`this.youtubeResults` locally without calling `searchUrl`." +
+                        "⚠ RULE: LOCATION ACCURACY. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
+                        "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. If there are multiple arrays with 'Crypto-Hub', " +
+                        "find the one named 'navigationItemDescriptions'. If the change mentions 'under nicehash bot note', find the text containing 'NiceHash' and add the note there.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -5628,16 +5631,14 @@ public class AgentController : ControllerBase
                 if (firstNewline >= 0) cleaned = cleaned[(firstNewline + 1)..];
                 if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
             }
-            var fb = cleaned.IndexOf('{');
-            var lb = cleaned.LastIndexOf('}');
-            if (fb < 0 || lb <= fb)
-                return ("error", $"No JSON object found in LLM response: {TruncateForLlm(cleaned, 200)}", 0);
-            cleaned = cleaned[fb..(lb + 1)];
+
+            // FIX: Use ExtractFirstJsonObject to handle multiple JSON objects in response
+            cleaned = ExtractFirstJsonObject(cleaned);
 
             using var doc = JsonDocument.Parse(cleaned);
             var decision = doc.RootElement.TryGetProperty("decision", out var dEl)
                 ? dEl.GetString()?.ToLowerInvariant().Trim() ?? ""
-                : "";
+                : ""; 
             var reason = doc.RootElement.TryGetProperty("reason", out var rEl)
                 ? rEl.GetString()?.Trim() ?? ""
                 : "";
@@ -9127,7 +9128,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Set complete=false if anything is missing, broken, or would cause compilation errors.");
         sb.AppendLine("Include a brief list of specific issues in the 'issues' array when complete=false.");
 
-        var verifySystemPrompt = "You are a strict QA verifier for TypeScript/C# code. Check whether a programming task is 100% complete AND whether the code would compile. Pay special attention to properties accessed on typed objects — verify each one exists in the type definition. Output ONLY a JSON object with 'complete' (bool), 'reason' (string), and 'issues' (array of strings).";
+        var verifySystemPrompt = "You are a strict QA verifier for TypeScript/C# code. Check whether a programming task is 100% complete AND whether the code would compile. " +
+     "CRITICAL: You must VERIFY that the specific locations, arrays, or variables mentioned in the task were actually modified. " +
+     "For example, if the task says 'in navigationItemDescriptions array', you must check that the edit was made to 'navigationItemDescriptions' and NOT 'navigationItems'. " +
+     "If the task says 'under nicehash bot note', you must check that the new text appears near 'NiceHash'. " +
+     "If the edit was applied to the wrong location, return complete=false. " +
+     "Pay special attention to properties accessed on typed objects — verify each one exists in the type definition. " +
+     "Output ONLY a JSON object with 'complete' (bool), 'reason' (string), and 'issues' (array of strings).";
 
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,
@@ -9147,9 +9154,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
                 if (m.Success) cleaned = m.Groups[1].Value.Trim();
             }
-            var fb = cleaned.IndexOf('{');
-            var lb = cleaned.LastIndexOf('}');
-            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+            // FIX: Use ExtractFirstJsonObject
+            cleaned = ExtractFirstJsonObject(cleaned);
 
             using var doc = JsonDocument.Parse(cleaned);
             if (doc.RootElement.TryGetProperty("complete", out var completeEl))
@@ -13065,7 +13071,51 @@ done = build OK; command = run this to fix; ask_user = need input";
         await EmitLog(emitSse, "warn", $"Build check inconclusive after {maxIter} iterations", ct: ct);
         return false;
     }
+    /// <summary>
+    /// Extracts the first valid JSON object from a string that might contain
+    /// multiple JSON objects or extra text. This prevents JsonDocument.Parse 
+    /// from failing when the LLM outputs multiple JSON blocks in one response.
+    /// </summary>
+    private static string ExtractFirstJsonObject(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "{}";
+        var cleaned = raw.Trim();
+        if (cleaned.StartsWith("```"))
+        {
+            var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            else
+            {
+                cleaned = cleaned.TrimStart('`');
+                var firstNl = cleaned.IndexOf('\n');
+                if (firstNl >= 0) cleaned = cleaned[(firstNl + 1)..];
+                if (cleaned.EndsWith("```")) cleaned = cleaned[..^3];
+            }
+        }
 
+        var fb = cleaned.IndexOf('{');
+        if (fb < 0) return "{}";
+
+        var depth = 0;
+        var inString = false;
+        var escape = false;
+        for (var i = fb; i < cleaned.Length; i++)
+        {
+            var c = cleaned[i];
+            if (escape) { escape = false; continue; }
+            if (c == '\\') { escape = true; continue; }
+            if (c == '"') inString = !inString;
+            if (inString) continue;
+
+            if (c == '{') depth++;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0) return cleaned.Substring(fb, i - fb + 1);
+            }
+        }
+        return cleaned.Substring(fb); // fallback
+    }
     private static BuildCheckDecision? ParseBuildCheckResponse(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
