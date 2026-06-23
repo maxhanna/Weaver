@@ -1010,12 +1010,7 @@ public class AgentController : ControllerBase
             }
         }
         var shifted = string.Join("\n", result);
-
-        // If the shifted code has no relative nesting (all non-empty lines at the same
-        // indent level), the LLM flattened the structure. Re-indent by brace depth — but
-        // ONLY for brace-based languages. For whitespace-significant languages (Python,
-        // YAML, F#, …) there are no braces to recover from, so brace-reindent would
-        // collapse everything to the base indent. There we keep the rebased code as-is.
+        
         var shiftedLines = shifted.Split('\n');
         var distinctIndents = shiftedLines
             .Where(l => !string.IsNullOrWhiteSpace(l))
@@ -1023,18 +1018,16 @@ public class AgentController : ControllerBase
             .Distinct()
             .ToList();
         if (distinctIndents.Count <= 1
-            && !IsWhitespaceSignificant(filePath)
-            && !shifted.Contains("@\"", StringComparison.Ordinal)
-            && !shifted.Contains("\"\"\"", StringComparison.Ordinal))
-            return ReindentByBraceDepth(shifted, baseIndent, DetectIndentUnit(oldSource));
+            && !IsWhitespaceSignificant(filePath))
+        {
+            // Pass the ORIGINAL newCode (before shifting) to ReindentByBraceDepth
+            // so that verbatim string contents are preserved at their original indentation.
+            return ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
+        }
 
         return shifted;
     }
 
-    /// <summary>
-    /// Re-indents code by tracking brace depth, using baseIndent as the starting
-    /// indentation. Accounts for strings and comments to avoid false brace matches.
-    /// </summary>
     private static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
     {
         var lines = code.Split('\n');
@@ -1043,6 +1036,9 @@ public class AgentController : ControllerBase
         var inSQ = false;
         var inDQ = false;
         var inTmpl = false;
+        var inVerbatim = false;
+        var inLineComment = false;
+        var inBlockComment = false;
 
         foreach (var line in lines)
         {
@@ -1053,28 +1049,92 @@ public class AgentController : ControllerBase
                 continue;
             }
 
-            // If line starts with closing brace, the content is at one less depth
-            var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
-            if (effectiveDepth < 0) effectiveDepth = 0;
+            // If we are inside a verbatim string or block comment, DO NOT re-indent the line.
+            // Just output it exactly as it is to preserve string content.
+            if (inVerbatim || inBlockComment)
+            {
+                result.Add(line);
+            }
+            else
+            {
+                // If line starts with closing brace, the content is at one less depth
+                var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
+                if (effectiveDepth < 0) effectiveDepth = 0;
 
-            var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
-            result.Add(indent + trimmed);
+                var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
+                result.Add(indent + trimmed);
+            }
 
-            // Count braces on this line, tracking string/comment state
+            // Count braces on this line, tracking string state
             for (var i = 0; i < trimmed.Length; i++)
             {
                 var c = trimmed[i];
                 var p = i > 0 ? trimmed[i - 1] : '\0';
 
-                if (c == '\\') { i++; continue; }
-                if (c == '\'' && !inDQ && !inTmpl) { inSQ = !inSQ; continue; }
-                if (c == '"' && !inSQ && !inTmpl) { inDQ = !inDQ; continue; }
-                if (c == '`' && !inSQ && !inDQ) { inTmpl = !inTmpl; continue; }
-                if (c == '/' && p == '/' && !inSQ && !inDQ && !inTmpl) break;
-                if (inSQ || inDQ || inTmpl) continue;
+                if (inLineComment) break; // rest of line is comment
+
+                if (inBlockComment)
+                {
+                    if (c == '*' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
+                    {
+                        inBlockComment = false;
+                        i++; // skip the /
+                    }
+                    continue;
+                }
+
+                if (inVerbatim)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < trimmed.Length && trimmed[i + 1] == '"')
+                        {
+                            i++; // skip escaped quote
+                        }
+                        else
+                        {
+                            inVerbatim = false;
+                        }
+                    }
+                    continue;
+                }
+
+                if (inSQ || inDQ || inTmpl)
+                {
+                    if (c == '\\' && (inDQ || inTmpl)) { i++; continue; } // escape sequence
+                    if (c == '\'' && inSQ) inSQ = false;
+                    else if (c == '"' && inDQ) inDQ = false;
+                    else if (c == '`' && inTmpl) inTmpl = false;
+                    continue;
+                }
+
+                // Not in string or comment
+                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
+                {
+                    inLineComment = true;
+                    break;
+                }
+                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '*')
+                {
+                    inBlockComment = true;
+                    i++;
+                    continue;
+                }
+                if (c == '@' && i + 1 < trimmed.Length && trimmed[i + 1] == '"')
+                {
+                    inVerbatim = true;
+                    i++;
+                    continue;
+                }
+                if (c == '\'') { inSQ = true; continue; }
+                if (c == '"') { inDQ = true; continue; }
+                if (c == '`') { inTmpl = true; continue; }
+
                 if (c == '{') depth++;
                 else if (c == '}') depth--;
             }
+
+            inLineComment = false; // resets at end of line
             if (depth < 0) depth = 0;
         }
 
