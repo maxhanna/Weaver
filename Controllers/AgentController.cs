@@ -8250,6 +8250,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine("## Quality check assessment");
             sb.AppendLine(qualityCheckReason);
             sb.AppendLine();
+            sb.AppendLine("NOTE: The quality check above identifies specific missing implementations. You MUST create steps to implement exactly what it asks for. Do not return an empty plan if the quality check identifies missing methods or properties that need to be added.");
         }
 
         sb.AppendLine("## What went wrong");
@@ -8287,14 +8288,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Lightweight replan: asks the LLM for only the additional PlanSteps needed,
-    /// without running discovery or full planning again.
-    /// </summary>
     private async Task<List<PlanStep>?> GenerateReplanStepsAsync(
-        string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
-        string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
-        List<string>? attachedFiles = null, string qualityCheckReason = "")
+     string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
+     string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
+     List<string>? attachedFiles = null, string qualityCheckReason = "")
     {
         var failHist = BuildFailedEditHistory(executedSteps);
 
@@ -8310,12 +8307,61 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             foreach (var f in attachedFiles) pathsToRead.Add(f.Replace('\\', '/'));
         }
+
+        var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var relPath in pathsToRead.Take(8))
         {
             var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath));
             if (!System.IO.File.Exists(fullPath)) continue;
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             fileContents.AppendLine($"### {relPath}\n```\n{content}\n```\n");
+
+            var ext = Path.GetExtension(relPath).ToLowerInvariant();
+            if (ext is ".ts" or ".tsx" or ".html" or ".htm")
+            {
+                // FIX: If it's an HTML file, automatically find and include the corresponding .ts file
+                if (ext is ".html" or ".htm")
+                {
+                    var baseDir = Path.GetDirectoryName(fullPath) ?? "";
+                    var nameNoExt = Path.GetFileNameWithoutExtension(relPath);
+                    var tsPath = Path.Combine(baseDir, nameNoExt + ".ts");
+                    if (System.IO.File.Exists(tsPath))
+                    {
+                        typeFilesToInclude.Add(tsPath);
+                    }
+                }
+
+                // Resolve local imports to find related type definitions
+                foreach (var importLine in content.Split('\n')
+                    .Where(l => l.TrimStart().StartsWith("import ", StringComparison.Ordinal)))
+                {
+                    var m = Regex.Match(importLine, @"from\s+['""]([^'""]+)['""]");
+                    if (!m.Success) continue;
+                    var importPath = m.Groups[1].Value;
+                    if (importPath.StartsWith("."))
+                    {
+                        var baseDir = Path.GetDirectoryName(fullPath) ?? "";
+                        var resolved = Path.GetFullPath(Path.Combine(baseDir, importPath));
+                        foreach (var suffix in new[] { ".ts", ".tsx", "/index.ts", "/index.tsx" })
+                        {
+                            var candidate = resolved + suffix;
+                            if (System.IO.File.Exists(candidate))
+                            {
+                                typeFilesToInclude.Add(candidate);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var typeFullPath in typeFilesToInclude.Take(5))
+        {
+            var content = await System.IO.File.ReadAllTextAsync(typeFullPath, Encoding.UTF8, ct);
+            var rel = Path.GetRelativePath(projectRoot, typeFullPath).Replace('\\', '/');
+            fileContents.AppendLine($"### {rel} (related type definition)\n```\n{content}\n```\n");
         }
 
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
@@ -8718,39 +8764,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!taskComplete)
         {
             await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
-            // ── INCREMENTAL REPLAN (not a fresh plan) ──
-            //
-            // Historically this branch called AnalyzePromptAndPlanCodeChanges, which
-            // generates a BRAND-NEW plan from scratch using only the touched file
-            // contents + verification gaps as context. That had three failure modes:
-            //
-            //   (1) PLAN-WIPING: ExecutePlan was called with `replan` directly, so
-            //       the original plan + all its (already-applied) steps were
-            //       discarded from the active plan object.
-            //   (2) FORGETTING PRIOR EDITS: the fresh-context prompt only carried
-            //       file contents — it never told the LLM "you already added
-            //       --kanban-board-flex-wrap: wrap to the CSS, please reuse it".
-            //       So the LLM invented a parallel approach (e.g. toggle buttons
-            //       + collapsedColumns property) that ignored the CSS variable
-            //       it had just added one round earlier.
-            //   (3) SCOPE DRIFT: with no existing-plan context, the LLM's new plan
-            //       could pivot to a totally different interpretation of the task
-            //       (the kanban "wrap on mobile" task became "implement collapse
-            //       toggles" — a different feature).
-            //
-            // Fix: use GenerateReplanStepsAsync (the lightweight, INCREMENTAL
-            // replanner already used by the AssessCompletion branch at line ~6677).
-            // Its BuildReplanPrompt includes:
-            //   * the EXISTING plan with per-step status (✓ DONE / ✗ FAILED / …),
-            //   * the ORIGINAL user task verbatim,
-            //   * the current file contents (so the LLM sees prior edits),
-            //   * the verification gaps (so the LLM knows what's still missing),
-            //   * and a "STOP AND THINK" guard that returns an EMPTY plan if the
-            //     current files already satisfy the task.
-            //
-            // The returned steps are then MERGED into the existing plan via
-            // MergePlans (preserving all original steps) and only the NEW steps
-            // are executed (completedStepIndices skips already-done ones).
+ 
             var replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
                 steeringContext, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles, qualityCheckReason: verificationDetails);
