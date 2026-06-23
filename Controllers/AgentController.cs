@@ -8190,8 +8190,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private static string BuildReplanPrompt(string originalPrompt, List<string> history, string? steeringContext = null,
-        AgentPlan? existingPlan = null, List<object>? executedSteps = null,
-        string qualityCheckReason = "", string fileContents = "")
+    AgentPlan? existingPlan = null, List<object>? executedSteps = null,
+    string qualityCheckReason = "", string fileContents = "")
     {
         var sb = new StringBuilder();
         sb.AppendLine("Previous plan did not fully complete. You must ONLY plan the FEWEST new steps needed.");
@@ -8250,7 +8250,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.AppendLine("## Quality check assessment");
             sb.AppendLine(qualityCheckReason);
             sb.AppendLine();
-            sb.AppendLine("NOTE: The quality check above identifies specific missing implementations. You MUST create steps to implement exactly what it asks for. Do not return an empty plan if the quality check identifies missing methods or properties that need to be added.");
+            sb.AppendLine("CRITICAL: The quality check above identifies specific missing implementations. You MUST create steps to implement exactly what it asks for. Do not return an empty plan if the quality check identifies missing methods or properties that need to be added.");
         }
 
         sb.AppendLine("## What went wrong");
@@ -8269,8 +8269,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("between methods, or 'cleanup' the user did not ask for.");
         sb.AppendLine("Only add a step if you can name a SPECIFIC piece of the ORIGINAL TASK that is VERIFIABLY absent from the");
         sb.AppendLine("current file content above.");
-        sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
-        sb.AppendLine("reuse existing names exactly, character for character.");
+
+        // FIX: Only enforce the "NEVER introduce" rule if there is no quality check reason.
+        // If the quality check identified a missing method, the LLM MUST be allowed to introduce it.
+        if (string.IsNullOrWhiteSpace(qualityCheckReason))
+        {
+            sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
+            sb.AppendLine("reuse existing names exactly, character for character.");
+        }
+        else
+        {
+            sb.AppendLine("If the quality check requires a new method or property, you MAY introduce it, but it must be exactly named as requested by the task or quality check.");
+        }
+
         sb.AppendLine();
         sb.AppendLine("SCOPE DISCIPLINE — the #1 replan failure mode is scope drift:");
         sb.AppendLine("  * Do NOT reinterpret the original task. Read '## Original task' literally and stay on that topic.");
@@ -8279,8 +8290,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("    an EMPTY plan — the user will steer, not the replanner.");
         sb.AppendLine("  * Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine("  * If a step in the EXISTING PLAN added a property/variable/CSS-rule/method, that name NOW EXISTS");
-        sb.AppendLine("    in the file. Reuse it. Do NOT introduce a parallel mechanism (e.g. if step 1 added");
-        sb.AppendLine("    --kanban-board-flex-wrap, do NOT add a separate collapsedColumns property to do the same job).");
+        sb.AppendLine("    in the file. Reuse it. Do NOT introduce a parallel mechanism.");
         sb.AppendLine("  * If the verification gaps can be closed by EDITING the code that step 1 already added, do that —");
         sb.AppendLine("    do not add a second step that lives in a different file.");
         sb.AppendLine();
@@ -8288,10 +8298,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Lightweight replan: asks the LLM for only the additional PlanSteps needed,
+    /// without running discovery or full planning again.
+    /// </summary>
     private async Task<List<PlanStep>?> GenerateReplanStepsAsync(
-     string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
-     string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
-     List<string>? attachedFiles = null, string qualityCheckReason = "")
+        string originalPrompt, List<object> executedSteps, AgentPlan? existingPlan,
+        string? steeringContext, string projectRoot, bool emitSse, CancellationToken ct,
+        List<string>? attachedFiles = null, string qualityCheckReason = "")
     {
         var failHist = BuildFailedEditHistory(executedSteps);
 
@@ -8308,6 +8322,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             foreach (var f in attachedFiles) pathsToRead.Add(f.Replace('\\', '/'));
         }
 
+        // FIX: Auto-resolve related .ts files when an .html file was edited
         var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var relPath in pathsToRead.Take(8))
@@ -8320,7 +8335,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var ext = Path.GetExtension(relPath).ToLowerInvariant();
             if (ext is ".ts" or ".tsx" or ".html" or ".htm")
             {
-                // FIX: If it's an HTML file, automatically find and include the corresponding .ts file
                 if (ext is ".html" or ".htm")
                 {
                     var baseDir = Path.GetDirectoryName(fullPath) ?? "";
