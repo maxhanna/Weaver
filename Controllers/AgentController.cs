@@ -159,7 +159,7 @@ public class AgentController : ControllerBase
                 "inline SQL (verbatim @\"...\" strings), you MUST copy the SQL verbatim from the file" +
                 "into newCode.Do NOT reformat, re-indent, or \"clean up\" SQL inside @\"...\" strings —" +
                 "every space inside the string literal is significant.The system will NOT normalize" +
-                "whitespace inside verbatim strings." + 
+                "whitespace inside verbatim strings." +
             "23. OBJECT LITERAL PROPERTIES: NEVER add a property to an object that already has that property. " +
                 "If the change requires updating an existing property (like a template literal or backtick string), " +
                 "you MUST include the entire existing property in oldString and output the MODIFIED version in newString. " +
@@ -1164,7 +1164,8 @@ public class AgentController : ControllerBase
           CancellationToken ct,
           List<(string old, string @new, string error)>? history = null,
           string? explorationContext = null,
-          string? targetSymbol = null)
+          string? targetSymbol = null,
+          string? originalPrompt = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -1175,10 +1176,25 @@ public class AgentController : ControllerBase
         var fileContent = fileExists
             ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
             : string.Empty;
-
         var sb = new StringBuilder();
+
+        // ── INJECT ORIGINAL PROMPT FOR CONTEXT ───────────────────────────
+        if (!string.IsNullOrWhiteSpace(originalPrompt))
+        {
+            sb.AppendLine("### ORIGINAL USER REQUEST (for context) ###");
+            sb.AppendLine(originalPrompt);
+            sb.AppendLine();
+            sb.AppendLine("⚠ NOTE: The CHANGE REQUIRED below is a specific step derived from the request above. " +
+                          "You MUST implement exactly what the step asks for, but ensure the result adheres to ALL " +
+                          "specific details, locations, and constraints mentioned in the original request. " +
+                          "For example, if the original request says 'under nicehash bot note', your edit MUST place the text near 'NiceHash'. " +
+                          "If it says 'users need kraken api key', your edit MUST include that exact requirement.");
+            sb.AppendLine();
+        }
+
         sb.AppendLine($"FILE: {relPath}");
         sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
+
         sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
                       "If the change says \"instead of X use Y\", modify X to become Y. " +
                       "Do NOT keep the old X and also add Y next to it. " +
@@ -1198,12 +1214,15 @@ public class AgentController : ControllerBase
                         "because `onPageChange` sets `this.currentPage` and calls `this.searchUrl()`, which are specific to " +
                         "crawler search results. A new method for YouTube would set `this.youtubeCurrentPage` and filter " +
                         "`this.youtubeResults` locally without calling `searchUrl`." +
-                        "⚠ RULE: LOCATION ACCURACY. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
-                        "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. If there are multiple arrays with 'Crypto-Hub', " +
-                        "find the one named 'navigationItemDescriptions'. If the change mentions 'under nicehash bot note', find the text containing 'NiceHash' and add the note there." +
+                        "⚠ RULE: LOCATION ACCURACY & CONTEXT. If the CHANGE REQUIRED specifies a variable, array, or method name (e.g., 'in navigationItemDescriptions array'), " +
+                        "you MUST find and edit THAT specific location. Do not edit the first similar-looking code you find. " +
+                        "If there are multiple arrays with 'Crypto-Hub', find the one named 'navigationItemDescriptions'. " +
+                        "If the ORIGINAL USER REQUEST mentions 'under nicehash bot note', you MUST find the text containing 'NiceHash' and add the note there. " +
+                        "If the request mentions 'instructions can be found in the user settings', your added text MUST include that instruction. " +
+                        "Do NOT hallucinate generic text. Use the exact details from the ORIGINAL USER REQUEST." +
                         "⚠ RULE: TEMPLATE LITERALS. If you need to add text inside a template literal (backtick string `...`), you MUST include the entire backtick string in oldString " +
                         "and output the modified backtick string in newString. NEVER add a duplicate property above it. For example, to add a note to a `content: \\`...\\`` property, " +
-                        "include the whole `content: \\`...\\`` line in oldString, and output `content: \\`... (original text) ... (new note)\\`` in newString.");
+                        "include the whole `content: \\`...\\`` line in oldString, and output `content: \\`... (original text) ... (new note from original prompt)\\`` in newString.");
 
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
@@ -3609,7 +3628,8 @@ public class AgentController : ControllerBase
                     await ResolveEditForStep(
                         step, projectRoot, emitSse, ct, history,
                         explorationContext: explorationContext,
-                        targetSymbol: exploration.TargetSymbol);
+                        targetSymbol: exploration.TargetSymbol,
+                        originalPrompt: prompt);
 
                 if (resolveError == null)
                 {
@@ -5651,7 +5671,7 @@ public class AgentController : ControllerBase
             using var doc = JsonDocument.Parse(cleaned);
             var decision = doc.RootElement.TryGetProperty("decision", out var dEl)
                 ? dEl.GetString()?.ToLowerInvariant().Trim() ?? ""
-                : ""; 
+                : "";
             var reason = doc.RootElement.TryGetProperty("reason", out var rEl)
                 ? rEl.GetString()?.Trim() ?? ""
                 : "";
