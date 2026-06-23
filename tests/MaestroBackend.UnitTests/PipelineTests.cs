@@ -2,7 +2,7 @@ using Xunit;
 using Weaver.Services;
 using Weaver;
 
-namespace MaestroBackend.UnitTests;
+namespace Weaver.UnitTests;
 
 public class PipelineTests
 {

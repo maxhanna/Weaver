@@ -1,7 +1,7 @@
 using Xunit;
 using Weaver.Services;
 
-namespace MaestroBackend.UnitTests;
+namespace Weaver.UnitTests;
 
 public class TryNormalizeSignatureTests
 {

@@ -2,7 +2,7 @@ using Xunit;
 using System;
 using Weaver.Services;
 
-namespace MaestroBackend.UnitTests;
+namespace Weaver.UnitTests;
 
 public class DebugSkeletonTests
 {

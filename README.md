@@ -29,7 +29,7 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 2. Click on both 'projects' and 'settings' and configure the application
 3. Start by adding a card in the kanban, adding files for context and then pressing start
 
-`llamaUrl` specifies the address of your local llama.cpp server or Ollama instance. By default, Weaver looks for the server at `http://localhost:8080`. If your server runs on a different port or address, update this setting by opening the settings panel or in `weaverconfig.json` to ensure Weaver can connect to your LLM backend.
+`llamaUrl` specifies the address of your OpenAI API compatible LLM endpoint. This can be any compatible server such as Ollama, llama.cpp, or other local/remote LLM services. By default, Weaver looks for the server at `http://localhost:8080`. If your server runs on a different port or address, update this setting by opening the settings panel or in `weaverconfig.json` to ensure Weaver can connect to your LLM backend.
 
 ### Force File Edits
 In cases where the edit pipeline isn't being chosen,
