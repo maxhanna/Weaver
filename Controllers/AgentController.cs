@@ -5761,6 +5761,7 @@ public class AgentController : ControllerBase
     private static bool IsBuiltinIdentifier(string name)
     {
         if (string.IsNullOrEmpty(name)) return true;
+
         // Lowercase keywords / control flow.
         var keywords = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -5771,7 +5772,8 @@ public class AgentController : ControllerBase
             "export","from","as","is","out","ref","params","var","let","const",
         };
         if (keywords.Contains(name)) return true;
-        // Capitalized globals / standard library.
+
+        // Capitalized globals / standard library types.
         var builtins = new HashSet<string>(StringComparer.Ordinal)
         {
             "Math","JSON","Object","Array","String","Number","Boolean","Date",
@@ -5786,7 +5788,33 @@ public class AgentController : ControllerBase
             "Path","File","Directory","Environment","Math","Random","CancellationToken",
         };
         if (builtins.Contains(name)) return true;
-        // Common framework prefixes are fine if used with a known target.
+
+        // Standard library methods (C#, TS, JS) commonly called on instances. 
+        // These do not need to be declared in the file and should not trigger 
+        // the "NEW-SYMBOL INVENTION" guard.
+        var standardMethods = new HashSet<string>(StringComparer.Ordinal)
+        {
+            // C# String methods
+            "ToString", "Trim", "TrimStart", "TrimEnd", "Substring", "Split",
+            "Replace", "Contains", "StartsWith", "EndsWith", "IndexOf", "LastIndexOf",
+            "ToUpper", "ToLower", "Equals", "Compare", "CompareTo", "Concat", "Join",
+            "IsNullOrEmpty", "IsNullOrWhiteSpace", "Format", "PadLeft", "PadRight",
+            // C# LINQ / Collection methods
+            "Select", "Where", "FirstOrDefault", "First", "Last", "LastOrDefault",
+            "Any", "All", "Count", "Sum", "Min", "Max", "Average", "ToList",
+            "ToArray", "ToDictionary", "ToHashSet", "Distinct", "GroupBy",
+            "OrderBy", "OrderByDescending", "ThenBy", "Skip", "Take", "Single",
+            "SingleOrDefault", "ElementAt", "Reverse", "Add", "AddRange", "Remove",
+            "RemoveAt", "Clear", "ContainsKey", "ContainsValue", "TryGetValue",
+            // JS/TS array & JSON methods
+            "map", "filter", "reduce", "forEach", "find", "findIndex", "includes",
+            "join", "concat", "flat", "flatMap", "some", "every", "sort", "push",
+            "pop", "shift", "unshift", "splice", "slice", "stringify", "parse",
+            // Math/Number methods
+            "floor", "ceil", "round", "abs", "min", "max", "pow", "sqrt", "toFixed"
+        };
+        if (standardMethods.Contains(name)) return true;
+
         return false;
     }
 
