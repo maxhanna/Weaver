@@ -2386,6 +2386,92 @@ public class AgentController : ControllerBase
             return addedToFiles;
         }
 
+        List<string> FindLikelyProjectFiles(string requested, int max = 5)
+        {
+            var normalized = (requested ?? "").Replace('\\', '/').Trim().Trim('"', '\'', '`');
+            if (string.IsNullOrWhiteSpace(normalized)) return new List<string>();
+
+            var requestedName = Path.GetFileName(normalized);
+            var requestedStem = Path.GetFileNameWithoutExtension(requestedName);
+            var rawTokens = Regex.Matches(normalized + " " + requestedStem, @"[A-Za-z_][A-Za-z0-9_]{2,}")
+                .Select(m => m.Value)
+                .Where(t => !new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "read", "file", "path", "source", "component", "service", "class", "method",
+                    "function", "interface", "model", "controller", "style", "template"
+                }.Contains(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToList();
+
+            var skipSegments = new[] { "/bin/", "/obj/", "/node_modules/", "/dist/", "/packages/", "/.git/", "/.vs/" };
+            var textExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".cs", ".ts", ".tsx", ".js", ".jsx", ".html", ".css", ".scss", ".less",
+                ".json", ".xml", ".yaml", ".yml", ".md", ".razor", ".cshtml", ".sql"
+            };
+
+            var scored = new List<(string rel, int score)>();
+            foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                var relLow = "/" + rel.ToLowerInvariant();
+                if (skipSegments.Any(relLow.Contains)) continue;
+                var ext = Path.GetExtension(rel);
+                if (!textExts.Contains(ext)) continue;
+
+                var name = Path.GetFileName(rel);
+                var stem = Path.GetFileNameWithoutExtension(rel);
+                var score = 0;
+
+                if (string.Equals(rel, normalized, StringComparison.OrdinalIgnoreCase)) score += 1000;
+                if (rel.EndsWith("/" + normalized, StringComparison.OrdinalIgnoreCase)) score += 800;
+                if (!string.IsNullOrWhiteSpace(requestedName) &&
+                    string.Equals(name, requestedName, StringComparison.OrdinalIgnoreCase)) score += 650;
+                if (!string.IsNullOrWhiteSpace(requestedStem) &&
+                    string.Equals(stem, requestedStem, StringComparison.OrdinalIgnoreCase)) score += 500;
+
+                foreach (var token in rawTokens)
+                {
+                    if (stem.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 120;
+                    if (rel.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 45;
+                }
+
+                if (score > 0)
+                    scored.Add((rel, score));
+            }
+
+            if (scored.Count < max && rawTokens.Count > 0)
+            {
+                var already = scored.Select(s => s.rel).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var file in Directory.EnumerateFiles(projectRoot, "*.*", SearchOption.AllDirectories))
+                {
+                    var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                    if (already.Contains(rel)) continue;
+                    var relLow = "/" + rel.ToLowerInvariant();
+                    if (skipSegments.Any(relLow.Contains)) continue;
+                    if (!textExts.Contains(Path.GetExtension(rel))) continue;
+
+                    try
+                    {
+                        var content = System.IO.File.ReadAllText(file);
+                        var score = rawTokens.Sum(token =>
+                            Regex.IsMatch(content, $@"\b{Regex.Escape(token)}\b") ? 35 : 0);
+                        if (score > 0) scored.Add((rel, score));
+                    }
+                    catch { }
+                }
+            }
+
+            return scored
+                .OrderByDescending(s => s.score)
+                .ThenBy(s => s.rel.Length)
+                .Select(s => s.rel)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(max)
+                .ToList();
+        }
+
 
         // ── Seed exploration with attached file content ───────────────────
         if (attachedFiles != null && attachedFiles.Count > 0)
@@ -2520,51 +2606,49 @@ public class AgentController : ControllerBase
                 if (!System.IO.File.Exists(fp) ||
                     !AgentUtilities.IsPathUnderRoot(fp, projectRoot))
                 {
-                    // Search for the file by filename in the project
-                    var fileName = Path.GetFileName(requested.Replace('/', '\\'));
-                    var matches = new List<string>();
-                    try
-                    {
-                        matches = Directory.EnumerateFiles(projectRoot, fileName, SearchOption.AllDirectories)
-                            .Select(f => Path.GetRelativePath(projectRoot, f).Replace('\\', '/'))
-                            .Where(rel => AgentUtilities.IsPathUnderRoot(
-                                Path.GetFullPath(Path.Combine(projectRoot, rel.Replace('/', Path.DirectorySeparatorChar))), projectRoot))
-                            .Take(5)
-                            .ToList();
-                    }
-                    catch { }
+                    // Search by exact filename first, then by path/symbol tokens.
+                    var matches = FindLikelyProjectFiles(requested, max: 5);
 
-                    if (matches.Count == 1)
+                    if (matches.Count > 0)
                     {
-                        // Exactly one match — read it and tell the LLM the correct path
-                        var correctPath = matches[0];
-                        var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
-                        var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
-                        var matchExcerpt = matchContent.Length > 3_500 ? AgentUtilities.ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars) : matchContent;
-                        if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
+                        var readMatches = 0;
+                        foreach (var correctPath in matches.Take(2))
                         {
-                            ctx.AppendLine($"### {correctPath}  (resolved from `{requested}`)");
-                            ctx.AppendLine("```");
-                            ctx.AppendLine(matchExcerpt);
-                            ctx.AppendLine("```");
+                            if (normalizedPaths.Contains(AbsNormalize(correctPath)) ||
+                                filesRead.Contains(RelNormalize(correctPath))) continue;
+
+                            var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
+                            var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
+                            var matchExcerpt = matchContent.Length > 3_500
+                                ? AgentUtilities.ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                                : matchContent;
+                            if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
+                            {
+                                ctx.AppendLine($"### {correctPath}  (resolved from `{requested}`)");
+                                ctx.AppendLine("```");
+                                ctx.AppendLine(matchExcerpt);
+                                ctx.AppendLine("```");
+                                ctx.AppendLine();
+                                readMatches++;
+                            }
+                            else
+                            {
+                                ctx.AppendLine($"⚠ `{requested}` resolved to `{correctPath}` (skipped — context budget exhausted)");
+                                ctx.AppendLine();
+                            }
+                            AddFileRead(correctPath);
+                        }
+
+                        if (matches.Count > 2)
+                        {
+                            var suggestions = string.Join(", ", matches.Skip(2).Select(m => $"`{m}`"));
+                            ctx.AppendLine($"Other likely matches for `{requested}`: {suggestions}.");
                             ctx.AppendLine();
                         }
-                        else
-                        {
-                            ctx.AppendLine($"⚠ `{requested}` resolved to `{correctPath}` (skipped — context budget exhausted)");
-                            ctx.AppendLine();
-                        }
-                        AddFileRead(correctPath);
+
                         await EmitLog(emitSse, "info",
-                            $"  🔍 {requested} → {correctPath}", ct: ct);
-                    }
-                    else if (matches.Count > 1)
-                    {
-                        var suggestions = string.Join(", ", matches.Select(m => $"`{m}`"));
-                        ctx.AppendLine($"⚠ `{requested}` not found. Possible matches: {suggestions}. Use an exact relative path from the project root.");
-                        ctx.AppendLine();
-                        await EmitLog(emitSse, "warn",
-                            $"  ⚠ Not found: {requested} — found {matches.Count} candidates: {string.Join(", ", matches)}", ct: ct);
+                            $"  🔍 {requested} → {string.Join(", ", matches.Take(2))}" +
+                            (readMatches == 0 ? " (not read: context budget or duplicate)" : ""), ct: ct);
                     }
                     else
                     {
@@ -3060,10 +3144,13 @@ public class AgentController : ControllerBase
     // ── Exploration prompt builders ───────────────────────────────────────
 
     private static string BuildStepExplorationSystemPrompt() =>
-        "You are a surgical code exploration agent. Before a code change is applied, " +
-        "your job is to understand exactly what needs to change and precisely where.\n\n" +
+        "You are a senior codebase navigation agent. Before a code change is applied, " +
+        "your job is to understand exactly what needs to change, which existing code owns it, " +
+        "and the smallest context needed to edit it safely.\n\n" +
         "You are given the original task, the full plan (so you understand what came before " +
         "and after), the specific step, and the files already read.\n\n" +
+        "Work like a careful coding agent: inspect concrete files before inferring, follow names " +
+        "from imports/call sites/types, and stop reading as soon as the edit is grounded.\n\n" +
         "Output ONLY valid JSON — exactly one of these two forms:\n\n" +
         "NEED MORE CONTEXT:\n" +
         "{\n" +
@@ -3083,16 +3170,21 @@ public class AgentController : ControllerBase
         "RULES:\n" +
         "1. filesToRead: only files DIRECTLY needed for THIS step — no tangential reads\n" +
         "2. Never request a file already listed under 'files already read'\n" +
-        "3. Max 3 files per request; prefer the most likely to contain the relevant code\n" +
-        "4. refinedChange MUST: name the exact method/function/component, describe the " +
+        "3. Max 3 files per request; prefer exact project-relative paths. If you only know a symbol, " +
+        "request the most likely file path from imports, filenames, or existing context; do not ask for broad directories.\n" +
+        "4. Search strategy: target file first, then imported definitions, adjacent component/template/style files, " +
+        "interface/model definitions, and tests only if they reveal expected behavior. Avoid generated, minified, bin/obj, and package files.\n" +
+        "5. refinedChange MUST: name the exact method/function/component, describe the " +
         "exact code block being replaced, describe the replacement code — zero ambiguity\n" +
-        "5. targetSymbol: the identifier of the specific method/function/class being changed\n" +
-        "6. confidence 0-100: if < 70, request more files rather than guessing\n" +
-        "7. If the target file already has enough context (small file, obvious location), " +
+        "6. targetSymbol: the identifier of the specific method/function/class being changed\n" +
+        "7. confidence 0-100: if < 70, request more files rather than guessing\n" +
+        "8. If the target file already has enough context (small file, obvious location), " +
         "go ready=true on round 1 with a precise refinedChange\n" +
-        "8. If the change involves a component, import, alias, or UI element, " +
+        "9. If the change involves a component, import, alias, or UI element, " +
         "request the import source files to verify the import path and alias are correct before proceeding\n" +
-        "9. SPACING in refinedChange: where you describe code snippets inline, verify every token is properly " +
+        "10. Memory discipline: do not ask for files just to be safe. Each requested file must answer a specific question " +
+        "needed for THIS edit. If the question is already answered by the context, set ready=true.\n" +
+        "11. SPACING in refinedChange: where you describe code snippets inline, verify every token is properly " +
         "separated by a space. 'INTERVAL15 MINUTE' is WRONG — it should be 'INTERVAL 15 MINUTE'. " +
         "Read through your output character-by-character before finalizing.";
 
@@ -4742,7 +4834,17 @@ public class AgentController : ControllerBase
             return content;
         }
     }
-
+    /// <summary>
+    /// Normalizes a change description for deduplication by lowercasing 
+    /// and collapsing whitespace.
+    /// </summary>
+    private static string NormalizeChangeForDedup(string? change)
+    {
+        if (string.IsNullOrWhiteSpace(change)) return "";
+        var norm = change.Trim().ToLowerInvariant();
+        norm = string.Join(" ", norm.Split(default(char[]), StringSplitOptions.RemoveEmptyEntries));
+        return norm;
+    }
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
     {
         if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
@@ -7006,7 +7108,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     /// The actual edit (oldString/newString) is resolved per-step during execution.
     /// </summary>
     private static string BuildPlanningPrompt() =>
-        "You are a software-engineering agent. Plan only 1-2 SMALL focused steps at a time.\n" +
+        "You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n" +
+        "Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n" +
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
         "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
@@ -7023,43 +7126,44 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
         "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
+        "   If the right file is not in discovery context but its path is listed or strongly implied, use _explore with the exact project-relative path.\n" +
+        "   If you are unsure which file owns a symbol, choose the most likely path from filenames/imports and use _explore before planning an edit.\n" +
         "2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps. " +
         "Do NOT artificially limit yourself to 1-2 steps so you can be re-invoked later — under-planning " +
         "causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. " +
         "If the task is a single coherent code change (e.g. two related assignments in the same block, " +
         "or one method body), output exactly ONE step for it.\n" +
-        "3. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
-        "4. COMMANDS BEFORE EDITS: if a file must exist first, add _command BEFORE the edit step.\n" +
-        "5. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
+        "3. Tool choice: use _explore for repository source, _web_search/_web_fetch only for external current information, and _command only for terminal work that cannot be represented as an edit step.\n" +
+        "4. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
+        "5. COMMANDS BEFORE EDITS: if a generated/downloaded file must exist first, add _command BEFORE the edit step and write outputs inside the project.\n" +
+        "6. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
         "   The DISCOVERY CONTEXT section above shows the ACTUAL content of files that were read.\n" +
         "   Check that content BEFORE planning an edit step. If the property, method, or config\n" +
         "   already exists in the file shown in discovery context, do NOT create an edit step.\n" +
         "   Use _done instead.\n" +
-        "6. Score precisely:\n" +
+        "7. Score precisely:\n" +
         "   90-100: Exact file + precise change description, no uncertainty\n" +
         "   70-89:  Correct file, good description, minor refinement possible\n" +
         "   40-69:  File identified but change is vague or approach is uncertain\n" +
         "   0-39:  Unsure which file or what to change.\n" +
         "   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n" +
-         "7. Each step must be ONE atomic change — do NOT combine two edits in one step.\n" +
-         "   BAD (combined): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
-         "   GOOD (decoupled): Two steps — Step 1: \"Add CalendarNotificationsEnabled property to UserSettings\", Step 2: \"Wire up CalendarNotificationsEnabled toggle in HTML\"\n" +
-         "   IMPORTANT: MOVING content from one location to another is NOT a single step. It is TWO steps:\n" +
-         "     Step 1: Add/copy the content at the new location\n" +
-         "     Step 2: Remove the content from the old location\n" +
-         "   BAD (combined): \"Move the link button from the action column into the todo text column\"\n" +
-         "   GOOD (decoupled): Step 1: \"Append link button at end of todo text cell, after the text content\", Step 2: \"Remove link button from the action column\"\n" +
-         "   If your change description contains the word \"and\" joining two distinct actions, SPLIT it into separate steps.\n" +
-         "   Each step's change field must be extremely precise. Ex: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\"\n" +
-        "8. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
-        "9. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
-        "10. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
-        "11. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
-         "12. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
+         "8. Step sizing: one step may cover one coherent edit in one file or one tightly coupled block. Split only when changes touch different files, have different owners, or need independent verification.\n" +
+         "   BAD (over-combined): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
+         "   GOOD: Two steps — Step 1: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\", Step 2: \"In settings template: bind the existing notification toggle to CalendarNotificationsEnabled\"\n" +
+         "   BAD (too vague): \"Fix the dashboard\"\n" +
+         "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
+         "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
+        "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
+        "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
+        "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
+        "13. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
+        "14. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
+         "15. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
          "For reading project source files use _explore with the relative file path. " +
          "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
          "If you don't know which file contains the code, add an _explore step first.\n" +
-         "13. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
+         "16. Context and memory discipline: do not ask to read everything. Prefer the smallest file set that proves names, signatures, imports, and local patterns. Use referenceFiles for narrow supporting context rather than extra edit steps.\n" +
+         "17. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
          "DO NOT re-describe existing functionality as something that needs to be built. " +
          "BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" " +
          "(the method already collects events — \"collect\" is wrong). " +
@@ -7116,6 +7220,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
                 }
+            }
+        }
+
+        if (plan?.Plan != null && IsVisualLayoutTask(userPrompt))
+        {
+            var editFiles = plan.Plan
+                .Select(s => (s.File ?? "").Replace('\\', '/'))
+                .Where(AgentUtilities.IsRelativePath)
+                .Where(f => !AgentUtilities.IsSpecialMarker(f))
+                .ToList();
+
+            var hasMarkup = editFiles.Any(f => Path.GetExtension(f).Equals(".html", StringComparison.OrdinalIgnoreCase) ||
+                                               Path.GetExtension(f).Equals(".cshtml", StringComparison.OrdinalIgnoreCase) ||
+                                               Path.GetExtension(f).Equals(".razor", StringComparison.OrdinalIgnoreCase));
+            var hasStylesheet = editFiles.Any(IsStylesheetPath);
+            var hasScript = editFiles.Any(f => Path.GetExtension(f) is ".ts" or ".tsx" or ".js" or ".jsx");
+
+            if (hasMarkup && !hasStylesheet)
+            {
+                return "Visual layout/positioning request is planned only against markup. Replan with a stylesheet/CSS step for positioning instead of moving DOM order. Keep markup edits only for missing elements or missing event wiring.";
+            }
+
+            var changes = string.Join(" ", plan.Plan.Select(s => s.Change ?? ""));
+            if (Regex.IsMatch(changes, @"\b(click|touchstart|touchend|handler|method|function|wire|wiring|event)\b", RegexOptions.IgnoreCase) &&
+                hasMarkup && !hasScript)
+            {
+                return "Template event wiring is planned without the component script/context. Replan to inspect or edit the .ts/.js component before changing handlers, so method names are verified instead of invented.";
             }
         }
 
@@ -7541,13 +7672,34 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string prompt, List<string> candidates, bool emitSse, CancellationToken ct)
     {
         if (candidates.Count == 0) return new List<string>();
+        var promptTokens = AgentUtilities.ExtractMeaningfulKeywords(prompt.ToLowerInvariant());
+        var deterministic = candidates
+            .Select(f =>
+            {
+                var name = Path.GetFileNameWithoutExtension(f);
+                var score = 0;
+                foreach (var token in promptTokens)
+                {
+                    if (name.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 6;
+                    if (f.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 2;
+                }
+                return (file: f, score);
+            })
+            .Where(x => x.score > 0)
+            .OrderByDescending(x => x.score)
+            .ThenBy(x => x.file.Length)
+            .Take(3)
+            .Select(x => x.file)
+            .ToList();
+
         const string system =
-            "You are a file relevance selector. Given a task and files, pick 3-7 most likely to need editing. " +
+            "You are a file relevance selector for a coding agent. Given a task and candidate files, pick the 3-7 files most likely to own the requested change or define types/imports needed for it. " +
+            "Prefer exact filename/path/symbol matches, neighboring component/template/style files, and files named in the task. Avoid generated, minified, dependency, build, or broad entry-point files unless the task clearly targets them. " +
             "Output ONLY valid JSON, no markdown: {\"files\": [\"path1\", \"path2\"]}";
-        var user = $"Task: {prompt}\n\nFiles:\n{string.Join("\n", candidates)}\n\nSelect 3-7 max.";
+        var user = $"Task: {prompt}\n\nCandidate files:\n{string.Join("\n", candidates)}\n\nDeterministic high-signal matches to include unless clearly irrelevant:\n{string.Join("\n", deterministic)}\n\nSelect 3-7 max.";
         var (raw, _, err) = await CallLlmRaw(system, user, ct, TimeSpan.FromSeconds(25));
         if (string.IsNullOrWhiteSpace(raw))
-            return candidates.Take(6).ToList();
+            return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
         try
         {
             var cleaned = raw.Trim();
@@ -7566,12 +7718,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     .Select(el => el.GetString()?.Replace('\\', '/') ?? "")
                     .Where(f => !string.IsNullOrWhiteSpace(f) &&
                                 candidates.Any(c => string.Equals(c, f, StringComparison.OrdinalIgnoreCase)))
-                    .Take(7).ToList();
+                    .ToList();
+                selected = deterministic.Concat(selected)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(7)
+                    .ToList();
                 if (selected.Count > 0) return selected;
             }
         }
         catch { }
-        return candidates.Take(6).ToList();
+        return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -10315,7 +10471,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
 
         var baseInstructions = new StringBuilder();
-        baseInstructions.AppendLine("You are a terminal automation agent. You have full terminal access.");
+        baseInstructions.AppendLine("You are a senior terminal automation agent. You have full terminal access and must complete the user's task end-to-end.");
         baseInstructions.AppendLine($"You are running on {shellName} ({Environment.OSVersion}).");
         baseInstructions.AppendLine("Output ONLY valid JSON. Options:");
         baseInstructions.AppendLine("  {\"cmd\": \"the full command\"}        # PREFERRED — use curl/Invoke-WebRequest for API calls");
@@ -10330,8 +10486,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         baseInstructions.AppendLine("If this task's results will feed into a subsequent code-editing step, save output files INSIDE the project directory (use a temp path like \"_temp_data.json\") so the next pipeline can read them. The file will be attached to the card automatically.");
         baseInstructions.AppendLine("NEVER use mkdir for files — use New-Item -ItemType File -Path \"<path>\" -Force");
         baseInstructions.AppendLine("NEVER use cd/Set-Location — use absolute paths");
+        baseInstructions.AppendLine("Inspect before acting: for repository questions use fast file commands first. Prefer `rg --files` to enumerate files, `rg -n \"pattern\" <path>` to search text, and `Get-Content -TotalCount/-Tail` for bounded reads. If `rg` is unavailable, use PowerShell equivalents.");
+        baseInstructions.AppendLine("Keep outputs small and useful. Limit broad searches, exclude bin/obj/node_modules/.git/dist, and save large raw outputs to a project temp file instead of dumping them into the conversation.");
+        baseInstructions.AppendLine("After every command, decide what new fact was learned and what exact next step follows. Do not repeat failed commands without changing the hypothesis or command.");
         baseInstructions.AppendLine("For well-known REST APIs (pokeapi.co, jsonplaceholder, github api, etc.) use Invoke-RestMethod/curl via cmd — NOT web_search. web_search is only for finding URLs or info you don't already know.");
-        baseInstructions.AppendLine("BEFORE planning the first step, briefly assess the full task end-to-end. What data do you need? What files will be created? What merge/transform steps are needed? Then plan only the next 1-2 steps. Re-assess after each step.");
+        baseInstructions.AppendLine("BEFORE planning the first step, assess the full task end-to-end. What data do you need? What files will be created? What merge/transform/verification steps are needed? Plan the smallest complete chain, usually 1-4 steps.");
         baseInstructions.AppendLine("KEEP THE ORIGINAL TASK AS YOUR NORTH STAR. After each step, check: does this complete the user's request yet? If the planned steps do not add up to finishing the task, add the remaining steps. If your plan covers the full task, execute the steps — do NOT keep planning new steps.");
         if (isWindows)
         {
@@ -10358,12 +10517,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var conversation = new StringBuilder();
         conversation.Append(baseInstructions);
-        conversation.AppendLine("\nPlan 1-2 steps at a time. Do NOT repeat steps already in the plan. Output:");
-        conversation.AppendLine("  {\"plan\": [{\"file\": \"<output path>\", \"change\": \"what to do\"}]}  # add 1-2 new steps");
+        conversation.AppendLine("\nPlan the smallest complete chain of remaining steps. Do NOT repeat steps already in the plan. Output:");
+        conversation.AppendLine("  {\"plan\": [{\"file\": \"<output path or tool>\", \"change\": \"what to do and how you will verify it\"}]}  # add needed new steps");
         conversation.AppendLine("  {\"cmd\": \"...\"} / {\"web_fetch\": \"...\"} / {\"web_search\": \"...\"}  # execute directly");
         conversation.AppendLine("  {\"step\": N}  # explicitly mark step N done (if current approach failed but you want a different one)");
         conversation.AppendLine("  {\"done\": true, \"summary\": \"...\"}  # finish");
-        conversation.AppendLine("After each action, verify if the step\'s objective was met. If a step errors, you can mark it done and try a different approach.");
+        conversation.AppendLine("After each action, verify if the step\'s objective was met using concrete output, file existence, or a bounded read. If a step errors, change approach or mark it done before trying a different route.");
         conversation.AppendLine("IMPORTANT: Check the PLAN section above before adding new steps. If a step is already in the plan, DO NOT add it again.");
 
         for (var i = 0; i < MAX_COMMAND_ITERATIONS; i++)
