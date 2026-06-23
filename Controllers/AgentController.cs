@@ -3991,8 +3991,24 @@ public class AgentController : ControllerBase
                     // Also fix newStr so VerifyEdit's "newString must be present in result" check passes
                     newStr = PreVerifyFormat(newStr ?? "", newStr ?? "", relPath);
                 }
-            }
+            } 
 
+            // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
+            // formatting issues don't cause false rejections. The LLM frequently
+            // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
+            // it deterministically rather than retrying.
+            if (replaced && !string.IsNullOrWhiteSpace(newStr))
+            {
+                var formatted = AutoFormatEditedRegion(newContent, newStr);
+                if (formatted != newContent)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Pre-verify format: fixed spacing in {relPath}", ct: ct);
+                    newContent = formatted;
+                    // Also fix newStr so VerifyEdit's "newString must be present in result" check passes
+                    newStr = AutoFormatEditedRegion(newStr, newStr);
+                }
+            }
             var (approved, verifyReason, _) = VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
 
             if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
@@ -4528,112 +4544,336 @@ public class AgentController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Deterministically auto-formats the edited region of a code file.
-    /// Fixes three common LLM formatting regressions by scanning each
-    /// edited line character-by-character, tracking string and comment
-    /// state so that commas/colons/semicolons inside strings or comments
-    /// are never touched:
-    ///
-    ///   1. Missing space after ','  ("indices,0" -> "indices, 0")
-    ///      — skips when next char is ')', ']', '}' (trailing comma) or
-    ///        whitespace or end-of-line.
-    ///   2. Missing space after ':'  ("{a:1}" -> "{a: 1}", "let x:number"
-    ///      -> "let x: number")
-    ///      — skips "::" (C# qualified names, TS scope), end-of-line
-    ///        colons (case labels, default:), and URLs (handled by string
-    ///        state).
-    ///   3. Missing space after ';'  ("for(i=0;i<10;)" -> "for(i=0; i<10;)")
-    ///      — skips ";;", ";)", and end-of-line semicolons.
-    ///
-    /// Only lines that contain a needle from the applied newStr are
-    /// processed — unrelated lines are left byte-for-byte unchanged.
-    /// </summary>
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
     {
         if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
             return content;
 
         var fileLines = content.Split('\n');
-
-        // Collect needles — trimmed, non-empty lines from the APPLIED newStr.
-        // No Take(N) cap: every edited line should get spacing fixes, otherwise
-        // long replacements (e.g. a 50-line method body) leave lines 11+ unformatted,
-        // which is exactly the regression we see on `this.gl.uniform1i(...,1);`.
-        // Min length 3 (was 5) so short edited lines like `});` or `},` are matched.
         var needleSet = appliedNewStr.Split('\n')
             .Select(l => l.Trim())
             .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 3)
             .ToHashSet(StringComparer.Ordinal);
-
-        if (needleSet.Count == 0) return content;
-
-        // Long needles (>= 12 chars) also serve as substring anchors — this catches
-        // the case where the file line has trailing punctuation the LLM omitted
-        // (e.g. needle `foo(a, b)` matches file line `foo(a, b);`).
         var longNeedles = needleSet.Where(n => n.Length >= 12).ToList();
 
-        // Find which file lines match any needle — those are the
-        // "edited region" lines that get formatting fixes.
-        // Primary path is O(1) HashSet lookup on the trimmed file line;
-        // substring fallback only runs for lines that missed the equality probe.
         var editedLineIndices = new HashSet<int>();
         for (var i = 0; i < fileLines.Length; i++)
         {
-            var trimmedFileLine = fileLines[i].Trim();
-            if (trimmedFileLine.Length < 3) continue;
-            if (needleSet.Contains(trimmedFileLine))
-            {
-                editedLineIndices.Add(i);
-                continue;
-            }
+            var trimmed = fileLines[i].Trim();
+            if (trimmed.Length < 3) continue;
+            if (needleSet.Contains(trimmed)) { editedLineIndices.Add(i); continue; }
             if (longNeedles.Count > 0)
             {
                 foreach (var needle in longNeedles)
                 {
-                    if (trimmedFileLine.Contains(needle, StringComparison.Ordinal))
-                    {
-                        editedLineIndices.Add(i);
-                        break;
-                    }
+                    if (trimmed.Contains(needle, StringComparison.Ordinal)) { editedLineIndices.Add(i); break; }
                 }
             }
         }
 
         if (editedLineIndices.Count == 0) return content;
 
-        // ── Pass 1: spacing fixes (commas/colons/semicolons/equals) ──
+        var sb = new StringBuilder(content.Length + 16);
+        var inStringDouble = false;
+        var inStringSingle = false;
+        var inTemplate = false;
+        var inVerbatimString = false;
+        var inLineComment = false;
+        var inBlockComment = false;
         var changed = false;
+
         for (var i = 0; i < fileLines.Length; i++)
         {
-            if (!editedLineIndices.Contains(i)) continue;
-            var fixedLine = FixLineSpacing(fileLines[i]);
-            if (fixedLine != fileLines[i])
+            var line = fileLines[i];
+            var formattedLine = FormatLineWithState(line, ref inStringDouble, ref inStringSingle, ref inTemplate, ref inVerbatimString, ref inLineComment, ref inBlockComment);
+
+            if (editedLineIndices.Contains(i))
             {
-                fileLines[i] = fixedLine;
-                changed = true;
+                if (formattedLine != line) changed = true;
+                sb.Append(formattedLine);
+            }
+            else
+            {
+                sb.Append(line);
+            }
+
+            if (i < fileLines.Length - 1) sb.Append('\n');
+        }
+
+        if (!changed) return content;
+
+        var result = sb.ToString();
+
+        // Pass 2: Stray closing paren dedent
+        var resultLines = result.Split('\n');
+        var parensChanged = false;
+        for (var i = 0; i < resultLines.Length; i++)
+        {
+            if (!editedLineIndices.Contains(i)) continue;
+            var fixedLine = FixStrayClosingParens(resultLines, i);
+            if (fixedLine != resultLines[i])
+            {
+                resultLines[i] = fixedLine;
+                parensChanged = true;
             }
         }
 
-        // ── Pass 2: stray closing-paren / closing-bracket / closing-brace dedent ──
-        // Fixes the regression where a line like `  ) {` (the close-paren of a
-        // multi-line function signature) gets over-indented to match the body
-        // indent instead of the signature indent. Only safe to apply when the
-        // line is JUST whitespace + a single closing delimiter (optionally
-        // followed by `;`, `,`, `)`, `]`, `}`, or ` {`), so we never touch
-        // lines that have meaningful content.
-        for (var i = 0; i < fileLines.Length; i++)
+        return parensChanged ? string.Join("\n", resultLines) : result;
+    }
+    private string FormatLineWithState(string line,
+    ref bool inStringDouble, ref bool inStringSingle, ref bool inTemplate,
+    ref bool inVerbatimString, ref bool inLineComment, ref bool inBlockComment)
+    {
+        var sb = new StringBuilder(line.Length + 4);
+        var i = 0;
+
+        while (i < line.Length)
         {
-            if (!editedLineIndices.Contains(i)) continue;
-            var fixedLine = FixStrayClosingParens(fileLines, i);
-            if (fixedLine != fileLines[i])
+            var c = line[i];
+            var next = (i + 1 < line.Length) ? line[i + 1] : '\0';
+            var prev = (i > 0) ? line[i - 1] : '\0';
+
+            // ── Block comment ──
+            if (inBlockComment)
             {
-                fileLines[i] = fixedLine;
-                changed = true;
+                sb.Append(c);
+                if (c == '*' && next == '/')
+                {
+                    sb.Append(next);
+                    i += 2;
+                    inBlockComment = false;
+                    continue;
+                }
+                i++;
+                continue;
             }
+
+            // ── Line comment ──
+            if (inLineComment)
+            {
+                sb.Append(c);
+                i++;
+                continue;
+            }
+
+            // ── Verbatim String (C# @"..." or multi-line) ──
+            if (inVerbatimString)
+            {
+                sb.Append(c);
+                if (c == '"')
+                {
+                    if (next == '"')
+                    {
+                        sb.Append(next);
+                        i += 2;
+                        continue;
+                    }
+                    else
+                    {
+                        inVerbatimString = false;
+                        i++;
+                        continue;
+                    }
+                }
+
+                // Apply SQL spacing rules inside verbatim strings
+                if (char.IsLetter(c))
+                {
+                    var rest = line.Substring(i);
+                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)\d", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(' ');
+                        sb.Append(match.Value[match.Value.Length - 1]);
+                        i += match.Value.Length;
+                        continue;
+                    }
+
+                    match = Regex.Match(rest, @"^(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(" *");
+                        i += match.Value.Length;
+                        continue;
+                    }
+
+                    match = Regex.Match(rest, @"^(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(" (");
+                        i += match.Value.Length;
+                        continue;
+                    }
+                }
+
+                i++;
+                continue;
+            }
+
+            // ── Inside normal string literal ──
+            if (inStringDouble || inStringSingle || inTemplate)
+            {
+                sb.Append(c);
+                if (c == '\\' && next != '\0')
+                {
+                    sb.Append(next);
+                    i += 2;
+                    continue;
+                }
+                if (inStringDouble && c == '"') inStringDouble = false;
+                else if (inStringSingle && c == '\'') inStringSingle = false;
+                else if (inTemplate && c == '`') inTemplate = false;
+                i++;
+                continue;
+            }
+
+            // ── Not in string or comment — check for state transitions ──
+            if (c == '/' && next == '/')
+            {
+                inLineComment = true;
+                sb.Append(c);
+                i++;
+                continue;
+            }
+            if (c == '/' && next == '*')
+            {
+                inBlockComment = true;
+                sb.Append(c);
+                i++;
+                continue;
+            }
+            if (c == '@' && next == '"')
+            {
+                inVerbatimString = true;
+                sb.Append(c);
+                sb.Append(next);
+                i += 2;
+                continue;
+            }
+            if (c == '"') { inStringDouble = true; sb.Append(c); i++; continue; }
+            if (c == '\'') { inStringSingle = true; sb.Append(c); i++; continue; }
+            if (c == '`') { inTemplate = true; sb.Append(c); i++; continue; }
+
+            // ── Not in string or comment — apply C# spacing fixes ──
+
+            // Rule 1: ',' followed by non-whitespace, non-')', ']', '}' -> insert space
+            if (c == ',')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != ' ' && after != '\t' && after != '\r' && after != '\n'
+                        && after != ')' && after != ']' && after != '}')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 2: ':' -> insert space after (but not for :: or URLs)
+            if (c == ':')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (prev != ':' && after != ':'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 3: ';' -> insert space after
+            if (c == ';')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != ';' && after != ')'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 4: '=' -> insert spaces around standalone '='
+            if (c == '=')
+            {
+                const string operatorPrevChars = "!<>=+-*/%&|^~?:";
+                var isOperatorContext = prev != '\0' && operatorPrevChars.IndexOf(prev) >= 0;
+                var nextChar = (i + 1 < line.Length) ? line[i + 1] : '\0';
+                var isHtmlAttributeLike = nextChar == '"' || nextChar == '\'' || nextChar == '`';
+
+                if (isHtmlAttributeLike)
+                {
+                    sb.Append(c);
+                    i++;
+                    continue;
+                }
+
+                if (!isOperatorContext && sb.Length > 0)
+                {
+                    var lastChar = sb[sb.Length - 1];
+                    if (lastChar != ' ' && lastChar != '\t'
+                        && (char.IsLetterOrDigit(lastChar) || lastChar == ')' || lastChar == ']'
+                            || lastChar == '_' || lastChar == '$'))
+                    {
+                        sb.Append(' ');
+                    }
+                }
+
+                sb.Append(c);
+                i++;
+
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (after != '=' && after != '>'
+                        && after != '"' && after != '\'' && after != '`'
+                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            // Rule 5: '?' (ternary operator) -> insert space after if followed by digit
+            if (c == '?')
+            {
+                sb.Append(c);
+                i++;
+                if (i < line.Length)
+                {
+                    var after = line[i];
+                    if (char.IsDigit(after))
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                continue;
+            }
+
+            sb.Append(c);
+            i++;
         }
 
-        return changed ? string.Join("\n", fileLines) : content;
+        inLineComment = false; // reset at end of line
+        return sb.ToString();
     }
 
     /// <summary>
@@ -9710,26 +9950,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var result = content;
         var changed = false;
 
-        // SQL keyword + digit: INTERVAL1 → INTERVAL 1
-        var keywordDigit = new Regex(
-            @"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)(\d)",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        var fixed_ = keywordDigit.Replace(result, "$1 $2");
-        if (fixed_ != result) { result = fixed_; changed = true; }
+        // Find all verbatim strings @"..." and fix SQL inside them
+        // C# verbatim string syntax: @"" represents a literal "
+        var verbatimRegex = new Regex(@"@""(?:[^""]|"""")*""", RegexOptions.Singleline);
+        var matches = verbatimRegex.Matches(result);
+        foreach (Match m in matches)
+        {
+            var sqlStr = m.Value;
+            var fixedSql = sqlStr;
 
-        // SQL keyword + *: SELECT* → SELECT *
-        var keywordStar = new Regex(
-            @"\b(SELECT|DELETE|DISTINCT|ALL)\*",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        fixed_ = keywordStar.Replace(result, "$1 *");
-        if (fixed_ != result) { result = fixed_; changed = true; }
+            var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)(\d)", RegexOptions.IgnoreCase);
+            fixedSql = keywordDigit.Replace(fixedSql, "$1 $2");
 
-        // SQL keyword + (: FROM( → FROM (
-        var keywordParen = new Regex(
-            @"\b(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(",
-            RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        fixed_ = keywordParen.Replace(result, "$1 (");
-        if (fixed_ != result) { result = fixed_; changed = true; }
+            var keywordStar = new Regex(@"\b(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);
+            fixedSql = keywordStar.Replace(fixedSql, "$1 *");
+
+            var keywordParen = new Regex(@"\b(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(", RegexOptions.IgnoreCase);
+            fixedSql = keywordParen.Replace(fixedSql, "$1 (");
+
+            if (fixedSql != sqlStr)
+            {
+                result = result.Replace(sqlStr, fixedSql);
+                changed = true;
+            }
+        }
 
         return changed ? result : content;
     }
