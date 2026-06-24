@@ -1,5 +1,5 @@
 ﻿
-# 🚀 Weaver — AI‑Powered Multi‑File Code Editing
+# 🚀 Weaver — AI‑Powered Assistant
 
 Weaver is an intelligent, agent‑driven development environment that can **modify your entire project from a single natural‑language prompt**. It understands your codebase, plans multi‑step edits, applies atomic diffs, verifies results, and even handles Git operations — all inside a beautiful, integrated IDE.
 
@@ -102,7 +102,8 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 ### 🛠️ Terminal & Build Tools
 - Ping, install packages, run builds  
 - Full agent pipeline execution  
-- Terminal approval system (approve all / per root / restricted)  
+- Terminal approval system (approve all / per root / restricted)
+- Search the Web
 
 ---
 
@@ -115,7 +116,7 @@ The app serves static files and APIs. Open the URL shown in the console (usually
 ---
 
 ### ⚙️ Advanced Settings
-- Llama backend URL  
+- OpenAI compatible backend
 - Build commands  
 - Token/context limits  
 - File hints system  
