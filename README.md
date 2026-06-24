@@ -5,6 +5,10 @@ Weaver is an advanced agentic system that enables AI-driven automation through i
 
 Control your agent remotely on Bughosted.com/Weaver
 
+Download EXE: https://Bughosted.com/assets/Weaver.exe
+
+Source code: https://github.com/maxhanna/Weaver
+
 ## Requirements
 
 - .NET 10 SDK (or compatible runtime)
@@ -20,6 +24,119 @@ dotnet run
 ```
 
 The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
+
+
+# 🚀 Weaver — AI‑Powered Multi‑File Code Editing
+
+Weaver is an intelligent, agent‑driven development environment that can **modify your entire project from a single natural‑language prompt**. It understands your codebase, plans multi‑step edits, applies atomic diffs, verifies results, and even handles Git operations — all inside a beautiful, integrated IDE.
+
+---
+
+## ✨ Core Features
+
+### 🧠 AI Multi‑File Editing Engine
+- Understands project structure and relationships  
+- Performs multi‑file, multi‑language edits from a single prompt  
+- Generates step‑by‑step edit plans  
+- Applies atomic diffs with full preview  
+- Supports renames, refactors, layout changes, and UI transformations  
+- Verifies changes with a dedicated validation pipeline  
+- Supports compound operations (edit → build → verify)
+
+---
+
+### 🖥️ Integrated In‑Browser IDE
+- Full file explorer with directory navigation  
+- Multi‑tab editor with dirty state tracking  
+- Syntax highlighting for 25+ languages  
+- Conflict detection & external‑change detection  
+- Shared editing indicators (BugHosted)  
+- Search‑in‑file with match navigation  
+- Side‑by‑side diff viewer  
+- Git integration: commit, push, PR creation  
+
+---
+
+### 📋 Kanban‑Driven Workflow
+- To Do / Doing / Done / Archived / Self‑Improving columns  
+- AI‑generated plans with step‑level status  
+- Attach files, split tasks, auto‑PR, auto‑test toggles  
+- Live agent streaming output  
+- Full activity logs with timestamps  
+- Drag‑and‑drop card movement  
+
+---
+
+### 📅 Calendar System with Cron Automation
+- Monthly calendar with task cards  
+- Priority colors, project labels, time indicators  
+- Cron‑based recurring tasks  
+- Add/edit/delete calendar cards  
+- Integrated with project selection  
+
+---
+
+### 🎤 Voice‑to‑Text Input
+- Continuous speech recognition  
+- Auto‑append to card text  
+- Recording indicator & timer  
+- Auto‑restart on disconnect  
+
+---
+
+### 🌐 BugHosted Remote Collaboration
+- Login/logout with heartbeat  
+- Remote command polling  
+- Shared editing indicators  
+- Remote file sync  
+- Conflict detection  
+
+---
+
+### 🛠️ Terminal & Build Tools
+- Ping, install packages, run builds  
+- Full agent pipeline execution  
+- Terminal approval system (approve all / per root / restricted)  
+
+---
+
+### 📁 Project Management
+- Add/edit/delete projects  
+- Project descriptions  
+- Default project selection  
+- Persistent settings  
+
+---
+
+### ⚙️ Advanced Settings
+- Llama backend URL  
+- Build commands  
+- Token/context limits  
+- File hints system  
+- Email account integration  
+- PR‑by‑default toggle  
+- UI visibility toggles (IDE, Kanban, Calendar, Terminal)  
+
+---
+
+## 🧬 Supported Languages
+
+Weaver supports syntax highlighting and editing for:
+
+**C#, Java, C/C++, JS, TS, JSX, TSX, HTML, XML, SVG, CSS, SCSS, LESS, JSON, SQL, Python, Ruby, PHP, Go, Rust, Swift, Markdown, YAML, Shell, Bash, PowerShell, Kotlin.**
+
+---
+
+## 🧨 Why Developers Love Weaver
+- One prompt → entire project updated  
+- Atomic, safe, reviewable diffs  
+- Full IDE + Git + Kanban + Calendar in one app  
+- Local, fast, private  
+- Works with any project structure  
+- Designed for real‑world development, not toy examples  
+- Designed for any model type - big or small. The agent's iterative approach should yield similar results for smaller tasks. The bigger LLMs produce similar results in fewer cycles.
+
+
 
 ## FAQ
 
