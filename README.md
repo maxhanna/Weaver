@@ -1,13 +1,15 @@
-﻿# Weaver
+﻿
+# 🚀 Weaver — AI‑Powered Multi‑File Code Editing
 
-Weaver is an advanced agentic system that enables AI-driven automation through intelligent orchestration of multiple tools and pipelines. It is a tool for building AI-powered workflows (via Kanban board, Calendar, Cron jobs, etc) that can execute complex tasks autonomously. Create/Prioritize tasks and let Weaver take care of the rest. Weaver also acts as a remote connection which enables you to work with your agent remotely, share workspace, it features a built-in IDE for co-editing files, etc.
-
+Weaver is an intelligent, agent‑driven development environment that can **modify your entire project from a single natural‑language prompt**. It understands your codebase, plans multi‑step edits, applies atomic diffs, verifies results, and even handles Git operations — all inside a beautiful, integrated IDE.
 
 Control your agent remotely on Bughosted.com/Weaver
 
 Download EXE: https://Bughosted.com/assets/Weaver.exe
 
 Source code: https://github.com/maxhanna/Weaver
+
+---
 
 ## Requirements
 
@@ -23,14 +25,7 @@ dotnet restore
 dotnet run
 ```
 
-The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`).
-
-
-# 🚀 Weaver — AI‑Powered Multi‑File Code Editing
-
-Weaver is an intelligent, agent‑driven development environment that can **modify your entire project from a single natural‑language prompt**. It understands your codebase, plans multi‑step edits, applies atomic diffs, verifies results, and even handles Git operations — all inside a beautiful, integrated IDE.
-
----
+The app serves static files and APIs. Open the URL shown in the console (usually `http://localhost:5000`). 
 
 ## ✨ Core Features
 
