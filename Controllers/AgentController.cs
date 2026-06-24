@@ -2031,13 +2031,34 @@ public class AgentController : ControllerBase
         sb.AppendLine("   but the file ALREADY has `public bool CalendarNotificationsEnabled { get; set; } = true;`,");
         sb.AppendLine("   then alreadyDone = true.");
         sb.AppendLine("2. needsDecoupling = true/false — Does this step combine TWO OR MORE distinct");
-        sb.AppendLine("   changes that should be separate steps? Example: \"Add X property AND implement Y toggle\"");
-        sb.AppendLine("   should be two steps: one for the property, one for the toggle.");
-        sb.AppendLine("   CRITICAL: MOVING content is TWO changes: add at new location + remove from old location.");
+        sb.AppendLine("   changes that should be separate steps?");
+        sb.AppendLine();
+        sb.AppendLine("   PATTERNS THAT NEED DECOUPLING:");
+        sb.AppendLine("   a) Cross-file: \"Add property to X AND wire up in Y\" → 2 steps");
+        sb.AppendLine("   b) Move: \"Move X from A to B\" → 2 steps (add at B, remove from A)");
+        sb.AppendLine("   c) SAME-FILE MULTI-LOCATION: \"Add field AND initialize in constructor AND add method\"");
+        sb.AppendLine("      → 3 steps (field decl, constructor init, method def)");
+        sb.AppendLine("   d) Any step containing 'then' that chains two add/create/implement actions → split");
+        sb.AppendLine("   e) Any step mentioning 2+ of {field, property, constructor, method, handler} → likely split");
+        sb.AppendLine("   f) Wrap: \"Wrap X in a container\" → 2 steps (open tag + close tag)");
+        sb.AppendLine();
+        sb.AppendLine("   CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
+        sb.AppendLine("   LOCATIONS (e.g., add a field at top of class, initialize in constructor, add method");
+        sb.AppendLine("   at bottom), that is MULTIPLE distinct edits. Each location needs its own anchor and");
+        sb.AppendLine("   edit strategy. Combining them forces the editor into full-class rewrites that fail.");
+        sb.AppendLine();
         sb.AppendLine("   Example: \"Move the link button from the action column into the todo text cell\"");
         sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
         sb.AppendLine("     { file: \"...\", change: \"Append link button after the todo text content\" },");
         sb.AppendLine("     { file: \"...\", change: \"Remove link button from the action column\" }");
+        sb.AppendLine("   ]");
+        sb.AppendLine();
+        sb.AppendLine("   Example: \"Add _fifteenMinuteTimer field and initialize it in the constructor,");
+        sb.AppendLine("   then add a RunFifteenMinuteTasks method\"");
+        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
+        sb.AppendLine("     { file: \"...\", change: \"Add _fifteenMinuteTimer field declaration after the last existing timer field\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Initialize _fifteenMinuteTimer in the constructor after existing timer initializations\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Add RunFifteenMinuteTasks method after the last existing RunXxxTasks method\" }");
         sb.AppendLine("   ]");
         sb.AppendLine("3. If needsDecoupling, provide decoupledSteps as an array of {file, change} objects.");
         sb.AppendLine();
@@ -3437,18 +3458,25 @@ public class AgentController : ControllerBase
         // Quick heuristic: only check steps whose description suggests multiple actions
         var ch = (step.Change ?? "").ToLowerInvariant();
         var hasMultipleConcerns =
-            ch.Contains(" and ") || ch.Contains(" & ") ||
-            ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
-            ch.Contains(" move ") || ch.StartsWith("move ") ||
-            // property/field combined with method/logic
-            (ch.ContainsAny("propert", "field", "variable", "global") &&
-             ch.ContainsAny("method", "function", "logic", "implement", "handler", "control")) ||
-            // "add X, implement Y" style
-            Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
-            // pagination / navigation / sort with controls
-            Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
-            // more than one comma-separated noun phrase
-            (ch.Split(',').Length >= 3 && ch.Length > 40);
+     ch.Contains(" and ") || ch.Contains(" & ") ||
+     ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
+     ch.Contains(" move ") || ch.StartsWith("move ") ||
+     ch.Contains(" then ") || ch.StartsWith("then ") ||
+     // property/field combined with method/logic/constructor
+     (ch.ContainsAny("propert", "field", "variable", "global") &&
+      ch.ContainsAny("method", "function", "logic", "implement", "handler", "control", "constructor", "init")) ||
+     // constructor combined with method
+     (ch.Contains("constructor") && ch.ContainsAny("method", "function", "handler", "task")) ||
+     // "add X then add Y" or "add X, then add Y" chaining pattern
+     Regex.IsMatch(ch, @"\b(add|create|implement|initialize)\b.{5,80}\bthen\b.{0,80}\b(add|create|implement|initialize)\b") ||
+     // "add X, implement Y" style
+     Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
+     // field + constructor pattern (e.g., "add field and initialize in constructor")
+     (ch.ContainsAny("field", "propert") && ch.ContainsAny("constructor", "init")) ||
+     // pagination / navigation / sort with controls
+     Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
+     // more than one comma-separated noun phrase
+     (ch.Split(',').Length >= 3 && ch.Length > 40);
         if (!hasMultipleConcerns) return null;
 
         var relPath = step.File.Replace('\\', '/');
@@ -3468,6 +3496,23 @@ public class AgentController : ControllerBase
         sb.AppendLine("  - Changing logic AND adding UI elements");
         sb.AppendLine("  - Adding a backend endpoint AND frontend code");
         sb.AppendLine("  - WRAPPING content in a new container/tag (needs open + close = 2 edits)");
+        sb.AppendLine("  - SAME-FILE MULTI-LOCATION: Adding a field/property AND initializing it in a");
+        sb.AppendLine("    constructor AND adding a method — these are 3 edits at 3 different locations");
+        sb.AppendLine("    in the same file, each requiring a different anchor and edit strategy.");
+        sb.AppendLine("  - Any step containing 'then' that chains two add/create/implement actions");
+        sb.AppendLine("  - Any step mentioning 2+ of {field, property, constructor, method, handler}");
+        sb.AppendLine();
+        sb.AppendLine("CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
+        sb.AppendLine("LOCATIONS (e.g., add a field at the top of a class, initialize it in the");
+        sb.AppendLine("constructor, add a method at the bottom), that is MULTIPLE distinct edits.");
+        sb.AppendLine("Each sub-step should target a SINGLE LOCATION with a SINGLE edit strategy.");
+        sb.AppendLine();
+        sb.AppendLine("Example: \"Add _timer field and initialize in constructor, then add RunTimerTasks method\"");
+        sb.AppendLine("→ decoupledSteps: [");
+        sb.AppendLine("  { file: \"...\", change: \"Add _timer field declaration after the last existing timer field\" },");
+        sb.AppendLine("  { file: \"...\", change: \"Initialize _timer in the constructor after existing timer initializations\" },");
+        sb.AppendLine("  { file: \"...\", change: \"Add RunTimerTasks method after the last existing RunXxxTasks method\" }");
+        sb.AppendLine("]");
         sb.AppendLine();
         sb.AppendLine("Also check the TARGET FILE CONTENT below: if it introduces new method calls,");
         sb.AppendLine("property references, or component bindings that would need implementation in a");
@@ -3527,7 +3572,7 @@ public class AgentController : ControllerBase
 
         var (raw, _, _) = await CallLlmRawStreaming(
             "You output ONLY valid JSON. Never add explanation.",
-            sb.ToString(), emitSse, ct, TimeSpan.FromSeconds(15), maxTokens: 1024);
+            sb.ToString(), emitSse, ct, TimeSpan.FromSeconds(30), maxTokens: 1024);
 
         if (string.IsNullOrWhiteSpace(raw)) return null;
 
@@ -7147,11 +7192,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   40-69:  File identified but change is vague or approach is uncertain\n" +
         "   0-39:  Unsure which file or what to change.\n" +
         "   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n" +
-         "8. Step sizing: one step may cover one coherent edit in one file or one tightly coupled block. Split only when changes touch different files, have different owners, or need independent verification.\n" +
-         "   BAD (over-combined): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
-         "   GOOD: Two steps — Step 1: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\", Step 2: \"In settings template: bind the existing notification toggle to CalendarNotificationsEnabled\"\n" +
-         "   BAD (too vague): \"Fix the dashboard\"\n" +
-         "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
+        "8. Step sizing: one step may cover one coherent edit in one file or one tightly coupled block. Split when changes touch different files, have different owners, need independent verification, OR target DIFFERENT LOCATIONS within the same file.\n" +
+        "   CRITICAL — SAME-FILE MULTI-LOCATION: Even within a single file, if a step requires editing 2+ separate locations (e.g., add a field at the top of a class, initialize it in the constructor, AND add a new method at the bottom), that is MULTIPLE steps. Each location requires a different edit strategy and anchor, so combining them causes the editor to attempt full-class rewrites instead of targeted edits.\n" +
+        "   BAD (over-combined, SAME FILE): \"Add a _timer field and initialize it in the constructor, then add a RunTimerTasks method\"\n" +
+        "   GOOD (3 steps, SAME FILE): Step 1: \"Add _timer field declaration after the last existing timer field\", Step 2: \"Initialize _timer in the constructor after existing timer initializations\", Step 3: \"Add RunTimerTasks method after the last existing RunXxxTasks method\"\n" +
+        "   BAD (over-combined, CROSS-FILE): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
+        "   GOOD: Two steps — Step 1: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\", Step 2: \"In settings template: bind the existing notification toggle to CalendarNotificationsEnabled\"\n" +
+        "   BAD (too vague): \"Fix the dashboard\"\n" +
+        "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
+        "   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n" +
          "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
         "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
         "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
