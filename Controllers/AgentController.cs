@@ -7184,6 +7184,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "  ]\n" +
         "}";
 
+    /// <summary>Check if user prompt describes a visual layout/positioning task that needs CSS.</summary>
+    private static bool IsVisualLayoutTask(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        var p = prompt.ToLowerInvariant();
+        return p.Contains("position") || p.Contains("layout") || p.Contains("align") ||
+               p.Contains("margin") || p.Contains("padding") || p.Contains("spacing") ||
+               p.Contains("move ") || p.Contains("overlap") || p.Contains("z-index") ||
+               p.Contains("zindex") || p.Contains("float") || p.Contains("sticky") ||
+               p.Contains("fixed ") || p.Contains("absolute") || p.Contains("relative") ||
+               p.Contains("grid") || p.Contains("flex") || p.Contains("width") ||
+               p.Contains("height") || p.Contains("size") || p.Contains("overflow");
+    }
+
+    private static bool IsStylesheetPath(string file)
+    {
+        var ext = Path.GetExtension(file ?? "").ToLowerInvariant();
+        return ext is ".css" or ".scss" or ".sass" or ".less" or ".styl";
+    }
+
     /// <summary>Quick LLM validation of plan steps before execution. Returns null if valid, or a reason string if invalid.</summary>
     private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
     {
