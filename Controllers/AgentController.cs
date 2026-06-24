@@ -1998,8 +1998,8 @@ public class AgentController : ControllerBase
         // through, skip it instead of entering a no-op retry loop.
         if (string.IsNullOrWhiteSpace(step.NewString) && !string.IsNullOrWhiteSpace(step.OldString))
         {
-            var changeLower = (step.Change ?? "").Trim().ToLowerInvariant();
-            if (_verifyPrefixes.Any(p => changeLower.StartsWith(p)))
+            var changeLower2 = (step.Change ?? "").Trim().ToLowerInvariant();
+            if (_verifyPrefixes.Any(p => changeLower2.StartsWith(p)))
             {
                 var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
                 if (content.Contains(oldStr, StringComparison.Ordinal))
