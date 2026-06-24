@@ -597,10 +597,12 @@ public class AgentController : ControllerBase
         {
             // ── C# (Roslyn AST) ────────────────────────────────────────────────────
             ".cs" => ("brace", true,
-                "⚠ C# FILE: USE FORMAT C (targetType/targetName/newCode). " +
-                "This is the ONLY supported format for C# files — oldString/newString WILL fail. " +
-                "INDENTATION: method signature at class-member level, body indented 4 spaces more. " +
-                "To ADD a method use insertAfter:true. To add a PROPERTY use oldString/newString."),
+                "⚠ C# FILE: " +
+                "USE FORMAT C (targetType/targetName/newCode) for FULL METHOD replacements or to ADD a new method (via insertAfter:true). " +
+                "For SMALL targeted edits (1-5 lines, e.g. adding a field/property, changing a return value): " +
+                "USE oldString/newString. This is the ONLY safe way to add properties/fields. " +
+                "Do NOT use targetType='class' to add properties/fields. " +
+                "INDENTATION: method signature at class-member level, body indented 4 spaces more."),
 
             // ── TypeScript / JavaScript ────────────────────────────────────────────
             ".ts" or ".tsx" => ("brace", true,
@@ -1702,9 +1704,9 @@ public class AgentController : ControllerBase
                                 return (null, null, false, null, false,
                                     $"targetType 'class' used without a full class declaration in newCode ({codeLineCount} lines). " +
                                     "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
-                                    "For adding properties/fields, use oldString/newString format instead: " +
-                                    "set oldString to the last 1-2 existing lines before the class closing brace, " +
-                                    "and newString to those lines plus the new property line.", false);
+                                    "For adding properties/fields, YOU MUST USE oldString/newString format instead. " +
+                                    "Set oldString to the last 1-2 existing lines before your insertion point (e.g. `private Timer _dailyTimer;`), " +
+                                    "and set newString to those lines followed by your new line (e.g. `private Timer _dailyTimer;\\n private Timer _fifteenMinuteTimer;`).", false);
                             }
                             if (isClassTarget)
                             {
@@ -1962,7 +1964,21 @@ public class AgentController : ControllerBase
             return (PreEditVerdict.Proceed, "");
 
         var content = AgentUtilities.NormalizeLineEndings(fileContent);
-
+        // Check if the step is trying to "Add" a method that already exists
+        var changeLower = (step.Change ?? "").ToLowerInvariant();
+        if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
+        {
+            var methodMatch = Regex.Match(step.Change, @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
+            if (methodMatch.Success)
+            {
+                var methodName = methodMatch.Groups[1].Value;
+                // Look for the method declaration in the file
+                if (Regex.IsMatch(content, $@"\b(void|Task|async\s+Task|public|private|protected|internal)\s+.*\b{Regex.Escape(methodName)}\s*\(", RegexOptions.IgnoreCase))
+                {
+                    return (PreEditVerdict.AlreadyDone, $"Method '{methodName}' already exists in the file");
+                }
+            }
+        }
         // Already done: newString already exists in the file
         if (!string.IsNullOrWhiteSpace(step.NewString))
         {
