@@ -1722,7 +1722,31 @@ public static class AgentUtilities
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
-
+    /// <summary>
+    /// Collects lines until the opening '(' of a method/constructor signature
+    /// is matched by its closing ')', handling multi-line parameter lists.
+    /// </summary>
+    public static string CollectCompleteSignatureLine(string[] lines)
+    {
+        var sb = new StringBuilder();
+        var depth = 0;
+        var foundParen = false;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(trimmed);
+            foreach (var c in trimmed)
+            {
+                if (c == '(') { depth++; foundParen = true; }
+                else if (c == ')') depth--;
+            }
+            if (foundParen && depth == 0) break;
+            if (foundParen && trimmed.EndsWith('{')) break;
+        }
+        return sb.ToString().Trim();
+    }
     private static string? ExtractField(string text, string fieldName)
     {
         // Match fieldName: followed by content up to the next field name, <<<tag>>>, or end of string

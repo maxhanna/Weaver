@@ -5950,8 +5950,8 @@ public class AgentController : ControllerBase
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")
         {
-            var oldSigLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
-            var newSigLine = newStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+            var oldSigLine = AgentUtilities.CollectCompleteSignatureLine(oldLines);
+            var newSigLine = AgentUtilities.CollectCompleteSignatureLine(newStr.Split('\n'));
             if (LooksLikeMethodDeclaration(oldSigLine) && LooksLikeMethodDeclaration(newSigLine))
             {
                 var oldTokens = ExtractSignatureTokens(oldSigLine);
