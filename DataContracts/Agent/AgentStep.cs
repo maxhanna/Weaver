@@ -16,3 +16,25 @@ public class AgentStep
     public bool? Complete { get; set; }
     public string? Prompt { get; set; }
 }
+
+
+
+/// <summary>
+/// Thrown when a plan step exhausts all retries and replan cycles.
+/// Caught by ExecutePlan to stop further step execution — the task
+/// cannot proceed because a prerequisite step failed.
+/// </summary>
+public class StepFatalException : Exception
+{
+    public string FailedFilePath { get; }
+    public string FailedChangeDescription { get; }
+    public string FailureContext { get; }
+
+    public StepFatalException(string message, string filePath, string changeDesc, string failureContext)
+        : base(message)
+    {
+        FailedFilePath = filePath;
+        FailedChangeDescription = changeDesc;
+        FailureContext = failureContext;
+    }
+}

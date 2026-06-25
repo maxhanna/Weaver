@@ -454,6 +454,22 @@ public class AgentController : ControllerBase
             targetNode = root.DescendantNodes()
                 .OfType<MethodDeclarationSyntax>()
                 .FirstOrDefault(m => string.Equals(m.Identifier.Text, targetName, StringComparison.Ordinal));
+ 
+            if (targetNode == null)
+            {
+                targetNode = root.DescendantNodes()
+                    .OfType<ConstructorDeclarationSyntax>()
+                    .FirstOrDefault(c =>
+                    {
+                        var ct = c.Parent as TypeDeclarationSyntax;
+                        return ct != null && string.Equals(ct.Identifier.Text, targetName, StringComparison.Ordinal);
+                    });
+
+                if (targetNode != null)
+                { 
+                    Console.WriteLine($"[AstResolveEdit] Method '{targetName}' not found — resolved as constructor of class '{targetName}' instead");
+                }
+            }
         }
         else if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
         {
@@ -4714,9 +4730,13 @@ public class AgentController : ControllerBase
             allResults.AddRange(replanResults);
         }
 
-        // ── All replan attempts exhausted — record final failure ───────
+        // ── All replan attempts exhausted — STOP the entire task ───────
+        // A prerequisite step failed. Continuing to the next step would
+        // build on a broken foundation (e.g. field added but constructor
+        // initialization failed → timer is null → NRE at runtime).
+        // Throw so ExecutePlan catches and halts all further execution.
         await EmitLog(emitSse, "error",
-            $"✗ All resolve attempts AND {MaxReplanAttempts} replan cycles failed for {relPath}: {lastErr}",
+            $"✗ FATAL: All resolve attempts AND {MaxReplanAttempts} replan cycles failed for {relPath}: {lastErr}",
             new { failureContext, attemptScores }, ct: ct);
 
         var fail = new Dictionary<string, object?>
@@ -4737,7 +4757,13 @@ public class AgentController : ControllerBase
 
         // Mark step done in boarddata so it won't be retried on restart
         await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
-        return stepIndex + 1;
+
+        // ── THROW: halt ExecutePlan — do NOT continue to next step ──
+        throw new StepFatalException(
+            $"Step failed after {history.Count} attempts and {MaxReplanAttempts} replan cycles: {relPath} — {lastErr}",
+            relPath,
+            step.Change,
+            failureContext);
     }
 
     private async Task PersistBoardDataPlanStepAsync(string? cardId, int planItemIndex, bool emitSse, CancellationToken ct)
@@ -9012,15 +9038,38 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         // Phase 3: Execute
+        // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
         if (emitSse)
         {
             await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
         }
 
-        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
-            steeringContext: steeringContext, attachedFiles: attachedFiles,
-            cardId: cardId);
+        try
+        {
+            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
+                steeringContext: steeringContext, attachedFiles: attachedFiles,
+                cardId: cardId);
+        }
+        catch (StepFatalException ex)
+        {
+            await EmitLog(emitSse, "error",
+                $"⛔ Plan execution halted due to fatal step failure: {ex.Message}", ct: ct);
+
+            if (emitSse)
+            {
+                await SendSse(Response, "fatal", new
+                {
+                    reason = "A plan step failed irrecoverably — execution halted",
+                    failedStep = ex.FailedFilePath,
+                    error = ex.Message
+                }, ct);
+            }
+
+            // Don't proceed to PostExecuteVerify or quality check —
+            // the task is incomplete because a step failed.
+            return (allSteps, plan ?? new AgentPlan());
+        }
 
         // ── Post-execution verification: re-check with LLM that task is 100% complete ──
         var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
@@ -9770,11 +9819,52 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
 
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
-                var prevCount = allResults.Count;
-                stepIndex = await ResolveAndApplyEdit(item, projectRoot, emitSse,
-                    ct, allResults, stepIndex,
-                    prompt, plan,
-                    itemIdx, cardId, attachedFiles);
+                var prevCount = allResults.Count; 
+                try
+                {
+                    stepIndex = await ResolveAndApplyEdit(
+                        item, projectRoot, emitSse, ct, allResults, stepIndex,
+                        prompt: prompt, plan: plan, planItemIndex: itemIdx,
+                        cardId: cardId, attachedFiles: attachedFiles);
+                }
+                catch (StepFatalException ex)
+                {
+                    // ── A step failed irrecoverably — STOP the entire plan ──
+                    // Do NOT continue to the next step. The task is incomplete.
+                    await EmitLog(emitSse, "error",
+                        $"⛔ FATAL STEP FAILURE — halting plan execution. " +
+                        $"Failed step: {ex.FailedFilePath} — {ex.FailedChangeDescription}",
+                        new
+                        {
+                            error = ex.Message,
+                            failedFile = ex.FailedFilePath,
+                            failureContext = ex.FailureContext
+                        }, ct: ct);
+
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "plan-halted", new
+                        {
+                            reason = "A plan step failed irrecoverably",
+                            failedStep = ex.FailedFilePath,
+                            failedChange = ex.FailedChangeDescription,
+                            error = ex.Message,
+                            remainingSteps = planItems.Count - itemIdx - 1
+                        }, ct);
+                    }
+
+                    // Add a summary result so the caller knows we stopped early
+                    allResults.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "plan_halted",
+                        ["status"] = "error",
+                        ["reason"] = $"Fatal step failure: {ex.Message}",
+                        ["failedFile"] = ex.FailedFilePath,
+                        ["remainingSteps"] = planItems.Count - itemIdx - 1
+                    });
+
+                    return; // ── Exit ExecutePlan — no more steps execute ──
+                }
 
                 var stepSkipped = false;
                 string? status = null;
