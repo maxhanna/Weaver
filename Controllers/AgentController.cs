@@ -3482,8 +3482,8 @@ public class AgentController : ControllerBase
         }
         catch (Exception ex)
         {
-            await EmitLog(true, "warn", "Failed to persist step exploration",
-                new { cardId, planItemIndex, error = ex.Message });
+            await EmitLog(true, "error", "Failed to persist step status - halting to prevent data loss", new { cardId, planItemIndex, error = ex.Message });
+            throw;
         }
     }
 
@@ -4889,7 +4889,8 @@ emitSse, ct);
         }
         catch (Exception ex)
         {
-            await EmitLog(true, "warn", "Failed to persist boarddata plan progress", new { cardId, planItemIndex, error = ex.Message });
+            await EmitLog(true, "error", "Failed to persist full plan to boarddata - halting to prevent data loss", new { cardId, error = ex.Message });
+            throw;
         }
     }
 
@@ -8769,7 +8770,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
-        
+
         // Show what was already planned and their results
         if (existingPlan?.Plan?.Count > 0)
         {

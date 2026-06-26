@@ -1,5 +1,5 @@
-﻿using System.Text.Json; 
-using Microsoft.AspNetCore.Mvc; 
+﻿using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 using Weaver.Services;
 
 namespace Weaver.Controllers;
@@ -10,9 +10,6 @@ public class BoardDataController : ControllerBase
 {
     private readonly BoardDataService _svc;
     private readonly ILogger<BoardDataController> _logger;
-
-    // This static lock ensures only ONE save request processes at a time across the whole server.
-    private static readonly SemaphoreSlim _saveLock = new SemaphoreSlim(1, 1);
 
     public BoardDataController(BoardDataService svc, ILogger<BoardDataController> logger)
     {
@@ -50,7 +47,6 @@ public class BoardDataController : ControllerBase
     {
         if (data == null) return BadRequest("Data cannot be null");
 
-        // 1. Serialize JSON before locking (optimization)
         string json;
         try
         {
@@ -63,49 +59,16 @@ public class BoardDataController : ControllerBase
             return BadRequest("Invalid data format");
         }
 
-        // 2. Wait for the Queue (Semaphore)
-        await _saveLock.WaitAsync();
-
         try
         {
-            // 3. Execute the Critical Save (with retries)
-            await SaveWithRetryAsync(json);
+            // BoardDataService now handles its own locking and retries internally
+            await _svc.SaveRawAsync(json);
             return Ok();
         }
-        finally
+        catch (Exception ex)
         {
-            // 4. Release the Queue
-            _saveLock.Release();
-        }
-    }
-
-    private async Task SaveWithRetryAsync(string json)
-    {
-        int retryCount = 0;
-        int maxRetries = 3;
-        int delay = 100;
-
-        while (retryCount < maxRetries)
-        {
-            try
-            {
-                await _svc.SaveRawAsync(json);
-                return; // Success
-            }
-            catch (Exception ex)
-            {
-                retryCount++;
-                _logger.LogWarning(ex, "Save attempt {RetryCount} failed.", retryCount);
-
-                if (retryCount >= maxRetries)
-                {
-                    // We give up. The service has already rolled back the file internally if needed.
-                    throw;
-                }
-
-                await Task.Delay(delay);
-                delay *= 2; // Exponential backoff
-            }
+            _logger.LogError(ex, "Save failed permanently after retries.");
+            return StatusCode(500, "Error saving data");
         }
     }
 }
