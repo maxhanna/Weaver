@@ -3123,13 +3123,22 @@ public class AgentController : ControllerBase
 
         var typeRefs = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match m in Regex.Matches(searchScope,
-            @"(?:new\s+|:\s*|<\s*|,\s*|Task\s*<\s*|ValueTask\s*<\s*)" +
-            @"([A-Z][a-zA-Z0-9]+)" +
-            @"(?:\s*[>\[,;\)]|\s+\w|\s*\{|\s*\?)"))
+     @"(?:public|private|protected|readonly|static)?\s*(?:\w+)\s*:\s*([A-Z][A-Za-z0-9_]+)",
+     RegexOptions.Compiled))
         {
             var name = m.Groups[1].Value;
             if (!skipTypes.Contains(name) && name.Length > 2 &&
                 !serviceSuffixes.Any(s => name.EndsWith(s, StringComparison.Ordinal)))
+                typeRefs.Add(name);
+        }
+
+        // And from generic type parameters
+        foreach (Match m in Regex.Matches(searchScope,
+            @"<\s*([A-Z][A-Za-z0-9_]+)\s*>",
+            RegexOptions.Compiled))
+        {
+            var name = m.Groups[1].Value;
+            if (!skipTypes.Contains(name) && name.Length > 2)
                 typeRefs.Add(name);
         }
 
@@ -3140,9 +3149,12 @@ public class AgentController : ControllerBase
         if (typeRefs.Count == 0 && tableNames.Count == 0)
             return explorationContext;
 
-        var projectFiles = Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+        var typeFileExtensions = new[] { "*.cs", "*.ts", "*.tsx", "*.js", "*.jsx" };
+        var projectFiles = typeFileExtensions
+            .SelectMany(ext => Directory.EnumerateFiles(projectRoot, ext, SearchOption.AllDirectories))
             .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\")
-                     && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\"))
+                     && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\")
+                     && !f.Contains("\\dist\\"))
             .ToList();
 
         // ── 3) Same-table SQL from other files ──────────────────────────────
@@ -3200,7 +3212,8 @@ public class AgentController : ControllerBase
                 {
                     var content = await System.IO.File.ReadAllTextAsync(pf, Encoding.UTF8, ct);
                     if (Regex.IsMatch(content,
-                        $@"(?:class|record|struct)\s+{Regex.Escape(typeName)}\b"))
+                        $@"(?:class|record|struct|interface|type)\s+{Regex.Escape(typeName)}\b",
+                        RegexOptions.IgnoreCase))
                     {
                         var rel = Path.GetRelativePath(projectRoot, pf).Replace('\\', '/');
                         if (alreadyRead.Contains(rel) || alreadyRead.Contains(pf)) continue;
@@ -3278,7 +3291,19 @@ public class AgentController : ControllerBase
         "needed for THIS edit. If the question is already answered by the context, set ready=true.\n" +
         "11. SPACING in refinedChange: where you describe code snippets inline, verify every token is properly " +
         "separated by a space. 'INTERVAL15 MINUTE' is WRONG — it should be 'INTERVAL 15 MINUTE'. " +
-        "Read through your output character-by-character before finalizing.";
+        "Read through your output character-by-character before finalizing." +
+         "12. TYPE CHAIN TRACING (CRITICAL): When the target file references a type (e.g., `FileEntry`), " +
+        "you MUST read that type's definition file. If that type has properties referencing OTHER " +
+        "custom types (e.g., `romMetadata?: RomMetadata`), you MUST read those type definitions too. " +
+        "Do NOT assume you know the data structure — VERIFY it by reading the actual class/interface. " +
+        "This is especially important when the change involves data that lives in nested type properties. " +
+        "Example: if the task is about 'image previews' and the component uses FileEntry, you must read " +
+        "FileEntry.ts, discover it has romMetadata?: RomMetadata, then read RomMetadata.ts to see " +
+        "screenshotsJson, artworksJson, coverUrl — those are where image URLs actually live.\n" +
+        "13. DATA SOURCE VERIFICATION: Before declaring ready=true, state explicitly in refinedChange " +
+        "WHERE the data being modified comes from. Example: 'Images come from FileEntry.romMetadata." +
+        "screenshotsJson (parsed from JSON string) and romMetadata.coverUrl, NOT from filtering " +
+        "FileEntry objects by file type.' If you cannot state the data source, you are NOT ready.\n";
 
     private static string BuildStepExplorationPrompt(
         PlanStep step,
@@ -3772,6 +3797,12 @@ public class AgentController : ControllerBase
                 projectRoot, relPath, step.Change, explorationContext,
                 new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
                 emitSse, ct);
+            var typeChainContext = await EnrichWithTypeChain(
+projectRoot, relPath, step.Change,
+new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
+emitSse, ct);
+            if (!string.IsNullOrWhiteSpace(typeChainContext))
+                explorationContext += typeChainContext;
         }
 
         if (exploration.LowConfidenceWarning != null)
@@ -7460,19 +7491,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
         "13. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
         "14. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
-         "15. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
-         "For reading project source files use _explore with the relative file path. " +
-         "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
-         "If you don't know which file contains the code, add an _explore step first.\n" +
-         "16. Context and memory discipline: do not ask to read everything. Prefer the smallest file set that proves names, signatures, imports, and local patterns. Use referenceFiles for narrow supporting context rather than extra edit steps.\n" +
-         "17. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
-         "DO NOT re-describe existing functionality as something that needs to be built. " +
-         "BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" " +
-         "(the method already collects events — \"collect\" is wrong). " +
-         "GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" " +
-         "(describes only the missing logic). " +
-         "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n\n" +
-         "### OUTPUT FORMAT ###\n" +
+        "15. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
+        "For reading project source files use _explore with the relative file path. " +
+        "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
+        "If you don't know which file contains the code, add an _explore step first.\n" +
+        "16. Context and memory discipline: do not ask to read everything. Prefer the smallest file set that proves names, signatures, imports, and local patterns. Use referenceFiles for narrow supporting context rather than extra edit steps.\n" +
+        "17. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
+        "DO NOT re-describe existing functionality as something that needs to be built. " +
+        "BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" " +
+        "(the method already collects events — \"collect\" is wrong). " +
+        "GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" " +
+        "(describes only the missing logic). " +
+        "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n\n" +
+        "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
         "  \"summary\": \"one sentence: what this step accomplishes\",\n" +
@@ -7484,7 +7515,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
         "    }\n" +
         "  ]\n" +
-        "}";
+        "}" +
+        "18. DATA FLOW TRACING: Before planning an edit that modifies how data is displayed or accessed, " +
+        "trace WHERE the data comes from. Read type definitions to understand the full data structure. " +
+        "Example: if the task is about 'image preview navigation', don't assume images come from filtering " +
+        "a file list — check the actual type definitions to see if there's a metadata field with " +
+        "screenshot/artwork/cover URLs. Plan your edit based on the ACTUAL data structure, not assumptions.\n" +
+        "19. When the DISCOVERY CONTEXT shows a type reference like `romMetadata?: RomMetadata`, and the " +
+        "task involves data that might live in that nested type, add a _explore step to read the RomMetadata " +
+        "type definition BEFORE planning the edit. You cannot plan correctly without understanding the " +
+        "full data structure.\n";
 
     /// <summary>Check if user prompt describes a visual layout/positioning task that needs CSS.</summary>
     private static bool IsVisualLayoutTask(string prompt)
@@ -12972,6 +13012,135 @@ Respond with JSON only:
         }
 
         return string.Join("\n", lines);
+    }
+    /// <summary>
+    /// Recursively follows type references from a discovered type definition.
+    /// If FileEntry has a property of type RomMetadata, this finds and includes
+    /// RomMetadata's definition too (up to 3 levels deep).
+    /// </summary>
+    private async Task<string> EnrichWithTypeChain(
+        string projectRoot,
+        string relPath,
+        string stepChange,
+        HashSet<string> alreadyRead,
+        bool emitSse,
+        CancellationToken ct,
+        int maxDepth = 3)
+    {
+        var buf = new StringBuilder();
+        const int MaxEnrichChars = 6000;
+        var discoveredTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var typesToFollow = new Queue<(string typeName, int depth)>();
+
+        // ── Seed: extract type references from the TARGET file ──
+        var targetFullPath = Path.GetFullPath(
+            Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!System.IO.File.Exists(targetFullPath)) return "";
+
+        var targetContent = await System.IO.File.ReadAllTextAsync(targetFullPath, Encoding.UTF8, ct);
+
+        // Extract all referenced type names from the target file
+        // (property declarations like `fileEntry: FileEntry`, `romMetadata: RomMetadata`)
+        var typeRefPattern = new Regex(
+            @"(?::\s*)([A-Z][A-Za-z0-9_]+)(?:\[\])?(?:\s*[;=})|])",
+            RegexOptions.Compiled);
+
+        foreach (Match m in typeRefPattern.Matches(targetContent))
+        {
+            var typeName = m.Groups[1].Value;
+            if (!_builtInTypes.Contains(typeName) && typeName.Length > 2)
+            {
+                typesToFollow.Enqueue((typeName, 0));
+            }
+        }
+
+        // Also extract type refs from the step change description itself
+        foreach (Match m in Regex.Matches(stepChange, @"\b([A-Z][A-Za-z0-9_]+)\b"))
+        {
+            var typeName = m.Groups[1].Value;
+            if (!_builtInTypes.Contains(typeName) && typeName.Length > 2)
+            {
+                typesToFollow.Enqueue((typeName, 0));
+            }
+        }
+
+        var typeFileExtensions = new[] { ".cs", ".ts", ".tsx", ".js", ".jsx" };
+        var allProjectFiles = typeFileExtensions
+            .SelectMany(ext => Directory.EnumerateFiles(projectRoot, ext, SearchOption.AllDirectories))
+            .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\")
+                     && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\")
+                     && !f.Contains("\\dist\\"))
+            .ToList();
+
+        // ── BFS through the type graph ──
+        while (typesToFollow.Count > 0 && buf.Length < MaxEnrichChars)
+        {
+            var (typeName, depth) = typesToFollow.Dequeue();
+            if (depth > maxDepth) continue;
+            if (discoveredTypes.Contains(typeName)) continue;
+            if (_builtInTypes.Contains(typeName)) continue;
+            discoveredTypes.Add(typeName);
+
+            // Find the file that defines this type
+            string? definingFile = null;
+            string? definingContent = null;
+            foreach (var pf in allProjectFiles)
+            {
+                try
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(pf, Encoding.UTF8, ct);
+                    if (Regex.IsMatch(content,
+                        $@"(?:export\s+)?(?:abstract\s+)?(?:class|interface|type|record|struct)\s+{Regex.Escape(typeName)}\b",
+                        RegexOptions.IgnoreCase))
+                    {
+                        definingFile = pf;
+                        definingContent = content;
+                        break;
+                    }
+                }
+                catch { continue; }
+            }
+
+            if (definingFile == null || definingContent == null) continue;
+
+            var rel = Path.GetRelativePath(projectRoot, definingFile).Replace('\\', '/');
+            if (alreadyRead.Contains(rel)) continue;
+            alreadyRead.Add(rel);
+
+            // Extract the type definition (the class/interface body)
+            var excerpt = AgentUtilities.ExtractRelevantExcerpt(definingContent, typeName, null, 1500);
+            buf.AppendLine($"### {rel}  (type: {typeName}, depth: {depth})");
+            buf.AppendLine("```");
+            buf.AppendLine(excerpt);
+            buf.AppendLine("```");
+            buf.AppendLine();
+
+            // ── If not at max depth, look for NESTED type references in this type ──
+            // This is the key: FileEntry has romMetadata?: RomMetadata → enqueue RomMetadata
+            if (depth < maxDepth && !string.IsNullOrEmpty(excerpt))
+            {
+                foreach (Match m in typeRefPattern.Matches(excerpt))
+                {
+                    var nestedType = m.Groups[1].Value;
+                    if (!discoveredTypes.Contains(nestedType) &&
+                        !_builtInTypes.Contains(nestedType) &&
+                        nestedType.Length > 2)
+                    {
+                        typesToFollow.Enqueue((nestedType, depth + 1));
+                    }
+                }
+            }
+        }
+
+        if (buf.Length == 0) return "";
+
+        await EmitLog(emitSse, "info",
+            $"  🔗 Type-chain enrichment: discovered {discoveredTypes.Count} type(s) " +
+            $"[{string.Join(", ", discoveredTypes.Take(8))}]", ct: ct);
+
+        return "\n### AUTO-ENRICHED TYPE CONTEXT (followed type references recursively)\n" +
+               "⚠ These type definitions show EXACT property names. Use ONLY these property names in your edit.\n" +
+               buf.ToString();
     }
     /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
     private static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
