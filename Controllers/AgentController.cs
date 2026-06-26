@@ -163,7 +163,10 @@ public class AgentController : ControllerBase
             "23. OBJECT LITERAL PROPERTIES: NEVER add a property to an object that already has that property. " +
                 "If the change requires updating an existing property (like a template literal or backtick string), " +
                 "you MUST include the entire existing property in oldString and output the MODIFIED version in newString. " +
-                "Do NOT output a second property with the same name — that creates invalid code and will be rejected.";
+                "Do NOT output a second property with the same name — that creates invalid code and will be rejected. " +
+            "24. HALLUCINATED PROPERTIES: NEVER invent a property by pluralizing or modifying the name of an existing property (e.g., using `this.imageUrls` when `this.imageUrl` exists). " +
+                "If you need to iterate over multiple items but only a single property exists, adapt your logic to use the existing property, or explicitly declare the new property in the same edit. " +
+                "Every `.propertyName` you access MUST exactly match a property defined in the file content or declared in your newString.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -4029,6 +4032,12 @@ emitSse, ct);
                     wipeReason = DetectDuplicatePropertyAddition(oldStr!, newStr!);
                 }
 
+                // ── Hallucinated property guard ──
+                if (wipeReason == null)
+                {
+                    wipeReason = DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath);
+                }
+
                 if (wipeReason != null)
                 {
                     await EmitLog(emitSse, "warn",
@@ -6235,6 +6244,7 @@ emitSse, ct);
             "Exception","InvalidOperationException","ArgumentException","Guid",
             "DateTime","TimeSpan","StringBuilder","Regex","Encoding","JsonSerializer",
             "Path","File","Directory","Environment","Math","Random","CancellationToken",
+            "length", // Added to prevent false positives in the hallucinated property guard
         };
         if (builtins.Contains(name)) return true;
 
@@ -13710,6 +13720,67 @@ Respond with JSON only:
             }
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
+    }
+    /// <summary>
+    /// Detects when the LLM hallucinates a property by using a slightly modified name
+    /// of an existing property (e.g., using `this.imageUrls` when `this.imageUrl` exists).
+    /// </summary>
+    private static string? DetectHallucinatedProperties(string oldStr, string newStr, string fileContent, string relPath)
+    {
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        if (ext is not (".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")) return null;
+
+        var newProps = new HashSet<string>(StringComparer.Ordinal);
+        // Match .X in this.X or obj.X
+        foreach (Match m in Regex.Matches(newStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
+        {
+            var name = m.Groups[1].Value;
+            if (!IsBuiltinIdentifier(name)) newProps.Add(name);
+        }
+
+        var oldProps = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(oldStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
+        {
+            oldProps.Add(m.Groups[1].Value);
+        }
+
+        var introducedProps = newProps.Except(oldProps).ToList();
+        var trulyInvented = new List<string>();
+
+        // Split file content into words once
+        var fileWords = new HashSet<string>(fileContent.Split(new[] { ' ', '\n', '\r', '\t', '.', ';', ',', '(', ')', '[', ']', '{', '}', '<', '>', '=', '!', '?', '|', '&', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries));
+
+        foreach (var prop in introducedProps)
+        {
+            // Check if it's declared in newStr (e.g. "imagePreviews: FileEntry[]")
+            if (Regex.IsMatch(newStr, $@"\b{Regex.Escape(prop)}\s*[:=]")) continue;
+
+            // Check if it exists anywhere in the file content
+            if (fileWords.Contains(prop)) continue;
+
+            // Check if it's a pluralized/singularized version of an existing property
+            var existingSimilar = fileWords.FirstOrDefault(w =>
+                (w.Length > 3) &&
+                ((w + "s" == prop) || (w + "es" == prop) ||
+                 (prop + "s" == w) || (prop + "es" == w) ||
+                 (w + "Array" == prop) || (w + "List" == prop) ||
+                 (prop + "Array" == w) || (prop + "List" == w)));
+
+            if (existingSimilar != null)
+            {
+                trulyInvented.Add($"{prop} (did you mean '{existingSimilar}'?)");
+            }
+        }
+
+        if (trulyInvented.Count > 0)
+        {
+            var preview = string.Join(", ", trulyInvented.Take(5));
+            return $"HALLUCINATED PROPERTY — newString references [{preview}] which do NOT appear anywhere in {relPath}. " +
+                   "The LLM invented properties by modifying the name of existing properties (e.g., pluralizing). " +
+                   "Use ONLY properties that already appear in the file. If you need a collection, check if the existing singular property can be used, or explicitly declare the new property in the same edit.";
+        }
+
+        return null;
     }
 
     private static void AppendPlanToConversation(StringBuilder conversation, List<PlanStep> steps, int startIndex, int totalCount)
