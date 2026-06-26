@@ -6414,7 +6414,177 @@ public class AgentController : ControllerBase
         }
         return sb.ToString();
     }
+    /// <summary>
+    /// Checks the plan as a whole: every symbol a step REFERENCES (method, property,
+    /// array, variable) must either exist in the CURRENT file content or be INTRODUCED
+    /// by a PRIOR step. Catches cross-step name mismatches and missing initializations
+    /// before execution starts.
+    /// </summary>
+    private async Task<AgentPlan> RunPlanCoherenceCheckAsync(
+        AgentPlan plan,
+        string projectRoot,
+        string originalPrompt,
+        bool emitSse,
+        CancellationToken ct)
+    {
+        if (plan?.Plan == null || plan.Plan.Count < 2) return plan!;
 
+        var sb = new StringBuilder();
+        sb.AppendLine(
+            "You are checking whether a code-change plan is coherent AS A WHOLE — not step by step, " +
+            "but as a chain. A plan is coherent when every symbol a step REFERENCES (methods, properties, " +
+            "arrays, variables) is either:\n" +
+            "  (a) already present in the file's CURRENT content, OR\n" +
+            "  (b) explicitly INTRODUCED by a PRIOR step in the same plan.\n" +
+            "Name mismatches count as gaps: if the HTML references `selectedImageIndex` but a TS step " +
+            "adds `imagePreviewIndex`, that is a gap — they are different names.");
+        sb.AppendLine();
+        sb.AppendLine("## ORIGINAL TASK");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+
+        // Load current content of every file the plan touches
+        sb.AppendLine("## CURRENT FILE CONTENTS");
+        var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var step in plan.Plan)
+        {
+            if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File)) continue;
+            if (!loaded.Add(step.File)) continue;
+            var fp = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fp)) continue;
+            var content = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
+            sb.AppendLine($"### {step.File} (current — before this plan runs)");
+            sb.AppendLine("```");
+            sb.AppendLine(content.Length > 4000 ? content[..4000] + "\n// ... truncated" : content);
+            sb.AppendLine("```");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("## PLAN TO CHECK");
+        for (var i = 0; i < plan.Plan.Count; i++)
+            sb.AppendLine($"Step {i + 1}: [{plan.Plan[i].File}] {plan.Plan[i].Change}");
+        sb.AppendLine();
+
+        sb.AppendLine("## INSTRUCTIONS");
+        sb.AppendLine("For each step, identify:");
+        sb.AppendLine("  introduces: the specific symbol NAMES this step will ADD (e.g. `imagePreviews: FileEntry[]`, `nextImage()`)");
+        sb.AppendLine("  requires:   the specific symbol NAMES this step REFERENCES that must already exist");
+        sb.AppendLine();
+        sb.AppendLine("Then check every 'requires' entry against (a) current file content and (b) prior steps' 'introduces'.");
+        sb.AppendLine("A mismatch in NAME is a gap — `selectedImageIndex` ≠ `imagePreviewIndex`.");
+        sb.AppendLine();
+        sb.AppendLine("If coherent: {\"coherent\": true, \"gaps\": []}");
+        sb.AppendLine("If not coherent:");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"coherent\": false,");
+        sb.AppendLine("  \"gaps\": [");
+        sb.AppendLine("    {\"afterStep\": 1, \"missing\": \"imagePreviews array\", \"usedBy\": \"Step 3 nextImage() and HTML template\"},");
+        sb.AppendLine("    {\"afterStep\": 1, \"missing\": \"selectedImageIndex\", \"usedBy\": \"HTML *ngIf and Step 3\"}");
+        sb.AppendLine("  ],");
+        sb.AppendLine("  \"correctedPlan\": [");
+        sb.AppendLine("    {\"file\": \"...\", \"change\": \"...\"}");
+        sb.AppendLine("  ]");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("correctedPlan must include ALL original steps PLUS new insertion steps in the correct order.");
+        sb.AppendLine("Use the SAME property/method names consistently across all steps.");
+        sb.AppendLine("Output ONLY JSON — no markdown, no explanation.");
+
+        var (raw, _, err) = await CallLlmRaw(
+            "You check code-change plan coherence across steps. Output ONLY valid JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(45), maxTokens: 2048);
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Plan coherence check skipped: {err ?? "empty response"}", ct: ct);
+            return plan;
+        }
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+
+            var coherent = root.TryGetProperty("coherent", out var cEl) && cEl.GetBoolean();
+            if (coherent)
+            {
+                await EmitLog(emitSse, "info", "Plan coherence: ✓ steps form a coherent chain", ct: ct);
+                return plan;
+            }
+
+            // Log every gap
+            var gapSummaries = new List<string>();
+            if (root.TryGetProperty("gaps", out var gapsEl) && gapsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var gap in gapsEl.EnumerateArray())
+                {
+                    var afterStep = gap.TryGetProperty("afterStep", out var asEl) ? asEl.GetInt32() : -1;
+                    var missing = gap.TryGetProperty("missing", out var miEl) ? miEl.GetString() : "?";
+                    var usedBy = gap.TryGetProperty("usedBy", out var ubEl) ? ubEl.GetString() : "";
+                    var msg = $"gap after step {afterStep}: '{missing}'" +
+                              (string.IsNullOrWhiteSpace(usedBy) ? "" : $" — needed by: {usedBy}");
+                    gapSummaries.Add(msg);
+                    await EmitLog(emitSse, "warn", $"Plan coherence {msg}", ct: ct);
+                }
+            }
+
+            // Apply the corrected plan if it's at least as large as the original
+            if (root.TryGetProperty("correctedPlan", out var cpArr) && cpArr.ValueKind == JsonValueKind.Array)
+            {
+                var corrected = new List<PlanStep>();
+                foreach (var el in cpArr.EnumerateArray())
+                {
+                    var file = el.TryGetProperty("file", out var f) ? f.GetString() : null;
+                    var change = el.TryGetProperty("change", out var c) ? c.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change)) continue;
+                    corrected.Add(new PlanStep
+                    {
+                        File = file,
+                        Change = change,
+                        Priority = plan.Plan.FirstOrDefault(p =>
+                            string.Equals(p.File, file, StringComparison.OrdinalIgnoreCase))?.Priority ?? 1
+                    });
+                }
+
+                if (corrected.Count >= plan.Plan.Count)
+                {
+                    var added = corrected.Count - plan.Plan.Count;
+                    await EmitLog(emitSse, "info",
+                        $"Plan coherence: inserted {added} missing step(s) to close {gapSummaries.Count} gap(s)", ct: ct);
+                    plan.Plan = corrected;
+
+                    if (emitSse)
+                        await SendSse(Response, "plan", new
+                        {
+                            thinking = $"Coherence check found {gapSummaries.Count} gap(s) — inserted {added} step(s)",
+                            summary = plan.Summary,
+                            items = plan.Plan
+                        }, ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Plan coherence: corrected plan ({corrected.Count} steps) is smaller than original " +
+                        $"({plan.Plan.Count}) — keeping original to avoid data loss", ct: ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", $"Plan coherence check parse error: {ex.Message}", ct: ct);
+        }
+
+        return plan;
+    }
     // ════════════════════════════════════════════════════════════════════════
     //  CSS DUPLICATE-SELECTOR MERGE
     // ════════════════════════════════════════════════════════════════════════
@@ -9037,7 +9207,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
 
-        // Phase 3: Execute
+        // Phase 2.95: Plan Coherence Check — verify steps form a coherent chain
+        // (each step's references must be satisfied by existing code or a prior step)
+        if (plan?.Plan?.Count > 1)
+        {
+            plan = await RunPlanCoherenceCheckAsync(
+                plan, projectRoot, prompt, emitSse, ct);
+            if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
+                await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
+                    summary: plan.Summary ?? "", score: plan.Score);
+        }
+        
         // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
         if (emitSse)
