@@ -1501,9 +1501,23 @@ public class AgentController : ControllerBase
                             sb.AppendLine($"  {hint}");
                         }
                     }
+                    // Show the verbatim target section from the file based on change description keywords.
+                    // This catches the failure where the LLM copies structure from the WRONG section
+                    // (e.g. another popup with a similar class name) rather than the actual target.
+                    var targetSectionHint = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change, 10);
+                    if (!string.IsNullOrWhiteSpace(targetSectionHint))
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("  ⚡ ACTUAL TARGET SECTION (verbatim lines near your intended edit):");
+                        sb.AppendLine("  Pick the MOST UNIQUE single line below as your ENTIRE oldString — copy it character-for-character:");
+                        sb.AppendLine("  ```");
+                        foreach (var tLine in targetSectionHint.Split('\n'))
+                            sb.AppendLine($"  {tLine}");
+                        sb.AppendLine("  ```");
+                    }
                 }
                 else if (h.error.Contains("FORMAT C failed", StringComparison.OrdinalIgnoreCase) || h.error.Contains("not found in file", StringComparison.OrdinalIgnoreCase))
-                {
+                { 
                     sb.AppendLine("  You used FORMAT C but the symbol was not found. " +
                                   "This file has no named methods/classes for FORMAT C to target. " +
                                   "Switch to oldString/newString: copy the EXACT lines from the file content, " +
@@ -1582,16 +1596,41 @@ public class AgentController : ControllerBase
             }
             else // history.Count >= 3
             {
-                sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
-                sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
-                sb.AppendLine("  • Look at the FILE CONTENT block. Identify the line numbers of the region to replace.");
-                sb.AppendLine("  • Output a JSON object with this exact shape:");
-                sb.AppendLine("    {");
-                sb.AppendLine("      \"fullFile\": [\"...entire file content with your changes applied...\"]");
-                sb.AppendLine("    }");
-                sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
-                sb.AppendLine("    Do NOT omit any lines — this is a full-file replacement.");
-                sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte")
+                {
+                    // fullFile is blocked for HTML — the LLM hallucinates wrong component structure.
+                    // Force a pinpoint single-line anchor instead.
+                    sb.AppendLine("  STRATEGY: HTML_PINPOINT — fullFile is BLOCKED for HTML/Angular templates.");
+                    sb.AppendLine("  The LLM generates wrong component structure when given fullFile for Angular. Instead:");
+                    sb.AppendLine("  1. Look at the TARGET SECTION shown in the history above.");
+                    sb.AppendLine("  2. Pick the SINGLE most unique line there (longest, appears only ONCE in the whole file).");
+                    sb.AppendLine("  3. Use that one line VERBATIM as your entire oldString (≥20 chars).");
+                    sb.AppendLine("  4. In newString: include that unchanged line, then add your new elements around it.");
+                    sb.AppendLine("  ⚠ Do NOT use <div class=\"popupPanelActions\"> alone — it appears multiple times. Use a more specific line.");
+                    sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected.");
+                    var targetSectionForEscalation = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change, 8);
+                    if (targetSectionForEscalation != null)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("  TARGET SECTION — pick the single most unique line here as your ENTIRE oldString:");
+                        sb.AppendLine("  ```html");
+                        sb.AppendLine(targetSectionForEscalation);
+                        sb.AppendLine("  ```");
+                    }
+                }
+                else
+                {
+                    sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
+                    sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
+                    sb.AppendLine("  • Look at the FILE CONTENT block. Identify the line numbers of the region to replace.");
+                    sb.AppendLine("  • Output a JSON object with this exact shape:");
+                    sb.AppendLine("    {");
+                    sb.AppendLine("      \"fullFile\": [\"...entire file content with your changes applied...\"]");
+                    sb.AppendLine("    }");
+                    sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
+                    sb.AppendLine("    Do NOT omit any lines — this is a full-file replacement.");
+                    sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                }
             }
             sb.AppendLine();
         }
@@ -3856,17 +3895,19 @@ public class AgentController : ControllerBase
             if (fullFile && fullContent != null)
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
-                // fullFile for EXISTING files is normally rejected — the LLM
-                // should use targeted oldString/newString edits. BUT the strategy
-                // ladder in ResolveEditForStep escalates to fullFile after 3+
-                // failed attempts (see "STRATEGY: LINE_RANGE_REPLACEMENT" in
-                // the prompt). In that case, allow the fullFile replacement
-                // through — it's the only way to escape a stuck oldString loop.
-                var allowFullFileEscalation = history.Count >= 3 && fileAlreadyExists;
+                // HTML/Angular templates are never allowed fullFile escalation — the LLM
+                // hallucinates the wrong component structure (e.g. invents a table layout
+                // instead of copying the actual Angular template content).
+                var fullFileExt = Path.GetExtension(relPath).ToLowerInvariant();
+                var allowFullFileEscalation = history.Count >= 3 && fileAlreadyExists
+                    && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte");
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
-                    var e = "LLM incorrectly used fullFile for existing file — " +
-                            "use oldString/newString targeted edits only";
+                    var e = fullFileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"
+                        ? "fullFile is BLOCKED for HTML/Angular template files — the LLM generates wrong component structure. " +
+                          "Use a single unique line from the TARGET SECTION as your ENTIRE oldString (must appear only once in the file, ≥20 chars). " +
+                          "Look at the ⚡ ACTUAL TARGET SECTION shown in the history above."
+                        : "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
                     continue;
@@ -11609,7 +11650,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     case "web": case "web_search": case "web_fetch": await ExecuteWebStep(step, result); break;
                     default: result["status"] = "error"; result["error"] = $"Unknown step type: {step.Type}"; break;
                 }
-                await EmitLog(true, "log", "Raw Step Result", result, ct);
+                await EmitLog(true, "log", $"Raw {step.Type?.ToLowerInvariant()} Result", result, ct);
             }
             catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
             result["status"] = AgentUtilities.NormalizeUiStatus(result["status"]?.ToString());

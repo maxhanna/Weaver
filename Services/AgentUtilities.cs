@@ -1747,6 +1747,45 @@ public static class AgentUtilities
         }
         return sb.ToString().Trim();
     }
+
+    /// <summary>
+    /// Extracts the verbatim file section most relevant to the change description using
+    /// keyword matching. Used to show the LLM the ACTUAL target section when its oldString
+    /// matched a different section of the file (e.g. another popup with a similar structure).
+    /// </summary>
+    public static string? ExtractVerbatimTargetSection(
+        string fileContent, string changeDesc, int contextLines = 10)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent) || string.IsNullOrWhiteSpace(changeDesc))
+            return null;
+
+        var words = changeDesc.ToLowerInvariant()
+            .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';' },
+                   StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length >= 4)
+            .Distinct()
+            .ToList();
+
+        if (words.Count == 0) return null;
+
+        var lines = fileContent.Split('\n');
+        var bestIdx = -1;
+        var bestScore = -1;
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var lineLower = lines[i].ToLowerInvariant();
+            var score = words.Sum(w => lineLower.Contains(w) ? 1 : 0);
+            if (score > bestScore) { bestScore = score; bestIdx = i; }
+        }
+
+        if (bestIdx < 0 || bestScore == 0) return null;
+
+        var start = Math.Max(0, bestIdx - contextLines);
+        var end = Math.Min(lines.Length - 1, bestIdx + contextLines);
+        return string.Join("\n", lines[start..(end + 1)]);
+    }
+
     private static string? ExtractField(string text, string fieldName)
     {
         // Match fieldName: followed by content up to the next field name, <<<tag>>>, or end of string
