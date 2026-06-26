@@ -1186,7 +1186,8 @@ public class AgentController : ControllerBase
           List<(string old, string @new, string error)>? history = null,
           string? explorationContext = null,
           string? targetSymbol = null,
-          string? originalPrompt = null)
+          string? originalPrompt = null,
+          string? preservationDirective = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -1215,7 +1216,15 @@ public class AgentController : ControllerBase
 
         sb.AppendLine($"FILE: {relPath}");
         sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
-
+        // INJECT PRESERVATION DIRECTIVE FROM SUB-AGENT
+        if (!string.IsNullOrWhiteSpace(preservationDirective))
+        {
+            sb.AppendLine();
+            sb.AppendLine("🛡️ MANDATORY PRESERVATION DIRECTIVE (from Sub-Agent Analysis)");
+            sb.AppendLine(preservationDirective);
+            sb.AppendLine("⚠ You MUST adhere to this directive. Do NOT invent new logic if the directive tells you to reuse existing patterns. Your edit will be rejected if you break these constraints.");
+            sb.AppendLine();
+        }
         sb.AppendLine("⚠ RULE: REPLACE existing code — do NOT add new alongside existing. " +
                       "If the change says \"instead of X use Y\", modify X to become Y. " +
                       "Do NOT keep the old X and also add Y next to it. " +
@@ -3821,7 +3830,15 @@ emitSse, ct);
                 planItemIndex
             }, ct);
         }
-
+        // ── Sub-Agent: Preservation & Dependency Analysis ──
+        // Before resolving the edit, check if we are modifying an existing method.
+        // If so, delegate deep inspection to a sub-agent to generate a strict preservation directive.
+        string? preservationDirective = null;
+        if (!string.IsNullOrWhiteSpace(exploration.TargetSymbol))
+        {
+            preservationDirective = await AnalyzePreservationAndDependenciesAsync(
+                step, projectRoot, relPath, exploration.TargetSymbol, explorationContext, emitSse, ct);
+        }
         // Signal "applying" now that exploration is complete
         await PersistStepStatusAsync(cardId, planItemIndex, "applying", emitSse, ct);
 
@@ -3872,11 +3889,12 @@ emitSse, ct);
                 // Pass the rich exploration context so the edit-resolve LLM
                 // has far better information than just the file excerpt
                 (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
-                    await ResolveEditForStep(
-                        step, projectRoot, emitSse, ct, history,
-                        explorationContext: explorationContext,
-                        targetSymbol: exploration.TargetSymbol,
-                        originalPrompt: prompt);
+                await ResolveEditForStep(
+                    step, projectRoot, emitSse, ct, history,
+                    explorationContext: explorationContext,
+                    targetSymbol: exploration.TargetSymbol,
+                    originalPrompt: prompt,
+                    preservationDirective: preservationDirective);
 
                 if (resolveError == null)
                 {
@@ -14264,7 +14282,113 @@ done = build OK; command = run this to fix; ask_user = need input";
         await ExecutePlan(repairPrompt, projectRoot, emitSse, tail, plan, ct, resultSteps,
             steeringContext: repairSteering);
     }
+    /// <summary>
+    /// Sub-agent: Analyzes the target method, its dependencies, and existing logic
+    /// to produce a "Preservation Directive" that ensures the edit reshapes code
+    /// instead of inventing logic or breaking call sites.
+    /// </summary>
+    private async Task<string?> AnalyzePreservationAndDependenciesAsync(
+        PlanStep step, string projectRoot, string relPath, string? targetSymbol,
+        string explorationContext, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(targetSymbol)) return null;
 
+        // 1. Find call sites of the target method in the project
+        var callSites = new List<string>();
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var codeFiles = ext is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx"
+            ? Directory.EnumerateFiles(projectRoot, "*" + ext, SearchOption.AllDirectories)
+                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\"))
+                .ToList()
+            : new List<string>();
+
+        foreach (var file in codeFiles)
+        {
+            try
+            {
+                var content = await System.IO.File.ReadAllTextAsync(file, ct);
+                if (content.Contains(targetSymbol + "(") || content.Contains(targetSymbol + " ("))
+                {
+                    var rel = Path.GetRelativePath(projectRoot, file).Replace('\\', '/');
+                    if (rel != relPath) callSites.Add(rel);
+                }
+            }
+            catch { }
+        }
+
+        // 2. Extract the existing method body (if AST/Regex can find it)
+        var fullPath = Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
+        string? existingMethodBody = null;
+        if (System.IO.File.Exists(fullPath))
+        {
+            var (oldStr, _) = AstResolveEdit(fullPath, "method", targetSymbol);
+            if (!string.IsNullOrWhiteSpace(oldStr))
+            {
+                existingMethodBody = oldStr;
+            }
+        }
+
+        if (existingMethodBody == null && callSites.Count == 0) return null; // Nothing to preserve
+
+        // 3. Prompt the sub-agent
+        var sysPrompt =
+            "You are a Code Preservation and Dependency Analysis Agent. " +
+            "Your job is to analyze an existing method and a proposed change, then output a strict 'PRESERVATION DIRECTIVE'. " +
+            "This directive will be fed to an Editor Agent to ensure it reshapes existing logic rather than inventing new logic or breaking dependencies.\n\n" +
+            "Output ONLY valid JSON: " +
+            "{\"preservationDirective\": \"...\", \"performanceNotes\": \"...\"}\n\n" +
+            "In the directive, explicitly state:\n" +
+            "1. Whether the method signature MUST be preserved (if there are call sites).\n" +
+            "2. What existing logic must be retained (e.g., 'must still return a valid User object').\n" +
+            "3. How the new logic should integrate with the old logic (e.g., 'add the new filter BEFORE the existing loop').";
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## TASK CONTEXT");
+        sb.AppendLine($"File: {relPath}");
+        sb.AppendLine($"Proposed Change: {step.Change}");
+        sb.AppendLine();
+
+        if (existingMethodBody != null)
+        {
+            sb.AppendLine("## EXISTING METHOD IMPLEMENTATION (Target Symbol: " + targetSymbol + ")");
+            sb.AppendLine("```");
+            sb.AppendLine(existingMethodBody.Length > 2000 ? existingMethodBody[..2000] + "..." : existingMethodBody);
+            sb.AppendLine("```");
+            sb.AppendLine();
+        }
+
+        if (callSites.Count > 0)
+        {
+            sb.AppendLine("## DEPENDENCIES / CALL SITES");
+            sb.AppendLine($"This method is called in {callSites.Count} other file(s): {string.Join(", ", callSites.Take(5))}");
+            sb.AppendLine("The method signature and return type MUST be preserved to avoid breaking these files.");
+            sb.AppendLine();
+        }
+
+        var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, sb.ToString(), emitSse, ct,
+            requestTimeout: TimeSpan.FromSeconds(45), maxTokens: 512);
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
+            using var doc = JsonDocument.Parse(cleaned);
+            if (doc.RootElement.TryGetProperty("preservationDirective", out var pdEl))
+            {
+                var directive = pdEl.GetString();
+                if (!string.IsNullOrWhiteSpace(directive))
+                {
+                    await EmitLog(emitSse, "info", $"  🛡️ Preservation Directive generated: {directive}", ct: ct);
+                    return directive;
+                }
+            }
+        }
+        catch { }
+
+        return null;
+    }
     private async Task RunSelfImprovingPipeline(
         string prompt, string projectRoot, List<object> allSteps,
         AgentPlan? plan, bool complete, bool editsApplied)
