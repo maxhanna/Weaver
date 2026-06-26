@@ -8340,60 +8340,71 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
 
         // ── LLM verification of pipeline choice ────────────────────────────
-        var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: terminal commands, web fetches, create/modify files on filesystem (no code editing)\n- UnifiedPipeline: code editing, project source changes\n\nIs this routing correct? If the task has BOTH a data-fetching/filesystem component AND a code-editing component, suggest chaining (CommandExecution first to fetch data and save temp files inside the project, then UnifiedPipeline to edit code using those files).\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
-
-        var (vRaw, _, vErr) = await CallLlmRaw(
-            "You verify task routing. Output only JSON.",
-            verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+        // If the user provided code in the prompt, it's definitely a CodeEdit task.
+        bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
+        if (hasCodeInPrompt && pipelineType != PipelineType.CodeEdit)
+        {
+            await EmitLog(emitSse, "info", $"Code detected in prompt — forcing CodeEdit pipeline", ct: ct);
+            pipelineType = PipelineType.CodeEdit;
+        }
 
         PipelineType? chainedNext = null;
         List<(PipelineType Pipeline, string Summary)>? stages = null;
 
-        if (!string.IsNullOrWhiteSpace(vRaw))
+        if (!hasCodeInPrompt)
         {
-            var vClean = vRaw.Trim();
-            if (vClean.StartsWith("```")) { var m = Regex.Match(vClean, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) vClean = m.Groups[1].Value.Trim(); }
-            try
+            var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: terminal commands, web fetches, create/modify files on filesystem (no code editing)\n- UnifiedPipeline (CodeEdit): code editing, project source changes\n\nIs this routing correct? \n- If the task is purely a code change (e.g., changing UI logic, modifying a component, replacing an icon with an existing property), choose UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n- DO NOT suggest chaining just because the task mentions 'photos' or 'files' that are already part of the project's existing data model.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
+
+            var (vRaw, _, vErr) = await CallLlmRaw(
+                "You verify task routing. Output only JSON.",
+                verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
+
+            if (!string.IsNullOrWhiteSpace(vRaw))
             {
-                using var vDoc = JsonDocument.Parse(vClean, new JsonDocumentOptions { AllowTrailingCommas = true });
-                var vRoot = vDoc.RootElement;
-                var decision = vRoot.TryGetProperty("decision", out var d) ? d.GetString() : null;
-                if (decision == "override" && vRoot.TryGetProperty("pipeline", out var ov))
+                var vClean = vRaw.Trim();
+                if (vClean.StartsWith("```")) { var m = Regex.Match(vClean, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) vClean = m.Groups[1].Value.Trim(); }
+                try
                 {
-                    var overridePipeline = ov.GetString();
-                    pipelineType = overridePipeline?.ToLowerInvariant() switch
+                    using var vDoc = JsonDocument.Parse(vClean, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    var vRoot = vDoc.RootElement;
+                    var decision = vRoot.TryGetProperty("decision", out var d) ? d.GetString() : null;
+                    if (decision == "override" && vRoot.TryGetProperty("pipeline", out var ov))
                     {
-                        "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
-                        "commandexecution" or "command" => PipelineType.CommandExecution,
-                        _ => pipelineType
-                    };
-                    if (pipelineType != (AgentUtilities.ClassifyTask(prompt).Type))
-                        await EmitLog(emitSse, "info", $"LLM override → {pipelineType}", ct: ct);
-                }
-                else if (decision == "chain" && vRoot.TryGetProperty("stages", out var stArr) && stArr.ValueKind == JsonValueKind.Array)
-                {
-                    stages = new List<(PipelineType, string)>();
-                    foreach (var st in stArr.EnumerateArray())
-                    {
-                        var stP = st.TryGetProperty("pipeline", out var sp) ? sp.GetString() : null;
-                        var stSum = st.TryGetProperty("summary", out var ss) ? ss.GetString() : "";
-                        PipelineType? parsed = stP?.ToLowerInvariant() switch
+                        var overridePipeline = ov.GetString();
+                        pipelineType = overridePipeline?.ToLowerInvariant() switch
                         {
                             "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
                             "commandexecution" or "command" => PipelineType.CommandExecution,
-                            _ => null
+                            _ => pipelineType
                         };
-                        if (parsed.HasValue) stages.Add((parsed.Value, stSum ?? ""));
+                        if (pipelineType != (AgentUtilities.ClassifyTask(prompt).Type))
+                            await EmitLog(emitSse, "info", $"LLM override → {pipelineType}", ct: ct);
                     }
-                    if (stages.Count >= 2)
+                    else if (decision == "chain" && vRoot.TryGetProperty("stages", out var stArr) && stArr.ValueKind == JsonValueKind.Array)
                     {
-                        pipelineType = stages[0].Pipeline;
-                        chainedNext = stages[1].Pipeline;
-                        await EmitLog(emitSse, "info", $"LLM chain: {stages[0].Pipeline} → {stages[1].Pipeline}", ct: ct);
+                        stages = new List<(PipelineType, string)>();
+                        foreach (var st in stArr.EnumerateArray())
+                        {
+                            var stP = st.TryGetProperty("pipeline", out var sp) ? sp.GetString() : null;
+                            var stSum = st.TryGetProperty("summary", out var ss) ? ss.GetString() : "";
+                            PipelineType? parsed = stP?.ToLowerInvariant() switch
+                            {
+                                "unifiedpipeline" or "unified" or "codeedit" => PipelineType.CodeEdit,
+                                "commandexecution" or "command" => PipelineType.CommandExecution,
+                                _ => null
+                            };
+                            if (parsed.HasValue) stages.Add((parsed.Value, stSum ?? ""));
+                        }
+                        if (stages.Count >= 2)
+                        {
+                            pipelineType = stages[0].Pipeline;
+                            chainedNext = stages[1].Pipeline;
+                            await EmitLog(emitSse, "info", $"LLM chain: {stages[0].Pipeline} → {stages[1].Pipeline}", ct: ct);
+                        }
                     }
                 }
+                catch { }
             }
-            catch { }
         }
 
         // ── Run pipeline(s) ────────────────────────────────────────────────
