@@ -166,7 +166,10 @@ public class AgentController : ControllerBase
                 "Do NOT output a second property with the same name — that creates invalid code and will be rejected. " +
             "24. HALLUCINATED PROPERTIES: NEVER invent a property by pluralizing or modifying the name of an existing property (e.g., using `this.imageUrls` when `this.imageUrl` exists). " +
                 "If you need to iterate over multiple items but only a single property exists, adapt your logic to use the existing property, or explicitly declare the new property in the same edit. " +
-                "Every `.propertyName` you access MUST exactly match a property defined in the file content or declared in your newString.";
+                "Every `.propertyName` you access MUST exactly match a property defined in the file content or declared in your newString." +
+            "25. PRIOR STEP REUSE: If the PRIOR STEPS CONTEXT section indicates that a method, property, or variable was added in a previous step, you MUST use that exact symbol in your current edit. " +
+                "Do NOT reinvent the logic inline. Do NOT hallucinate alternative property names. " +
+                "For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -457,7 +460,7 @@ public class AgentController : ControllerBase
             targetNode = root.DescendantNodes()
                 .OfType<MethodDeclarationSyntax>()
                 .FirstOrDefault(m => string.Equals(m.Identifier.Text, targetName, StringComparison.Ordinal));
- 
+
             if (targetNode == null)
             {
                 targetNode = root.DescendantNodes()
@@ -469,7 +472,7 @@ public class AgentController : ControllerBase
                     });
 
                 if (targetNode != null)
-                { 
+                {
                     Console.WriteLine($"[AstResolveEdit] Method '{targetName}' not found — resolved as constructor of class '{targetName}' instead");
                 }
             }
@@ -1187,7 +1190,9 @@ public class AgentController : ControllerBase
           string? explorationContext = null,
           string? targetSymbol = null,
           string? originalPrompt = null,
-          string? preservationDirective = null)
+          string? preservationDirective = null,
+          AgentPlan? fullPlan = null,
+          int planItemIndex = -1)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -1212,6 +1217,27 @@ public class AgentController : ControllerBase
                           "For example, if the original request says 'under nicehash bot note', your edit MUST place the text near 'NiceHash'. " +
                           "If it says 'users need kraken api key', your edit MUST include that exact requirement.");
             sb.AppendLine();
+        }
+
+        // ── INJECT PRIOR STEPS CONTEXT ───────────────────────────────────
+        if (fullPlan?.Plan?.Count > 0 && planItemIndex >= 0)
+        {
+            var priorSteps = new StringBuilder();
+            for (var i = 0; i < planItemIndex; i++)
+            {
+                if (i < fullPlan.Plan.Count)
+                {
+                    var p = fullPlan.Plan[i];
+                    priorSteps.AppendLine($"  ✓ Step {i + 1} (DONE): [{p.File}] {p.Change}");
+                }
+            }
+            if (priorSteps.Length > 0)
+            {
+                sb.AppendLine("### PRIOR STEPS CONTEXT (What has already been done in this plan) ###");
+                sb.AppendLine(priorSteps.ToString());
+                sb.AppendLine("⚠ CRITICAL RULE: If a prior step added a new method, property, or variable, you MUST use that EXACT symbol in your current edit. Do NOT reinvent the logic inline. Do NOT hallucinate alternative property names. For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`.");
+                sb.AppendLine();
+            }
         }
 
         sb.AppendLine($"FILE: {relPath}");
@@ -1529,7 +1555,7 @@ public class AgentController : ControllerBase
                     }
                 }
                 else if (h.error.Contains("FORMAT C failed", StringComparison.OrdinalIgnoreCase) || h.error.Contains("not found in file", StringComparison.OrdinalIgnoreCase))
-                { 
+                {
                     sb.AppendLine("  You used FORMAT C but the symbol was not found. " +
                                   "This file has no named methods/classes for FORMAT C to target. " +
                                   "Switch to oldString/newString: copy the EXACT lines from the file content, " +
@@ -3609,6 +3635,9 @@ public class AgentController : ControllerBase
         sb.AppendLine("    in the same file, each requiring a different anchor and edit strategy.");
         sb.AppendLine("  - Any step containing 'then' that chains two add/create/implement actions");
         sb.AppendLine("  - Any step mentioning 2+ of {field, property, constructor, method, handler}");
+        sb.AppendLine("  - ADDING a new method/property AND MODIFYING/UPDATING an existing method/property (even in the same file). " +
+                      "    These MUST be split into separate steps: one to add the new member, and one to update the existing logic. " +
+                      "    Example: 'Add a isFileLimitReached() method and update uploadSubmitClicked to use it' -> MUST split.");
         sb.AppendLine();
         sb.AppendLine("CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
         sb.AppendLine("LOCATIONS (e.g., add a field at the top of a class, initialize it in the");
@@ -3889,12 +3918,14 @@ emitSse, ct);
                 // Pass the rich exploration context so the edit-resolve LLM
                 // has far better information than just the file excerpt
                 (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
-                await ResolveEditForStep(
-                    step, projectRoot, emitSse, ct, history,
-                    explorationContext: explorationContext,
-                    targetSymbol: exploration.TargetSymbol,
-                    originalPrompt: prompt,
-                    preservationDirective: preservationDirective);
+  await ResolveEditForStep(
+      step, projectRoot, emitSse, ct, history,
+      explorationContext: explorationContext,
+      targetSymbol: exploration.TargetSymbol,
+      originalPrompt: prompt,
+      preservationDirective: preservationDirective,
+      fullPlan: plan,
+      planItemIndex: planItemIndex);
 
                 if (resolveError == null)
                 {
@@ -7509,6 +7540,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   CRITICAL — SAME-FILE MULTI-LOCATION: Even within a single file, if a step requires editing 2+ separate locations (e.g., add a field at the top of a class, initialize it in the constructor, AND add a new method at the bottom), that is MULTIPLE steps. Each location requires a different edit strategy and anchor, so combining them causes the editor to attempt full-class rewrites instead of targeted edits.\n" +
         "   BAD (over-combined, SAME FILE): \"Add a _timer field and initialize it in the constructor, then add a RunTimerTasks method\"\n" +
         "   GOOD (3 steps, SAME FILE): Step 1: \"Add _timer field declaration after the last existing timer field\", Step 2: \"Initialize _timer in the constructor after existing timer initializations\", Step 3: \"Add RunTimerTasks method after the last existing RunXxxTasks method\"\n" +
+        "   BAD (over-combined, SAME FILE): \"Add a isFileLimitReached() method and update uploadSubmitClicked to use it\"\n" +
+        "   GOOD (2 steps, SAME FILE): Step 1: \"Add isFileLimitReached() method\", Step 2: \"Update uploadSubmitClicked to check isFileLimitReached() instead of length\"\n" +
         "   BAD (over-combined, CROSS-FILE): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
         "   GOOD: Two steps — Step 1: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\", Step 2: \"In settings template: bind the existing notification toggle to CalendarNotificationsEnabled\"\n" +
         "   BAD (too vague): \"Fix the dashboard\"\n" +
@@ -9340,7 +9373,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                     summary: plan.Summary ?? "", score: plan.Score);
         }
-        
+
         // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
         if (emitSse)
@@ -10122,7 +10155,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
 
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
-                var prevCount = allResults.Count; 
+                var prevCount = allResults.Count;
                 try
                 {
                     stepIndex = await ResolveAndApplyEdit(
