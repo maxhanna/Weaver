@@ -8468,7 +8468,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             var step = plan.Plan[i];
                             var result = allSteps.OfType<Dictionary<string, object?>>()
-                                .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                                .LastOrDefault(s =>
+                                    s.TryGetValue("planItemIndex", out var pIdxObj) &&
+                                    pIdxObj is int pIdx &&
+                                    pIdx == i &&
                                     s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
                                     s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
                             if (result != null) doneIndices.Add(i);
@@ -8505,7 +8508,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             {
                                 var step = plan.Plan[i];
                                 var result = allSteps.OfType<Dictionary<string, object?>>()
-                                    .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                                    .LastOrDefault(s =>
+                                        s.TryGetValue("planItemIndex", out var pIdxObj) &&
+                                        pIdxObj is int pIdx &&
+                                        pIdx == i &&
                                         s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
                                         s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
                                 if (result != null) mergedDone.Add(i);
@@ -8523,13 +8529,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         else
                         {
                             await EmitLog(emitSse, "warn", "No additional steps needed — stopping.", ct: ct);
-                            complete = plan?.Plan?.All(p =>
+                            complete = plan?.Plan?.Select((p, i) =>
                             {
                                 var result = allSteps.OfType<Dictionary<string, object?>>()
-                                    .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), p.File, StringComparison.OrdinalIgnoreCase) &&
+                                    .LastOrDefault(s =>
+                                        s.TryGetValue("planItemIndex", out var pIdxObj) &&
+                                        pIdxObj is int pIdx &&
+                                        pIdx == i &&
                                         s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
                                 return result != null && result.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped";
-                            }) ?? true;
+                            }).All(x => x) ?? true;
                         }
                     }
                 }
@@ -8760,23 +8769,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Do NOT add new files, features, refactors, or improvements the user did not ask for.");
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
-
+        
         // Show what was already planned and their results
         if (existingPlan?.Plan?.Count > 0)
         {
             sb.AppendLine("## Existing plan with results");
-            foreach (var step in existingPlan.Plan)
+            for (var i = 0; i < existingPlan.Plan.Count; i++)
             {
+                var step = existingPlan.Plan[i];
                 // Look up the result for this step
                 string? status = null;
                 string? output = null;
                 if (executedSteps != null)
                 {
+                    // FIX: Match on planItemIndex to get the exact result for this step.
+                    // Sub-steps from decoupling may share the same file path, so matching
+                    // on path alone returns the wrong result for all but the last sub-step.
                     var result = executedSteps.OfType<Dictionary<string, object?>>()
                         .LastOrDefault(s =>
-                            string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) ||
-                            (string.Equals(s.GetValueOrDefault("type")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
-                             string.Equals(s.GetValueOrDefault("command")?.ToString(), step.Change, StringComparison.OrdinalIgnoreCase)));
+                            s.TryGetValue("planItemIndex", out var pIdxObj) &&
+                            pIdxObj is int pIdx &&
+                            pIdx == i);
                     if (result != null)
                     {
                         status = result.GetValueOrDefault("status")?.ToString();
