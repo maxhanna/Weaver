@@ -52,11 +52,11 @@
     vm.showNotification = function(message) {
       if (navigator.userAgent.indexOf('Win') !== -1) {
         if (Notification.permission === 'granted') {
-          new Notification('Kanban App', { body: message });
+          new Notification('Weaver', { body: message });
         } else if (Notification.permission !== 'denied') {
           Notification.requestPermission().then(function (permission) {
             if (permission === 'granted') {
-              new Notification('Kanban App', { body: message });
+              new Notification('Weaver', { body: message });
             }
           });
         }

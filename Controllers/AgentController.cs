@@ -4358,6 +4358,38 @@ emitSse, ct);
                 continue;
             }
 
+            // ── Unclosed string literal guard ────────────────────────────────
+            // If the LLM splits a string literal containing '\n' across array elements,
+            // it creates a syntax error (e.g., parts.join('\n') becomes parts.join('\n') split across two lines).
+            // We detect this by checking for an odd number of unescaped single quotes on a line.
+            var newStrLines = newStr?.Split('\n') ?? Array.Empty<string>();
+            for (var i = 0; i < newStrLines.Length - 1; i++)
+            {
+                var line = newStrLines[i];
+                var quoteCount = 0;
+                for (var j = 0; j < line.Length; j++)
+                {
+                    if (line[j] == '\'' && (j == 0 || line[j - 1] != '\\'))
+                        quoteCount++;
+                }
+                if (quoteCount % 2 != 0)
+                {
+                    var err = "Syntax error: Unclosed string literal. You split a string containing '\\n' across multiple lines. " +
+                              "If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), " +
+                              "you MUST output the `\\n` escaped inside that single array element. NEVER split a line of code across multiple array elements.";
+                    await EmitLog(emitSse, "warn",
+                        $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                    history.Add((oldStr!, newStr ?? "", err));
+                    if (string.Equals(
+                        AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                        AgentUtilities.NormalizeLineEndings(lastOld),
+                        StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2) goto RecordFailure;
+                    goto continueResolveLoop; // Skip applying this broken edit
+                }
+            }
+
             // Prefix leak check: if oldString's first trimmed line starts with '}',
             // the LLM included the previous method's closing brace as context.
             // The newString typically doesn't include it, causing the previous method
@@ -4380,6 +4412,8 @@ emitSse, ct);
                 continue;
             }
 
+            continueResolveLoop:;
+            
             // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
             // formatting issues don't cause false rejections. The LLM frequently
             // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
