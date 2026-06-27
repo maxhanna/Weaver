@@ -4359,20 +4359,33 @@ emitSse, ct);
             }
 
             // ── Unclosed string literal guard ────────────────────────────────
-            // If the LLM splits a string literal containing '\n' across array elements,
-            // it creates a syntax error (e.g., parts.join('\n') becomes parts.join('\n') split across two lines).
-            // We detect this by checking for an odd number of unescaped single quotes on a line.
+            // If the LLM splits a string literal containing '\n' across multiple lines,
+            // it creates a syntax error. We detect this by checking for an odd number of
+            // unescaped quotes on a line, ignoring comments.
             var newStrLines = newStr?.Split('\n') ?? Array.Empty<string>();
             for (var i = 0; i < newStrLines.Length - 1; i++)
             {
                 var line = newStrLines[i];
-                var quoteCount = 0;
+                var trimmed = line.TrimStart();
+
+                // FIX: Skip comments so apostrophes in natural language (e.g., "they've") don't trigger false positives
+                if (trimmed.StartsWith("//") || trimmed.StartsWith("*") || trimmed.StartsWith("/*"))
+                    continue;
+
+                var singleQuoteCount = 0;
+                var doubleQuoteCount = 0;
                 for (var j = 0; j < line.Length; j++)
                 {
-                    if (line[j] == '\'' && (j == 0 || line[j - 1] != '\\'))
-                        quoteCount++;
+                    if (line[j] == '\\' && j + 1 < line.Length) { j++; continue; }
+                    if (line[j] == '\'') singleQuoteCount++;
+                    if (line[j] == '"') doubleQuoteCount++;
                 }
-                if (quoteCount % 2 != 0)
+
+                // Only trigger if there's an odd number of quotes AND it looks like a broken string literal
+                // (e.g., it contains a quote and isn't just a char declaration like 'a')
+                if ((singleQuoteCount % 2 != 0 || doubleQuoteCount % 2 != 0) &&
+                    (line.Contains("'\\n") || line.Contains("'\\t") || line.Contains("'\\r") ||
+                     line.Contains("\"\\n") || line.Contains("\"\\t") || line.Contains("\"\\r")))
                 {
                     var err = "Syntax error: Unclosed string literal. You split a string containing '\\n' across multiple lines. " +
                               "If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), " +
@@ -6068,19 +6081,19 @@ emitSse, ct);
             "  40-69:  Poor — wrong approach or missing key functionality\n" +
             "  0-39:   Broken — signature change, deleted functionality, invented symbols\n\n" +
             "DECISION RULES:\n" +
-            " * Return \"keep\" if the edit correctly implements the step AND preserves all existing " +
-            "  functionality (caches, guards, return types, call-site contracts). Score 85+.\n" +
+            " * Return \"keep\" if the edit correctly implements the step. Score 85+.\n" +
             " * Return \"abandon\" if ANY of these are true:\n" +
             "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
             "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
             "    - The edit changed the method signature (return type, name, or parameter list).\n" +
             "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
-            "    - The edit replaced existing logic instead of extending/tweaking it, when the " +
-            "      step only asked for a small change.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
-            " * Be conservative: if you're unsure, return \"abandon\" with a clear reason and " +
-            "  a low score. The agent will retry with your feedback.\n" +
+            " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+            "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
+            "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
+            "  functionality that is UNRELATED to the requested change.\n" +
+            " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
             " * Do NOT consider style/whitespace issues — those are handled by other passes.";
 
         var userMsg =
@@ -6100,10 +6113,8 @@ emitSse, ct);
                 requestTimeout: TimeSpan.FromMinutes(2),
                 maxTokens: 256);
 
-            if (!string.IsNullOrWhiteSpace(error))
-                return ("error", $"LLM call failed: {error}", 0);
             if (string.IsNullOrWhiteSpace(raw))
-                return ("error", "LLM returned empty response", 0);
+                return ("error", $"LLM returned empty response. {error}", 0);
 
             // Strip markdown fences if present.
             var cleaned = raw.Trim();
@@ -6119,6 +6130,7 @@ emitSse, ct);
             cleaned = ExtractFirstJsonObject(cleaned);
 
             using var doc = JsonDocument.Parse(cleaned);
+
             var decision = doc.RootElement.TryGetProperty("decision", out var dEl)
                 ? dEl.GetString()?.ToLowerInvariant().Trim() ?? ""
                 : "";
@@ -6250,13 +6262,6 @@ emitSse, ct);
         return null;
     }
 
-    /// <summary>
-    /// Heuristic: does this trimmed line look like a method/function declaration?
-    /// Matches TypeScript/JavaScript/C# patterns like:
-    ///   private getRocketMesh(): CityMesh | CityMesh[] {
-    ///   public async Task&lt;int&gt; ResolveAsync(string path, CancellationToken ct)
-    ///   function foo(a, b) {
-    /// </summary>
     private static bool LooksLikeMethodDeclaration(string line)
     {
         if (string.IsNullOrWhiteSpace(line)) return false;
@@ -6275,9 +6280,10 @@ emitSse, ct);
             lower.StartsWith("//") || lower.StartsWith("/*"))
             return false;
         // Match: optional modifiers, then an identifier, then '('.
+        // FIX: Make modifiers optional so it matches TS/JS methods without modifiers (e.g. `genesisThreeRight(): VPadItem[] {`)
         return Regex.IsMatch(line,
-            @"^\s*(public|private|protected|internal|static|async|export|function|override|sealed|virtual|abstract|readonly|partial|\s)+\s*"
-            + @"(<[^>]+>\s*)?"                 // optional generic return type
+            @"^\s*(?:(?:public|private|protected|internal|static|async|export|function|override|sealed|virtual|abstract|readonly|partial)\s+)*"
+            + @"(?:<[^>]+>\s*)?"                 // optional generic return type
             + @"~?\w+\s*\(",
             RegexOptions.Compiled);
     }
