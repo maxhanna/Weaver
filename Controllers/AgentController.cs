@@ -1763,13 +1763,38 @@ public class AgentController : ControllerBase
                         {
                             // For classes, insert new members inside the body (before closing })
                             var unit = DetectIndentUnit(fullStr);
+                            var memberIndent = unit + unit; // class member indent (e.g. 8 spaces if class is 4)
                             var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
                             var body = hasClassDecl ? StripClassWrapper(newCodeStr) : newCodeStr;
-                            var bodyIndented = ReindentToLevel(body, unit);
+
+                            // Shift body to memberIndent instead of flattening to unit
+                            var bodyLines = body.Split('\n');
+                            var nonEmpty = bodyLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+                            var minBodyIndent = nonEmpty.Count > 0
+                                ? nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
+                                : 0;
+
+                            var indentedBodySb = new StringBuilder();
+                            foreach (var line in bodyLines)
+                            {
+                                if (string.IsNullOrWhiteSpace(line))
+                                {
+                                    indentedBodySb.AppendLine();
+                                }
+                                else
+                                {
+                                    var trimmed = line.Length > minBodyIndent
+                                        ? line.Substring(minBodyIndent)
+                                        : line.TrimStart();
+                                    indentedBodySb.Append(memberIndent).AppendLine(trimmed);
+                                }
+                            }
+                            var bodyIndented = indentedBodySb.ToString().TrimEnd('\n', '\r');
+
                             var lastBrace = fullStr.LastIndexOf('}');
                             if (lastBrace >= 0)
                             {
-                                newStr = fullStr[..lastBrace].TrimEnd() + "\n" + bodyIndented + "\n" + fullStr[lastBrace..];
+                                newStr = fullStr[..lastBrace].TrimEnd() + "\n\n" + bodyIndented + "\n" + fullStr[lastBrace..];
                                 return (fullStr, newStr, false, null, false, null, true);
                             }
                         }
@@ -1784,23 +1809,46 @@ public class AgentController : ControllerBase
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
-                            // When targetType="class" is used WITHOUT a full class declaration
-                            // in newCode, the LLM is incorrectly trying to insert properties
-                            // via targetType. Reject this — the LLM must use oldString/newString
-                            // for property additions, or include the FULL class in newCode
-                            // for full-class replacements.
                             var isClassTarget = string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase);
                             var hasClassDecl = newCodeStr.Contains("class ", StringComparison.OrdinalIgnoreCase);
                             if (isClassTarget && !hasClassDecl)
                             {
-                                var codeLineCount = newCodeStr.Split('\n').Length;
-                                return (null, null, false, null, false,
-                                    $"targetType 'class' used without a full class declaration in newCode ({codeLineCount} lines). " +
-                                    "targetType='class' is ONLY for replacing the ENTIRE class — newCode must contain 'class ClassName {{'. " +
-                                    "For adding properties/fields, YOU MUST USE oldString/newString format instead. " +
-                                    "Set oldString to the last 1-2 existing lines before your insertion point (e.g. `private Timer _dailyTimer;`), " +
-                                    "and set newString to those lines followed by your new line (e.g. `private Timer _dailyTimer;\\n private Timer _fifteenMinuteTimer;`).", false);
+                                // LLM provided just the new method/property as newCode without a class declaration.
+                                // Treat this as an INSERTION before the closing brace of the class.
+                                var lastBrace = astOldStr.LastIndexOf('}');
+                                if (lastBrace >= 0)
+                                {
+                                    var unit = DetectIndentUnit(astOldStr);
+                                    var methodIndent = unit + unit; // class member indent
+
+                                    var lines = newCodeStr.Split('\n');
+                                    var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+                                    var minIndent = nonEmpty.Count > 0
+                                        ? nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
+                                        : 0;
+
+                                    var indentedSb = new StringBuilder();
+                                    foreach (var line in lines)
+                                    {
+                                        if (string.IsNullOrWhiteSpace(line))
+                                        {
+                                            indentedSb.AppendLine();
+                                        }
+                                        else
+                                        {
+                                            var trimmed = line.Length > minIndent
+                                                ? line.Substring(minIndent)
+                                                : line.TrimStart();
+                                            indentedSb.Append(methodIndent).AppendLine(trimmed);
+                                        }
+                                    }
+                                    var indentedNewCode = indentedSb.ToString().TrimEnd('\n', '\r');
+
+                                    var mergedStr = astOldStr[..lastBrace].TrimEnd() + "\n\n" + indentedNewCode + "\n" + astOldStr[lastBrace..];
+                                    return (astOldStr, mergedStr, false, null, false, null, true);
+                                }
                             }
+                            
                             if (isClassTarget)
                             {
                                 // For .ts/.js and other non-C# files: full-class REPLACE is unsafe.
