@@ -1885,6 +1885,29 @@ public class AgentController : ControllerBase
                                 }
                             }
 
+                            // ── Auto-correct: Method name mismatch ──────────────────────────
+                            // If the LLM is trying to REPLACE a method, but the newCode contains a 
+                            // method declaration with a DIFFERENT name than targetName, it almost 
+                            // certainly meant to ADD a new method but forgot insertAfter:true.
+                            // Force insertion to prevent deleting the existing method.
+                            if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var newMethodMatch = MethodDeclRegex.Match(newCodeStr);
+                                if (newMethodMatch.Success)
+                                {
+                                    var newMethodName = newMethodMatch.Groups[1].Value;
+                                    if (!string.IsNullOrWhiteSpace(newMethodName) &&
+                                        !string.Equals(newMethodName, targetName, StringComparison.Ordinal))
+                                    {
+                                        // Method name mismatch! Treat as insertion (append after existing method)
+                                        var indentedNew = AutoIndentCode(astOldStr, newCodeStr, relPath);
+                                        newStr = astOldStr + "\n\n" + indentedNew;
+                                        return (astOldStr, newStr, false, null, false, null, true);
+                                    }
+                                }
+                            }
+
                             // Format newCode with Roslyn BEFORE AutoIndentCode so that
                             // the indentation adjustment shifts from a normalized base
                             // (0 indent for root, 4 spaces per level) to the file's level
