@@ -1848,7 +1848,7 @@ public class AgentController : ControllerBase
                                     return (astOldStr, mergedStr, false, null, false, null, true);
                                 }
                             }
-                            
+
                             if (isClassTarget)
                             {
                                 // For .ts/.js and other non-C# files: full-class REPLACE is unsafe.
@@ -6127,40 +6127,7 @@ emitSse, ct);
                 }
             }
         }
-
-        // ── Guard C: new-symbol invention ────────────────────────────────
-        // Collect every `this.X(`, `X.Y(`, `new X(` call in newString that
-        // was NOT in oldString, then check whether X appears anywhere in the
-        // full file content. If it doesn't, the LLM invented it.
-        var oldCalls = ExtractMethodCalls(oldStr);
-        var newCalls = ExtractMethodCalls(newStr);
-        var inventedCalls = newCalls.Except(oldCalls, StringComparer.Ordinal).ToList();
-        if (inventedCalls.Count > 0)
-        {
-            var trulyInvented = new List<string>();
-            foreach (var call in inventedCalls)
-            {
-                // The call is e.g. "this.createBoxMesh" or "createConeMesh" or "Foo.bar".
-                // Check if the bare identifier (last segment) appears anywhere in the file.
-                var bareIdent = call.Split('.').Last();
-                if (string.IsNullOrEmpty(bareIdent)) continue;
-                // Allow common built-ins / language constructs.
-                if (IsBuiltinIdentifier(bareIdent)) continue;
-                // Search the file content for the bare identifier followed by '(' or as a property.
-                if (!fileContent.Contains(bareIdent, StringComparison.Ordinal))
-                    trulyInvented.Add(call);
-            }
-            if (trulyInvented.Count > 0)
-            {
-                var preview = string.Join(", ", trulyInvented.Take(5));
-                if (trulyInvented.Count > 5) preview += $", (+{trulyInvented.Count - 5} more)";
-                return $"NEW-SYMBOL INVENTION — newString calls [{preview}] which do NOT appear anywhere in {relPath}. " +
-                       "The LLM invented methods/identifiers that don't exist in this file. " +
-                       "Use ONLY methods that already appear in the file. If you need a helper that doesn't exist, " +
-                       "say so in the plan instead of fabricating calls.";
-            }
-        }
-
+ 
         return null;
     }
 
