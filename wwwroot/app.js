@@ -49,6 +49,25 @@
       var audio = new Audio('/wwwroot/zen.mp3');
       audio.play();
     };
+    vm.showNotification = function(message) {
+      if (navigator.userAgent.indexOf('Win') !== -1) {
+        if (Notification.permission === 'granted') {
+          new Notification('Kanban App', { body: message });
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(function (permission) {
+            if (permission === 'granted') {
+              new Notification('Kanban App', { body: message });
+            }
+          });
+        }
+      }
+    };
+    vm.sendSystemToast = function() {
+      if (navigator.userAgent.indexOf('Win') !== -1) {
+        vm.showNotification('Done');
+        vm.playSound();
+      }
+    };
 
     vm.faqs = [
       {
@@ -2172,7 +2191,7 @@
                             }
                             break;
                           case 'done':
-                            vm.playSound();
+                            vm.sendSystemToast();
                             vm.streamingActive = false;
                             resumeTerminalPolling();
                             vm.steeringContext = '';
