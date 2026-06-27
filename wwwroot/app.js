@@ -45,6 +45,11 @@
     vm.aiChatLoading = false;
     vm.searchFilter = '';
     vm.chatMode = 'ask';
+    vm.playSound = function() {
+      var audio = new Audio('/wwwroot/zen.mp3');
+      audio.play();
+    };
+
     vm.faqs = [
       {
         question: 'How do I get started?',
@@ -2167,6 +2172,7 @@
                             }
                             break;
                           case 'done':
+                            vm.playSound();
                             vm.streamingActive = false;
                             resumeTerminalPolling();
                             vm.steeringContext = '';

@@ -64,7 +64,7 @@ public class AgentController : ControllerBase
 
     private const string EditResolveSystemPrompt =
         "You are a surgical code editor. Output ONLY a JSON object.\n\n" +
-        "FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
+                "FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
         "{\n" +
         "  \"oldString\": [\n" +
         "    \"  first line EXACTLY as it appears in the file\",\n" +
@@ -75,7 +75,8 @@ public class AgentController : ControllerBase
         "    \"  first line\",\n" +
         "    \"  replacement second line\"\n" +
         "  ]\n" +
-        "}\n\n" +
+        "}\n" +
+        "  CRITICAL: Each array element is ONE line of code. If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), you MUST output the `\\n` escaped inside that single array element. NEVER split a line of code across multiple array elements.\n\n" +
 "FORMAT B — single-line (escape newlines as \\n):\n" +
 "{\n" +
 "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
@@ -1901,7 +1902,35 @@ public class AgentController : ControllerBase
                                         !string.Equals(newMethodName, targetName, StringComparison.Ordinal))
                                     {
                                         // Method name mismatch! Treat as insertion (append after existing method)
-                                        var indentedNew = AutoIndentCode(astOldStr, newCodeStr, relPath);
+                                        // Calculate the exact base indent of the existing method to apply to the new one
+                                        var oldFirstRealLine = astOldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+                                        var methodBaseIndent = oldFirstRealLine != null
+                                            ? Regex.Match(oldFirstRealLine, @"^(\s*)").Groups[1].Value
+                                            : "";
+
+                                        var lines = newCodeStr.Split('\n');
+                                        var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+                                        var minIndent = nonEmpty.Count > 0
+                                            ? nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
+                                            : 0;
+
+                                        var indentedSb = new StringBuilder();
+                                        foreach (var line in lines)
+                                        {
+                                            if (string.IsNullOrWhiteSpace(line))
+                                            {
+                                                indentedSb.AppendLine();
+                                            }
+                                            else
+                                            {
+                                                var trimmed = line.Length > minIndent
+                                                    ? line.Substring(minIndent)
+                                                    : line.TrimStart();
+                                                indentedSb.Append(methodBaseIndent).AppendLine(trimmed);
+                                            }
+                                        }
+                                        var indentedNew = indentedSb.ToString().TrimEnd('\n', '\r');
+
                                         newStr = astOldStr + "\n\n" + indentedNew;
                                         return (astOldStr, newStr, false, null, false, null, true);
                                     }
@@ -7639,7 +7668,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "19. When the DISCOVERY CONTEXT shows a type reference like `romMetadata?: RomMetadata`, and the " +
         "task involves data that might live in that nested type, add a _explore step to read the RomMetadata " +
         "type definition BEFORE planning the edit. You cannot plan correctly without understanding the " +
-        "full data structure.\n";
+        "full data structure.\n" +
+        "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
+        "and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file " +
+        "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
+        "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
+        "If the service method does not exist, plan a step to create it.\n";
 
     /// <summary>Check if user prompt describes a visual layout/positioning task that needs CSS.</summary>
     private static bool IsVisualLayoutTask(string prompt)
