@@ -116,10 +116,14 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         }
       };
 
-      vm.loadFilePickerEntries = function() {
+      vm.loadFilePickerEntries = function(search) {
         var params = { project: vm.selectedProject || '' };
         if (vm.ide.filePickerPath) {
           params.path = vm.ide.filePickerPath;
+        }
+        if (search) {
+          params.search = search;
+          params.recursive = true;
         }
         console.log('loadFilePickerEntries', params);
         $http.get('/api/editor/list', { params: params }).then(function(resp) {
@@ -480,9 +484,11 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         vm.loadFilePickerEntries();
       };
 
-      vm.onSearchChange = function() {
+      vm.onIdeSearchChange = function() {
+        console.log("onIdeSearchChange", vm.ide.searchFilter);
+
         if (vm.ide.searchFilter && vm.ide.searchFilter.trim()) {
-          vm.loadFilePickerEntries();
+          vm.loadFilePickerEntries(vm.ide.searchFilter);
         } else {
           vm.loadFilePickerEntries();
         }

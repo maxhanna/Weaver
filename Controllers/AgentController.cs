@@ -4413,7 +4413,7 @@ emitSse, ct);
             }
 
             continueResolveLoop:;
-            
+
             // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
             // formatting issues don't cause false rejections. The LLM frequently
             // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
@@ -7707,7 +7707,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file " +
         "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
         "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
-        "If the service method does not exist, plan a step to create it.\n";
+        "If the service method does not exist, plan a step to create it.\n" +
+        "21. SCAFFOLDING (Angular/Nx/Vue/etc.): When the task asks to CREATE a new component, service, directive, or pipe in a framework project " +
+        "(detectable by `angular.json`, `nx.json`, or `package.json` containing `@angular/core`), you MUST use a `_command` step to run the framework's CLI generator. " +
+        "Do NOT manually create the files with `_create_file`.\n" +
+        "   - For Angular: `npx ng generate component <path/name> --skip-tests` (or `npx nx g c <path/name>` if using Nx)\n" +
+        "   - If the project root contains `angular.json` in a subfolder (e.g., `maxhanna.client/`), prefix the command with `cd <subfolder> && ` (e.g., `cd maxhanna.client && npx ng g c ...`)\n" +
+        "   - After the `_command` step succeeds, add `_explore` or edit steps to modify the newly generated `.ts`, `.html`, and `.css` files to implement the actual logic and template.\n";
 
     /// <summary>Check if user prompt describes a visual layout/positioning task that needs CSS.</summary>
     private static bool IsVisualLayoutTask(string prompt)
