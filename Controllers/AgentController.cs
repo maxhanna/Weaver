@@ -1885,18 +1885,7 @@ public class AgentController : ControllerBase
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
             }
-
-            // HARD ENFORCEMENT: oldString must be ≤ 15 lines (array format adds a few blank lines)
-            if (oldStr != null && oldStr.Split('\n').Length > 15)
-            {
-                var lineCounts = oldStr.Split('\n').Length;
-                return (null, null, false, null, false,
-                    $"oldString is {lineCounts} lines long — STRICT MAXIMUM is 10 lines. " +
-                    "You MUST use FORMAT C (targetType='method', targetName='MethodName') for methods longer than 10 lines. " +
-                    "If FORMAT C failed because the method name is wrong, look at the file content, find the exact method name, and use FORMAT C with the correct name. " +
-                    "Do NOT output a massive oldString.", false);
-            }
-
+ 
             if (!string.IsNullOrWhiteSpace(oldStr))
                 return (oldStr, newStr ?? "", false, null, false, null, false);
 
@@ -1934,15 +1923,7 @@ public class AgentController : ControllerBase
                 {
                     oldStr = string.Join("\n", oldLines);
                     newStr = string.Join("\n", newLines);
-
-                    // HARD ENFORCEMENT in fallback parser too
-                    if (oldStr.Split('\n').Length > 15)
-                    {
-                        return (null, null, false, null, false,
-                            $"oldString is {oldStr.Split('\n').Length} lines long — STRICT MAXIMUM is 10 lines. " +
-                            "You MUST use FORMAT C (targetType='method', targetName='MethodName') for methods longer than 10 lines.", false);
-                    }
-
+ 
                     return (oldStr, newStr ?? "", false, null, false, null, false);
                 }
             }
@@ -4051,7 +4032,8 @@ emitSse, ct);
                 };
                 if (emitSse) await SendSse(Response, "step", r, ct);
                 allResults.Add(r);
-                return stepIndex + 1;
+                history.Add((oldStr!, newStr ?? "", "LLM produced a no-op edit — oldString and newString are identical"));
+                goto RecordFailure;
             }
             // Detect replacement-when-insertion-was-intended: oldString >> newString
             if (!fromFormatC &&
