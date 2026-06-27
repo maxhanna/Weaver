@@ -5288,6 +5288,39 @@ emitSse, ct);
             // ── Inside normal string literal ──
             if (inStringDouble || inStringSingle || inTemplate)
             {
+                // Apply SQL spacing rules inside regular strings too (e.g. "SELECT ... INTERVAL5 MINUTE")
+                if (char.IsLetter(c))
+                {
+                    var rest = line.Substring(i);
+                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)\d", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(' ');
+                        sb.Append(match.Value[match.Value.Length - 1]);
+                        i += match.Value.Length;
+                        continue;
+                    }
+
+                    match = Regex.Match(rest, @"^(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(" *");
+                        i += match.Value.Length;
+                        continue;
+                    }
+
+                    match = Regex.Match(rest, @"^(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        sb.Append(match.Value.Substring(0, match.Value.Length - 1));
+                        sb.Append(" (");
+                        i += match.Value.Length;
+                        continue;
+                    }
+                }
+
                 sb.Append(c);
                 if (c == '\\' && next != '\0')
                 {
@@ -10886,12 +10919,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var result = content;
         var changed = false;
 
-        // Find all verbatim strings @"..." and fix SQL inside them
-        var verbatimRegex = new Regex(@"@""(?:[^""]|"""")*""", RegexOptions.Singleline);
-        var matches = verbatimRegex.Matches(result);
+        // Find BOTH verbatim (@"...") and regular ("...") strings
+        var stringRegex = new Regex(@"@?""(?:[^""\\]|\\.|"""")*""", RegexOptions.Singleline);
+        var matches = stringRegex.Matches(result);
         foreach (Match m in matches)
         {
             var sqlStr = m.Value;
+
+            // Only process if it looks like a SQL query
+            if (!Regex.IsMatch(sqlStr, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE)\b", RegexOptions.IgnoreCase))
+                continue;
+
             var fixedSql = sqlStr;
 
             var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)(\d)", RegexOptions.IgnoreCase);
