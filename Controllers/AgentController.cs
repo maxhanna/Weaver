@@ -102,7 +102,8 @@ public class AgentController : ControllerBase
 "  \"insertAfter\": true,\n" +
 "  \"newCode\": \"    public async Task<IActionResult> NewMethod() { ... }\"\n" +
 "}\n" +
-"  Use insertAfter:true to INSERT a new method/constructor RIGHT AFTER an existing one.\n" +
+"  CRITICAL: If the CHANGE REQUIRED asks to ADD a new method, you MUST use `insertAfter: true`.\n" +
+"  The `newCode` field MUST contain ONLY the new method being added. DO NOT include the existing method in `newCode`.\n" +
 "  The target method is NOT replaced — the new code is added after its closing brace.\n" +
 "  This is the SAFEST way to add a new method: no existing code is touched.\n" +
 "  DO NOT use targetType=\"class\" to add methods — use insertAfter with targetType=\"method\" instead.\n\n" +
@@ -4698,7 +4699,12 @@ emitSse, ct);
             // The score is tracked across attempts to measure improvement.
             // Prior failed attempts (with their code) are fed back so the LLM
             // can avoid repeating the same mistakes.
-            if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent))
+            // 
+            // SKIP LLM GATE for insertAfter edits: The deterministic verify already
+            // confirmed the old method is intact and the new method was appended.
+            // The LLM verify gate frequently hallucinates syntax errors on these
+            // large combined blocks and abandons perfectly good insertions.
+            if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
                 var (llmGateDecision, llmGateReason, llmGateScore) = await LlmVerifyEditStepAsync(
                     relPath, prompt ?? step.Change, step.Change,
@@ -6136,10 +6142,14 @@ emitSse, ct);
             "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
-                      " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+                        " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
             "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
             "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
             "  functionality that is UNRELATED to the requested change.\n" +
+            " * INSERTIONS: If the step asks to ADD a new method, property, or block of code, and the newString " +
+            "  CONTAINS the entire oldString unchanged (usually at the beginning) followed by the new code, this is an INSERTION. " +
+            "  This is the CORRECT behavior. Do NOT abandon it claiming it 'replaced' or 'failed to add' the new method. " +
+            "  If the new code is present and the old code is preserved, keep the edit.\n" +
             " * If the step asks to modify specific values inside a method (e.g., change coordinates, update a config), " +
             "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
             "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
