@@ -1800,8 +1800,23 @@ public class AgentController : ControllerBase
                                 return (fullStr, newStr, false, null, false, null, true);
                             }
                         }
-
-                        var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
+                        // Format newCode with Roslyn BEFORE AutoIndentCode so that
+                        // the indentation adjustment shifts from a normalized base
+                        // (0 indent for root, 4 spaces per level) to the file's level
+                        var fmtNewCode = newCodeStr;
+                        if (string.Equals(Path.GetExtension(relPath), ".cs", StringComparison.OrdinalIgnoreCase)
+                            && !fmtNewCode.Contains("@\"", StringComparison.Ordinal)
+                            && !fmtNewCode.Contains("/*", StringComparison.Ordinal)
+                            && !fmtNewCode.Contains("///", StringComparison.Ordinal))
+                        {
+                            try
+                            {
+                                var fmtTree = CSharpSyntaxTree.ParseText(fmtNewCode);
+                                fmtNewCode = fmtTree.GetRoot().NormalizeWhitespace().ToFullString();
+                            }
+                            catch { }
+                        }
+                        var indented = AutoIndentCode(fullStr, fmtNewCode, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null, true);
                     }
