@@ -150,7 +150,7 @@ public class AgentController : ControllerBase
                 "The RELATED FILE CONTEXT / AUTO-ENRICHED CONTEXT sections show type definitions found across the project. " +
                 "Use those existing types — do NOT rename them or create similar ones. " +
                 "If you need a type not present in the context, define it fully (not as a stub) in the same edit. " +
-            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors to watch for: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'); 'font-size:12px' is OK but '12pximportant' should be '12px important'; 'pitch: number =0' should be 'pitch: number = 0' (space on BOTH sides of '=' in assignments and default parameters); 'useTextureLoc,1)' should be 'useTextureLoc, 1)' (space after every comma, even when followed by ')'); '[0, -2,0]' should be '[0, -2, 0]' (space after comma inside arrays/tuples); 'Apply180°' in a comment should be 'Apply 180°' (space between a word and a number). NEVER collapse '==', '===', '!=', '<=', '>=', '=>', '+=', '-=', '*=', '/=' into spaced forms — those are compound operators and stay together. HTML/JSX attributes like class=\"foo\" stay glued to their value. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
+            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors to watch for: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'); 'font-size:12px' is OK but '12pximportant' should be '12px important'; 'pitch: number =0' should be 'pitch: number = 0' (space on BOTH sides of '=' in assignments and default parameters); 'useTextureLoc,1)' should be 'useTextureLoc, 1)' (space after every comma, even when followed by ')'); '[0, -2,0]' should be '[0, -2, 0]' (space after comma inside arrays/tuples); 'Apply180°' in a comment should be 'Apply 180°' (space between a word and a number). NEVER collapse '==', '===', '!=', '<=', '>=', '=>', '+=', '-=', '*=', '/=' into spaced forms — those are compound operators and stay together. HTML/JSX attributes like class=\"foo\" stay glued to their value. FUNCTION CALLS: NEVER add a space between a method/function name and its opening parenthesis. `join(',')` is CORRECT; `join (',')` is WRONG. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
                 "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
                 "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
                 "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
@@ -8479,19 +8479,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── LLM verification of pipeline choice ────────────────────────────
         // If the user provided code in the prompt, it's definitely a CodeEdit task.
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
-        if (hasCodeInPrompt && pipelineType != PipelineType.CodeEdit)
+
+        // DETERMINISTIC CHECK: If the prompt explicitly mentions code files, components, or services,
+        // it is ALWAYS a CodeEdit task. Do not ask the LLM router.
+        bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php)\b", RegexOptions.IgnoreCase) ||
+                                 prompt.Contains("component", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("service", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("controller", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("directive", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("module", StringComparison.OrdinalIgnoreCase);
+
+        if ((hasCodeInPrompt || mentionsCodeFiles) && pipelineType != PipelineType.CodeEdit)
         {
-            await EmitLog(emitSse, "info", $"Code detected in prompt — forcing CodeEdit pipeline", ct: ct);
+            await EmitLog(emitSse, "info", $"Code files or components detected in prompt — forcing CodeEdit pipeline", ct: ct);
             pipelineType = PipelineType.CodeEdit;
         }
 
         PipelineType? chainedNext = null;
         List<(PipelineType Pipeline, string Summary)>? stages = null;
 
-        if (!hasCodeInPrompt)
+        if (!hasCodeInPrompt && !mentionsCodeFiles)
         {
-            var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: terminal commands, web fetches, create/modify files on filesystem (no code editing)\n- UnifiedPipeline (CodeEdit): code editing, project source changes\n\nIs this routing correct? \n- If the task is purely a code change (e.g., changing UI logic, modifying a component, replacing an icon with an existing property), choose UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n- DO NOT suggest chaining just because the task mentions 'photos' or 'files' that are already part of the project's existing data model.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
-
+            var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: running shell/terminal commands, downloading files via URL, file system operations OUTSIDE the codebase logic.\n- UnifiedPipeline (CodeEdit): modifying, adding, or refactoring source code in the project (e.g., .cs, .ts, .html, .css files). This includes implementing upload logic, modifying components, or changing API calls.\n\nIs this routing correct? \n- If the task mentions modifying or creating code in specific files (like 'upload.component.ts' or 'file.service.ts'), it MUST be UnifiedPipeline.\n- If the task asks to 'create a method', 'add a variable', or 'change logic', it MUST be UnifiedPipeline.\n- DO NOT route to CommandExecution just because the task mentions 'uploading files', 'fetch data', or 'files' — if the upload/fetch logic is being implemented in code, it's UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
             var (vRaw, _, vErr) = await CallLlmRaw(
                 "You verify task routing. Output only JSON.",
                 verifyPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 256);
