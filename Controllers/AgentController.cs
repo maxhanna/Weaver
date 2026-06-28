@@ -4208,7 +4208,7 @@ emitSse, ct);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
                     await EmitLog(emitSse, "info",
-                        $"Self-healing: exact block from file ({correctedBlock.Length} chars)",
+                        $"Self-healing: found exact block in file:\n{correctedBlock}",
                         ct: ct);
                     var (replaced2, newContent2, _, _) =
                         TryReplaceSafe(fileContent, correctedBlock, newStr ?? string.Empty);
@@ -6089,10 +6089,13 @@ emitSse, ct);
             "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
-            " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+                      " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
             "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
             "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
             "  functionality that is UNRELATED to the requested change.\n" +
+            " * If the step asks to modify specific values inside a method (e.g., change coordinates, update a config), " +
+            "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
+            "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
             " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
             " * Do NOT consider style/whitespace issues — those are handled by other passes.";
 
