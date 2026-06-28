@@ -622,6 +622,7 @@
         // Ensure cards are loaded before counting archived cards
         $timeout(function () {
           vm.countArchivedCards();
+          vm.loadFilePickerEntries();
         }, 100);
       });
     };

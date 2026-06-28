@@ -267,10 +267,13 @@ public class AgentController : ControllerBase
 
             if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
-{                // ── General: JS/TS/Java/PHP/C-family access-modifier prefix ───── 
+{               // ── General: JS/TS/Java/PHP/C-family access-modifier prefix ───── 
                 patterns.Add(("Method/function",
                     new Regex(
-                        $@"^\s*(?:(?:async|export|default|public|private|protected|static|override|abstract|get|set|readonly)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?\s+)?\b{Regex.Escape(targetName)}\s*(?:<[^>]*>)?\s*(?:\([^)]*\)|=\s*(?:async\s+)?function\s*\([^)]*\)|:\s*(?:async\s+)?function\s*\([^)]*\))\s*(?::\s*[^{{;]+?)?\s*(?:{{|=>)",
+                        $@"^\s*(?:(?:export|default|async|static|public|private|protected|get|set|readonly|override|abstract)\s+)*" +
+                        $@"(?:(?:function\s+)|(?:[\w$.]+\.)?)?{Regex.Escape(targetName)}\s*(?:<[^>]*>)?\s*" +
+                        $@"(?:\([^)]*\)|=\s*(?:async\s+)?function\s*\([^)]*\)|:\s*(?:async\s+)?function\s*\([^)]*\)|:\s*(?:async\s+)?\([^)]*\)\s*=>)" +
+                        $@"\s*(?::\s*[^{{;]+?)?\s*(?:{{|=>)",
                         RegexOptions.Multiline)));
                 // ── Go: func [( receiver )] Name( ───────────────────────────────
                 if (ext == ".go")
