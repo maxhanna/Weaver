@@ -64,7 +64,7 @@ button {
 	filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
 	box-shadow: var(--brand-glow);
 	transform: scale(1);
- 	transition: all .12s ease;
+	transition: all .12s ease;
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
@@ -83,7 +83,7 @@ a:hover {
 
 button:hover {
 	border-color: var(--accent);
-} 
+}
 
 button.btn-ready {
 	background: var(--brand-gradient);
@@ -110,43 +110,43 @@ button.brand-button {
 
 button.brand-enhanced {
 
-.app-password-instructions {
-  margin-top: 8px;
-  padding: 12px;
-  border-radius: 8px;
-  background: rgba(251, 191, 36, 0.08);
-  border: 1px solid rgba(251, 191, 36, 0.25);
-}
+	.app-password-instructions {
+		margin-top: 8px;
+		padding: 12px;
+		border-radius: 8px;
+		background: rgba(251, 191, 36, 0.08);
+		border: 1px solid rgba(251, 191, 36, 0.25);
+	}
 
-.app-password-instructions p {
-  margin: 8px 0 4px 0;
-  font-size: 12px;
-}
+	.app-password-instructions p {
+		margin: 8px 0 4px 0;
+		font-size: 12px;
+	}
 
-.app-password-instructions ol {
-  margin: 4px 0 8px 0;
-  padding-left: 20px;
-  font-size: 11px;
-}
+	.app-password-instructions ol {
+		margin: 4px 0 8px 0;
+		padding-left: 20px;
+		font-size: 11px;
+	}
 
-.app-password-instructions li {
-  margin-bottom: 4px;
-}
+	.app-password-instructions li {
+		margin-bottom: 4px;
+	}
 
-.app-password-steps {
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
-}
+	.app-password-steps {
+		margin-top: 8px;
+		padding: 8px;
+		border-radius: 6px;
+		background: rgba(255, 255, 255, 0.03);
+	}
 
-.success-text {
-  color: #4caf50;
-}
+	.success-text {
+		color: #4caf50;
+	}
 
-.error-text {
-  color: #ff5252;
-}
+	.error-text {
+		color: #ff5252;
+	}
 
 	background: var(--brand-gradient);
 	border: none;
@@ -155,7 +155,8 @@ button.brand-enhanced {
 	padding: 12px 24px;
 	border-radius: 12px;
 	transition: all 0.3s ease;
-	box-shadow: var(--brand-shadow), 0 4px 15px rgba(6, 182, 212, 0.3);
+	box-shadow: var(--brand-shadow),
+	0 4px 15px rgba(6, 182, 212, 0.3);
 	transform: translateY(0);
 	font-size: 14px;
 }
@@ -288,7 +289,7 @@ header.brand-enhanced {
 	border-radius: 16px;
 	padding: 15px 25px;
 }
- 
+
 
 header.brand-enhanced h1 {
 	text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
@@ -526,7 +527,7 @@ header h1 {
 	justify-content: flex-end;
 	gap: 10px;
 }
- 
+
 .popup-overlay {
 	position: fixed;
 	inset: 0;
@@ -1135,6 +1136,7 @@ h1 .brand-e:hover::before {
 	transform: scale(1.2);
 	box-shadow: var(--brand-glow), 0 0 20px rgba(6, 182, 212, 0.6);
 }
+
 .brand-link {
 	color: var(--accent);
 }
@@ -1427,7 +1429,7 @@ header h1 span.brand-badge {
 .delete-confirm-actions button {
 	padding: 8px 16px;
 }
- 
+
 .settings-overlay {
 	position: fixed;
 	top: 0;
@@ -1438,7 +1440,7 @@ header h1 span.brand-badge {
 	backdrop-filter: blur(10px);
 	z-index: 1000;
 }
- 
+
 .context-review-panel {
 	width: 500px;
 	max-height: 80vh;
@@ -2216,7 +2218,7 @@ h3 .small.ghost:hover {
 .card-plan {
 	margin-bottom: 6px;
 	padding: 6px 8px;
-    background: var(--glass);
+	background: var(--glass);
 	border-radius: 6px;
 	border: 1px solid var(--border, #eee);
 }
@@ -2262,7 +2264,7 @@ h3 .small.ghost:hover {
 .plan-item-file {
 	font-family: ui-monospace, monospace;
 	color: var(--accent);
-	flex-shrink: 0; 
+	flex-shrink: 0;
 	max-width: calc(100% - 50px);
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -2932,4 +2934,12 @@ h3 .small.ghost:hover {
 	.col-resizer {
 		display: none;
 	}
+}
+
+.activeCardTextReview { 
+	white-space: break-spaces;
+	margin: 8px 0 0 0;
+	font-size: 12px;
+	max-height: 50vh;
+	overflow: auto;
 }

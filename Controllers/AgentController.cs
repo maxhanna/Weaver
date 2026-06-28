@@ -91,6 +91,8 @@ public class AgentController : ControllerBase
 "  Supported targetType values: method, class, property, interface, struct, record, enum, constructor\n" +
 "  newCode can be a string or array of lines (like FORMAT A).\n" +
 "  The tool will parse the file's AST, find the named node, and replace its body.\n" +
+"  CRITICAL: If you are modifying an existing method (e.g., adding a catch block, changing a return value, or adding a line of code), `newCode` MUST contain the ENTIRE method body from signature to closing brace, including your changes.\n" +
+"  NEVER put just an attribute or a single line in `newCode` when replacing a method.\n\n" +
 "  INDENTATION in newCode: the first line (method signature) must start with the SAME indentation as the original method in the file.\n" +
 "  Subsequent lines (method body) must be progressively indented: class indent + method indent + block indent.\n" +
 "  Example — if the method is inside a class at 8 spaces, output newCode with 8 spaces before the signature\n" +
@@ -1822,7 +1824,21 @@ public class AgentController : ControllerBase
                     }
                     else
                     {
-                        // REPLACE mode: find the full node and replace it entirely
+                        // ── Guard: If step asks to ADD a method, ensure LLM isn't modifying the wrong one ──
+                        var addMethodMatch = Regex.Match(step.Change ?? "", @"Add\s+(?:a\s+)?(?:new\s+)?method\s+(\w+)", RegexOptions.IgnoreCase);
+                        if (addMethodMatch.Success)
+                        {
+                            var requestedMethodName = addMethodMatch.Groups[1].Value;
+                            if (!string.IsNullOrWhiteSpace(requestedMethodName) &&
+                                !string.Equals(targetName, requestedMethodName, StringComparison.OrdinalIgnoreCase) &&
+                                !newCodeStr.Contains(requestedMethodName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return (null, null, false, null, false,
+                                    $"WRONG METHOD MODIFIED — Step asks to add '{requestedMethodName}' but you targeted '{targetName}' and did not include '{requestedMethodName}' in newCode. " +
+                                    "Use insertAfter:true with an existing method, and provide ONLY the new method in newCode.", false);
+                            }
+                        }
+
                         var (astOldStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
                         if (astOldStr != null)
                         {
@@ -5396,7 +5412,7 @@ emitSse, ct);
                 if (char.IsLetter(c))
                 {
                     var rest = line.Substring(i);
-                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)\d", RegexOptions.IgnoreCase);
+                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP|SELECT|DELETE|UPDATE|INSERT|FROM|WHERE|JOIN|AND|OR|NOT|IN|ON|AS|BY|ORDER|GROUP|HAVING|UNION|INTO|VALUES|SET|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL)\d", RegexOptions.IgnoreCase);
                     if (match.Success)
                     {
                         sb.Append(match.Value.Substring(0, match.Value.Length - 1));
@@ -5436,7 +5452,7 @@ emitSse, ct);
                 if (char.IsLetter(c))
                 {
                     var rest = line.Substring(i);
-                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)\d", RegexOptions.IgnoreCase);
+                    var match = Regex.Match(rest, @"^(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP|SELECT|DELETE|UPDATE|INSERT|FROM|WHERE|JOIN|AND|OR|NOT|IN|ON|AS|BY|ORDER|GROUP|HAVING|UNION|INTO|VALUES|SET|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL)\d", RegexOptions.IgnoreCase);
                     if (match.Success)
                     {
                         sb.Append(match.Value.Substring(0, match.Value.Length - 1));
@@ -11073,7 +11089,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             var fixedSql = sqlStr;
 
-            var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP)(\d)", RegexOptions.IgnoreCase);
+            var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP|SELECT|DELETE|UPDATE|INSERT|FROM|WHERE|JOIN|AND|OR|NOT|IN|ON|AS|BY|ORDER|GROUP|HAVING|UNION|INTO|VALUES|SET|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL)(\d)", RegexOptions.IgnoreCase);
             fixedSql = keywordDigit.Replace(fixedSql, "$1 $2");
 
             var keywordStar = new Regex(@"\b(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);

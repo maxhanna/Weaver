@@ -1058,7 +1058,7 @@
         </p>
         <div class="context-review-card-text" ng-if="vm.activeCardText">
           <strong>Card Text:</strong>
-          <pre style="white-space:pre-wrap;margin:8px 0 0 0;font-size:12px;">{{vm.activeCardText}}</pre>
+          <pre class="activeCardTextReview">{{vm.activeCardText}}</pre>
         </div>
         <div class="context-review-files">
           <label class="context-review-file" ng-repeat="f in vm.pendingContextReview.files track by f.path">
