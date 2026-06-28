@@ -5111,7 +5111,9 @@ emitSse, ct);
                     // Check this line for spacing issues
                     if (Regex.IsMatch(fileLines[i], @"\(\w+\s*[+\-*/%]\d") ||  // `(page -1` no space before digit
                         Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%]\s*\d") ||  // `5*5` `5 *5` `5* 5` missing spaces
-                        Regex.IsMatch(fileLines[i], @"(?<![=!<>])=(?!=)\d"))    // `=1` no space after = (but not ==, !=, <=, >=)
+                        Regex.IsMatch(fileLines[i], @"(?<![=!<>])=(?!=)\d") || // `=1` no space after = (but not ==, !=, <=, >=)
+                        Regex.IsMatch(fileLines[i], @"[\w\)\]]\s*[+*/%<>]\s*\d") || // `length>0`, `count+1`, `val*2`
+                        Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%<>]\s*[\w\(]"))   // `0+count`, `1*foo`, `1-1`
                     {
                         hasSpacingIssue = true;
                     }
