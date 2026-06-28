@@ -7709,19 +7709,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "task involves data that might live in that nested type, add a _explore step to read the RomMetadata " +
         "type definition BEFORE planning the edit. You cannot plan correctly without understanding the " +
         "full data structure.\n" +
-        "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
+               "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
         "and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file " +
         "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
         "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
         "If the service method does not exist, plan a step to create it.\n" +
-        "21. SCAFFOLDING (Angular/Nx/Vue/etc.): When the task asks to CREATE a new component, service, directive, or pipe in a framework project " +
-        "(detectable by `angular.json`, `nx.json`, or `package.json` containing `@angular/core`), you MUST use a `_command` step to run the framework's CLI generator. " +
-        "Do NOT manually create the files with `_create_file`.\n" +
-        "   - For Angular: `npx ng generate component <path/name> --skip-tests` (or `npx nx g c <path/name>` if using Nx)\n" +
-        "   - If the project root contains `angular.json` in a subfolder (e.g., `maxhanna.client/`), prefix the command with `cd <subfolder> && ` (e.g., `cd maxhanna.client && npx ng g c ...`)\n" +
-        "   - After the `_command` step succeeds, add `_explore` or edit steps to modify the newly generated `.ts`, `.html`, and `.css` files to implement the actual logic and template.\n";
+        "21. SCAFFOLDING (CRITICAL): When the task asks to CREATE a new component, service, directive, or pipe in a frontend project, " +
+        "your plan MUST contain the following steps in order:\n" +
+        "   1. A `_command` step to run the framework's CLI generator. Use `;` to separate commands (e.g., `cd maxhanna.client; npx ng g c components/recipe --skip-tests`). NEVER use `&&` as it fails in PowerShell.\n" +
+        "   2. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files to implement the actual logic and template.\n" +
+        "   3. If the component needs to be registered in a module (`app.module.ts`) or routing file, add an edit step for that.\n" +
+        "   Do NOT manually create the files with `_create_file`. If the CLI fails, the replanner will handle manual creation.\n";
 
-    /// <summary>Check if user prompt describes a visual layout/positioning task that needs CSS.</summary>
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
