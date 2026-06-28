@@ -2142,7 +2142,7 @@ public class AgentController : ControllerBase
         var changeLower = (step.Change ?? "").ToLowerInvariant();
         if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
         {
-            var methodMatch = Regex.Match(step.Change, @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
+            var methodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
             if (methodMatch.Success)
             {
                 var methodName = methodMatch.Groups[1].Value;
@@ -2157,7 +2157,7 @@ public class AgentController : ControllerBase
         if (changeLower.StartsWith("add ") &&
             (changeLower.Contains(" property") || changeLower.Contains(" variable") || changeLower.Contains(" field")))
         {
-            var propMatch = Regex.Match(step.Change, @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+(?:property|variable|field)", RegexOptions.IgnoreCase);
+            var propMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+(?:property|variable|field)", RegexOptions.IgnoreCase);
             if (propMatch.Success)
             {
                 var propName = propMatch.Groups[1].Value;
@@ -4079,13 +4079,16 @@ emitSse, ct);
                 // instead of copying the actual Angular template content).
                 var fullFileExt = Path.GetExtension(relPath).ToLowerInvariant();
                 var allowFullFileEscalation = history.Count >= 3 && fileAlreadyExists
-                    && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte");
+     && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs");
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
                     var e = fullFileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"
                         ? "fullFile is BLOCKED for HTML/Angular template files — the LLM generates wrong component structure. " +
                           "Use a single unique line from the TARGET SECTION as your ENTIRE oldString (must appear only once in the file, ≥20 chars). " +
                           "Look at the ⚡ ACTUAL TARGET SECTION shown in the history above."
+                        : fullFileExt == ".cs"
+                        ? "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
+                          "Use a targeted oldString/newString edit. Pick a single unique line from the target method as your anchor."
                         : "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
@@ -4466,6 +4469,15 @@ emitSse, ct);
             // it deterministically rather than retrying.
             if (replaced && !string.IsNullOrWhiteSpace(newStr))
             {
+                // Pre-emptively fix common SQL whitespace collapses (INTERVAL15 -> INTERVAL 15)
+                var fixedSqlContent = AutoFixSqlWhitespace(newContent);
+                if (fixedSqlContent != newContent)
+                {
+                    await EmitLog(emitSse, "info", $"Pre-verify SQL fix: corrected spacing in {relPath}", ct: ct);
+                    newContent = fixedSqlContent;
+                    newStr = AutoFixSqlWhitespace(newStr);
+                }
+
                 var formatted = AutoFormatEditedRegion(newContent, newStr);
                 if (formatted != newContent)
                 {
