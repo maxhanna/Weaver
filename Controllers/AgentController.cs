@@ -2153,6 +2153,21 @@ public class AgentController : ControllerBase
                 }
             }
         }
+        // Check if the step is trying to "Add" a property/variable that already exists
+        if (changeLower.StartsWith("add ") &&
+            (changeLower.Contains(" property") || changeLower.Contains(" variable") || changeLower.Contains(" field")))
+        {
+            var propMatch = Regex.Match(step.Change, @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+(?:property|variable|field)", RegexOptions.IgnoreCase);
+            if (propMatch.Success)
+            {
+                var propName = propMatch.Groups[1].Value;
+                // Look for the property declaration in the file (e.g. `propName:`, `propName =`, `propName;`)
+                if (Regex.IsMatch(content, $@"\b{Regex.Escape(propName)}\b\s*[:=;]", RegexOptions.IgnoreCase))
+                {
+                    return (PreEditVerdict.AlreadyDone, $"Property/variable '{propName}' already exists in the file");
+                }
+            }
+        }
         // Already done: newString already exists in the file
         if (!string.IsNullOrWhiteSpace(step.NewString))
         {
@@ -4112,15 +4127,33 @@ emitSse, ct);
                 $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                 ct: ct);
 
-            // Detect no-op edit: if old and new are functionally identical, treat as error.
-            // A "skipped" status would make doneIndices count the step as completed, causing the
-            // quality-check loop to enter "genuinely missing work" → return empty → "stopping"
-            // even though the LLM produced zero actual changes. The LLM was asked to make a
-            // change and failed — that's an error, triggering a retry via hasIncomplete.
+            // Detect no-op edit: if old and new are functionally identical, check if it's already done.
+            // If the LLM produces an identical old/new string, it usually means the code is already
+            // in the desired state. We verify if the block exists in the file. If so, mark as done.
             if (!string.IsNullOrWhiteSpace(oldStr) &&
                 AgentUtilities.NormalizeLineEndings(oldStr) == AgentUtilities.NormalizeLineEndings(newStr ?? ""))
             {
-                await EmitLog(emitSse, "error", $"No-op edit for {relPath}: LLM produced no change", ct: ct);
+                var checkOldStr = AgentUtilities.NormalizeLineEndings(oldStr);
+                var checkFileContent = AgentUtilities.NormalizeLineEndings(fileContent);
+                if (checkFileContent.Contains(checkOldStr, StringComparison.Ordinal))
+                {
+                    await EmitLog(emitSse, "info", $"✓ Already done (no-op): {relPath} — code already present", ct: ct);
+                    var r2 = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "edit",
+                        ["status"] = "skipped",
+                        ["path"] = relPath,
+                        ["reason"] = "already done",
+                        ["planItemIndex"] = planItemIndex
+                    };
+                    if (emitSse) await SendSse(Response, "step", r2, ct);
+                    allResults.Add(r2);
+                    await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                    return stepIndex + 1;
+                }
+
+                await EmitLog(emitSse, "error", $"No-op edit for {relPath}: LLM produced no change and code not found", ct: ct);
                 var r = new Dictionary<string, object?>
                 {
                     ["index"] = stepIndex,
