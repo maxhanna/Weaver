@@ -4146,7 +4146,6 @@ emitSse, ct);
                     projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
                 return stepIndex;
             }
-
             // ── Targeted replacement ──────────────────────────────────
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
@@ -4164,6 +4163,37 @@ emitSse, ct);
                 $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                 ct: ct);
 
+            bool replaced;
+            string newContent;
+            string? matchError = null;
+            string? snippet = null;
+
+            // FORMAT C: AstResolveEdit extracted the exact text directly from the file.
+            // We must use a direct replacement to avoid fuzzy matching inserting 
+            // duplicate methods in the wrong location.
+            if (fromFormatC && !string.IsNullOrEmpty(oldStr))
+            {
+                var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+                var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+                var idx = normFile.IndexOf(normOld, StringComparison.Ordinal);
+                if (idx >= 0)
+                {
+                    var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "");
+                    newContent = normFile[..idx] + normNew + normFile[(idx + normOld.Length)..];
+                    replaced = true;
+                }
+                else
+                {
+                    replaced = false;
+                    newContent = fileContent;
+                    matchError = "FORMAT C oldString not found in file (direct match failed)";
+                }
+            }
+            else
+            {
+                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
+                replaced = r; newContent = nc; matchError = me; snippet = sn;
+            }
             // Detect no-op edit: if old and new are functionally identical, check if it's already done.
             // If the LLM produces an identical old/new string, it usually means the code is already
             // in the desired state. We verify if the block exists in the file. If so, mark as done.
@@ -4261,10 +4291,7 @@ emitSse, ct);
             }
 
             var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
-
-            var (replaced, newContent, matchError, snippet) =
-                TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
-
+ 
             if (!replaced)
             {
                 var err = matchError ?? "oldString not found verbatim";
@@ -8577,16 +8604,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                  prompt.Contains("directive", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("module", StringComparison.OrdinalIgnoreCase);
 
-        if ((hasCodeInPrompt || mentionsCodeFiles) && pipelineType != PipelineType.CodeEdit)
+        // Also force CodeEdit if the prompt mentions frontend UI elements or logic changes
+        bool mentionsCodeLogic = prompt.Contains("upload list", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("list changes", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("pre-mark", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("button", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("click", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("event", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("function", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("method", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("variable", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("array", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("callback", StringComparison.OrdinalIgnoreCase);
+
+        if ((hasCodeInPrompt || mentionsCodeFiles || mentionsCodeLogic) && pipelineType != PipelineType.CodeEdit)
         {
-            await EmitLog(emitSse, "info", $"Code files or components detected in prompt — forcing CodeEdit pipeline", ct: ct);
+            await EmitLog(emitSse, "info", $"Code files, components, or UI logic detected in prompt — forcing CodeEdit pipeline", ct: ct);
             pipelineType = PipelineType.CodeEdit;
         }
 
         PipelineType? chainedNext = null;
         List<(PipelineType Pipeline, string Summary)>? stages = null;
 
-        if (!hasCodeInPrompt && !mentionsCodeFiles)
+        if (!hasCodeInPrompt && !mentionsCodeFiles && !mentionsCodeLogic)
         {
             var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: running shell/terminal commands, downloading files via URL, file system operations OUTSIDE the codebase logic.\n- UnifiedPipeline (CodeEdit): modifying, adding, or refactoring source code in the project (e.g., .cs, .ts, .html, .css files). This includes implementing upload logic, modifying components, or changing API calls.\n\nIs this routing correct? \n- If the task mentions modifying or creating code in specific files (like 'upload.component.ts' or 'file.service.ts'), it MUST be UnifiedPipeline.\n- If the task asks to 'create a method', 'add a variable', or 'change logic', it MUST be UnifiedPipeline.\n- DO NOT route to CommandExecution just because the task mentions 'uploading files', 'fetch data', or 'files' — if the upload/fetch logic is being implemented in code, it's UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
             var (vRaw, _, vErr) = await CallLlmRaw(
@@ -10109,12 +10149,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var webCtx = new StringBuilder();
         var checkpointCount = 0;
         const int MaxCheckpoints = 3;
-        completedStepIndices ??= new HashSet<int>();
-        // Per-execution budget: TryReplanAfterStep may add at most ONE extra round of
-        // steps. Genuinely missing work beyond that is handled by PostExecuteVerify's
-        // single, well-grounded replan (full file content + compile-check), not by
-        // repeated cheap re-invocations that tend to hallucinate.
+        completedStepIndices ??= new HashSet<int>(); 
         var replanBudget = new[] { 1 };
+        var alreadyDecoupled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
@@ -10363,17 +10400,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
 
                 // ── Per-step decoupling check: split into sub-steps if needed ──
-                var decoupledSubSteps = await CheckAndDecoupleStepAsync(
-                    item, itemIdx, projectRoot, emitSse, ct, allResults, cardId, prompt);
-                if (decoupledSubSteps?.Count > 0)
+                if (!alreadyDecoupled.Contains(item.Change ?? ""))
                 {
-                    await EmitLog(emitSse, "info",
-                        $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
-                        string.Join(" | ", decoupledSubSteps.Select(s => s.Change)), ct: ct);
-                    planItems.RemoveAt(itemIdx);
-                    planItems.InsertRange(itemIdx, decoupledSubSteps);
-                    if (!string.IsNullOrWhiteSpace(cardId))
+                    var decoupledSubSteps = await CheckAndDecoupleStepAsync(
+                        item, itemIdx, projectRoot, emitSse, ct, allResults, cardId, prompt);
+                    if (decoupledSubSteps?.Count > 0)
+                    {
+                        // Mark this step and its sub-steps as decoupled to prevent infinite loops
+                        alreadyDecoupled.Add(item.Change ?? "");
+                        foreach (var sub in decoupledSubSteps)
+                            alreadyDecoupled.Add(sub.Change ?? "");
+
+                        await EmitLog(emitSse, "info",
+                            $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
+                            string.Join(" | ", decoupledSubSteps.Select(s => s.Change)), ct: ct);
+                        planItems.RemoveAt(itemIdx);
+                        planItems.InsertRange(itemIdx, decoupledSubSteps);
+                        if (!string.IsNullOrWhiteSpace(cardId))
                         await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+                    }
                     // Send a "plan" SSE event so the frontend immediately shows the updated steps
                     var planItemsJson = new JsonArray();
                     for (var pi = 0; pi < planItems.Count; pi++)
