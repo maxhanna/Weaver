@@ -519,6 +519,38 @@
               </div>
               <div class="agent-summary" ng-if="vm.agentResult.summary"><strong>Summary:</strong>
                 {{vm.agentResult.summary}}</div>
+
+              <!-- Test Score Card (benchmark "test card" runs) -->
+              <div class="test-score-card" ng-if="vm.agentResult.testResult"
+                ng-class="{'test-pass': vm.agentResult.testResult.passed, 'test-fail': !vm.agentResult.testResult.passed}">
+                <div class="test-score-head">
+                  <span class="test-score-title">📊 {{vm.agentResult.testResult.testName}}</span>
+                  <span class="test-score-badge">{{vm.agentResult.testResult.passed ? 'PASS' : 'FAIL'}}</span>
+                </div>
+                <div class="test-score-big">
+                  <span class="test-score-num">{{vm.agentResult.testResult.score}}</span><span
+                    class="test-score-denom">/100</span>
+                  <span class="test-score-steps">{{vm.agentResult.testResult.stepsPassed}} /
+                    {{vm.agentResult.testResult.totalSteps}} steps</span>
+                </div>
+                <div class="test-score-bar">
+                  <div class="test-score-bar-fill" ng-style="{width: vm.agentResult.testResult.score + '%'}"></div>
+                </div>
+                <div class="test-score-fail" ng-if="!vm.agentResult.testResult.passed && vm.agentResult.testResult.failedStep">
+                  ✕ Broke at <code>{{vm.agentResult.testResult.failedStep}}</code>
+                  <span ng-if="vm.agentResult.testResult.failureReason"> — {{vm.agentResult.testResult.failureReason}}</span>
+                </div>
+                <div class="test-score-grid">
+                  <div ng-if="vm.agentResult.testResult.codeFile"><span class="tk">Code file</span><span
+                      class="tv">{{vm.agentResult.testResult.codeFile}}</span></div>
+                  <div ng-if="vm.agentResult.testResult.writtenTests.length"><span class="tk">Tests written</span><span
+                      class="tv">{{vm.agentResult.testResult.writtenTests.join(', ')}}</span></div>
+                  <div><span class="tk">Weaver version</span><span class="tv">{{vm.agentResult.testResult.weaverVersion}}</span></div>
+                  <div><span class="tk">Machine</span><span class="tv">{{vm.agentResult.testResult.machine.os}}
+                      · {{vm.agentResult.testResult.machine.cpuCores}} cores
+                      · {{vm.agentResult.testResult.machine.ramGb}} GB</span></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

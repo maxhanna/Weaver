@@ -11676,6 +11676,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
 
+            if (req.IsTest)
+            {
+                var editedPaths = allSteps.OfType<Dictionary<string, object?>>()
+                    .Where(s => (s.GetValueOrDefault("type")?.ToString() is "edit" or "rename" or "create_file")
+                                && s.GetValueOrDefault("status")?.ToString() == "done")
+                    .Select(s => s.GetValueOrDefault("path")?.ToString())
+                    .Where(p => !string.IsNullOrWhiteSpace(p))
+                    .Select(p => p!)
+                    .Distinct()
+                    .ToList();
+
+                var testResult = TestScorer.Score(
+                    testName: !string.IsNullOrWhiteSpace(req.TestName) ? req.TestName!
+                              : (!string.IsNullOrWhiteSpace(req.CardId) ? req.CardId! : req.Prompt),
+                    cardId: req.CardId,
+                    steps: allSteps,
+                    plan: plan,
+                    complete: complete,
+                    filesEdited: editedPaths,
+                    machine: EnvironmentMetadata.Collect(),
+                    weaverVersion: WeaverVersion.Read(projectRoot, Directory.GetCurrentDirectory()));
+
+                await SendSse(Response, "test_result", testResult);
+                await EmitLog(true, "info",
+                    $"📊 Test '{testResult.TestName}': score {testResult.Score} " +
+                    $"({testResult.StepsPassed}/{testResult.TotalSteps} steps, " +
+                    $"{(testResult.Passed ? "PASS" : "FAIL")})");
+            }
+
             await SendSse(Response, "done", new
             {
                 summary = plan?.Summary ?? "",

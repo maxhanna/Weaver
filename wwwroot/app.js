@@ -1941,6 +1941,7 @@
           vm.streamingStableCount = 0;
           vm.streamingSteps = [];
           vm.streamingFilesEdited = [];
+          vm.streamingTestResult = null;
           vm.planItems = [];
           vm.agentActivityLog = [];
           vm._lastStreamMs = Date.now();
@@ -1966,6 +1967,8 @@
             selfImproving: card.selfImproving || false,
             isDecomposing: card.isDecomposing || false,
             createTests: card.createTests || false,
+            isTest: card.isTest || false,
+            testName: card.testName || card.text,
             cardId: card.id
           };
 
@@ -2191,6 +2194,15 @@
                               pushAgentLog('error', 'Question error: ' + (e.message || e));
                             }
                             break;
+                          case 'test_result':
+                            if (parsed) {
+                              vm.streamingTestResult = parsed;
+                              pushAgentLog(parsed.passed ? 'info' : 'warn',
+                                '📊 Test "' + (parsed.testName || '?') + '": score ' + parsed.score +
+                                ' (' + parsed.stepsPassed + '/' + parsed.totalSteps + ' steps, ' +
+                                (parsed.passed ? 'PASS' : 'FAIL') + ')', parsed);
+                            }
+                            break;
                           case 'done':
                             vm.sendSystemToast();
                             vm.streamingActive = false;
@@ -2218,7 +2230,8 @@
                               summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited,
                               steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning,
                               incomplete: incomplete, needsClarification: parsed && parsed.needsClarification,
-                              question: parsed && (parsed.question || parsed.warning || finalSummary)
+                              question: parsed && (parsed.question || parsed.warning || finalSummary),
+                              testResult: vm.streamingTestResult
                             };
                             vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
                             var analysis = {
@@ -2226,7 +2239,8 @@
                               filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems),
                               warning: parsed && parsed.warning, incomplete: incomplete,
                               needsClarification: parsed && parsed.needsClarification,
-                              question: parsed && (parsed.question || parsed.warning || finalSummary)
+                              question: parsed && (parsed.question || parsed.warning || finalSummary),
+                              testResult: vm.streamingTestResult
                             };
                             var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                             if (doIdx !== -1) {
