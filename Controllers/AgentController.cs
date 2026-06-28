@@ -9914,13 +9914,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("Set complete=false if anything is missing, broken, or would cause compilation errors.");
         sb.AppendLine("Include a brief list of specific issues in the 'issues' array when complete=false.");
 
-        var verifySystemPrompt = "You are a strict QA verifier for TypeScript/C# code. Check whether a programming task is 100% complete AND whether the code would compile. " +
-     "CRITICAL: You must VERIFY that the specific locations, arrays, or variables mentioned in the task were actually modified. " +
-     "For example, if the task says 'in navigationItemDescriptions array', you must check that the edit was made to 'navigationItemDescriptions' and NOT 'navigationItems'. " +
-     "If the task says 'under nicehash bot note', you must check that the new text appears near 'NiceHash'. " +
-     "If the edit was applied to the wrong location, return complete=false. " +
-     "Pay special attention to properties accessed on typed objects — verify each one exists in the type definition. " +
-     "Output ONLY a JSON object with 'complete' (bool), 'reason' (string), and 'issues' (array of strings).";
+        var verifySystemPrompt = "You are a meticulous code reviewer verifying if a task is fully complete based ONLY on the original task prompt. " +
+       "Do NOT invent new requirements or check for things not explicitly mentioned in the task. " +
+       "If the original task asked to modify a specific method, and that method was modified, the task is complete. " +
+       "Check if the code would compile (no syntax errors, missing brackets, or undefined variables). " +
+       "Output ONLY a JSON object: {\"complete\": true/false, \"reason\": \"...\", \"issues\": [\"...\"]}.";
 
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,
@@ -10743,9 +10741,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // Guard: never write empty content when the original was non-empty
         if (!string.IsNullOrWhiteSpace(oldContent) && string.IsNullOrWhiteSpace(newContent))
             return (false, "Edit would produce empty file — rejected to prevent data loss", 1);
-
-        // Guard: if the result is less than 10% of the original size, the edit likely
-        // matched too broadly (e.g. oldString matched the entire file by accident).
+ 
         if (oldContent.Length > 200 && newContent.Length > 0 &&
             newContent.Length < oldContent.Length * 0.10)
             return (false, $"Edit would reduce file by {100 - (int)(newContent.Length * 100.0 / oldContent.Length)}% — suspicious content loss", 1);
@@ -10754,26 +10750,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var normNew = AgentUtilities.NormalizeLineEndings(newString);
         var normOldContent = AgentUtilities.NormalizeLineEndings(oldContent);
         var normNewContent = AgentUtilities.NormalizeLineEndings(newContent);
-
-        // newString must be present in result
+ 
         if (!string.IsNullOrEmpty(normNew) &&
             !normNewContent.Contains(normNew, StringComparison.Ordinal))
-        {
-            // Indentation may have been adjusted — retry with leading whitespace stripped from each line
+        { 
             var strippedNew = AgentUtilities.StripLineLeadingWhitespace(normNew);
-            var strippedContent = AgentUtilities.StripLineLeadingWhitespace(normNewContent);
-            // AutoIndentHtml uses Trim() internally so trailing whitespace is also lost;
-            // trim trailing from both to avoid false mismatch.
+            var strippedContent = AgentUtilities.StripLineLeadingWhitespace(normNewContent); 
             var trimmedNew = string.Join("\n", strippedNew.Split('\n').Select(l => l.TrimEnd()));
             var trimmedContent = string.Join("\n", strippedContent.Split('\n').Select(l => l.TrimEnd()));
             if (!trimmedContent.Contains(trimmedNew, StringComparison.Ordinal))
                 return (false, "newString not found after replacement", 4);
-        }
+        } 
 
-        // Detect hallucinated property names: LLMs often use common names like Title,
-        // Description, StartTime, EndTime that don't exist on the actual model types.
-        // If a property name appears nowhere in the old file but the new code uses it,
-        // it's likely hallucinated.
         var hallucinatedPropertyNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "EventTitle", "EventDescription",   // almost always should be Title/Description on an Event type
@@ -10792,12 +10780,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 $"Cross-reference the type definition in AUTO-ENRICHED CONTEXT and use the EXACT property names " +
                 $"shown there (e.g. CalendarEntry uses 'Type' and 'Note', not 'Title' and 'Description').", 2);
         }
-
-        // oldString should not appear as-frequently in the result
-        // (it was supposed to be replaced). Only check this for non-trivial oldStrings.
-        // Skip if oldString is contained inside newString — that means this is an
-        // additive insert (insertAfter, append), not a replacement, so oldString
-        // should still be present.
+ 
         if (!string.IsNullOrEmpty(normOld) && normOld.Length >= 10 && !normNew.Contains(normOld))
         {
             // Strip leading whitespace from each line for indentation-aware comparison
@@ -10815,15 +10798,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (oldCount > 0 && newCount >= oldCount)
                 return (false, "oldString still fully present after replacement — edit hit wrong location", 4);
         }
-
-        // Verify the replacement actually changed the target area:
-        // oldString and newString should be meaningfully different
+ 
         if (string.Equals(normOld.Trim(), normNew.Trim(), StringComparison.Ordinal))
             return (false, "oldString and newString are identical after normalization", 3);
-
-        // Detect duplicate HTTP-method route attributes (the most common source
-        // of LLM-produced method duplication — it copies a whole existing method
-        // alongside the new one instead of doing a clean insertion).
+ 
         if (!fromFormatC)
         {
             var uniqueRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -12495,18 +12473,25 @@ Respond with JSON only:
         catch { return (failed.Count == 0, "Could not parse assessment"); }
     }
 
-    private static AgentPlan MergePlans(AgentPlan? original, AgentPlan? replan)
+    private AgentPlan MergePlans(AgentPlan existing, AgentPlan replan)
     {
-        if (original == null) return replan ?? new AgentPlan();
-        if (replan == null) return original;
-        var merged = new AgentPlan
+        if (existing == null) return replan;
+        if (existing.Plan == null) existing.Plan = new List<PlanStep>();
+
+        var existingKeys = new HashSet<string>(
+            existing.Plan.Select(p => $"{p.File}|{NormalizeChangeForDedup(p.Change)}"),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var step in replan.Plan)
         {
-            Thinking = !string.IsNullOrWhiteSpace(replan.Thinking) ? replan.Thinking : original.Thinking,
-            Summary = !string.IsNullOrWhiteSpace(replan.Summary) ? replan.Summary : original.Summary,
-            Score = replan.Score > 0 ? replan.Score : original.Score,
-            Plan = MergePlanSteps(original.Plan, replan.Plan)
-        };
-        return merged;
+            var key = $"{step.File}|{NormalizeChangeForDedup(step.Change)}";
+            if (existingKeys.Add(key))
+            {
+                existing.Plan.Add(step);
+            }
+        }
+
+        return existing;
     }
 
     private static List<PlanStep> MergePlanSteps(IEnumerable<PlanStep> existing, IEnumerable<PlanStep> additions)
@@ -13121,13 +13106,6 @@ Respond with JSON only:
         return null;
     }
 
-    private static string RemoveUnsafeEditMarkersForPrompt(string value)
-    {
-        foreach (var marker in UnsafeEditMarkers)
-            value = value.Replace(marker, "[placeholder removed]", StringComparison.OrdinalIgnoreCase);
-        return value;
-    }
-
     private static string ReplaceLineBlock(string[] fileLines, int start, int count, string replacement)
     {
         var sb = new StringBuilder();
@@ -13615,17 +13593,6 @@ Respond with JSON only:
         return content[..Math.Max(lastBalanced, content.Length / 2)];
     }
 
-    /// <summary>Apply a fullFile replacement: continuation, indent correction, write, and SSE.</summary>
-    /// <remarks>
-    /// Historically only used for NEW files. Now also used for EXISTING files when
-    /// the strategy ladder escalates to fullFile after 3+ failed oldString attempts
-    /// (see <c>allowFullFileEscalation</c> in <see cref="ResolveAndApplyEdit"/>).
-    /// When used for existing files, the SAME formatting passes that run on the
-    /// normal edit path are applied here — otherwise escalated edits would skip
-    /// <see cref="FormatCssEditedRegion"/>, <see cref="AutoFormatEditedRegion"/>,
-    /// and <see cref="MergeDuplicateCssRules"/>, producing regressions like
-    /// <c>rgba(255,255,255,0.06)</c> (missing spaces) and duplicate CSS rules.
-    /// </remarks>
     private async Task<int> ApplyFullFile(string fullContent, PlanStep step, string fullPath, string relPath,
         string projectRoot, int stepIndex, int planItemIndex, string? cardId, bool emitSse, CancellationToken ct,
         List<object> allResults)
@@ -13642,23 +13609,9 @@ Respond with JSON only:
         if (existingLines != null && existingLines.Length > 0)
             fullContent = AutoIndentFullFile(fullContent, existingLines);
 
-        // ── Post-edit formatting passes (mirror the normal edit path) ──
-        // When fullFile is used as a strategy-ladder escalation for an EXISTING
-        // file, the LLM's full-content output needs the same deterministic
-        // formatting fixes that the normal edit path applies. Without these,
-        // escalated edits regress on spacing (commas/colons/equals) and
-        // duplicate CSS rules.
-        //
-        // We pass `fullContent` as the `appliedNewStr` parameter to
-        // AutoFormatEditedRegion so ALL lines in the file are considered
-        // "edited" and get formatting fixes. This is slightly more aggressive
-        // than the normal path (which only fixes lines in the edit region),
-        // but it's the right call for fullFile since the LLM rewrote the
-        // entire file.
+  
         var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
 
-        // CSS/SCSS/LESS: merge duplicate selectors FIRST (before formatting),
-        // so the formatting passes run on the merged result.
         if (fileExt is ".css" or ".scss" or ".less")
         {
             var (merged, mergeWarnings) = MergeDuplicateCssRules(fullContent);
@@ -13983,14 +13936,6 @@ Respond with JSON only:
         }
 
         return null;
-    }
-
-    private static void AppendPlanToConversation(StringBuilder conversation, List<PlanStep> steps, int startIndex, int totalCount)
-    {
-        conversation.AppendLine("\n### PLAN ###");
-        for (var pi = 0; pi < steps.Count; pi++)
-            conversation.AppendLine($"  Step {startIndex + pi}: [{steps[pi].File}] {steps[pi].Change}");
-        conversation.AppendLine("### END PLAN ###");
     }
 
     private async Task<List<EditResult>> ApplyEditsDirect(List<EditAction> edits, string projectRoot)
