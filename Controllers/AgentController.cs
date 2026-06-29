@@ -1508,6 +1508,17 @@ public class AgentController : ControllerBase
                         }
                     }
                 }
+                else if (h.error.Contains("WRONG SECTION", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("  ⚠ CRITICAL: You edited the WRONG SECTION of the HTML file.");
+                    sb.AppendLine("  The file has multiple *ngIf sections (e.g., 'users', 'general', 'stories').");
+                    sb.AppendLine("  The step description specifies WHICH section to edit — look for the section name");
+                    sb.AppendLine("  in the step description and find the matching *ngIf directive in the file.");
+                    sb.AppendLine();
+                    sb.AppendLine("  The CORRECT SECTION CONTENT was shown in the error message above.");
+                    sb.AppendLine("  Copy your oldString VERBATIM from that section — NOT from any other section.");
+                    sb.AppendLine("  Do NOT edit a section just because it has similar structure to the target.");
+                }
                 else if (h.error.Contains("Method signature changed", StringComparison.OrdinalIgnoreCase))
                 {
                     sb.AppendLine("  ⚠ Your new LOGIC was correct but you used the WRONG method signature.");
@@ -4329,11 +4340,24 @@ emitSse, ct);
                     wipeReason = DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath);
                 }
 
+                // ── NEW: Wrong section guard (HTML/Angular templates) ──────────────
+                // Catches the #1 HTML editing failure: LLM edits the wrong *ngIf section
+                // (e.g., edits 'users' tab when step asks for 'general' tab). The LLM
+                // verify gate frequently misses this because sections look similar.
+                if (wipeReason == null)
+                {
+                    wipeReason = AgentUtilities.DetectWrongSectionEdit(oldStr!, fileContent, step.Change, relPath);
+                }
+
                 if (wipeReason != null)
                 {
                     await EmitLog(emitSse, "warn",
                         $"Guard triggered for {relPath}: {wipeReason}",
-                        new { oldPreview = oldStr!.Length > 200 ? oldStr!.Substring(0, 200) + "..." : oldStr, newPreview = newStr!.Length > 200 ? newStr!.Substring(0, 200) + "..." : newStr },
+                        new
+                        {
+                            oldPreview = oldStr!.Length > 200 ? oldStr!.Substring(0, 200) + "..." : oldStr,
+                            newPreview = newStr!.Length > 200 ? newStr!.Substring(0, 200) + "..." : newStr
+                        },
                         ct: ct);
                     history.Add((oldStr!, newStr, wipeReason));
 
@@ -6305,7 +6329,13 @@ emitSse, ct);
             "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
-                        " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+            "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
+            "      (e.g., *ngIf=\"activeDataTab === 'users'\" vs *ngIf=\"activeDataTab === 'general'\"), " +
+            "      if the step says 'add X to the general tab' but the oldString comes from the 'users' " +
+            "      tab (or any other section), ABANDON with reason 'edited wrong section'. " +
+            "      This is critical — do NOT be fooled by sections that have similar structure. " +
+            "      Check WHICH *ngIf section the oldString belongs to, not just whether the edit 'looks right'.\n" + 
+            " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
             "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
             "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
             "  functionality that is UNRELATED to the requested change.\n" +
