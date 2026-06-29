@@ -1684,8 +1684,48 @@ public class AgentController : ControllerBase
 
         if (emitSse)
             await SendSse(Response, "edit-resolve", new { }, ct);
-        var (raw, _, _) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 8192);
 
+        // ── CONTEXT COMPACTION ────────────────────────────────────────
+        // Local LLMs (llama.cpp) can time out or degrade severely on massive prompts.
+        // If the prompt exceeds 100k chars (~25k tokens), we strip away the bulky 
+        // exploration context and older history, keeping only the immediate file 
+        // excerpt and the most recent failure.
+        var promptContent = sb.ToString();
+        const int MaxPromptChars = 100000;
+        if (promptContent.Length > MaxPromptChars)
+        {
+            await EmitLog(emitSse, "warn", $"Context size {promptContent.Length} chars exceeds limit. Compacting context to prevent LLM timeout...", ct: ct);
+            sb.Clear();
+            sb.AppendLine("⚠ CONTEXT COMPACTION APPLIED: Original context was too large for the LLM window. Only immediate file context is shown.");
+            sb.AppendLine($"FILE: {relPath}");
+            sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
+            sb.AppendLine();
+
+            if (fileExists)
+            {
+                sb.AppendLine("CURRENT FILE CONTENT (TRUNCATED TO RELEVANT EXCERPT):");
+                sb.AppendLine("```");
+                // Hard limit the file excerpt to 4000 chars to guarantee it fits
+                var excerpt = AgentUtilities.ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, 4000);
+                sb.AppendLine(excerpt);
+                sb.AppendLine("```");
+            }
+
+            if (history?.Count > 0)
+            {
+                sb.AppendLine($"⚠ PREVIOUS {history.Count} ATTEMPT(S) FAILED. Learn from the most recent failure:");
+                var lastH = history[^1];
+                sb.AppendLine($"\n--- Most Recent Error: {lastH.error} ---");
+                if (!string.IsNullOrWhiteSpace(lastH.old))
+                {
+                    sb.AppendLine($"  Your oldString was (truncated): {lastH.old[..Math.Min(300, lastH.old.Length)]}...");
+                }
+            }
+            sb.AppendLine();
+            sb.AppendLine("Output the edit now:");
+        }
+
+        var (raw, _, _) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 8192);
         if (string.IsNullOrWhiteSpace(raw))
             return (null, null, false, null, false, "LLM returned empty response", false);
 
@@ -2815,13 +2855,23 @@ public class AgentController : ControllerBase
                     message = $"Exploration round {round + 1}/{MaxRounds}"
                 }, ct);
 
+            // Hard cap exploration context to 30k chars so the local LLM doesn't time out
+            // during the prefill phase of the prompt.
+            var contextStr = ctx.ToString();
+            if (contextStr.Length > 30000)
+            {
+                await EmitLog(emitSse, "warn", $"Exploration context exceeded 30k chars. Truncating older file contents to prevent timeout.", ct: ct);
+                contextStr = contextStr[^30000..]; // Keep the most recent 30k chars
+            }
+
             var (raw, _, _) = await CallLlmRaw(
                 BuildStepExplorationSystemPrompt(),
                 BuildStepExplorationPrompt(
                     step, originalPrompt, fullPlan, planItemIndex,
-                    ctx.ToString(), filesRead, round),
-                ct, TimeSpan.FromSeconds(35), maxTokens: 1024);
+                    contextStr, filesRead, round),
+                ct, TimeSpan.FromMinutes(2), maxTokens: 1024);
 
+                
             if (string.IsNullOrWhiteSpace(raw)) break;
 
             var parsed = ParseStepExplorationResponse(raw);
