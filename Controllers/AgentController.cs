@@ -3862,11 +3862,21 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(f) && !string.IsNullOrWhiteSpace(c))
                     result.Add(new PlanStep { File = f, Change = c, Priority = step.Priority });
             }
+            
+            if (result.Count == 1)
+            {
+                var isSameFile = string.Equals(result[0].File, step.File, StringComparison.OrdinalIgnoreCase);
+                var isSameChange = string.Equals(result[0].Change, step.Change, StringComparison.OrdinalIgnoreCase);
+                if (isSameFile && isSameChange)
+                {
+                    return null;
+                }
+            }
+
             return result.Count > 0 ? result : null;
         }
         catch { return null; }
-    }
-
+    } 
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -3878,7 +3888,8 @@ public class AgentController : ControllerBase
         AgentPlan? plan = null,   // NEW — full plan for context
         int planItemIndex = -1,
         string? cardId = null,
-        List<string>? attachedFiles = null)
+        List<string>? attachedFiles = null,
+        int replanDepth = 0)
     {
         var cfg8 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -5027,9 +5038,39 @@ emitSse, ct);
         }, CancellationToken.None);
 
         // ── REPLANNING CYCLE: try to generate a new approach ───────────
-        // Instead of just giving up, feed the failure context (including
-        // the actual failed code snippets and scores) back to the planner
-        // and ask for a DIFFERENT approach to the same step.
+
+        // PREVENT INFINITE RECURSION: Only allow replanning at depth 0.
+        // If this is already a replan step (depth > 0), fail immediately.
+        if (replanDepth > 0)
+        {
+            await EmitLog(emitSse, "error",
+                $"✗ FATAL: Replan step failed (depth {replanDepth}) — aborting {relPath}: {lastErr}",
+                new { failureContext, attemptScores }, ct: ct);
+
+            var failDepth = new Dictionary<string, object?>
+            {
+                ["index"] = stepIndex,
+                ["type"] = "edit",
+                ["status"] = "error",
+                ["path"] = relPath,
+                ["error"] = lastErr,
+                ["planItemIndex"] = planItemIndex,
+                ["failureContext"] = failureContext,
+                ["attemptScores"] = attemptScores.Select(a => new { a.attempt, a.score, a.reason }).ToList(),
+                ["bestScore"] = bestScore,
+                ["replanAttempts"] = 0
+            };
+            if (emitSse) await SendSse(Response, "step", failDepth, ct);
+            allResults.Add(failDepth);
+            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+
+            throw new StepFatalException(
+                $"Replan step failed after {history.Count} attempts: {relPath} — {lastErr}",
+                relPath,
+                step.Change,
+                failureContext);
+        }
+
         var replanAttempts = 0;
         const int MaxReplanAttempts = 2;
 
@@ -5071,15 +5112,23 @@ emitSse, ct);
                 $"Replan cycle {replanAttempts} generated {replanSteps.Count} new step(s): " +
                 string.Join(" | ", replanSteps.Select(s => s.Change)), ct: ct);
 
-            // Execute the replanned steps
             var replanResults = new List<object>();
             foreach (var replanStep in replanSteps)
             {
                 var replanStepIndex = stepIndex;
-                replanStepIndex = await ResolveAndApplyEdit(
-                    replanStep, projectRoot, emitSse, ct,
-                    replanResults, replanStepIndex,
-                    prompt, plan, planItemIndex, cardId, attachedFiles);
+                try
+                {
+                    replanStepIndex = await ResolveAndApplyEdit(
+                        replanStep, projectRoot, emitSse, ct,
+                        replanResults, replanStepIndex,
+                        prompt, plan, planItemIndex, cardId, attachedFiles,
+                        replanDepth + 1); // <-- PASS DEPTH
+                }
+                catch (StepFatalException)
+                {
+                    // The replan step failed and threw. It already logged its error.
+                    // We catch it here so we can try the next replan attempt (if any).
+                }
             }
 
             // Check if any replan step succeeded

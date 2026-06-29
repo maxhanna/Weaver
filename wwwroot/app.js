@@ -917,7 +917,10 @@
         es.addEventListener('command', function (e) {
           try {
             var cmd = JSON.parse(e.data);
-            receiveCommand(cmd);
+            // Wrap in $timeout to prevent infdig when commands arrive during an active $digest
+            $timeout(function () {
+              receiveCommand(cmd);
+            }, 0);
           } catch (ex) {
             console.log("SSE command parse error", ex);
           }
@@ -948,7 +951,12 @@
               try {
                 var cmds = resp.data || undefined;
                 if (cmds && cmds.length > 0) {
-                  cmds.forEach(receiveCommand);
+                  // Wrap in $timeout to prevent infdig loop
+                  cmds.forEach(function (cmd) {
+                    $timeout(function () {
+                      receiveCommand(cmd);
+                    }, 0);
+                  });
                 }
               } catch (e) { console.log("poll cmd error", e); }
             }
