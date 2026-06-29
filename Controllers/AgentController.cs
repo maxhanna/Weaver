@@ -3718,9 +3718,11 @@ public class AgentController : ControllerBase
             return null;
         if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
             return null;
-
-        // Quick heuristic: only check steps whose description suggests multiple actions
+ 
         var ch = (step.Change ?? "").ToLowerInvariant();
+ 
+        if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
+            return null;
         var hasMultipleConcerns =
      ch.Contains(" and ") || ch.Contains(" & ") ||
      ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
@@ -3862,21 +3864,25 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(f) && !string.IsNullOrWhiteSpace(c))
                     result.Add(new PlanStep { File = f, Change = c, Priority = step.Priority });
             }
-            
-            if (result.Count == 1)
+
+            // ── PREVENT INFINITE DECOUPLING LOOP ───────────────────────────
+            // 1. If the LLM returns 0 or 1 step, it didn't actually decouple. Abort.
+            if (result.Count <= 1) return null;
+
+            // 2. If the LLM returns duplicate steps, abort.
+            var distinctChanges = new HashSet<string>(result.Select(s => s.Change), StringComparer.OrdinalIgnoreCase);
+            if (distinctChanges.Count != result.Count) return null;
+
+            // 3. If any of the decoupled steps is identical to the original step, abort.
+            if (result.Any(s => string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
             {
-                var isSameFile = string.Equals(result[0].File, step.File, StringComparison.OrdinalIgnoreCase);
-                var isSameChange = string.Equals(result[0].Change, step.Change, StringComparison.OrdinalIgnoreCase);
-                if (isSameFile && isSameChange)
-                {
-                    return null;
-                }
+                return null;
             }
 
-            return result.Count > 0 ? result : null;
+            return result;
         }
         catch { return null; }
-    } 
+    }
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -10466,44 +10472,56 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // ── Per-step decoupling check: split into sub-steps if needed ──
                 if (!alreadyDecoupled.Contains(item.Change ?? ""))
                 {
+                    // FIX: Mark as checked FIRST, before the LLM call.
+                    // Previously this was only done inside the decoupled-steps branch,
+                    // causing an infinite loop when CheckAndDecoupleStepAsync returned null.
+                    alreadyDecoupled.Add(item.Change ?? "");
+
                     var decoupledSubSteps = await CheckAndDecoupleStepAsync(
                         item, itemIdx, projectRoot, emitSse, ct, allResults, cardId, prompt);
+
                     if (decoupledSubSteps?.Count > 0)
                     {
-                        // Mark this step and its sub-steps as decoupled to prevent infinite loops
-                        alreadyDecoupled.Add(item.Change ?? "");
                         foreach (var sub in decoupledSubSteps)
                             alreadyDecoupled.Add(sub.Change ?? "");
 
                         await EmitLog(emitSse, "info",
                             $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
                             string.Join(" | ", decoupledSubSteps.Select(s => s.Change)), ct: ct);
+
                         planItems.RemoveAt(itemIdx);
                         planItems.InsertRange(itemIdx, decoupledSubSteps);
                         if (!string.IsNullOrWhiteSpace(cardId))
-                        await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
-                    }
-                    // Send a "plan" SSE event so the frontend immediately shows the updated steps
-                    var planItemsJson = new JsonArray();
-                    for (var pi = 0; pi < planItems.Count; pi++)
-                    {
-                        planItemsJson.Add(new JsonObject
+                            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+
+                        var planItemsJson = new JsonArray();
+                        for (var pi = 0; pi < planItems.Count; pi++)
                         {
-                            ["index"] = pi,
-                            ["file"] = planItems[pi].File,
-                            ["change"] = planItems[pi].Change,
-                            ["priority"] = planItems[pi].Priority,
-                            ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict && dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal && piiVal == pi && dict.TryGetValue("status", out var st) && st is string stStr && stStr == "done")
-                        });
+                            planItemsJson.Add(new JsonObject
+                            {
+                                ["index"] = pi,
+                                ["file"] = planItems[pi].File ?? "",
+                                ["change"] = planItems[pi].Change ?? "",
+                                ["priority"] = planItems[pi].Priority,
+                                ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict &&
+                                    dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal &&
+                                    piiVal == pi &&
+                                    dict.TryGetValue("status", out var st) && st is string stStr && stStr == "done")
+                            });
+                        }
+                        await SendSse(Response, "plan", new
+                        {
+                            thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps.Count} sub-steps",
+                            summary = "Plan updated after decoupling",
+                            items = planItemsJson
+                        }, ct);
+
+                        // FIX: Only decrement+continue when decoupling actually happened.
+                        // Previously itemIdx-- ran even when null was returned → infinite loop.
+                        itemIdx--;
+                        continue;
                     }
-                    await SendSse(Response, "plan", new
-                    {
-                        thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps?.Count ?? 0} sub-steps",
-                        summary = "Plan updated after decoupling",
-                        items = planItemsJson
-                    }, ct);
-                    itemIdx--;
-                    continue;
+                    // No decoupling — fall through to ResolveAndApplyEdit below
                 }
 
                 // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally

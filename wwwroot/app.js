@@ -49,19 +49,33 @@
       var audio = new Audio('/wwwroot/zen.mp3');
       audio.play();
     };
-    vm.showNotification = function(message) {
-      if (navigator.userAgent.indexOf('Win') !== -1) {
-        if (Notification.permission === 'granted') {
-          new Notification('Weaver', { body: message });
-        } else if (Notification.permission !== 'denied') {
-          Notification.requestPermission().then(function (permission) {
-            if (permission === 'granted') {
-              new Notification('Weaver', { body: message });
+    vm.showNotification = async function (message) {
+      // If browser supports the Notification API
+      if ("Notification" in window) {
+        let permission = Notification.permission;
+
+        if (permission === "granted") {
+          new Notification("Weaver", { body: message });
+          return;
+        }
+
+        if (permission === "default") {
+          try {
+            permission = await Notification.requestPermission();
+            if (permission === "granted") {
+              new Notification("Weaver", { body: message });
+              return;
             }
-          });
+          } catch (e) {
+            console.warn("Notification permission request failed:", e);
+          }
         }
       }
+
+      // Fallback for browsers/platforms that don't support notifications
+      vm.showToast(message); // Implement your own toast/snackbar UI
     };
+
     vm.sendSystemToast = function() {
       if (navigator.userAgent.indexOf('Win') !== -1) {
         vm.showNotification('Done');
