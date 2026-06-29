@@ -6343,17 +6343,6 @@ emitSse, ct);
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
     }
 
-    /// <summary>
-    /// Deterministic pre-write guard. Inspects an oldString/newString pair
-    /// and returns a non-null reason string if the edit would wipe existing
-    /// functionality, change a method's signature, or invent symbols that do
-    /// not exist in the file. Returns null if the edit looks safe.
-    ///
-    /// The three checks below catch the failure mode where the LLM, asked to
-    /// make a small tweak ("make the rocket projectile a bit bigger"),
-    /// instead rewrites the entire method — deleting cache guards, changing
-    /// the return type, and calling methods that don't exist in the file.
-    /// </summary>
     private static string? DetectFunctionalityWipe(
         string oldStr, string newStr, string fileContent, string relPath)
     {
@@ -6361,44 +6350,69 @@ emitSse, ct);
             return null;
 
         var oldLines = oldStr.Split('\n');
+
+        // FIX: Normalize internal whitespace before comparison so minor differences
+        // like "== 0" vs "==0" don't trigger false cache-state-loss positives.
+        // The LLM frequently collapses spaces around operators; the guard logic
+        // itself is still present, just with slightly different spacing.
+        string NormalizeForComparison(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return "";
+            return Regex.Replace(line.Trim(), @"\s+", " ").Trim();
+        }
+
         var newLinesSet = new HashSet<string>(
-            newStr.Split('\n').Select(l => l.Trim()),
+            newStr.Split('\n').Select(l => NormalizeForComparison(l)),
             StringComparer.Ordinal);
 
-        // ── Guard A: cached-state loss ────────────────────────────────────
-        // Lines in oldString that match cache/guard patterns but are missing
-        // (by trimmed content) from newString. We match on the trimmed line
-        // so trivial re-indentation by the LLM doesn't bypass the check.
         var cacheLinePatterns = new[]
         {
-            new Regex(@"\.has\s*\(", RegexOptions.Compiled),                  // map.has('rocket')
-            new Regex(@"\.get\s*\(", RegexOptions.Compiled),                  // map.get('rocket')
-            new Regex(@"\.set\s*\(", RegexOptions.Compiled),                  // map.set('rocket', ...)
-            new Regex(@"\.delete\s*\(", RegexOptions.Compiled),               // map.delete('rocket')
-            new Regex(@"return\s+this\.\w+\s*;", RegexOptions.Compiled),      // return this.rocketMesh;
-            new Regex(@"if\s*\(\s*this\.\w+", RegexOptions.Compiled),         // if (this.rocketMesh)
-            new Regex(@"if\s*\(\s*!\s*this\.\w+", RegexOptions.Compiled),     // if (!this.rocketMesh)
-            new Regex(@"this\.\w+\s*=\s*null\s*;", RegexOptions.Compiled),    // this.rocketMesh = null;
-            new Regex(@"this\.\w+\s*=\s*undefined\s*;", RegexOptions.Compiled),
-            new Regex(@"this\.\w+\s*=\s*default\s*;", RegexOptions.Compiled),
-            new Regex(@"_\w+\s*=\s*null\s*;", RegexOptions.Compiled),         // _field = null; (C#)
-        };
+        new Regex(@"\.has\s*\(", RegexOptions.Compiled),
+        new Regex(@"\.get\s*\(", RegexOptions.Compiled),
+        new Regex(@"\.set\s*\(", RegexOptions.Compiled),
+        new Regex(@"\.delete\s*\(", RegexOptions.Compiled),
+        new Regex(@"return\s+this\.\w+\s*;", RegexOptions.Compiled),
+        new Regex(@"if\s*\(\s*this\.\w+", RegexOptions.Compiled),
+        new Regex(@"if\s*\(\s*!\s*this\.\w+", RegexOptions.Compiled),
+        new Regex(@"this\.\w+\s*=\s*null\s*;", RegexOptions.Compiled),
+        new Regex(@"this\.\w+\s*=\s*undefined\s*;", RegexOptions.Compiled),
+        new Regex(@"this\.\w+\s*=\s*default\s*;", RegexOptions.Compiled),
+        new Regex(@"_\w+\s*=\s*null\s*;", RegexOptions.Compiled),
+    };
+
+        // Also add: guard lines that check array lengths or conditions
+        // (these are the ones being false-positived in the user's case)
+        var guardLinePatterns = new[]
+        {
+        cacheLinePatterns,
+        new[]
+        {
+            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),  // if (x.length == 0)
+            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),         // if (!this.displayRadioFilters)
+            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),           // if (!X && Y)
+        }
+    }.SelectMany(x => x).ToArray();
+
         var lostCacheLines = new List<string>();
         foreach (var line in oldLines)
         {
             var trimmed = line.Trim();
             if (string.IsNullOrWhiteSpace(trimmed)) continue;
-            // Skip pure-structural lines (braces, blank) — those are allowed to move.
             if (trimmed == "{" || trimmed == "}" || trimmed == "});") continue;
+
             var isCacheLine = false;
-            foreach (var pat in cacheLinePatterns)
+            foreach (var pat in guardLinePatterns)
             {
                 if (pat.IsMatch(trimmed)) { isCacheLine = true; break; }
             }
             if (!isCacheLine) continue;
-            if (!newLinesSet.Contains(trimmed))
+
+            // FIX: Compare using normalized whitespace instead of exact trimmed match
+            var normalizedOld = NormalizeForComparison(trimmed);
+            if (!newLinesSet.Contains(normalizedOld))
                 lostCacheLines.Add(trimmed);
         }
+
         if (lostCacheLines.Count > 0)
         {
             var preview = string.Join("; ", lostCacheLines.Take(3));
@@ -6406,7 +6420,7 @@ emitSse, ct);
             return $"CACHE-STATE LOSS — oldString contained cache/guard line(s) that are MISSING from newString: [{preview}]. " +
                    "These lines protect against redundant work or null derefs. PRESERVE them in newString verbatim " +
                    "(only the property values you actually need to change should be edited, not the guard logic).";
-        }
+        } 
 
         // ── Guard B: signature change ────────────────────────────────────
         // For .ts/.tsx/.js/.jsx/.cs files: if the FIRST non-blank line of
@@ -8620,25 +8634,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── Resume from existing plan (skip replanning) ─────────────────────
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
-            var doneCount = completedStepIndices?.Count ?? 0;
-            await EmitLog(emitSse, "info", $"Using existing plan — {existingPlan.Plan.Count} step(s), {doneCount} already done", existingPlan, ct: ct);
-            if (emitSse)
-                await SendSse(Response, "plan",
-                    new
-                    {
-                        thinking = existingPlan.Thinking,
-                        summary = existingPlan.Summary,
-                        items = existingPlan.Plan,
-                        resumed = true
-                    }, ct);
-
             var resumeSteps = new List<object>();
+            // ... existing code ...
             await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                 completedStepIndices: completedStepIndices, cardId: cardId);
 
+            // FIX: Check for step errors before declaring complete
+            var resumeHasErrors = resumeSteps.OfType<Dictionary<string, object?>>()
+                .Any(s => s.TryGetValue("status", out var st) && st?.ToString() == "error");
+
             var allStepsAlreadyDone = completedStepIndices != null && completedStepIndices.Count >= existingPlan.Plan.Count;
-            return (resumeSteps, existingPlan, (resumeSteps.Count > 0) || allStepsAlreadyDone);
+
+            // FIX: Don't mark complete if there are errors
+            bool resumeComplete = !resumeHasErrors && ((resumeSteps.Count > 0) || allStepsAlreadyDone);
+
+            if (resumeHasErrors)
+            {
+                await EmitLog(emitSse, "error",
+                    "Resumed plan has step errors — task NOT complete", ct: ct);
+            }
+
+            return (resumeSteps, existingPlan, resumeComplete);
         }
 
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
@@ -8830,12 +8847,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         // ── Quality check ─────────────────────────────────────────────────
-        bool complete = true;
-        if (!skipQualityCheck && allSteps.Count > 0)
+        bool complete = true; 
+        var hasFatalStepErrors = allSteps.OfType<Dictionary<string, object?>>()
+            .Any(s => s.TryGetValue("status", out var st) &&
+                      st?.ToString() == "error");
+
+        if (hasFatalStepErrors)
+        {
+            complete = false;
+            await EmitLog(emitSse, "warn",
+                "Task marked INCOMPLETE — one or more steps failed with errors. " +
+                "Skipping LLM quality check since step failures are deterministic.", ct: ct); 
+        }
+
+        if (complete && !skipQualityCheck && allSteps.Count > 0)
         {
             var hasDone = allSteps.OfType<Dictionary<string, object?>>()
                 .Any(s => s.TryGetValue("type", out var t) && t?.ToString() == "done_signal");
-            // If PostExecuteVerify already confirmed task completion, skip redundant quality check
             var verified = allSteps.OfType<Dictionary<string, object?>>()
                 .Any(s => s.TryGetValue("type", out var t) && t?.ToString() == "verified_complete");
 
@@ -8844,6 +8872,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (!hasDone)
             {
                 var (ok, reason) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
+ 
+                if (ok && hasFatalStepErrors)
+                {
+                    ok = false;
+                    reason = "Step errors present — overriding LLM completion assessment";
+                }
+
                 complete = ok;
                 if (!ok)
                 {
