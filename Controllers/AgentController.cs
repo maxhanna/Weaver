@@ -10449,7 +10449,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     await SendSse(Response, "plan", new
                     {
-                        thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps.Count} sub-steps",
+                        thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps?.Count ?? 0} sub-steps",
                         summary = "Plan updated after decoupling",
                         items = planItemsJson
                     }, ct);
