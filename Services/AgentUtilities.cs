@@ -1747,7 +1747,176 @@ public static class AgentUtilities
         }
         return sb.ToString().Trim();
     }
+    /// <summary>
+    /// For HTML/Angular/Razor templates, deterministically verifies that the
+    /// oldString being replaced is located within the correct *ngIf section.
+    ///
+    /// This catches the #1 HTML editing failure: the LLM edits a section that
+    /// looks similar to the target (e.g., editing the 'users' tab when the step
+    /// asks for the 'general' tab). The LLM verify gate frequently misses this
+    /// because the sections have similar structure (both have search inputs,
+    /// coordinate lists, etc.).
+    ///
+    /// Algorithm:
+    ///   1. Scan the file for all *ngIf="someVar === 'sectionName'" directives
+    ///   2. Find the div boundaries for each section
+    ///   3. Determine which section the oldString falls in
+    ///   4. Determine which section the step description references
+    ///   5. If they don't match, reject with a directive error that includes
+    ///      the CORRECT section's content so the LLM can copy from it
+    /// </summary>
+    public static string? DetectWrongSectionEdit(
+        string oldStr, string fileContent, string stepChange, string relPath)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(stepChange))
+            return null;
 
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        if (ext is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"))
+            return null;
+
+        // ── 1. Find all named conditional sections in the file ──────────────
+        // Matches: *ngIf="activeDataTab === 'general'" or *ngIf="activeTab == 'users'"
+        var sectionRegex = new Regex(
+            @"\*ngIf\s*=\s*""(\w+)\s*={2,3}\s*'([^']+)'""",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        var sections = new List<(string name, int divStart, int divEnd)>();
+        foreach (Match m in sectionRegex.Matches(fileContent))
+        {
+            var name = m.Groups[2].Value;
+            var divStart = fileContent.LastIndexOf("<div", m.Index, StringComparison.Ordinal);
+            if (divStart < 0) continue;
+            var divEnd = FindMatchingCloseDiv(fileContent, divStart);
+            if (divEnd < 0) continue;
+            sections.Add((name, divStart, divEnd));
+        }
+
+        // Need at least 2 sections for wrong-section to be possible
+        if (sections.Count < 2) return null;
+
+        // ── 2. Find which section the oldStr is in ──────────────────────────
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+        var oldStrIdx = normFile.IndexOf(normOld, StringComparison.Ordinal);
+        if (oldStrIdx < 0) return null; // Let other guards handle "not found"
+
+        string? actualSection = null;
+        foreach (var (name, divStart, divEnd) in sections)
+        {
+            if (oldStrIdx >= divStart && oldStrIdx <= divEnd)
+            {
+                actualSection = name;
+                break;
+            }
+        }
+
+        // If oldStr is not inside any named section (e.g. it's in the <head> or
+        // common area), don't trigger — other guards will catch real issues.
+        if (actualSection == null) return null;
+
+        // ── 3. Determine target section from step description ───────────────
+        var stepLower = stepChange.ToLowerInvariant();
+        string? targetSection = null;
+        foreach (var (name, _, _) in sections)
+        {
+            // Match the section name as a standalone word in the step description
+            // e.g., step contains "general data tab" → matches section "general"
+            if (Regex.IsMatch(stepLower, $@"\b{Regex.Escape(name.ToLowerInvariant())}\b"))
+            {
+                targetSection = name;
+                break;
+            }
+        }
+
+        // Step doesn't reference any named section — can't verify
+        if (targetSection == null) return null;
+
+        // ── 4. Correct section — no problem ─────────────────────────────────
+        if (string.Equals(actualSection, targetSection, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        // ── 5. Wrong section! Build a helpful error with the correct content ─
+        var targetSectionEntry = sections.FirstOrDefault(s =>
+            string.Equals(s.name, targetSection, StringComparison.OrdinalIgnoreCase));
+
+        var error = new StringBuilder();
+        error.AppendLine($"WRONG SECTION — the step description references the '{targetSection}' section, " +
+                         $"but your oldString was found in the '{actualSection}' section.");
+        error.AppendLine();
+        error.AppendLine($"You MUST find the section marked with *ngIf=\"... === '{targetSection}'\" " +
+                         $"and use lines from THAT section as your oldString.");
+        error.AppendLine($"Do NOT edit the '{actualSection}' section.");
+
+        // Include the CORRECT section's content so the LLM can copy from it
+        if (targetSectionEntry.divEnd > targetSectionEntry.divStart)
+        {
+            var sectionContent = normFile.Substring(
+                targetSectionEntry.divStart,
+                Math.Min(targetSectionEntry.divEnd - targetSectionEntry.divStart + 6, 3000));
+
+            // Trim to a reasonable size — show first ~40 lines
+            var sectionLines = sectionContent.Split('\n');
+            if (sectionLines.Length > 45)
+            {
+                sectionContent = string.Join('\n', sectionLines.Take(40)) +
+                                 "\n... (section continues)";
+            }
+
+            error.AppendLine();
+            error.AppendLine($"═══ CORRECT SECTION CONTENT (*ngIf=\"... === '{targetSection}'\") ═══");
+            error.AppendLine("```html");
+            error.AppendLine(sectionContent);
+            error.AppendLine("```");
+            error.AppendLine();
+            error.AppendLine($"Pick a unique line from the CORRECT section above as your oldString.");
+        }
+
+        return error.ToString();
+    }
+    /// <summary>
+    /// Finds the matching closing </div> tag for the <div at the given index,
+    /// tracking div nesting depth. Handles comments and attribute strings
+    /// naively (sufficient for well-formed Angular templates).
+    /// Returns the index of the closing </div> tag, or -1 if not found.
+    /// </summary>
+    private static int FindMatchingCloseDiv(string content, int openDivIdx)
+    {
+        if (openDivIdx < 0 || openDivIdx >= content.Length) return -1;
+
+        var depth = 0;
+        var pos = openDivIdx;
+
+        while (pos < content.Length)
+        {
+            var nextOpen = content.IndexOf("<div", pos, StringComparison.OrdinalIgnoreCase);
+            var nextClose = content.IndexOf("</div>", pos, StringComparison.OrdinalIgnoreCase);
+
+            if (nextClose < 0) return -1; // unmatched — malformed HTML
+
+            if (nextOpen >= 0 && nextOpen < nextClose)
+            {
+                // Verify it's actually a <div tag (not <divider, <divide, etc.)
+                var charAfter = nextOpen + 4 < content.Length
+                    ? content[nextOpen + 4]
+                    : '\0';
+                if (charAfter == ' ' || charAfter == '>' || charAfter == '\t' ||
+                    charAfter == '\n' || charAfter == '\r')
+                {
+                    depth++;
+                }
+                pos = nextOpen + 4;
+            }
+            else
+            {
+                if (depth <= 0) return nextClose;
+                depth--;
+                pos = nextClose + 6;
+            }
+        }
+
+        return -1;
+    }
     /// <summary>
     /// Extracts the verbatim file section most relevant to the change description using
     /// keyword matching. Used to show the LLM the ACTUAL target section when its oldString
