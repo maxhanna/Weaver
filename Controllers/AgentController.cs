@@ -8615,7 +8615,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                  prompt.Contains("method", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("variable", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("array", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("callback", StringComparison.OrdinalIgnoreCase);
+                                 prompt.Contains("callback", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("search box", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("input field", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("map", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("globe", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("rotate", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("select", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("dropdown", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("modal", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("popup", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("ui", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("style", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("layout", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("render", StringComparison.OrdinalIgnoreCase) ||
+                                 prompt.Contains("display", StringComparison.OrdinalIgnoreCase);
 
         if ((hasCodeInPrompt || mentionsCodeFiles || mentionsCodeLogic) && pipelineType != PipelineType.CodeEdit)
         {
