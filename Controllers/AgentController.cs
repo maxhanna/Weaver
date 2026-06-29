@@ -4163,6 +4163,49 @@ emitSse, ct);
                     projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
                 return stepIndex;
             }
+
+            // ── HTML/TS method existence check (deterministic) ────────────────
+            // Prevents the LLM from writing HTML templates that reference methods
+            // not yet implemented in the corresponding .ts component file.
+            if (!fullFile && !string.IsNullOrWhiteSpace(newStr) &&
+                (relPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                 relPath.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase) ||
+                 relPath.EndsWith(".razor", StringComparison.OrdinalIgnoreCase)))
+            {
+                var tsRelPath = Path.ChangeExtension(relPath, ".ts");
+                var tsFullPath = Path.GetFullPath(Path.Combine(projectRoot, tsRelPath.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(tsFullPath))
+                {
+                    var tsContent = await System.IO.File.ReadAllTextAsync(tsFullPath, Encoding.UTF8, ct);
+                    var bindingRegex = new Regex(@"\((?:click|input|change|ngModelChange|submit|focus|blur)\)=""(\w+)\(");
+                    var matches = bindingRegex.Matches(newStr);
+                    var missingMethods = new List<string>();
+                    foreach (Match m in matches)
+                    {
+                        var methodName = m.Groups[1].Value;
+                        if (!string.IsNullOrWhiteSpace(methodName) &&
+                            !tsContent.Contains($"{methodName}(") &&
+                            !tsContent.Contains($"{methodName} =") &&
+                            !tsContent.Contains($"{methodName}:"))
+                        {
+                            missingMethods.Add(methodName);
+                        }
+                    }
+                    if (missingMethods.Count > 0)
+                    {
+                        var err = $"HTML edit references methods [{string.Join(", ", missingMethods.Distinct())}] that do not exist in the corresponding .ts file ({tsRelPath}). " +
+                                  "You MUST add a step to implement these methods in the .ts file BEFORE editing the .html file.";
+                        await EmitLog(emitSse, "warn", $"Guard triggered for {relPath}: {err}", ct: ct);
+                        history.Add((oldStr!, newStr, err));
+
+                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                        if (stuckCount >= 2) goto RecordFailure;
+                        continue; // Forces retry with feedback, or eventually triggers RecordFailure -> Replan
+                    }
+                }
+            }
+
             // ── Targeted replacement ──────────────────────────────────
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
@@ -5299,7 +5342,12 @@ emitSse, ct);
                         "ensure proper spacing around operators (+, -, *, /, %, =, etc.) and colons in " +
                         "TypeScript/JavaScript/HTML/CSS. Output ONLY a JSON object with an array of fixes: " +
                         "{\"fixes\":[{\"oldString\":\"...\",\"newString\":\"...\"}]}. " +
-                        "Each fix must be an exact substring from the excerpt. Do NOT change logic or add/remove code.";
+                        "Each fix must be an exact substring from the excerpt. Do NOT change logic or add/remove code. " +
+                        "CRITICAL RULE: NEVER add a space between a function/method name and its opening parenthesis. " +
+                        "`delete(optionsFile)` is CORRECT; `delete (optionsFile)` is WRONG. " +
+                        "`myFunc()` is CORRECT; `myFunc ()` is WRONG. " +
+                        "DO NOT add spaces after keywords if they are immediately followed by '(' for a function call. " +
+                        "DO NOT modify text inside HTML attribute values unless explicitly necessary.";
 
         var userMsg = $"### FILE ###\n{relPath}\n\n### EXCERPT WITH SPACING ISSUES ###\n```\n{excerpt}\n```\n\n" +
                       "Fix spacing issues. Return JSON with oldString/newString pairs.";
@@ -7898,7 +7946,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "task involves data that might live in that nested type, add a _explore step to read the RomMetadata " +
         "type definition BEFORE planning the edit. You cannot plan correctly without understanding the " +
         "full data structure.\n" +
-               "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
+        "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
         "and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file " +
         "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
         "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
@@ -7908,7 +7956,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   1. A `_command` step to run the framework's CLI generator. Use `;` to separate commands (e.g., `cd maxhanna.client; npx ng g c components/recipe --skip-tests`). NEVER use `&&` as it fails in PowerShell.\n" +
         "   2. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files to implement the actual logic and template.\n" +
         "   3. If the component needs to be registered in a module (`app.module.ts`) or routing file, add an edit step for that.\n" +
-        "   Do NOT manually create the files with `_create_file`. If the CLI fails, the replanner will handle manual creation.\n";
+        "   Do NOT manually create the files with `_create_file`. If the CLI fails, the replanner will handle manual creation.\n" +
+        "22. COMPONENT TEMPLATE WIRING: When the task involves adding UI elements (buttons, inputs) that trigger new " +
+        "actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript " +
+        "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
+        "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
+        "If the component class does not have the method, plan a step to add it first.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
@@ -9318,6 +9371,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("    in the file. Reuse it. Do NOT introduce a parallel mechanism.");
         sb.AppendLine("  * If the verification gaps can be closed by EDITING the code that step 1 already added, do that —");
         sb.AppendLine("    do not add a second step that lives in a different file.");
+        sb.AppendLine("  * CROSS-FILE DEPENDENCIES: If a step failed because it referenced methods or properties that don't exist in the target file (e.g., an HTML template referencing a method not yet implemented in the .ts component), you MUST add a step to implement the missing method/property in the correct file BEFORE retrying the failed step.");
         sb.AppendLine();
         sb.AppendLine("Add at most 1 new step. If everything is done or you are unsure, return an EMPTY plan with no steps.");
         return sb.ToString();
