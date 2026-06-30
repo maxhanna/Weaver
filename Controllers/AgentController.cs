@@ -6742,7 +6742,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
         "   If the right file is not in discovery context but its path is listed or strongly implied, use _explore with the exact project-relative path.\n" +
         "   If you are unsure which file owns a symbol, choose the most likely path from filenames/imports and use _explore before planning an edit.\n" +
-        "2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps. " +
+        "2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps for simple tasks, but up to 10-12 steps for complex features. " +
         "Do NOT artificially limit yourself to 1-2 steps so you can be re-invoked later — under-planning " +
         "causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. " +
         "If the task is a single coherent code change (e.g. two related assignments in the same block, " +
@@ -6829,8 +6829,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
         "If the component class does not have the method, plan a step to add it first.\n" +
         "23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call. When describing the call in the step description, you MUST use the exact syntax `this.serviceName.methodName()` so the system can automatically detect the dependency.\n" +
-        "24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n";
-
+        "24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n" +
+        "25. FEATURE IMPLEMENTATION STACK (CRITICAL): When the user asks to build a new feature (e.g., 'Create a paint component where users can paint, save, and view paintings'), you MUST plan the steps in the following strict architectural order. Do NOT combine these phases into fewer steps.\n" +
+        "   a. Backend Data Model (if needed): Create the C# data contract (e.g., `Painting.cs`) with the required properties.\n" +
+        "   b. Backend Controller/Service (if needed): Create the endpoint (e.g., `PaintController.cs`) to save and retrieve the data. \n" +
+        "   c. Frontend Data Contract: Create the TypeScript interface (e.g., `painting.ts`) matching the backend model.\n" +
+        "   d. Frontend Service: Create the Angular service (e.g., `paint.service.ts`) with methods to call the backend API (e.g., `savePainting`, `getPaintings`).\n" +
+        "   e. Frontend Component Scaffolding: Run the `_command` step to generate the component.\n" +
+        "   f. Component Logic (.ts): Inject the new service in the constructor and implement the methods to save/load paintings.\n" +
+        "   g. Component Template (.html): Build the UI (canvas, buttons, list).\n" +
+        "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
+        "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n";
+        
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
