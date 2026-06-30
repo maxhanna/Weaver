@@ -1508,9 +1508,18 @@ public class AgentController : ControllerBase
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
             }
-
-            if (!string.IsNullOrWhiteSpace(oldStr))
+ 
+            if (string.IsNullOrWhiteSpace(oldStr) &&
+                !string.IsNullOrWhiteSpace(newStr) &&
+                fileExists &&
+                string.IsNullOrWhiteSpace(fileContent))
+            {
+                oldStr = ""; 
                 return (oldStr, newStr ?? "", false, null, false, null, false);
+            }
+
+            if (!string.IsNullOrWhiteSpace(oldStr)) { return (oldStr, newStr ?? "", false, null, false, null, false); }
+                
 
             return (null, null, false, null, false, "JSON has no oldString, targetType, fullFile, or alreadyDone field", false);
         }
@@ -3501,8 +3510,16 @@ emitSse, ct);
             bool replaced;
             string newContent;
             string? matchError = null;
-            string? snippet = null;
-            if (fromFormatC && !string.IsNullOrEmpty(oldStr))
+            string? snippet = null; 
+
+            if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
+            {
+                newContent = newStr;
+                replaced = true;
+                matchError = null;
+                snippet = null;
+            }
+            else if (fromFormatC && !string.IsNullOrEmpty(oldStr))
             {
                 var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
                 var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
@@ -3525,6 +3542,7 @@ emitSse, ct);
                 var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
                 replaced = r; newContent = nc; matchError = me; snippet = sn;
             }
+
             if (!string.IsNullOrWhiteSpace(oldStr) &&
                 AgentUtilities.NormalizeLineEndings(oldStr) == AgentUtilities.NormalizeLineEndings(newStr ?? ""))
             {
@@ -3768,9 +3786,8 @@ emitSse, ct);
                 }
                 continue;
             }
-
             var shrinkThreshold = fromFormatC ? 0.02 : 0.1;
-            if (!string.IsNullOrEmpty(newStr) && (double)newStr.Length / oldStr!.Length < shrinkThreshold)
+            if (!string.IsNullOrEmpty(newStr) && oldStr!.Length > 0 && (double)newStr.Length / oldStr!.Length < shrinkThreshold)
             {
                 var err = $"newString too short ({(double)newStr.Length / oldStr.Length:P1} of oldString length) — possible content deletion";
                 await EmitLog(emitSse, "warn",
@@ -3784,6 +3801,7 @@ emitSse, ct);
                 if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
+            
             var newStrLines = newStr?.Split('\n') ?? Array.Empty<string>();
             for (var i = 0; i < newStrLines.Length - 1; i++)
             {
@@ -3859,7 +3877,11 @@ emitSse, ct);
                     newStr = AutoFormatEditedRegion(newStr, newStr);
                 }
             }
-            var (approved, verifyReason, _) = VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
+
+            var (approved, verifyReason, _) =
+                (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
+                ? (true, "Bypassed verify for empty file insertion", 100)
+                : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
 
             if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
