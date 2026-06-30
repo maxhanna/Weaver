@@ -3096,7 +3096,11 @@ public class AgentController : ControllerBase
             {
                 var result = new List<PlanStep>
                 {
-                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority },
+                    // Step 1: Add the import at the top of the file
+                    new PlanStep { File = step.File, Change = $"Add the import statement for {serviceName} at the top of the file.", Priority = step.Priority },
+                    // Step 2: Add the parameter to the constructor
+                    new PlanStep { File = step.File, Change = $"Add private {serviceName} to the constructor parameters.", Priority = step.Priority },
+                    // Step 3: The original method call step
                     new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority }
                 };
                 await EmitLog(emitSse, "info", $"⚙️ Deterministic decoupling: Injecting constructor step for {serviceName}", ct: ct);
