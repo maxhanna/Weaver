@@ -1663,6 +1663,18 @@ public class AgentController : ControllerBase
 
         var content = AgentUtilities.NormalizeLineEndings(fileContent);
         var changeLower = (step.Change ?? "").ToLowerInvariant();
+        if (changeLower.Contains("add ") && changeLower.Contains("component"))
+        {
+            var compMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Component)", RegexOptions.IgnoreCase);
+            if (compMatch.Success)
+            {
+                var compName = compMatch.Groups[1].Value;
+                if (content.Contains(compName, StringComparison.Ordinal))
+                {
+                    return (PreEditVerdict.AlreadyDone, $"Component '{compName}' already exists in the file");
+                }
+            }
+        }
         if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
         {
             var methodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
@@ -8425,8 +8437,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot);
-        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot); 
- 
+        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot);
+        if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
+        {
+            await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct, summary: plan.Summary ?? "", score: plan.Score);
+        }
+        
         if (plan?.Plan?.Count > 0)
         {
             var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);
