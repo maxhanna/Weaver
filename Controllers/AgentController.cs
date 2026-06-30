@@ -2811,7 +2811,7 @@ public class AgentController : ControllerBase
         "11. SPACING in refinedChange: where you describe code snippets inline, verify every token is properly " +
         "separated by a space. 'INTERVAL15 MINUTE' is WRONG — it should be 'INTERVAL 15 MINUTE'. " +
         "Read through your output character-by-character before finalizing." +
-         "12. TYPE CHAIN TRACING (CRITICAL): When the target file references a type (e.g., `FileEntry`), " +
+        "12. TYPE CHAIN TRACING (CRITICAL): When the target file references a type (e.g., `FileEntry`), " +
         "you MUST read that type's definition file. If that type has properties referencing OTHER " +
         "custom types (e.g., `romMetadata?: RomMetadata`), you MUST read those type definitions too. " +
         "Do NOT assume you know the data structure — VERIFY it by reading the actual class/interface. " +
@@ -2822,7 +2822,8 @@ public class AgentController : ControllerBase
         "13. DATA SOURCE VERIFICATION: Before declaring ready=true, state explicitly in refinedChange " +
         "WHERE the data being modified comes from. Example: 'Images come from FileEntry.romMetadata." +
         "screenshotsJson (parsed from JSON string) and romMetadata.coverUrl, NOT from filtering " +
-        "FileEntry objects by file type.' If you cannot state the data source, you are NOT ready.\n";
+        "FileEntry objects by file type.' If you cannot state the data source, you are NOT ready.\n" +
+        "14. SERVICE METHOD SIGNATURES (CRITICAL): If the change involves calling a service method (e.g., `this.myService.doSomething(data)`), you MUST read the service file to verify the exact method name and parameters. If the method accepts an interface/model (e.g., `UserEvent`), you MUST read that interface definition to know the exact properties required. Do NOT guess the method signature or model properties.\n";
 
     private static string BuildStepExplorationPrompt(
         PlanStep step,
@@ -6784,7 +6785,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript " +
         "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
         "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
-        "If the component class does not have the method, plan a step to add it first.\n";
+        "If the component class does not have the method, plan a step to add it first.\n" +
+        "23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call.\n" +
+        "24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
