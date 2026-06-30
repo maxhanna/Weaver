@@ -3076,34 +3076,61 @@ public class AgentController : ControllerBase
 
 
     private async Task<List<PlanStep>?> CheckAndDecoupleStepAsync(
-        PlanStep step, int itemIdx, string projectRoot, bool emitSse,
-        CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
+      PlanStep step, int itemIdx, string projectRoot, bool emitSse,
+      CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
     {
         if (step == null || string.IsNullOrWhiteSpace(step.Change))
             return null;
         if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
             return null;
 
-        var serviceCallMatch = Regex.Match(step.Change ?? "", @"(?:this\.)?([A-Za-z]\w*Service)(?:\.|\b)", RegexOptions.IgnoreCase);
-        if (serviceCallMatch.Success)
-        {
-            var serviceName = serviceCallMatch.Groups[1].Value;
-            // Capitalize the first letter to ensure it matches the class name (e.g., UserEventService)
-            serviceName = char.ToUpper(serviceName[0]) + serviceName.Substring(1);
+        // ✅ DETERMINISTIC SERVICE DECOUPLING (MUST BE AT THE TOP)
+        var serviceMatch = Regex.Match(step.Change ?? "", @"([A-Z][a-zA-Z0-9]*Service)", RegexOptions.IgnoreCase);
+        var multiMethodMatch = Regex.Match(step.Change ?? "", @"(?:both\s+)?([a-zA-Z]\w*)\s+(?:and|&)\s+([a-zA-Z]\w*)\s+methods", RegexOptions.IgnoreCase);
 
-            // If the step DOES NOT explicitly mention constructor, we must add a step for it
-            if (!(step.Change ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase))
+        if (serviceMatch.Success || multiMethodMatch.Success)
+        {
+            var chLower = (step.Change ?? "").ToLowerInvariant();
+            var result = new List<PlanStep>();
+            var serviceName = serviceMatch.Success ? serviceMatch.Groups[1].Value : "Service";
+
+            // 1. Always ensure the import is a separate step (if not already explicitly asked for)
+            if (serviceMatch.Success && !chLower.Contains("import"))
             {
-                var result = new List<PlanStep>
+                result.Add(new PlanStep { File = step.File, Change = $"Add the import statement for {serviceName} at the top of the file.", Priority = step.Priority });
+            }
+
+            // 2. Handle Multi-Method Split
+            if (multiMethodMatch.Success)
+            {
+                var method1 = multiMethodMatch.Groups[1].Value;
+                var method2 = multiMethodMatch.Groups[2].Value;
+
+                // If the original step also mentioned constructor, keep a step for the constructor
+                if (chLower.Contains("constructor"))
                 {
-                    // Step 1: Add the import at the top of the file
-                    new PlanStep { File = step.File, Change = $"Add the import statement for {serviceName} at the top of the file.", Priority = step.Priority },
-                    // Step 2: Add the parameter to the constructor
-                    new PlanStep { File = step.File, Change = $"Add private {serviceName} to the constructor parameters.", Priority = step.Priority },
-                    // Step 3: The original method call step
-                    new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority }
-                };
-                await EmitLog(emitSse, "info", $"⚙️ Deterministic decoupling: Injecting constructor step for {serviceName}", ct: ct);
+                    result.Add(new PlanStep { File = step.File, Change = $"Inject {serviceName} into the constructor parameters.", Priority = step.Priority });
+                }
+
+                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method1} method.", Priority = step.Priority });
+                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method2} method.", Priority = step.Priority });
+            }
+            else
+            {
+                // 3. Handle Single-Method Service Constructor Injection
+                if (serviceMatch.Success && !chLower.Contains("constructor"))
+                {
+                    result.Add(new PlanStep { File = step.File, Change = $"Add private {serviceName} to the constructor parameters.", Priority = step.Priority });
+                }
+
+                // 4. Keep the original step
+                result.Add(new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority });
+            }
+
+            // If we successfully generated a multi-step plan, return it
+            if (result.Count > 1)
+            {
+                await EmitLog(emitSse, "info", $"⚙️ Deterministic decoupling: Splitting complex step into {result.Count} atomic steps.", ct: ct);
                 return result;
             }
         }
@@ -3136,10 +3163,10 @@ public class AgentController : ControllerBase
 
         if (hasMultipleConcerns && ch.Contains("constructor") && ch.ContainsAny("method", "call", "insert", "add"))
         {
-            var serviceMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Service)", RegexOptions.IgnoreCase);
-            if (serviceMatch.Success)
+            var serviceCallMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Service)", RegexOptions.IgnoreCase);
+            if (serviceCallMatch.Success)
             {
-                var serviceName = serviceMatch.Groups[1].Value;
+                var serviceName = serviceCallMatch.Groups[1].Value;
                 var result = new List<PlanStep>
                 {
                     new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority },
@@ -6840,7 +6867,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   g. Component Template (.html): Build the UI (canvas, buttons, list).\n" +
         "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
         "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n";
-        
+
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
