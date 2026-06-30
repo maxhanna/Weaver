@@ -852,6 +852,12 @@ public class AgentController : ControllerBase
             sb.AppendLine("⚠ CSS FILE: preserve ALL whitespace in property values exactly " +
                           "(e.g. '0px 1px' must stay as two tokens with a space; 'rgba(255, 255, 255, 0.06)' must keep spaces after every comma).");
 
+            if ((step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase) ||
+                           (step.Change ?? "").Contains("Delete", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.AppendLine("⚠ CSS DELETION: To remove CSS rules, set `oldString` to the exact block of rules to remove, and set `newString` to an empty array `[]` or an empty string `\"\"`. Do NOT output the same code in both fields.");
+            }
+
             if (fileExists && !string.IsNullOrWhiteSpace(fileContent))
             {
                 var existingSelectors = ExtractTopLevelCssSelectors(fileContent);
@@ -1508,18 +1514,18 @@ public class AgentController : ControllerBase
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
             }
- 
+
             if (string.IsNullOrWhiteSpace(oldStr) &&
                 !string.IsNullOrWhiteSpace(newStr) &&
                 fileExists &&
                 string.IsNullOrWhiteSpace(fileContent))
             {
-                oldStr = ""; 
+                oldStr = "";
                 return (oldStr, newStr ?? "", false, null, false, null, false);
             }
 
             if (!string.IsNullOrWhiteSpace(oldStr)) { return (oldStr, newStr ?? "", false, null, false, null, false); }
-                
+
 
             return (null, null, false, null, false, "JSON has no oldString, targetType, fullFile, or alreadyDone field", false);
         }
@@ -3429,7 +3435,11 @@ emitSse, ct);
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
                 var fullFileExt = Path.GetExtension(relPath).ToLowerInvariant();
-                var allowFullFileEscalation = history.Count >= 3 && fileAlreadyExists
+                // Allow fullFile escalation earlier for CSS deletions, because matching large CSS blocks is hard
+                var isCssDeletion = fullFileExt is ".css" or ".scss" or ".less" &&
+                    (step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase);
+
+                var allowFullFileEscalation = (history.Count >= 3 || isCssDeletion) && fileAlreadyExists
      && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs");
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
@@ -3522,7 +3532,7 @@ emitSse, ct);
             bool replaced;
             string newContent;
             string? matchError = null;
-            string? snippet = null; 
+            string? snippet = null;
 
             if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
             {
@@ -3578,20 +3588,13 @@ emitSse, ct);
                     return stepIndex + 1;
                 }
 
-                await EmitLog(emitSse, "error", $"No-op edit for {relPath}: LLM produced no change and code not found", ct: ct);
-                var r = new Dictionary<string, object?>
-                {
-                    ["index"] = stepIndex,
-                    ["type"] = "edit",
-                    ["status"] = "error",
-                    ["path"] = relPath,
-                    ["error"] = "LLM produced a no-op edit — oldString and newString are identical. The LLM failed to produce the required change.",
-                    ["planItemIndex"] = planItemIndex
-                };
-                if (emitSse) await SendSse(Response, "step", r, ct);
-                allResults.Add(r);
-                history.Add((oldStr!, newStr ?? "", "LLM produced a no-op edit — oldString and newString are identical"));
-                goto RecordFailure;
+                await EmitLog(emitSse, "warn", $"No-op edit for {relPath}: LLM produced no change. Retrying.", ct: ct);
+                history.Add((oldStr!, newStr ?? "", "LLM produced a no-op edit — oldString and newString are identical. If the step asks to REMOVE code, set newString to an empty string or empty array."));
+
+                if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 2) goto RecordFailure;
+                continue;
             }
             if (!fromFormatC &&
                 !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) &&
@@ -3813,7 +3816,7 @@ emitSse, ct);
                 if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
-            
+
             var newStrLines = newStr?.Split('\n') ?? Array.Empty<string>();
             for (var i = 0; i < newStrLines.Length - 1; i++)
             {
@@ -8442,7 +8445,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct, summary: plan.Summary ?? "", score: plan.Score);
         }
-        
+
         if (plan?.Plan?.Count > 0)
         {
             var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);
@@ -9112,7 +9115,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planFile.Equals("_git", StringComparison.OrdinalIgnoreCase))
             {
                 stepIndex = await ExecuteGitStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 continue;
             }
 
@@ -9141,17 +9144,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             if (planFile.Equals("_ping", StringComparison.OrdinalIgnoreCase))
-            { 
+            {
                 stepIndex = await ExecutePingStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
-                continue; 
+                continue;
             }
 
             if (planFile.Equals("_package_install", StringComparison.OrdinalIgnoreCase))
-            { 
+            {
                 stepIndex = await ExecutePackageInstallStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
-                continue; 
+                continue;
             }
 
             if (planFile.Equals("_command", StringComparison.OrdinalIgnoreCase))
@@ -9179,7 +9182,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 (stepIndex, discoveryContext) = await ExecuteWebPlanStep(planFile, changeDesc, prompt, projectRoot, emitSse, ct,
                     allResults, planItems, itemIdx, stepIndex, discoveryContext, webCtx);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 continue;
             }
 
@@ -9192,12 +9195,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var rr = await ExecuteSteps(new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += rr.Count; allResults.AddRange(rr);
                 }
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 continue;
             }
- 
+
             if (AgentUtilities.IsRelativePath(planFile))
-            { 
+            {
                 var readOnlyPrefixes = new[] { "read", "look at", "examine", "inspect", "review", "understand",
                     "study", "browse", "view", "check how", "see how", "get familiar", "explore" };
                 var changeLower = (item.Change ?? "").Trim().ToLowerInvariant();
@@ -9255,9 +9258,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     stepIndex++;
                     continue;
                 }
- 
+
                 if (!alreadyDecoupled.Contains(item.Change ?? ""))
-                { 
+                {
                     alreadyDecoupled.Add(item.Change ?? "");
 
                     var decoupledSubSteps = await CheckAndDecoupleStepAsync(
@@ -9302,12 +9305,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             summary = "Plan updated after decoupling",
                             items = planItemsJson
                         }, ct);
- 
+
                         itemIdx--;
                         continue;
-                    } 
+                    }
                 }
- 
+
                 var prevCount = allResults.Count;
                 try
                 {
@@ -9317,7 +9320,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         cardId: cardId, attachedFiles: attachedFiles);
                 }
                 catch (StepFatalException ex)
-                { 
+                {
                     await EmitLog(emitSse, "error",
                         $"⛔ FATAL STEP FAILURE — halting plan execution. " +
                         $"Failed step: {ex.FailedFilePath} — {ex.FailedChangeDescription}",
@@ -9339,7 +9342,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             remainingSteps = planItems.Count - itemIdx - 1
                         }, ct);
                     }
- 
+
                     allResults.Add(new Dictionary<string, object?>
                     {
                         ["type"] = "plan_halted",
@@ -9349,7 +9352,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         ["remainingSteps"] = planItems.Count - itemIdx - 1
                     });
 
-                    return; 
+                    return;
                 }
 
                 var stepSkipped = false;
@@ -9369,19 +9372,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         stepSkipped = true;
                     }
                 }
- 
+
                 if (status == "done" && planFile.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
-                { 
+                {
                     var editNewStr = allResults.Count > prevCount &&
                         allResults[^1] is Dictionary<string, object?> lastEditDict
                         ? lastEditDict.GetValueOrDefault("newStringPreview")?.ToString()
                         : null;
                     if (!string.IsNullOrWhiteSpace(editNewStr))
-                    { 
+                    {
                         var funcMatches = Regex.Matches(editNewStr,
                             @"\(\w+\)=\""[^\""]*?(\w+)\s*\(");
                         if (funcMatches.Count > 0)
-                        { 
+                        {
                             var htmlFullPath2 = Path.GetFullPath(
                                 Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
                             var baseDir = Path.GetDirectoryName(htmlFullPath2) ?? "";
@@ -9395,9 +9398,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             var seenMethods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                             foreach (System.Text.RegularExpressions.Match m in funcMatches)
                             {
-                                var funcName = m.Groups[1].Value; 
+                                var funcName = m.Groups[1].Value;
                                 if (funcName is "ngOnInit" or "ngOnDestroy" or "ngAfterViewInit" or "ngOnChanges" or "ngDoCheck" or "ngAfterContentInit" or "ngAfterContentChecked" or "ngAfterViewChecked" or "toggle" or "open" or "close" or "preventDefault" or "stopPropagation" or "console")
-                                { continue; } 
+                                { continue; }
                                 if (!seenMethods.Add(funcName)) { continue; }
                                 var foundInProject = false;
                                 if (!string.IsNullOrWhiteSpace(tsContent))
@@ -9414,10 +9417,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         foundInProject = true;
                                 }
                                 if (foundInProject)
-                                { 
+                                {
                                     var argsText = "";
                                     try
-                                    { 
+                                    {
                                         var callStart = m.Index + m.Length;
                                         if (callStart > 0 && callStart < (editNewStr?.Length ?? 0))
                                         {
@@ -9429,30 +9432,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     }
                                     catch { /* best-effort */ }
                                     if (!string.IsNullOrWhiteSpace(argsText) && !string.IsNullOrWhiteSpace(tsContent))
-                                    { 
+                                    {
                                         var argProps = Regex.Matches(argsText, @"\b[a-z]+[a-zA-Z0-9]*\b")
                                             .Cast<Match>().Select(x => x.Value)
                                             .Where(x => !Regex.IsMatch(x, @"^\d+$"))
-                                            .Distinct().ToList(); 
+                                            .Distinct().ToList();
                                         var methodBodyProps = Regex.Matches(tsContent, @"\bthis\.([a-zA-Z_]\w*)")
                                             .Cast<Match>().Select(x => x.Value)
-                                            .Distinct().ToHashSet(StringComparer.OrdinalIgnoreCase); 
+                                            .Distinct().ToHashSet(StringComparer.OrdinalIgnoreCase);
                                         var mismatchedArgs = argProps
                                             .Where(a => !a.Contains("this.") &&
                                                 !methodBodyProps.Any(b =>
                                                     b.EndsWith("." + a, StringComparison.OrdinalIgnoreCase)))
                                             .ToList();
                                         if (mismatchedArgs.Count > 0 && mismatchedArgs.Count >= argProps.Count / 2)
-                                        { 
-                                            var newFuncName = funcName; 
+                                        {
+                                            var newFuncName = funcName;
                                             var youtubeArg = mismatchedArgs
                                                 .FirstOrDefault(a => a.IndexOf("youtube", StringComparison.OrdinalIgnoreCase) >= 0
                                                     || a.IndexOf("yt", StringComparison.OrdinalIgnoreCase) >= 0);
                                             if (youtubeArg != null)
-                                            { 
+                                            {
                                                 var prefix = funcName.StartsWith("on", StringComparison.OrdinalIgnoreCase) ? "onYoutube" : "youtube";
                                                 var suffix = funcName.Length > 2 && char.IsUpper(funcName[2]) ? funcName.Substring(2) : funcName;
-                                                newFuncName = prefix + char.ToUpper(suffix[0]) + suffix.Substring(1); 
+                                                newFuncName = prefix + char.ToUpper(suffix[0]) + suffix.Substring(1);
                                                 foundInProject = false;
                                                 funcName = newFuncName;
                                             }
@@ -9460,7 +9463,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     }
                                     if (foundInProject)
                                         continue;
-                                } 
+                                }
                                 if (planItems.Any(p => p.File != null && p.File.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) &&
                                     p.Change != null && p.Change.Contains(funcName, StringComparison.OrdinalIgnoreCase)))
                                     continue;
@@ -9507,7 +9510,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             }
                         }
                     }
-                } 
+                }
                 if (status is "done" or "modified")
                 {
                     var lastEditResult = allResults.Count > prevCount
@@ -9515,7 +9518,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var appliedNewStr = lastEditResult?.GetValueOrDefault("newStringPreview")?.ToString();
 
                     if (!string.IsNullOrWhiteSpace(appliedNewStr))
-                    { 
+                    {
                         var currentFullPath = Path.GetFullPath(
                             Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
                         string currentContent = "";
@@ -9535,8 +9538,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             await EmitLog(emitSse, "info",
                                 $"  ➕ Reflection added {reflectedSteps.Count} step(s): " +
                                 string.Join(" | ", reflectedSteps.Select(s => s.Change)), ct: ct);
- 
-                            planItems.InsertRange(itemIdx + 1, reflectedSteps); 
+
+                            planItems.InsertRange(itemIdx + 1, reflectedSteps);
                             await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
                                 summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
                                 append: true);
@@ -9558,7 +9561,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
                 }
- 
+
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                     stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
