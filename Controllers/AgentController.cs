@@ -3084,10 +3084,13 @@ public class AgentController : ControllerBase
         if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
             return null;
 
-        var serviceCallMatch = Regex.Match(step.Change ?? "", @"this\.([A-Z]\w+Service)\.", RegexOptions.IgnoreCase);
+        var serviceCallMatch = Regex.Match(step.Change ?? "", @"(?:this\.)?([A-Za-z]\w*Service)(?:\.|\b)", RegexOptions.IgnoreCase);
         if (serviceCallMatch.Success)
         {
             var serviceName = serviceCallMatch.Groups[1].Value;
+            // Capitalize the first letter to ensure it matches the class name (e.g., UserEventService)
+            serviceName = char.ToUpper(serviceName[0]) + serviceName.Substring(1);
+
             // If the step DOES NOT explicitly mention constructor, we must add a step for it
             if (!(step.Change ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase))
             {
@@ -3100,7 +3103,7 @@ public class AgentController : ControllerBase
                 return result;
             }
         }
-        
+
         var ch = (step.Change ?? "").ToLowerInvariant();
 
         if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
@@ -6821,7 +6824,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
         "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
         "If the component class does not have the method, plan a step to add it first.\n" +
-        "23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call.\n" +
+        "23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call. When describing the call in the step description, you MUST use the exact syntax `this.serviceName.methodName()` so the system can automatically detect the dependency.\n" +
         "24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
