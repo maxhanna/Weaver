@@ -38,3 +38,27 @@ public class StepFatalException : Exception
         FailureContext = failureContext;
     }
 }
+
+
+public sealed class StepExplorationResult
+{
+    public PlanStep EnrichedStep { get; init; } = new();
+    public string ExplorationContext { get; init; } = "";
+    public List<string> FilesRead { get; init; } = new();
+    public string RefinedChange { get; init; } = "";
+    public string? TargetSymbol { get; init; }
+    public string? EstimatedLineRange { get; init; }
+    public int Confidence { get; init; }
+    public int RoundsCompleted { get; init; }
+    public string? LowConfidenceWarning { get; init; }
+}
+
+public sealed class StepExplorationResponse
+{
+    public bool Ready { get; init; }
+    public List<string> FilesToRead { get; init; } = new();
+    public string? RefinedChange { get; init; }
+    public string? TargetSymbol { get; init; }
+    public string? LineRange { get; init; }
+    public int Confidence { get; init; }
+}

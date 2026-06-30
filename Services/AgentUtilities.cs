@@ -1591,6 +1591,636 @@ public static class AgentUtilities
         return null;
     }
 
+    private static readonly HashSet<string> _whitespaceSignificantExts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".py", ".pyi", ".pyw",
+        ".yaml", ".yml",
+        ".coffee",
+        ".haml", ".slim", ".pug", ".jade",
+        ".fs", ".fsx", ".fsi",
+        ".nim",
+        ".sass",
+        ".hs", ".lhs",          // Haskell
+        ".elm",                 // Elm
+        ".ml", ".mli",          // OCaml (off-side rule)
+    };
+    private static readonly HashSet<string> _endKeywordLanguages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".rb",                              // Ruby:   def/end
+        ".lua",                             // Lua:    function/end
+        ".ex", ".exs",                      // Elixir: do/end
+        ".sh", ".bash", ".zsh", ".fish",    // Shell:  if/fi, for/done, case/esac
+    };
+
+    private static string ResolveWorkspaceRoot(IConfiguration _config, IWebHostEnvironment _env)
+    {
+        var configuredRoot = _config.GetValue<string>("Editor:WorkspaceRoot");
+        if (!string.IsNullOrWhiteSpace(configuredRoot))
+            return Path.IsPathRooted(configuredRoot)
+                ? configuredRoot
+                : Path.GetFullPath(Path.Combine(_env.ContentRootPath, configuredRoot));
+        return Path.GetFullPath(Path.Combine(_env.ContentRootPath, ".."));
+    }
+
+    public static string GetProjectRoot(string project, IConfiguration _config, IWebHostEnvironment _env)
+    {
+        var workspaceRoot = ResolveWorkspaceRoot(_config, _env);
+        var projectSegment = string.IsNullOrWhiteSpace(project) ? "" :
+            project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
+    }
+    public static bool IsWhitespaceSignificant(string? filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return false;
+        var ext = Path.GetExtension(filePath);
+        return _whitespaceSignificantExts.Contains(ext) || _endKeywordLanguages.Contains(ext);
+    }
+    public static bool IsAngularTemplate(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || content.Length < 20)
+            return false;
+        return Regex.IsMatch(content, @"\*ng(If|For|Switch)") ||
+               Regex.IsMatch(content, @"\(click\)|\(change\)|\(keydown\)|\(submit\)|\(focus\)|\(blur\)") ||
+               (content.Contains("{{") && content.Contains("}}"));
+    }
+    public static string? FindLastReturnLine(string code)
+    {
+        if (string.IsNullOrEmpty(code)) return null;
+        var lines = code.Split('\n', StringSplitOptions.None);
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            var trimmed = lines[i].Trim();
+            if (trimmed.StartsWith("return ") && trimmed.EndsWith(";"))
+                return lines[i];
+        }
+        return null;
+    }
+    public static (string family, bool supportsFormatC, string llmHint) GetLanguageProfile(string ext)
+    {
+        return ext.ToLowerInvariant() switch
+        {
+            // ── C# (Roslyn AST) ────────────────────────────────────────────────────
+            ".cs" => ("brace", true,
+                "⚠ C# FILE: " +
+                "USE FORMAT C (targetType/targetName/newCode) for FULL METHOD replacements or to ADD a new method (via insertAfter:true). " +
+                "For SMALL targeted edits (1-5 lines, e.g. adding a field/property, changing a return value): " +
+                "USE oldString/newString. This is the ONLY safe way to add properties/fields. " +
+                "Do NOT use targetType='class' to add properties/fields. " +
+                "INDENTATION: method signature at class-member level, body indented 4 spaces more."),
+
+            // ── TypeScript / JavaScript ────────────────────────────────────────────
+            ".ts" or ".tsx" => ("brace", true,
+                "⚠ TS FILE: preserve ALL indentation exactly. Methods inside a class MUST be indented. " +
+                "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
+                "and after commas in arrays/objects. " +
+                "You can use FORMAT C (targetType='method', targetName='name') for full method replacements. " +
+                "For small targeted edits (< 10 lines) prefer oldString/newString." +
+                " Do NOT use targetType='class' — class REPLACE is blocked for .ts files. " +
+                "Use insertAfter:true with targetType='method' to add methods, " +
+                "or oldString/newString to add properties."),
+            ".js" or ".jsx" => ("brace", true,
+                "⚠ JS FILE: preserve ALL indentation exactly. " +
+                "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
+                "and after commas in arrays/objects. " +
+                "FORMAT C supported (targetType='function'/'method', targetName='name'). " +
+                "For small edits prefer oldString/newString."),
+
+            // ── JVM / CLR family (brace-based, regex-targeted) ────────────────────
+            ".java" => ("brace", true,
+                "⚠ JAVA FILE: brace-based, similar to C#. " +
+                "FORMAT C supported: targetType='method'/'class'/'interface'. " +
+                "Preserve ALL annotations (@Override, @Autowired, etc.) exactly. " +
+                "NEVER alter generic type parameters or throws clauses."),
+            ".kt" or ".kts" => ("brace", true,
+                "⚠ KOTLIN FILE: brace-based. FORMAT C supported: targetType='function'/'class'. " +
+                "Preserve data class properties, suspend/inline/override modifiers, and lambda syntax exactly."),
+            ".scala" => ("brace", true,
+                "⚠ SCALA FILE: brace-based. FORMAT C supported: targetType='method'/'class'/'object'. " +
+                "Preserve implicits, case class syntax, and for-comprehension indentation exactly."),
+
+            // ── Go ─────────────────────────────────────────────────────────────────
+            ".go" => ("brace", true,
+                "⚠ GO FILE: brace-based, uses TABS (not spaces) for indentation — never convert tabs to spaces. " +
+                "FORMAT C supported: targetType='function', targetName='FunctionName'. " +
+                "Preserve ALL error-handling idioms (if err != nil), defer statements, and goroutine patterns."),
+
+            // ── Systems languages ──────────────────────────────────────────────────
+            ".rs" => ("brace", true,
+                "⚠ RUST FILE: brace-based. FORMAT C supported: targetType='function'/'impl'. " +
+                "Preserve ALL lifetime annotations ('a), borrow markers (&, &mut), " +
+                "ownership semantics, trait bounds, and match arm patterns EXACTLY."),
+            ".c" or ".cpp" or ".cc" or ".cxx" or ".h" or ".hpp" => ("brace", false,
+                "⚠ C/C++ FILE: brace-based, preprocessor directives must stay on their own line. " +
+                "Use oldString/newString. Preserve #include order, extern \"C\", " +
+                "template parameters, and pointer/reference syntax exactly."),
+            ".swift" => ("brace", true,
+                "⚠ SWIFT FILE: brace-based. FORMAT C supported: targetType='function'/'class'/'struct'. " +
+                "Preserve access modifiers (open/public/internal/fileprivate/private), " +
+                "property wrappers (@State, @Binding), and optional chaining exactly."),
+
+            // ── Scripting / dynamic ────────────────────────────────────────────────
+            ".php" => ("brace", true,
+                "⚠ PHP FILE: brace-based. FORMAT C supported: targetType='function'/'method'/'class'. " +
+                "Preserve $ sigils on all variables, type hints, and nullable ? modifiers exactly."),
+            ".dart" => ("brace", true,
+                "⚠ DART FILE: brace-based. FORMAT C supported: targetType='function'/'class'. " +
+                "Preserve async/await, null-safety operators (?., ??, ??=, !), and Widget tree indentation."),
+            ".groovy" => ("brace", true,
+                "⚠ GROOVY FILE: brace-based (Gradle/Groovy DSL). FORMAT C supported: targetType='method'. " +
+                "Preserve closure syntax { ... }, GString interpolation, and Gradle DSL patterns."),
+
+            // ── End-keyword languages (def/end, if/fi, function/end) ──────────────
+            ".rb" => ("end-keyword", true,
+                "⚠ RUBY FILE: uses def/end, do/end, class/end block terminators — NOT braces. " +
+                "FORMAT C supported: targetType='method', targetName='method_name' (snake_case). " +
+                "Use oldString/newString for small edits. " +
+                "Preserve Ruby idioms: ||=, &., symbol literals, and block/proc/lambda syntax."),
+            ".lua" => ("end-keyword", false,
+                "⚠ LUA FILE: uses function/end, if/end, for/end block terminators — NOT braces. " +
+                "Use oldString/newString only. Preserve Lua table syntax, colon-method calls (:), " +
+                "and global vs local variable scoping."),
+            ".ex" or ".exs" => ("end-keyword", false,
+                "⚠ ELIXIR FILE: uses do/end block terminators and pipe operators |>. " +
+                "Use oldString/newString. Preserve pattern matching, atoms (:name), " +
+                "and module attribute syntax (@doc, @spec)."),
+            ".sh" or ".bash" or ".zsh" or ".fish" => ("end-keyword", false,
+                "⚠ SHELL SCRIPT: uses if/fi, for/done, while/done, case/esac terminators. " +
+                "Use oldString/newString. Preserve $() vs ``, quoting rules, " +
+                "and test [ ] vs [[ ]] distinctions exactly."),
+            ".ps1" or ".psm1" or ".psd1" => ("brace", false,
+                "⚠ POWERSHELL FILE: brace-based, $Variables, -Flags syntax. " +
+                "Use oldString/newString. Preserve $_ pipeline variable, " +
+                "cmdlet verb-noun naming, and parameter attribute syntax."),
+
+            // ── Whitespace-significant / indent-based ─────────────────────────────
+            ".py" or ".pyi" => ("indent", false,
+                "⚠ PYTHON FILE: indentation IS the syntax — do NOT alter indent levels. " +
+                "Use oldString/newString only. FORMAT C is NOT supported. " +
+                "Copy every leading space/tab from the file exactly into oldString and newString. " +
+                "Preserve type hints, decorators (@), and docstring quotes."),
+            ".yaml" or ".yml" => ("indent", false,
+                "⚠ YAML FILE: whitespace-significant. Use oldString/newString only. " +
+                "NEVER change indentation levels — copy exactly. " +
+                "Preserve anchors (&), aliases (*), and multiline block styles (|, >)."),
+            ".fs" or ".fsx" or ".fsi" => ("indent", false,
+                "⚠ F# FILE: whitespace-significant (offside rule). Use oldString/newString only. " +
+                "Preserve pipeline |> operators, computation expressions, and discriminated union syntax."),
+            ".hs" or ".lhs" => ("indent", false,
+                "⚠ HASKELL FILE: whitespace-significant. Use oldString/newString only. " +
+                "Preserve do-notation alignment, type class instances, and where-clause indentation."),
+            ".coffee" => ("indent", false,
+                "⚠ COFFEESCRIPT FILE: whitespace-significant, no braces. Use oldString/newString only."),
+
+            // ── Tag / markup ───────────────────────────────────────────────────────
+            ".html" or ".htm" => ("tag", false,
+                "⚠ HTML FILE: tag-based indentation — child elements MUST be indented more than parent. " +
+                "Use oldString/newString. Preserve attribute quoting, void element self-closing, " +
+                "and Angular/Vue directive syntax exactly."),
+            ".xml" or ".xaml" or ".axaml" => ("tag", false,
+                "⚠ XML FILE: tag-based. Use oldString/newString. " +
+                "Preserve namespace prefixes (xmlns:), attribute order, and CDATA sections."),
+            ".cshtml" or ".razor" => ("tag", false,
+                "⚠ RAZOR FILE: HTML with @C# expressions. Use oldString/newString. " +
+                "Preserve @model, @inject, @Html.* helpers, and @{ } code blocks exactly."),
+            ".vue" => ("tag", true,
+                "⚠ VUE FILE: <template>/<script>/<style> sections. " +
+                "FORMAT C supported for methods inside <script>. " +
+                "For template changes use oldString/newString. Preserve v-bind/:, v-on/@, v-model directives."),
+            ".svelte" => ("tag", false,
+                "⚠ SVELTE FILE: <script>/<style>/template sections. Use oldString/newString. " +
+                "Preserve $: reactive declarations, {#if}, {#each} blocks, and slot syntax."),
+            ".svg" => ("tag", false,
+                "⚠ SVG FILE: XML tag-based. Use oldString/newString. " +
+                "Preserve viewBox, transform attributes, and path d= values exactly."),
+
+            // ── Stylesheets ────────────────────────────────────────────────────────
+            ".css" or ".scss" or ".less" => ("brace", false,
+                "⚠ CSS/SCSS/LESS FILE: brace-based selectors. Use oldString/newString. " +
+                "CRITICAL: oldString MUST be at most 4 lines — never replace an entire CSS block. " +
+                "To change a CSS property value, set oldString to the ONE line containing that property " +
+                "(copied verbatim from the file), and newString to that line with the new value. " +
+                "Example: if changing `flex-direction: row;` to `flex-direction: column;`, " +
+                "oldString = \"  flex-direction: row;\" (exact whitespace), newString = \"  flex-direction: column;\". " +
+                "Preserve ALL whitespace in property values (e.g. '0 1px 2px rgba(0,0,0,0.5)' — " +
+                "every space and comma is significant). Preserve SCSS variables ($var), mixins, and nesting."),
+
+            // ── Config / data ──────────────────────────────────────────────────────
+            ".json" => ("config", false,
+                "⚠ JSON FILE: strict syntax — use oldString/newString only. " +
+                "NO trailing commas, NO comments. Preserve ALL nested object structure exactly. " +
+                "When editing arrays, include the full surrounding element for uniqueness."),
+            ".toml" => ("config", false,
+                "⚠ TOML FILE: use oldString/newString. Preserve [section] headers, " +
+                "[[array-of-tables]], and inline table {key=val} syntax exactly."),
+            ".env" or ".ini" => ("config", false,
+                "⚠ CONFIG FILE: key=value pairs. Use oldString/newString. " +
+                "Preserve comment lines (#) and section headers ([section]) exactly."),
+            ".proto" => ("brace", false,
+                "⚠ PROTOBUF FILE: brace-based. Use oldString/newString. " +
+                "Preserve field numbers, oneof blocks, and option statements exactly."),
+
+            // ── Query / data ───────────────────────────────────────────────────────
+            ".sql" => ("plain", false,
+                "⚠ SQL FILE: use oldString/newString. Preserve ALL whitespace in multi-line queries. " +
+                "Match exact keyword casing (uppercase SQL keywords are conventional). " +
+                "Preserve semicolons and comment styles (-- vs /* */)."),
+            ".graphql" or ".gql" => ("plain", false,
+                "⚠ GRAPHQL FILE: use oldString/newString. Preserve type definitions, " +
+                "field arguments, and directive (@deprecated, @skip) syntax exactly."),
+
+            // ── Documentation ──────────────────────────────────────────────────────
+            ".md" or ".mdx" => ("plain", false,
+                "⚠ MARKDOWN FILE: use oldString/newString. " +
+                "Preserve heading levels (# vs ##), list markers (-, *, 1.), " +
+                "and fenced code block language tags exactly."),
+            ".rst" => ("indent", false,
+                "⚠ RST FILE: indentation-significant section underlines. Use oldString/newString. " +
+                "Preserve directive syntax (.. directive::) and role syntax (:role:`text`)."),
+
+            // ── Default ────────────────────────────────────────────────────────────
+            _ => ("plain", false,
+                "⚠ Preserve ALL indentation and whitespace exactly as shown in the file. " +
+                "Use oldString/newString. Copy every leading space/tab character-for-character.")
+        };
+    }
+    public static string ReindentToLevel(string code, string indent)
+    {
+        if (string.IsNullOrEmpty(code)) return code;
+        var lines = code.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+                lines[i] = indent + lines[i].TrimStart();
+        }
+        return string.Join("\n", lines);
+    }
+
+    public static string StripClassWrapper(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return code;
+        var lines = code.Split('\n').ToList();
+        // Remove leading "export class X {" or "class X {" lines
+        while (lines.Count > 0)
+        {
+            var trimmed = lines[0].Trim();
+            if (trimmed.Length == 0 ||
+                Regex.IsMatch(trimmed, @"^(export\s+)?(default\s+)?(abstract\s+)?class\s+\w+"))
+            {
+                lines.RemoveAt(0);
+            }
+            else break;
+        }
+        while (lines.Count > 0)
+        {
+            var trimmed = lines[^1].Trim();
+            if (trimmed == "}" || trimmed.Length == 0)
+            {
+                lines.RemoveAt(lines.Count - 1);
+            }
+            else break;
+        }
+        return string.Join("\n", lines);
+    }
+    public static string UnescapeString(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? "";
+        return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
+    } 
+    public static bool IsSqlLike(string content)
+    {
+        var lower = content.ToLower();
+        return lower.Contains("select ") || lower.Contains("insert ") || lower.Contains("update ") ||
+               lower.Contains("delete ") || lower.Contains("from ") || lower.Contains("where ") ||
+               lower.Contains("interval ") || lower.Contains("date_add") || lower.Contains("where ");
+    }
+    public static int ComputeLevenshteinDistance(string a, string b)
+    {
+        var m = a.Length; var n = b.Length;
+        if (m == 0) return n; if (n == 0) return m;
+        var d = new int[n + 1];
+        for (var i = 0; i <= n; i++) d[i] = i;
+        for (var i = 1; i <= m; i++)
+        {
+            var prev = d[0]; d[0] = i;
+            for (var j = 1; j <= n; j++)
+            {
+                var temp = d[j];
+                d[j] = Math.Min(Math.Min(d[j] + 1, d[j - 1] + 1),
+                    prev + (a[i - 1] == b[j - 1] ? 0 : 1));
+                prev = temp;
+            }
+        }
+        return d[n];
+    }
+    public static AgentPlan DeduplicatePlan(AgentPlan? plan)
+    {
+        if (plan?.Plan == null || plan.Plan.Count == 0)
+            return plan!;
+
+        var seen = new HashSet<string>();
+        var unique = new List<PlanStep>();
+
+        foreach (var step in plan.Plan)
+        {
+            // Only dedupe steps that contain both oldString and newString
+            var key = step.File + "\n" + step.OldString + "\n" + step.NewString;
+
+            if (!seen.Contains(key))
+            {
+                seen.Add(key);
+                unique.Add(step);
+            }
+        }
+
+        plan.Plan = unique;
+        return plan;
+    }
+
+    public static string? DetectDuplicatePropertyAddition(string oldStr, string newStr)
+    {
+        string StripStrings(string s)
+        {
+            s = Regex.Replace(s, @"`[^`]*`", "``", RegexOptions.Singleline);
+            s = Regex.Replace(s, @"""[^""]*""", "\"\"", RegexOptions.Singleline);
+            s = Regex.Replace(s, @"'[^']*'", "''", RegexOptions.Singleline);
+            return s;
+        }
+
+        var cleanOld = StripStrings(oldStr);
+        var cleanNew = StripStrings(newStr);
+
+        var keyRegex = new Regex(@"^\s*(?:'([^']+)'|""([^""]+)""|(\w+))\s*:", RegexOptions.Multiline);
+
+        var oldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in keyRegex.Matches(cleanOld))
+        {
+            var key = (m.Groups[1].Value ?? m.Groups[2].Value ?? m.Groups[3].Value).Trim();
+            if (string.IsNullOrEmpty(key)) continue;
+            if (!oldCounts.ContainsKey(key)) oldCounts[key] = 0;
+            oldCounts[key]++;
+        }
+
+        var newCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in keyRegex.Matches(cleanNew))
+        {
+            var key = (m.Groups[1].Value ?? m.Groups[2].Value ?? m.Groups[3].Value).Trim();
+            if (string.IsNullOrEmpty(key)) continue;
+            if (!newCounts.ContainsKey(key)) newCounts[key] = 0;
+            newCounts[key]++;
+        }
+
+        foreach (var kvp in newCounts)
+        {
+            oldCounts.TryGetValue(kvp.Key, out var oldVal);
+            if (kvp.Value > oldVal && kvp.Value > 1)
+            {
+                return $"DUPLICATE PROPERTY ADDITION — newString contains {kvp.Value} occurrences of property '{kvp.Key}' " +
+                       $"but oldString only had {oldVal}. You added a duplicate property instead of modifying the existing one. " +
+                       "MODIFY the existing property value instead of adding a new one with the same name. Include the ENTIRE existing backtick string in oldString.";
+            }
+        }
+        return null;
+    }
+
+    public static string GetLeadingWhitespace(string s)
+    {
+        var i = 0;
+        while (i < s.Length && (s[i] == ' ' || s[i] == '\t')) i++;
+        return s[..i];
+    }
+    private static readonly HashSet<string> VoidHtmlElements = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr"
+    };
+
+    public static string AutoIndentHtml(string html, string baseIndent)
+    {
+        const string IndentStep = "  "; // 2 spaces per nesting level
+        var lines = html.Split('\n');
+
+        // If the content already has relative structure, preserve it exactly
+        var distinctDepths = lines
+            .Where(l => l.Trim().Length > 0)
+            .Select(l => AgentUtilities.GetLeadingWhitespace(l).Length)
+            .Distinct().Count();
+        if (distinctDepths > 1) return html;
+
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].Trim();
+            if (trimmed.Length == 0) continue;
+
+            // Closing tag → dedent BEFORE placing this line
+            if (Regex.IsMatch(trimmed, @"^</[\w-]"))
+                depth = Math.Max(0, depth - 1);
+
+            lines[i] = baseIndent + new string(' ', depth * IndentStep.Length) + trimmed;
+
+            // Opening tag: indent the NEXT line if this tag doesn't close on the same line
+            var tagMatch = Regex.Match(trimmed, @"^<([\w-]+)[\s>]");
+            if (tagMatch.Success)
+            {
+                var tag = tagMatch.Groups[1].Value;
+                var isSelfClosing = trimmed.EndsWith("/>") || VoidHtmlElements.Contains(tag);
+                var closedInline = trimmed.Contains($"</{tag}>");
+                var isClosing = trimmed.StartsWith("</");
+                var isComment = trimmed.StartsWith("<!--");
+                if (!isSelfClosing && !closedInline && !isClosing && !isComment)
+                    depth++;
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
+    /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
+    public static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
+    {
+        if (!replacement.Contains('{') && !replacement.Contains('}'))
+            return replacement;
+
+        // Infer indent size from the file (difference between parent and child indent levels)
+        var indentSize = AgentUtilities.InferIndentSize(fileLines, start);
+        if (indentSize <= 0) return replacement;
+
+        var lines = replacement.Split('\n');
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Trim().Length == 0) continue;
+
+            var trimmed = lines[i].TrimStart();
+            // Compute indent depth for THIS line only (don't mutate depth yet)
+            var lineDepth = depth;
+            if (trimmed.StartsWith("}"))
+                lineDepth = Math.Max(0, lineDepth - 1);
+
+            var expectedIndent = fileIndent + new string(' ', lineDepth * indentSize);
+            var lineIndent = AgentUtilities.GetLeadingWhitespace(lines[i]);
+            if (lineIndent != expectedIndent)
+                lines[i] = expectedIndent + trimmed;
+
+            // Update depth for the NEXT line by counting braces in this line
+            foreach (var c in trimmed)
+            {
+                if (c == '{') depth++;
+                if (c == '}') depth = Math.Max(0, depth - 1);
+            }
+        }
+        return string.Join("\n", lines);
+    }
+    /// <summary>Infer the file's indent size (e.g. 2 or 4) by sampling indentation deltas.</summary>
+    public static int InferIndentSize(string[] fileLines, int start)
+    {
+        var sampleStart = Math.Max(0, start - 5);
+        var sampleEnd = Math.Min(fileLines.Length, start + 20);
+        var deltas = new List<int>();
+        for (var i = sampleStart + 1; i < sampleEnd; i++)
+        {
+            var prev = GetLeadingWhitespace(fileLines[i - 1]).Length;
+            var curr = GetLeadingWhitespace(fileLines[i]).Length;
+            var delta = Math.Abs(curr - prev);
+            if (delta > 0 && delta <= 8)
+                deltas.Add(delta);
+        }
+        if (deltas.Count == 0) return 2; // default
+        // Use mode (most common delta) — more reliable than average for mixed indentation
+        var mode = deltas.GroupBy(d => d).OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).First().Key;
+        return mode < 2 ? 2 : mode > 4 ? 4 : mode;
+    }
+
+    public static string AutoIndentFullFile(string fullContent, string[] originalLines)
+    {
+        var indentSize = InferIndentSize(originalLines, 0);
+        if (indentSize <= 0) return fullContent;
+
+        var lines = fullContent.Split('\n');
+        var depth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Trim().Length == 0) continue;
+
+            var trimmed = lines[i].TrimStart();
+            var lineDepth = depth;
+            if (trimmed.StartsWith("}"))
+                lineDepth = Math.Max(0, lineDepth - 1);
+
+            var expectedIndent = new string(' ', lineDepth * indentSize);
+            var lineIndent = GetLeadingWhitespace(lines[i]);
+            if (lineIndent != expectedIndent)
+                lines[i] = expectedIndent + trimmed;
+
+            foreach (var c in trimmed)
+            {
+                if (c == '{') depth++;
+                if (c == '}') depth = Math.Max(0, depth - 1);
+            }
+        }
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>Find the last position where braces are balanced in partial content.</summary>
+    public static string FindLastBalancedPrefix(string content)
+    {
+        var depth = 0;
+        var lastBalanced = 0;
+        for (var i = 0; i < content.Length; i++)
+        {
+            if (content[i] == '{') depth++;
+            if (content[i] == '}') depth = Math.Max(0, depth - 1);
+            if (depth == 0) lastBalanced = i + 1;
+        }
+        return content[..Math.Max(lastBalanced, content.Length / 2)];
+    }
+    public static bool IsFullFileTruncated(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        var opens = content.Count(c => c == '{');
+        var closes = content.Count(c => c == '}');
+        return opens > closes;
+    }
+    private static bool LooksLikePlanJson(string text) =>
+        !string.IsNullOrWhiteSpace(text) &&
+        Regex.IsMatch(text, @"""?plan""?\s*:", RegexOptions.IgnoreCase);
+        
+    public static AgentPlan? ParsePlan(string jsonString)
+    {
+        if (string.IsNullOrWhiteSpace(jsonString)) return null;
+        var cleaned = jsonString.Trim();
+        if (cleaned.StartsWith("```"))
+        {
+            var fm = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            cleaned = fm.Success ? fm.Groups[1].Value.Trim() : cleaned.TrimStart('`');
+        }
+        var opts = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+        var truncRepaired = AgentUtilities.TryRepairTruncatedPlanJson(cleaned);
+        if (truncRepaired != null)
+        {
+            var truncOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true, AllowTrailingCommas = true };
+            foreach (var candidate in AgentUtilities.GeneratePlanJsonCandidates(truncRepaired))
+            {
+                try
+                {
+                    var deserializedPlan = JsonSerializer.Deserialize<AgentPlan>(candidate, truncOpts);
+                    if (deserializedPlan?.Plan?.Count > 0)
+                        return AgentUtilities.DeduplicatePlan(deserializedPlan);
+                }
+                catch { }
+            }
+        }
+        var jsonBlocks = AgentUtilities.ExtractJsonBlocks(cleaned).Where(LooksLikePlanJson).OrderByDescending(b => b.Length).ToList();
+        if (LooksLikePlanJson(cleaned) && cleaned.StartsWith("{"))
+        {
+            jsonBlocks.Insert(0, cleaned);
+        }
+        var fb = cleaned.IndexOf('{');
+        var lb = cleaned.LastIndexOf('}');
+        if (fb >= 0 && lb > fb)
+        {
+            var bc = cleaned[fb..(lb + 1)];
+            if (LooksLikePlanJson(bc))
+            {
+                jsonBlocks.Add(bc);
+            }
+        }
+        foreach (var candidate in jsonBlocks.Distinct())
+        {
+            foreach (var repaired in GeneratePlanJsonCandidates(candidate))
+            {
+                try
+                {
+                    var result = JsonSerializer.Deserialize<AgentPlan>(repaired, opts);
+                    if (result?.Plan != null)
+                    {
+                        return DeduplicatePlan(result);
+                    }
+                }
+                catch { }
+            }
+        }
+        var arrayCandidates = new List<string> { cleaned };
+        var f2 = cleaned.IndexOf('['); var l2 = cleaned.LastIndexOf(']');
+        if (f2 >= 0 && l2 > f2) arrayCandidates.Add(cleaned[f2..(l2 + 1)]);
+        foreach (var block in arrayCandidates.Distinct())
+        {
+            try
+            {
+                var c = block.Trim();
+                if (!c.StartsWith("[")) continue;
+                var steps = JsonSerializer.Deserialize<List<PlanStep>>(c, opts);
+                if (steps is { Count: > 0 }) return new AgentPlan { Summary = "Parsed array", Plan = steps, Score = 0 };
+            }
+            catch { }
+        }
+        return null;
+    }
+
     /// <summary>
     /// Parse a plan in delimiter format (replaces JSON for output robustness).
     /// Format:
