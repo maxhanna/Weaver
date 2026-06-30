@@ -9063,6 +9063,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     System.IO.File.Delete(fullPath);
                     await EmitLog(emitSse, "success", $"Deleted {target}", ct: ct);
                     allResults.Add(new Dictionary<string, object?> { ["type"] = "rename", ["status"] = "done", ["path"] = target, ["editAction"] = "deleted" });
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 }
                 else await EmitLog(emitSse, "warn", $"Delete target not found: {target}", ct: ct);
                 continue;
@@ -9071,6 +9072,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (planFile.Equals("_git", StringComparison.OrdinalIgnoreCase))
             {
                 stepIndex = await ExecuteGitStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
                 continue;
             }
 
@@ -9091,6 +9093,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var prevCount = allResults.Count;
                 var cr = await HandleCreateFile(changeDesc, projectRoot, prompt, discoveryContext, stepIndex, emitSse, ct, null, attachedFiles);
                 stepIndex += cr.stepsCount; allResults.AddRange(cr.results);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                     stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
@@ -9098,10 +9101,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             if (planFile.Equals("_ping", StringComparison.OrdinalIgnoreCase))
-            { stepIndex = await ExecutePingStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex); continue; }
+            { 
+                stepIndex = await ExecutePingStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                continue; 
+            }
 
             if (planFile.Equals("_package_install", StringComparison.OrdinalIgnoreCase))
-            { stepIndex = await ExecutePackageInstallStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex); continue; }
+            { 
+                stepIndex = await ExecutePackageInstallStep(changeDesc, projectRoot, emitSse, ct, allResults, stepIndex);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                continue; 
+            }
 
             if (planFile.Equals("_command", StringComparison.OrdinalIgnoreCase))
             {
@@ -9115,6 +9126,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var prevCount = allResults.Count;
                     var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += cr.Count; allResults.AddRange(cr);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
                     planItems = await TryReplanAfterStep(prompt, allResults, plan,
                         steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                         stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
@@ -9127,6 +9139,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 (stepIndex, discoveryContext) = await ExecuteWebPlanStep(planFile, changeDesc, prompt, projectRoot, emitSse, ct,
                     allResults, planItems, itemIdx, stepIndex, discoveryContext, webCtx);
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
                 continue;
             }
 
@@ -9139,15 +9152,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var rr = await ExecuteSteps(new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += rr.Count; allResults.AddRange(rr);
                 }
+                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct); 
                 continue;
             }
-
-            // ── File edit: resolve then apply ─────────────────────────────
+ 
             if (AgentUtilities.IsRelativePath(planFile))
-            {
-                // Safeguard: detect read-only intent (e.g. "Look at", "Read", "Examine")
-                // when the LLM used a regular file path instead of _explore.
-                // Treat as exploration (read + add result) rather than an edit.
+            { 
                 var readOnlyPrefixes = new[] { "read", "look at", "examine", "inspect", "review", "understand",
                     "study", "browse", "view", "check how", "see how", "get familiar", "explore" };
                 var changeLower = (item.Change ?? "").Trim().ToLowerInvariant();
@@ -9205,13 +9215,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     stepIndex++;
                     continue;
                 }
-
-                // ── Per-step decoupling check: split into sub-steps if needed ──
+ 
                 if (!alreadyDecoupled.Contains(item.Change ?? ""))
-                {
-                    // FIX: Mark as checked FIRST, before the LLM call.
-                    // Previously this was only done inside the decoupled-steps branch,
-                    // causing an infinite loop when CheckAndDecoupleStepAsync returned null.
+                { 
                     alreadyDecoupled.Add(item.Change ?? "");
 
                     var decoupledSubSteps = await CheckAndDecoupleStepAsync(
@@ -9220,7 +9226,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (decoupledSubSteps?.Count > 0)
                     {
                         foreach (var sub in decoupledSubSteps)
+                        {
                             alreadyDecoupled.Add(sub.Change ?? "");
+                        }
 
                         await EmitLog(emitSse, "info",
                             $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
@@ -9229,7 +9237,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         planItems.RemoveAt(itemIdx);
                         planItems.InsertRange(itemIdx, decoupledSubSteps);
                         if (!string.IsNullOrWhiteSpace(cardId))
+                        {
                             await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
+                        }
 
                         var planItemsJson = new JsonArray();
                         for (var pi = 0; pi < planItems.Count; pi++)
@@ -9252,16 +9262,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             summary = "Plan updated after decoupling",
                             items = planItemsJson
                         }, ct);
-
-                        // FIX: Only decrement+continue when decoupling actually happened.
-                        // Previously itemIdx-- ran even when null was returned → infinite loop.
+ 
                         itemIdx--;
                         continue;
-                    }
-                    // No decoupling — fall through to ResolveAndApplyEdit below
+                    } 
                 }
-
-                // ResolveAndApplyEdit handles plan-provided oldString + unbounded LLM retries internally
+ 
                 var prevCount = allResults.Count;
                 try
                 {
@@ -9271,9 +9277,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         cardId: cardId, attachedFiles: attachedFiles);
                 }
                 catch (StepFatalException ex)
-                {
-                    // ── A step failed irrecoverably — STOP the entire plan ──
-                    // Do NOT continue to the next step. The task is incomplete.
+                { 
                     await EmitLog(emitSse, "error",
                         $"⛔ FATAL STEP FAILURE — halting plan execution. " +
                         $"Failed step: {ex.FailedFilePath} — {ex.FailedChangeDescription}",
@@ -9295,8 +9299,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             remainingSteps = planItems.Count - itemIdx - 1
                         }, ct);
                     }
-
-                    // Add a summary result so the caller knows we stopped early
+ 
                     allResults.Add(new Dictionary<string, object?>
                     {
                         ["type"] = "plan_halted",
@@ -9306,7 +9309,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         ["remainingSteps"] = planItems.Count - itemIdx - 1
                     });
 
-                    return; // ── Exit ExecutePlan — no more steps execute ──
+                    return; 
                 }
 
                 var stepSkipped = false;
@@ -9326,24 +9329,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         stepSkipped = true;
                     }
                 }
-
-                // After successful HTML edit, detect references to undefined methods and add steps
+ 
                 if (status == "done" && planFile.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Only scan the newStr from the edit itself — never the whole file,
-                    // so we only flag methods the edit INTRODUCED, not inherited ones.
+                { 
                     var editNewStr = allResults.Count > prevCount &&
                         allResults[^1] is Dictionary<string, object?> lastEditDict
                         ? lastEditDict.GetValueOrDefault("newStringPreview")?.ToString()
                         : null;
                     if (!string.IsNullOrWhiteSpace(editNewStr))
-                    {
-                        // Extract function names from Angular event bindings in the edit's newStr
+                    { 
                         var funcMatches = Regex.Matches(editNewStr,
                             @"\(\w+\)=\""[^\""]*?(\w+)\s*\(");
                         if (funcMatches.Count > 0)
-                        {
-                            // Find corresponding .ts file (same directory, same base name)
+                        { 
                             var htmlFullPath2 = Path.GetFullPath(
                                 Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
                             var baseDir = Path.GetDirectoryName(htmlFullPath2) ?? "";
@@ -9357,14 +9355,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             var seenMethods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                             foreach (System.Text.RegularExpressions.Match m in funcMatches)
                             {
-                                var funcName = m.Groups[1].Value;
-                                // Skip common Angular lifecycle hooks, built-in DOM events, etc.
+                                var funcName = m.Groups[1].Value; 
                                 if (funcName is "ngOnInit" or "ngOnDestroy" or "ngAfterViewInit" or "ngOnChanges" or "ngDoCheck" or "ngAfterContentInit" or "ngAfterContentChecked" or "ngAfterViewChecked" or "toggle" or "open" or "close" or "preventDefault" or "stopPropagation" or "console")
-                                    continue;
-                                // Skip if already seen in this batch (e.g. same method referenced in two buttons)
-                                if (!seenMethods.Add(funcName))
-                                    continue;
-                                // Check if function exists in local .ts or anywhere in the project
+                                { continue; } 
+                                if (!seenMethods.Add(funcName)) { continue; }
                                 var foundInProject = false;
                                 if (!string.IsNullOrWhiteSpace(tsContent))
                                 {
@@ -9380,15 +9374,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         foundInProject = true;
                                 }
                                 if (foundInProject)
-                                {
-                                    // Even if the function exists, check if the arguments passed in the HTML
-                                    // reference properties that don't match the method body — this catches
-                                    // the LLM reusing a generic method (e.g. onPageChange) for a different
-                                    // data type (e.g., YouTube pagination) where a new method is needed.
+                                { 
                                     var argsText = "";
                                     try
-                                    {
-                                        // Extract argument text from the function call in editNewStr
+                                    { 
                                         var callStart = m.Index + m.Length;
                                         if (callStart > 0 && callStart < (editNewStr?.Length ?? 0))
                                         {
@@ -9400,39 +9389,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     }
                                     catch { /* best-effort */ }
                                     if (!string.IsNullOrWhiteSpace(argsText) && !string.IsNullOrWhiteSpace(tsContent))
-                                    {
-                                        // Extract property-like words from the arguments (camelCase words that aren't numbers/operators)
+                                    { 
                                         var argProps = Regex.Matches(argsText, @"\b[a-z]+[a-zA-Z0-9]*\b")
                                             .Cast<Match>().Select(x => x.Value)
                                             .Where(x => !Regex.IsMatch(x, @"^\d+$"))
-                                            .Distinct().ToList();
-                                        // Extract this.xxx property references from the method body
+                                            .Distinct().ToList(); 
                                         var methodBodyProps = Regex.Matches(tsContent, @"\bthis\.([a-zA-Z_]\w*)")
                                             .Cast<Match>().Select(x => x.Value)
-                                            .Distinct().ToHashSet(StringComparer.OrdinalIgnoreCase);
-                                        // If args reference properties the method body doesn't use,
-                                        // the LLM probably reused the wrong method — flag it.
+                                            .Distinct().ToHashSet(StringComparer.OrdinalIgnoreCase); 
                                         var mismatchedArgs = argProps
                                             .Where(a => !a.Contains("this.") &&
                                                 !methodBodyProps.Any(b =>
                                                     b.EndsWith("." + a, StringComparison.OrdinalIgnoreCase)))
                                             .ToList();
                                         if (mismatchedArgs.Count > 0 && mismatchedArgs.Count >= argProps.Count / 2)
-                                        {
-                                            // Generate a more specific method name by replacing the qualifier
-                                            var newFuncName = funcName;
-                                            // Try to extract a data type qualifier from mismatched args
+                                        { 
+                                            var newFuncName = funcName; 
                                             var youtubeArg = mismatchedArgs
                                                 .FirstOrDefault(a => a.IndexOf("youtube", StringComparison.OrdinalIgnoreCase) >= 0
                                                     || a.IndexOf("yt", StringComparison.OrdinalIgnoreCase) >= 0);
                                             if (youtubeArg != null)
-                                            {
-                                                // The existing method is being called with YouTube-specific args —
-                                                // a separate youtube method is needed
+                                            { 
                                                 var prefix = funcName.StartsWith("on", StringComparison.OrdinalIgnoreCase) ? "onYoutube" : "youtube";
                                                 var suffix = funcName.Length > 2 && char.IsUpper(funcName[2]) ? funcName.Substring(2) : funcName;
-                                                newFuncName = prefix + char.ToUpper(suffix[0]) + suffix.Substring(1);
-                                                // Don't skip — create the missing method step below
+                                                newFuncName = prefix + char.ToUpper(suffix[0]) + suffix.Substring(1); 
                                                 foundInProject = false;
                                                 funcName = newFuncName;
                                             }
@@ -9440,8 +9420,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     }
                                     if (foundInProject)
                                         continue;
-                                }
-                                // Avoid duplicating steps already in the plan
+                                } 
                                 if (planItems.Any(p => p.File != null && p.File.EndsWith(".ts", StringComparison.OrdinalIgnoreCase) &&
                                     p.Change != null && p.Change.Contains(funcName, StringComparison.OrdinalIgnoreCase)))
                                     continue;
@@ -9488,8 +9467,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             }
                         }
                     }
-                }
-                // ── Post-edit reflection: find missing methods/classes and add steps ──
+                } 
                 if (status is "done" or "modified")
                 {
                     var lastEditResult = allResults.Count > prevCount
@@ -9497,8 +9475,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var appliedNewStr = lastEditResult?.GetValueOrDefault("newStringPreview")?.ToString();
 
                     if (!string.IsNullOrWhiteSpace(appliedNewStr))
-                    {
-                        // Re-read the file from disk so we have the current full content for context
+                    { 
                         var currentFullPath = Path.GetFullPath(
                             Path.Combine(projectRoot, planFile.Replace('/', Path.DirectorySeparatorChar)));
                         string currentContent = "";
@@ -9518,11 +9495,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             await EmitLog(emitSse, "info",
                                 $"  ➕ Reflection added {reflectedSteps.Count} step(s): " +
                                 string.Join(" | ", reflectedSteps.Select(s => s.Change)), ct: ct);
-
-                            // Insert immediately after the current step so they run next
-                            planItems.InsertRange(itemIdx + 1, reflectedSteps);
-
-                            // Persist the expanded plan to boarddata and emit to frontend
+ 
+                            planItems.InsertRange(itemIdx + 1, reflectedSteps); 
                             await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
                                 summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
                                 append: true);
@@ -9544,9 +9518,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
                 }
-
-                // Step was skipped (already done / irrelevant) or succeeded —
-                // check if more work remains by re-running the planner
+ 
                 planItems = await TryReplanAfterStep(prompt, allResults, plan,
                     steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                     stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
