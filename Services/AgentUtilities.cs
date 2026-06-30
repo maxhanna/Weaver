@@ -356,6 +356,44 @@ public static class AgentUtilities
 
         return plan;
     }
+
+    public static List<string> ExtractSignatureTokens(string sigLine)
+    {
+        if (string.IsNullOrWhiteSpace(sigLine))
+            return new List<string>();
+
+        var parenIdx = sigLine.IndexOf('(');
+        var head = parenIdx >= 0 ? sigLine.Substring(0, parenIdx) : sigLine;
+
+        string paramsRegion = "";
+        string returnRegion = "";
+        if (parenIdx >= 0)
+        {
+            var depth = 0;
+            var closeIdx = -1;
+            for (var i = parenIdx; i < sigLine.Length; i++)
+            {
+                if (sigLine[i] == '(') depth++;
+                else if (sigLine[i] == ')')
+                {
+                    depth--;
+                    if (depth == 0) { closeIdx = i; break; }
+                }
+            }
+            if (closeIdx >= 0)
+            {
+                paramsRegion = sigLine.Substring(parenIdx, closeIdx - parenIdx + 1);
+                var after = sigLine.Substring(closeIdx + 1);
+                var braceIdx = after.IndexOf('{');
+                returnRegion = braceIdx >= 0 ? after.Substring(0, braceIdx) : after;
+            }
+        }
+
+        var combined = head + " " + paramsRegion + " " + returnRegion;
+        var normalized = Regex.Replace(combined.Trim(), @"\s+", " ");
+        return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+    }
+
     /// <summary>
     /// Deterministically ensures that plans creating new Angular components 
     /// use the CLI scaffolding command and update app.module.ts.

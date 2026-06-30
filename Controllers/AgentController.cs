@@ -3058,26 +3058,44 @@ public class AgentController : ControllerBase
 
         if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
             return null;
+            
         var hasMultipleConcerns =
-     ch.Contains(" and ") || ch.Contains(" & ") ||
-     ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
-     ch.Contains(" move ") || ch.StartsWith("move ") ||
-     ch.Contains(" then ") || ch.StartsWith("then ") ||
-     // property/field combined with method/logic/constructor
-     (ch.ContainsAny("propert", "field", "variable", "global") &&
-      ch.ContainsAny("method", "function", "logic", "implement", "handler", "control", "constructor", "init")) ||
-     // constructor combined with method
-     (ch.Contains("constructor") && ch.ContainsAny("method", "function", "handler", "task")) ||
-     // "add X then add Y" or "add X, then add Y" chaining pattern
-     Regex.IsMatch(ch, @"\b(add|create|implement|initialize)\b.{5,80}\bthen\b.{0,80}\b(add|create|implement|initialize)\b") ||
-     // "add X, implement Y" style
-     Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
-     // field + constructor pattern (e.g., "add field and initialize in constructor")
-     (ch.ContainsAny("field", "propert") && ch.ContainsAny("constructor", "init")) ||
-     // pagination / navigation / sort with controls
-     Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
-     // more than one comma-separated noun phrase
-     (ch.Split(',').Length >= 3 && ch.Length > 40);
+            ch.Contains(" and ") || ch.Contains(" & ") ||
+            ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
+            ch.Contains(" move ") || ch.StartsWith("move ") ||
+            ch.Contains(" then ") || ch.StartsWith("then ") ||
+            // property/field combined with method/logic/constructor
+            (ch.ContainsAny("propert", "field", "variable", "global") &&
+            ch.ContainsAny("method", "function", "logic", "implement", "handler", "control", "constructor", "init")) ||
+            // constructor combined with method
+            (ch.Contains("constructor") && ch.ContainsAny("method", "function", "handler", "task")) ||
+            // "add X then add Y" or "add X, then add Y" chaining pattern
+            Regex.IsMatch(ch, @"\b(add|create|implement|initialize)\b.{5,80}\bthen\b.{0,80}\b(add|create|implement|initialize)\b") ||
+            // "add X, implement Y" style
+            Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
+            // field + constructor pattern (e.g., "add field and initialize in constructor")
+            (ch.ContainsAny("field", "propert") && ch.ContainsAny("constructor", "init")) ||
+            // pagination / navigation / sort with controls
+            Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
+            // more than one comma-separated noun phrase
+            (ch.Split(',').Length >= 3 && ch.Length > 40);
+
+        if (hasMultipleConcerns && ch.Contains("constructor") && ch.ContainsAny("method", "call", "insert", "add"))
+        {
+            var serviceMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Service)", RegexOptions.IgnoreCase);
+            if (serviceMatch.Success)
+            {
+                var serviceName = serviceMatch.Groups[1].Value;
+                var result = new List<PlanStep>
+                {
+                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority },
+                    new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority }
+                };
+                return result;
+            }
+        }
+
+
         if (!hasMultipleConcerns) return null;
 
         var relPath = step.File.Replace('\\', '/');
@@ -3616,7 +3634,7 @@ emitSse, ct);
             if (!string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
                 var wipeReason = DetectFunctionalityWipe(
-                    oldStr!, newStr!, fileContent, relPath);
+                    oldStr!, newStr!, fileContent, relPath, step.Change);
 
                 if (wipeReason == null)
                 {
@@ -5463,7 +5481,7 @@ emitSse, ct);
     }
 
     private static string? DetectFunctionalityWipe(
-        string oldStr, string newStr, string fileContent, string relPath)
+        string oldStr, string newStr, string fileContent, string relPath, string? stepChange = null)
     {
         if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr))
             return null;
@@ -5542,15 +5560,21 @@ emitSse, ct);
             var newSigLine = AgentUtilities.CollectCompleteSignatureLine(newStr.Split('\n'));
             if (LooksLikeMethodDeclaration(oldSigLine) && LooksLikeMethodDeclaration(newSigLine))
             {
-                var oldTokens = ExtractSignatureTokens(oldSigLine);
-                var newTokens = ExtractSignatureTokens(newSigLine);
+                var oldTokens = AgentUtilities.ExtractSignatureTokens(oldSigLine);
+                var newTokens = AgentUtilities.ExtractSignatureTokens(newSigLine);
                 if (!oldTokens.SequenceEqual(newTokens))
                 {
-                    var oldSig = string.Join(" ", oldTokens);
-                    var newSig = string.Join(" ", newTokens);
-                    return $"SIGNATURE CHANGE — method declaration changed from [{oldSig}] to [{newSig}]. " +
-                           "The task is to tweak the body, not change the contract (return type / name / params). " +
-                           "RESTORE the original signature line and only modify the body lines below it.";
+                    bool isConstructorInjection = (stepChange ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase) &&
+                                                  oldSigLine.Contains("constructor(", StringComparison.OrdinalIgnoreCase);
+ 
+                    if (!isConstructorInjection)
+                    {
+                        var oldSig = string.Join(" ", oldTokens);
+                        var newSig = string.Join(" ", newTokens);
+                        return $"SIGNATURE CHANGE — method declaration changed from [{oldSig}] to [{newSig}]. " +
+                               "The task is to tweak the body, not change the contract (return type / name / params). " +
+                               "RESTORE the original signature line and only modify the body lines below it.";
+                    } 
                 }
             }
         }
@@ -5578,43 +5602,6 @@ emitSse, ct);
             + @"(?:<[^>]+>\s*)?"                 // optional generic return type
             + @"~?\w+\s*\(",
             RegexOptions.Compiled);
-    }
-
-    private static List<string> ExtractSignatureTokens(string sigLine)
-    {
-        if (string.IsNullOrWhiteSpace(sigLine))
-            return new List<string>();
-
-        var parenIdx = sigLine.IndexOf('(');
-        var head = parenIdx >= 0 ? sigLine.Substring(0, parenIdx) : sigLine;
-
-        string paramsRegion = "";
-        string returnRegion = "";
-        if (parenIdx >= 0)
-        {
-            var depth = 0;
-            var closeIdx = -1;
-            for (var i = parenIdx; i < sigLine.Length; i++)
-            {
-                if (sigLine[i] == '(') depth++;
-                else if (sigLine[i] == ')')
-                {
-                    depth--;
-                    if (depth == 0) { closeIdx = i; break; }
-                }
-            }
-            if (closeIdx >= 0)
-            {
-                paramsRegion = sigLine.Substring(parenIdx, closeIdx - parenIdx + 1);
-                var after = sigLine.Substring(closeIdx + 1);
-                var braceIdx = after.IndexOf('{');
-                returnRegion = braceIdx >= 0 ? after.Substring(0, braceIdx) : after;
-            }
-        }
-
-        var combined = head + " " + paramsRegion + " " + returnRegion;
-        var normalized = Regex.Replace(combined.Trim(), @"\s+", " ");
-        return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
 
     private string FormatCssEditedRegion(string content, string appliedNewStr)
