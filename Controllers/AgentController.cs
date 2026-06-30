@@ -545,7 +545,6 @@ public class AgentController : ControllerBase
         return (oldStr, null);
     }
 
-
     private static string DetectIndentUnit(string source)
     {
         var lines = source.Split('\n');
@@ -615,7 +614,7 @@ public class AgentController : ControllerBase
                 return ReindentHtmlTags(newCode, baseIndent, DetectIndentUnit(oldSource));
             }
 
-            return ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
+            return AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
         }
 
         return shifted;
@@ -712,112 +711,6 @@ public class AgentController : ControllerBase
         return string.Join("\n", result);
     }
 
-    private static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
-    {
-        var lines = code.Split('\n');
-        var result = new List<string>();
-        var depth = 0;
-        var inSQ = false;
-        var inDQ = false;
-        var inTmpl = false;
-        var inVerbatim = false;
-        var inLineComment = false;
-        var inBlockComment = false;
-
-        foreach (var line in lines)
-        {
-            var trimmed = line.TrimStart();
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                result.Add(line);
-                continue;
-            }
-            if (inVerbatim || inBlockComment)
-            {
-                result.Add(line);
-            }
-            else
-            {
-                var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
-                if (effectiveDepth < 0) effectiveDepth = 0;
-
-                var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
-                result.Add(indent + trimmed);
-            }
-
-            for (var i = 0; i < trimmed.Length; i++)
-            {
-                var c = trimmed[i];
-                var p = i > 0 ? trimmed[i - 1] : '\0';
-
-                if (inLineComment) break;
-
-                if (inBlockComment)
-                {
-                    if (c == '*' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
-                    {
-                        inBlockComment = false;
-                        i++;
-                    }
-                    continue;
-                }
-
-                if (inVerbatim)
-                {
-                    if (c == '"')
-                    {
-                        if (i + 1 < trimmed.Length && trimmed[i + 1] == '"')
-                        {
-                            i++;
-                        }
-                        else
-                        {
-                            inVerbatim = false;
-                        }
-                    }
-                    continue;
-                }
-
-                if (inSQ || inDQ || inTmpl)
-                {
-                    if (c == '\\' && (inDQ || inTmpl)) { i++; continue; }
-                    if (c == '\'' && inSQ) inSQ = false;
-                    else if (c == '"' && inDQ) inDQ = false;
-                    else if (c == '`' && inTmpl) inTmpl = false;
-                    continue;
-                }
-
-                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
-                {
-                    inLineComment = true;
-                    break;
-                }
-                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '*')
-                {
-                    inBlockComment = true;
-                    i++;
-                    continue;
-                }
-                if (c == '@' && i + 1 < trimmed.Length && trimmed[i + 1] == '"')
-                {
-                    inVerbatim = true;
-                    i++;
-                    continue;
-                }
-                if (c == '\'') { inSQ = true; continue; }
-                if (c == '"') { inDQ = true; continue; }
-                if (c == '`') { inTmpl = true; continue; }
-
-                if (c == '{') depth++;
-                else if (c == '}') depth--;
-            }
-
-            inLineComment = false;
-            if (depth < 0) depth = 0;
-        }
-
-        return string.Join("\n", result);
-    }
 
     private async Task<(string? oldStr, string? newStr, bool fullFile,
       string? fullContent, bool alreadyDone, string? error, bool fromFormatC)>
@@ -2968,7 +2861,6 @@ public class AgentController : ControllerBase
 
         return sb.ToString();
     }
-
     private static StepExplorationResponse ParseStepExplorationResponse(string raw)
     {
         var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
@@ -3698,7 +3590,7 @@ emitSse, ct);
 
                 if (wipeReason == null)
                 {
-                    wipeReason = DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath);
+                    wipeReason = AgentUtilities.DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath);
                 }
 
                 if (wipeReason == null)
@@ -3867,8 +3759,6 @@ emitSse, ct);
                         ct: ct);
                     goto RecordFailure;
                 }
-                // CSS/SCSS: abort after 4 attempts (plan + 3 retries) — LLM consistently
-                // hallucinates oldStrings that don't match the actual file content.
                 if (attempt >= 4 && fileExt is ".css" or ".scss" or ".less")
                 {
                     await EmitLog(emitSse, "error",
@@ -3879,7 +3769,6 @@ emitSse, ct);
                 continue;
             }
 
-            // Content-shrink check: if newString is drastically shorter than oldString,
             var shrinkThreshold = fromFormatC ? 0.02 : 0.1;
             if (!string.IsNullOrEmpty(newStr) && (double)newStr.Length / oldStr!.Length < shrinkThreshold)
             {
@@ -3901,7 +3790,6 @@ emitSse, ct);
                 var line = newStrLines[i];
                 var trimmed = line.TrimStart();
 
-                // FIX: Skip comments so apostrophes in natural language (e.g., "they've") don't trigger false positives
                 if (trimmed.StartsWith("//") || trimmed.StartsWith("*") || trimmed.StartsWith("/*"))
                     continue;
 
@@ -3929,7 +3817,7 @@ emitSse, ct);
                         StringComparison.Ordinal)) stuckCount++;
                     else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                     if (stuckCount >= 2) goto RecordFailure;
-                    goto continueResolveLoop; // Skip applying this broken edit
+                    goto continueResolveLoop;
                 }
             }
 
@@ -3952,14 +3840,8 @@ emitSse, ct);
             }
 
         continueResolveLoop:;
-
-            // Fix SQL whitespace and general spacing BEFORE VerifyEdit runs so that
-            // formatting issues don't cause false rejections. The LLM frequently
-            // collapses spaces in SQL (INTERVAL1 instead of INTERVAL 1); this fixes
-            // it deterministically rather than retrying.
             if (replaced && !string.IsNullOrWhiteSpace(newStr))
             {
-                // Pre-emptively fix common SQL whitespace collapses (INTERVAL15 -> INTERVAL 15)
                 var fixedSqlContent = AutoFixSqlWhitespace(newContent);
                 if (fixedSqlContent != newContent)
                 {
@@ -3974,7 +3856,6 @@ emitSse, ct);
                     await EmitLog(emitSse, "info",
                         $"Pre-verify format: fixed spacing in {relPath}", ct: ct);
                     newContent = formatted;
-                    // Also fix newStr so VerifyEdit's "newString must be present in result" check passes
                     newStr = AutoFormatEditedRegion(newStr, newStr);
                 }
             }
@@ -3985,10 +3866,6 @@ emitSse, ct);
                 var correctedContent = AutoFixSqlWhitespace(newContent);
                 if (correctedContent != newContent)
                 {
-                    // Also fix newStr so the "newString not found after replacement" check
-                    // inside VerifyEdit doesn't false-fire: correctedContent now has
-                    // "INTERVAL 15" but the original newStr still has "INTERVAL15", so
-                    // normNewContent.Contains(normNew) would always return false.
                     var correctedNewStr = AutoFixSqlWhitespace(newStr ?? "");
                     (approved, verifyReason, _) =
                         VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent, fromFormatC);
@@ -4001,13 +3878,11 @@ emitSse, ct);
                     }
                     else if (verifyReason.Contains("identical", StringComparison.OrdinalIgnoreCase))
                     {
-                        // SQL whitespace was the only difference — after fixing it, code matches original.
-                        // The LLM reproduced the existing method without adding any new logic.
                         verifyReason =
                             "SQL whitespace auto-fix made your newCode IDENTICAL to the existing code — " +
                             "you reproduced the original method body without implementing the new functionality. " +
                             "Write a DIFFERENT method body that adds the logic described in CHANGE REQUIRED.";
-                        newStr = correctedNewStr; // keep for feedback context
+                        newStr = correctedNewStr;
                     }
                 }
             }
@@ -4035,8 +3910,6 @@ emitSse, ct);
     !newContent.Contains(
         AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
-                // Strip leading whitespace AND trailing whitespace per line,
-                // same as VerifyEdit does internally — handles IndentReplacement re-indentation
                 var trimmedNew = string.Join("\n",
                     AgentUtilities.StripLineLeadingWhitespace(AgentUtilities.NormalizeLineEndings(newStr))
                         .Split('\n').Select(l => l.TrimEnd()));
@@ -4062,8 +3935,6 @@ emitSse, ct);
                 }
             }
 
-            // Normalize TypeScript/JS object literal spacing (C# was already
-            // formatted before insertion above — no file-wide Roslyn pass).
             if (Path.GetExtension(relPath).Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
                 Path.GetExtension(relPath).Equals(".tsx", StringComparison.OrdinalIgnoreCase) ||
                 Path.GetExtension(relPath).Equals(".js", StringComparison.OrdinalIgnoreCase) ||
@@ -4072,17 +3943,10 @@ emitSse, ct);
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
             }
 
-            // ── Snapshot the file BEFORE the edit is committed ───────────────
-            // Captured here so the LLM verify-and-decide gate below can revert
-            // deterministically if it decides to abandon the edit. `fileContent`
-            // is the in-memory copy we read earlier; we re-write it from disk
-            // on revert so any concurrent external modification is also undone.
             var preEditContent = fileContent;
 
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
 
-
-            // Post-edit: append stubs for any missing C# types referenced in the edit
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
             {
                 var missing = ScanMissingTypes(newContent, newStr);
@@ -4097,14 +3961,6 @@ emitSse, ct);
                 }
             }
 
-            // ── Post-edit CSS duplicate-selector merge (deterministic, runs BEFORE formatting) ──
-            // Detects when the LLM ADDED a CSS rule whose selector already exists
-            // in the file (e.g. adding a new `.kanban-board` rule when one already
-            // exists at line ~370). Merges the duplicate's properties into the
-            // first occurrence (later wins for same property) and removes the
-            // duplicate. This is the #1 CSS editing anti-pattern — the LLM sees
-            // an existing rule but chooses to add a new one instead of modifying it.
-            // Rules inside @media blocks are NOT merged with top-level rules.
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".css" or ".scss" or ".less"))
             {
@@ -4119,12 +3975,6 @@ emitSse, ct);
                 }
             }
 
-            // ── Post-edit CSS region formatting (deterministic, runs BEFORE LLM pass) ──
-            // Fixes two LLM-generated CSS defects in the rule block(s) touched by the edit:
-            //   * Missing space after ':' in declarations   ("flex:1;" -> "flex: 1;")
-            //   * Inconsistent property indentation          (" flex:1;" -> "  flex: 1;")
-            // Only the enclosing rule block(s) of the edited region are rewritten, so
-            // unrelated parts of the file stay byte-for-byte identical.
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".css" or ".scss" or ".less"))
             {
@@ -4170,10 +4020,8 @@ emitSse, ct);
                         ? attemptScores.Select(a => (a.score, a.reason, a.failedNew)).ToList()
                         : null);
 
-                // Track score for this attempt
                 attemptScores.Add((attempt + 1, llmGateScore, llmGateReason, newStr));
 
-                // Track best attempt for potential fallback
                 if (llmGateScore > bestScore)
                 {
                     bestScore = llmGateScore;
@@ -4187,7 +4035,6 @@ emitSse, ct);
 
                 if (llmGateDecision == "abandon")
                 {
-                    // ── REVERT: write the original content back to disk ───────────
                     await System.IO.File.WriteAllTextAsync(fullPath, preEditContent, Encoding.UTF8, ct);
 
                     await EmitLog(emitSse, "warn",
@@ -4212,9 +4059,6 @@ emitSse, ct);
                         }, ct);
                     }
 
-                    // ── Feed the FAILED CODE back into history with explicit context ──
-                    // This is the key change: the LLM sees exactly what code was wrong,
-                    // why it was wrong, and its quality score — so it can aim higher.
                     var abandonError =
                         $"LLM verify ABANDONED (score {llmGateScore}/100): {llmGateReason}\n" +
                         $"═══ FAILED CODE THAT WAS REVERTED (score {llmGateScore}/100) ═══\n" +
@@ -4223,7 +4067,6 @@ emitSse, ct);
                         $"DO NOT reproduce this code. It scored {llmGateScore}/100 because: {llmGateReason}.\n" +
                         $"Try a DIFFERENT approach. ";
 
-                    // Add specific guidance based on the failure reason
                     if (llmGateReason.Contains("signature", StringComparison.OrdinalIgnoreCase))
                         abandonError += "PRESERVE the original method signature (return type, name, parameters). Only change the BODY.";
                     else if (llmGateReason.Contains("cache", StringComparison.OrdinalIgnoreCase) ||
@@ -4236,7 +4079,6 @@ emitSse, ct);
                     else
                         abandonError += $"Address this specific issue: {llmGateReason}";
 
-                    // Also include a scoring hint
                     if (attemptScores.Count > 0)
                     {
                         var trend = attemptScores.Count >= 2 && llmGateScore > attemptScores[^2].score
@@ -4346,7 +4188,6 @@ emitSse, ct);
             allResults.Add(result);
             await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
 
-            // ── Method signature change: update call sites ─────────────
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr))
             {
                 stepIndex = await HandleMethodSignatureChange(
@@ -4360,9 +4201,7 @@ emitSse, ct);
     RecordFailure:
         var lastErr = history.Count > 0 ? history[^1].error : "resolve failed";
 
-        // ── Build a structured failure summary for replanning ──────────
         var failureSummary = new StringBuilder();
-        // FIX: use history.Count instead of attempt + 1 since 'attempt' is out of scope here
         failureSummary.AppendLine($"Step failed after {history.Count} attempts on {relPath}");
         failureSummary.AppendLine($"Step description: {step.Change}");
         failureSummary.AppendLine($"Final error: {lastErr}");
@@ -4378,7 +4217,7 @@ emitSse, ct);
         }
 
         failureSummary.AppendLine($"\nFailed code snippets (reverted — do NOT reproduce):");
-        foreach (var a in attemptScores.TakeLast(3)) // last 3 failed attempts
+        foreach (var a in attemptScores.TakeLast(3))
         {
             failureSummary.AppendLine($"--- Attempt {a.attempt} (score {a.score}/100): {a.reason} ---");
             failureSummary.AppendLine("```");
@@ -4391,7 +4230,6 @@ emitSse, ct);
         await EmitLog(emitSse, "warn",
             $"Step failure summary for replanning:\n{failureContext}", ct: ct);
 
-        // ── Record failed edit in project knowledge ───────────────────
         _ = Task.Run(async () =>
         {
             try
@@ -4404,10 +4242,6 @@ emitSse, ct);
             catch { /* swallow */ }
         }, CancellationToken.None);
 
-        // ── REPLANNING CYCLE: try to generate a new approach ───────────
-
-        // PREVENT INFINITE RECURSION: Only allow replanning at depth 0.
-        // If this is already a replan step (depth > 0), fail immediately.
         if (replanDepth > 0)
         {
             await EmitLog(emitSse, "error",
@@ -4489,16 +4323,12 @@ emitSse, ct);
                         replanStep, projectRoot, emitSse, ct,
                         replanResults, replanStepIndex,
                         prompt, plan, planItemIndex, cardId, attachedFiles,
-                        replanDepth + 1); // <-- PASS DEPTH
+                        replanDepth + 1);
                 }
                 catch (StepFatalException)
-                {
-                    // The replan step failed and threw. It already logged its error.
-                    // We catch it here so we can try the next replan attempt (if any).
-                }
+                { /*swallow */ }
             }
 
-            // Check if any replan step succeeded
             var hasSuccess = replanResults.OfType<Dictionary<string, object?>>()
                 .Any(r => r.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created");
 
@@ -4516,11 +4346,6 @@ emitSse, ct);
             allResults.AddRange(replanResults);
         }
 
-        // ── All replan attempts exhausted — STOP the entire task ───────
-        // A prerequisite step failed. Continuing to the next step would
-        // build on a broken foundation (e.g. field added but constructor
-        // initialization failed → timer is null → NRE at runtime).
-        // Throw so ExecutePlan catches and halts all further execution.
         await EmitLog(emitSse, "error",
             $"✗ FATAL: All resolve attempts AND {MaxReplanAttempts} replan cycles failed for {relPath}: {lastErr}",
             new { failureContext, attemptScores }, ct: ct);
@@ -4541,10 +4366,8 @@ emitSse, ct);
         if (emitSse) await SendSse(Response, "step", fail, ct);
         allResults.Add(fail);
 
-        // Mark step done in boarddata so it won't be retried on restart
         await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
 
-        // ── THROW: halt ExecutePlan — do NOT continue to next step ──
         throw new StepFatalException(
             $"Step failed after {history.Count} attempts and {MaxReplanAttempts} replan cycles: {relPath} — {lastErr}",
             relPath,
@@ -5757,87 +5580,6 @@ emitSse, ct);
         var combined = head + " " + paramsRegion + " " + returnRegion;
         var normalized = Regex.Replace(combined.Trim(), @"\s+", " ");
         return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
-    }
-
-    private static HashSet<string> ExtractMethodCalls(string code)
-    {
-        var calls = new HashSet<string>(StringComparer.Ordinal);
-        if (string.IsNullOrEmpty(code)) return calls;
-
-        foreach (Match m in Regex.Matches(code, @"((?:this|\b[A-Za-z_]\w*)\.[A-Za-z_]\w*)\s*\(", RegexOptions.Compiled))
-        {
-            var prefix = m.Groups[1].Value;
-            var bare = prefix.Split('.').Last();
-            if (IsBuiltinIdentifier(bare)) continue;
-            calls.Add(prefix);
-        }
-        foreach (Match m in Regex.Matches(code, @"\bnew\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(", RegexOptions.Compiled))
-        {
-            var name = m.Groups[1].Value;
-            var bare = name.Split('.').Last();
-            if (IsBuiltinIdentifier(bare)) continue;
-            calls.Add(name);
-        }
-        foreach (Match m in Regex.Matches(code, @"\b([A-Z][A-Za-z0-9_]*)\s*\(", RegexOptions.Compiled))
-        {
-            var name = m.Groups[1].Value;
-            if (IsBuiltinIdentifier(name)) continue;
-            calls.Add(name);
-        }
-        return calls;
-    }
-
-    private static bool IsBuiltinIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return true;
-
-        // Lowercase keywords / control flow.
-        var keywords = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "if","for","while","switch","return","using","lock","catch","throw",
-            "function","typeof","instanceof","in","of","do","else","try","finally",
-            "await","async","yield","new","delete","void","this","super","extends",
-            "implements","interface","class","struct","enum","namespace","import",
-            "export","from","as","is","out","ref","params","var","let","const",
-        };
-        if (keywords.Contains(name)) return true;
-
-        var builtins = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "Math","JSON","Object","Array","String","Number","Boolean","Date",
-            "Promise","Map","Set","WeakMap","WeakSet","Symbol","Reflect","Proxy",
-            "Error","TypeError","RangeError","SyntaxError","RegExp","Function",
-            "Console","console","window","document","globalThis","global",
-            "Number","BigInt","Intl","WebAssembly","process","Buffer",
-            "Task","List","Dictionary","HashSet","Enumerable","Action","Func",
-            "Tuple","ValueTuple","KeyValuePair","Nullable","Convert","Console",
-            "Exception","InvalidOperationException","ArgumentException","Guid",
-            "DateTime","TimeSpan","StringBuilder","Regex","Encoding","JsonSerializer",
-            "Path","File","Directory","Environment","Math","Random","CancellationToken",
-            "length", // Added to prevent false positives in the hallucinated property guard
-        };
-        if (builtins.Contains(name)) return true;
-
-        var standardMethods = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "ToString", "Trim", "TrimStart", "TrimEnd", "Substring", "Split",
-            "Replace", "Contains", "StartsWith", "EndsWith", "IndexOf", "LastIndexOf",
-            "ToUpper", "ToLower", "Equals", "Compare", "CompareTo", "Concat", "Join",
-            "IsNullOrEmpty", "IsNullOrWhiteSpace", "Format", "PadLeft", "PadRight",
-            "Select", "Where", "FirstOrDefault", "First", "Last", "LastOrDefault",
-            "Any", "All", "Count", "Sum", "Min", "Max", "Average", "ToList",
-            "ToArray", "ToDictionary", "ToHashSet", "Distinct", "GroupBy",
-            "OrderBy", "OrderByDescending", "ThenBy", "Skip", "Take", "Single",
-            "SingleOrDefault", "ElementAt", "Reverse", "Add", "AddRange", "Remove",
-            "RemoveAt", "Clear", "ContainsKey", "ContainsValue", "TryGetValue",
-            "map", "filter", "reduce", "forEach", "find", "findIndex", "includes",
-            "join", "concat", "flat", "flatMap", "some", "every", "sort", "push",
-            "pop", "shift", "unshift", "splice", "slice", "stringify", "parse",
-            "floor", "ceil", "round", "abs", "min", "max", "pow", "sqrt", "toFixed"
-        };
-        if (standardMethods.Contains(name)) return true;
-
-        return false;
     }
 
     private string FormatCssEditedRegion(string content, string appliedNewStr)
@@ -12690,67 +12432,7 @@ Respond with JSON only:
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
     }
-    /// <summary>
-    /// Detects when the LLM hallucinates a property by using a slightly modified name
-    /// of an existing property (e.g., using `this.imageUrls` when `this.imageUrl` exists).
-    /// </summary>
-    private static string? DetectHallucinatedProperties(string oldStr, string newStr, string fileContent, string relPath)
-    {
-        var ext = Path.GetExtension(relPath).ToLowerInvariant();
-        if (ext is not (".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")) return null;
 
-        var newProps = new HashSet<string>(StringComparer.Ordinal);
-        // Match .X in this.X or obj.X
-        foreach (Match m in Regex.Matches(newStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
-        {
-            var name = m.Groups[1].Value;
-            if (!IsBuiltinIdentifier(name)) newProps.Add(name);
-        }
-
-        var oldProps = new HashSet<string>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(oldStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
-        {
-            oldProps.Add(m.Groups[1].Value);
-        }
-
-        var introducedProps = newProps.Except(oldProps).ToList();
-        var trulyInvented = new List<string>();
-
-        // Split file content into words once
-        var fileWords = new HashSet<string>(fileContent.Split(new[] { ' ', '\n', '\r', '\t', '.', ';', ',', '(', ')', '[', ']', '{', '}', '<', '>', '=', '!', '?', '|', '&', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries));
-
-        foreach (var prop in introducedProps)
-        {
-            // Check if it's declared in newStr (e.g. "imagePreviews: FileEntry[]")
-            if (Regex.IsMatch(newStr, $@"\b{Regex.Escape(prop)}\s*[:=]")) continue;
-
-            // Check if it exists anywhere in the file content
-            if (fileWords.Contains(prop)) continue;
-
-            // Check if it's a pluralized/singularized version of an existing property
-            var existingSimilar = fileWords.FirstOrDefault(w =>
-                (w.Length > 3) &&
-                ((w + "s" == prop) || (w + "es" == prop) ||
-                 (prop + "s" == w) || (prop + "es" == w) ||
-                 (w + "Array" == prop) || (w + "List" == prop) ||
-                 (prop + "Array" == w) || (prop + "List" == w)));
-
-            if (existingSimilar != null)
-            {
-                trulyInvented.Add($"{prop} (did you mean '{existingSimilar}'?)");
-            }
-        }
-
-        if (trulyInvented.Count > 0)
-        {
-            var preview = string.Join(", ", trulyInvented.Take(5));
-            return $"HALLUCINATED PROPERTY — newString references [{preview}] which do NOT appear anywhere in {relPath}. " +
-                   "The LLM invented properties by modifying the name of existing properties (e.g., pluralizing). " +
-                   "Use ONLY properties that already appear in the file. If you need a collection, check if the existing singular property can be used, or explicitly declare the new property in the same edit.";
-        }
-
-        return null;
-    }
 
     private async Task<List<EditResult>> ApplyEditsDirect(List<EditAction> edits, string projectRoot)
     {
@@ -13000,9 +12682,9 @@ done = build OK; command = run this to fix; ask_user = need input";
 
         await EmitLog(emitSse, "info", $"TestCreation: preparing tests for {editedFiles.Count} file(s)", ct: ct);
 
-        var existingTestFiles = FindExistingTestFiles(projectRoot);
+        var existingTestFiles = AgentUtilities.FindExistingTestFiles(projectRoot);
         var hasExistingTests = existingTestFiles.Count > 0;
-        var testFramework = await DetectTestFramework(projectRoot, ct);
+        var testFramework = await AgentUtilities.DetectTestFramework(projectRoot, ct);
 
         if (!hasExistingTests && testFramework == null)
         {
@@ -13029,9 +12711,9 @@ done = build OK; command = run this to fix; ask_user = need input";
 
         if (existingTestFiles.Count > 0)
         {
-            if (existingTestFiles.Any(f => FileContains(f, "xunit", "Fact"))) testFramework = "xunit";
-            else if (existingTestFiles.Any(f => FileContains(f, "nunit", "TestFixture"))) testFramework = "nunit";
-            else if (existingTestFiles.Any(f => FileContains(f, "mstest", "TestClass", "TestMethod"))) testFramework = "mstest";
+            if (existingTestFiles.Any(f => AgentUtilities.FileContains(f, "xunit", "Fact"))) testFramework = "xunit";
+            else if (existingTestFiles.Any(f => AgentUtilities.FileContains(f, "nunit", "TestFixture"))) testFramework = "nunit";
+            else if (existingTestFiles.Any(f => AgentUtilities.FileContains(f, "mstest", "TestClass", "TestMethod"))) testFramework = "mstest";
         }
 
         await EmitLog(emitSse, "info", $"TestCreation: using '{testFramework}'", ct: ct);
@@ -13053,7 +12735,7 @@ done = build OK; command = run this to fix; ask_user = need input";
             catch { }
         }
 
-        var testDir = FindOrDetermineTestDir(projectRoot, existingTestFiles);
+        var testDir = AgentUtilities.FindOrDetermineTestDir(projectRoot, existingTestFiles);
 
         foreach (var filePath in editedFiles)
         {
@@ -13065,7 +12747,7 @@ done = build OK; command = run this to fix; ask_user = need input";
             }
 
             var fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            var testFilePath = GetTestFilePath(projectRoot, filePath, testDir);
+            var testFilePath = AgentUtilities.GetTestFilePath(projectRoot, filePath, testDir);
 
             var sysMsg = "You are a test-generation assistant. Generate unit tests for the given source code. Return ONLY the code, no explanations or markdown formatting.";
             var userMsg = new StringBuilder();
@@ -13111,79 +12793,6 @@ done = build OK; command = run this to fix; ask_user = need input";
             if (emitSse)
                 await SendSse(Response, "step", new { type = "create", path = relPath, status = "created" }, ct);
         }
-    }
-
-    private static List<string> FindExistingTestFiles(string projectRoot)
-    {
-        var patterns = new[] { "*Test*.cs", "*Tests.cs", "*.Specs.cs", "*.specs.cs" };
-        var dirs = new[] { "test", "tests", "Test", "Tests" };
-        var result = new List<string>();
-
-        foreach (var p in patterns)
-        {
-            try
-            {
-                result.AddRange(Directory.EnumerateFiles(projectRoot, p, SearchOption.AllDirectories)
-                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\")));
-            }
-            catch { }
-        }
-
-        foreach (var d in dirs)
-        {
-            var dp = Path.Combine(projectRoot, d);
-            if (Directory.Exists(dp))
-            {
-                try { result.AddRange(Directory.EnumerateFiles(dp, "*.cs", SearchOption.AllDirectories)); }
-                catch { }
-            }
-        }
-
-        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static bool FileContains(string filePath, params string[] keywords)
-    {
-        try
-        {
-            using var sr = new StreamReader(filePath, Encoding.UTF8);
-            var header = sr.ReadToEnd();
-            return keywords.Any(k => header.Contains(k, StringComparison.OrdinalIgnoreCase));
-        }
-        catch { return false; }
-    }
-
-    private static string FindOrDetermineTestDir(string projectRoot, List<string> existingTestFiles)
-    {
-        if (existingTestFiles.Count > 0)
-        {
-            var dir = Path.GetDirectoryName(existingTestFiles[0]);
-            if (dir != null) return dir;
-        }
-        return Path.Combine(projectRoot, "tests");
-    }
-
-    private static string GetTestFilePath(string projectRoot, string sourceFilePath, string testDir)
-    {
-        var fileName = Path.GetFileNameWithoutExtension(sourceFilePath);
-        var ext = Path.GetExtension(sourceFilePath);
-        return Path.Combine(testDir, $"{fileName}Tests{ext}");
-    }
-
-    private async Task<string?> DetectTestFramework(string projectRoot, CancellationToken ct)
-    {
-        try
-        {
-            foreach (var csproj in Directory.EnumerateFiles(projectRoot, "*.csproj", SearchOption.AllDirectories))
-            {
-                var content = await System.IO.File.ReadAllTextAsync(csproj, Encoding.UTF8, ct);
-                if (content.Contains("xunit", StringComparison.OrdinalIgnoreCase)) return "xunit";
-                if (content.Contains("nunit", StringComparison.OrdinalIgnoreCase)) return "nunit";
-                if (content.Contains("MSTest", StringComparison.OrdinalIgnoreCase)) return "mstest";
-            }
-        }
-        catch { }
-        return null;
     }
 
     private async Task RunRepairPlan(

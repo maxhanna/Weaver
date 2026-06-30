@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 namespace Weaver.Services;
 
 public static class AgentUtilities
-{ 
+{
     private const int CompactThreshold75 = 2100;
     private const int CompactThreshold90 = 2520;
     private static readonly HashSet<string> ExplorationStepTypes =
@@ -27,7 +27,7 @@ public static class AgentUtilities
         if (TryDetectSimpleIntent(prompt) != null) cmdScore += 100;
 
         if (Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
-            cmdScore += 80; 
+            cmdScore += 80;
 
         if (Regex.IsMatch(lower, @"\b(create\s+(a\s+)?(new\s+)?file)\b"))
             cmdScore += 60;
@@ -290,7 +290,7 @@ public static class AgentUtilities
         }
 
         return null; // needs full pipeline
-    } 
+    }
 
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
@@ -519,7 +519,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(json)) return json;
         return Regex.Replace(json,
-            @"(?<=[\{\,])\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=:)" ,
+            @"(?<=[\{\,])\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=:)",
             m => $"\"{m.Groups[1].Value}\"");
     }
 
@@ -675,7 +675,8 @@ public static class AgentUtilities
         if (repaired != null) candidates.Add(repaired);
         var quoted = QuoteJsonKeys(json);
         if (quoted != json) candidates.Add(quoted);
-        if (repaired != null) {
+        if (repaired != null)
+        {
             var quotedRepaired = QuoteJsonKeys(repaired);
             if (quotedRepaired != repaired) candidates.Add(quotedRepaired);
         }
@@ -701,7 +702,7 @@ public static class AgentUtilities
 
         return (null, null, "Could not parse oldString/newString from code gen response");
     }
- 
+
     public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
@@ -1134,25 +1135,28 @@ public static class AgentUtilities
         for (var i = 0; i < Math.Min(lines.Length, 100); i++)
         {
             var trimmed = lines[i].Trim();
-            if (string.IsNullOrWhiteSpace(trimmed)) {
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
                 structEnd = i + 1;
                 continue;
             }
-            
+
             // Header lines (using, import, etc.)
-            if (Regex.IsMatch(trimmed, @"^(using|import|namespace|package|from|export|#include|@|\[)", RegexOptions.IgnoreCase)) {
+            if (Regex.IsMatch(trimmed, @"^(using|import|namespace|package|from|export|#include|@|\[)", RegexOptions.IgnoreCase))
+            {
                 structEnd = i + 1;
                 continue;
             }
 
             // Declaration lines (class, interface, etc.)
-            if (Regex.IsMatch(trimmed, @"\b(class|interface|struct|record|enum|function|void)\b", RegexOptions.IgnoreCase)) {
+            if (Regex.IsMatch(trimmed, @"\b(class|interface|struct|record|enum|function|void)\b", RegexOptions.IgnoreCase))
+            {
                 foundClassLine = i;
                 structEnd = i + 1;
-                if (i + 1 < lines.Length && lines[i+1].Trim() == "{") structEnd = i + 2;
+                if (i + 1 < lines.Length && lines[i + 1].Trim() == "{") structEnd = i + 2;
                 break;
             }
-            
+
             if (foundClassLine == -1 && i > 50) break;
         }
         if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
@@ -1193,7 +1197,7 @@ public static class AgentUtilities
 
         // ── Step 3: Assemble with Skeleton ──
         var header = string.Join('\n', lines.Take(structEnd));
-        
+
         if (targetStart < 0)
         {
             // No target found: provide skeleton of the entire body
@@ -1367,7 +1371,7 @@ public static class AgentUtilities
             }
         }
         if (omittedCount > 0) skeleton.AppendLine($"... [{omittedCount} lines omitted]");
-        
+
         return skeleton.ToString();
     }
     public static IEnumerable<string> GeneratePlanJsonCandidates(string json)
@@ -1418,7 +1422,7 @@ public static class AgentUtilities
                 yield return truncAndRepaired;
         }
     }
-    
+
     public static int EstimateTokens(string text) =>
         string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
 
@@ -1655,6 +1659,291 @@ public static class AgentUtilities
         }
         return null;
     }
+
+
+    public static List<string> FindExistingTestFiles(string projectRoot)
+    {
+        var patterns = new[] { "*Test*.cs", "*Tests.cs", "*.Specs.cs", "*.specs.cs" };
+        var dirs = new[] { "test", "tests", "Test", "Tests" };
+        var result = new List<string>();
+
+        foreach (var p in patterns)
+        {
+            try
+            {
+                result.AddRange(Directory.EnumerateFiles(projectRoot, p, SearchOption.AllDirectories)
+                .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\")));
+            }
+            catch { }
+        }
+
+        foreach (var d in dirs)
+        {
+            var dp = Path.Combine(projectRoot, d);
+            if (Directory.Exists(dp))
+            {
+                try { result.AddRange(Directory.EnumerateFiles(dp, "*.cs", SearchOption.AllDirectories)); }
+                catch { }
+            }
+        }
+
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public static bool FileContains(string filePath, params string[] keywords)
+    {
+        try
+        {
+            using var sr = new StreamReader(filePath, Encoding.UTF8);
+            var header = sr.ReadToEnd();
+            return keywords.Any(k => header.Contains(k, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
+
+    public static string FindOrDetermineTestDir(string projectRoot, List<string> existingTestFiles)
+    {
+        if (existingTestFiles.Count > 0)
+        {
+            var dir = Path.GetDirectoryName(existingTestFiles[0]);
+            if (dir != null) return dir;
+        }
+        return Path.Combine(projectRoot, "tests");
+    }
+
+    public static string GetTestFilePath(string projectRoot, string sourceFilePath, string testDir)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(sourceFilePath);
+        var ext = Path.GetExtension(sourceFilePath);
+        return Path.Combine(testDir, $"{fileName}Tests{ext}");
+    }
+
+    public static bool IsBuiltinIdentifier(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return true;
+
+        // Lowercase keywords / control flow.
+        var keywords = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "if","for","while","switch","return","using","lock","catch","throw",
+            "function","typeof","instanceof","in","of","do","else","try","finally",
+            "await","async","yield","new","delete","void","this","super","extends",
+            "implements","interface","class","struct","enum","namespace","import",
+            "export","from","as","is","out","ref","params","var","let","const",
+        };
+        if (keywords.Contains(name)) return true;
+
+        var builtins = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Math","JSON","Object","Array","String","Number","Boolean","Date",
+            "Promise","Map","Set","WeakMap","WeakSet","Symbol","Reflect","Proxy",
+            "Error","TypeError","RangeError","SyntaxError","RegExp","Function",
+            "Console","console","window","document","globalThis","global",
+            "Number","BigInt","Intl","WebAssembly","process","Buffer",
+            "Task","List","Dictionary","HashSet","Enumerable","Action","Func",
+            "Tuple","ValueTuple","KeyValuePair","Nullable","Convert","Console",
+            "Exception","InvalidOperationException","ArgumentException","Guid",
+            "DateTime","TimeSpan","StringBuilder","Regex","Encoding","JsonSerializer",
+            "Path","File","Directory","Environment","Math","Random","CancellationToken",
+            "length", // Added to prevent false positives in the hallucinated property guard
+        };
+        if (builtins.Contains(name)) return true;
+
+        var standardMethods = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ToString", "Trim", "TrimStart", "TrimEnd", "Substring", "Split",
+            "Replace", "Contains", "StartsWith", "EndsWith", "IndexOf", "LastIndexOf",
+            "ToUpper", "ToLower", "Equals", "Compare", "CompareTo", "Concat", "Join",
+            "IsNullOrEmpty", "IsNullOrWhiteSpace", "Format", "PadLeft", "PadRight",
+            "Select", "Where", "FirstOrDefault", "First", "Last", "LastOrDefault",
+            "Any", "All", "Count", "Sum", "Min", "Max", "Average", "ToList",
+            "ToArray", "ToDictionary", "ToHashSet", "Distinct", "GroupBy",
+            "OrderBy", "OrderByDescending", "ThenBy", "Skip", "Take", "Single",
+            "SingleOrDefault", "ElementAt", "Reverse", "Add", "AddRange", "Remove",
+            "RemoveAt", "Clear", "ContainsKey", "ContainsValue", "TryGetValue",
+            "map", "filter", "reduce", "forEach", "find", "findIndex", "includes",
+            "join", "concat", "flat", "flatMap", "some", "every", "sort", "push",
+            "pop", "shift", "unshift", "splice", "slice", "stringify", "parse",
+            "floor", "ceil", "round", "abs", "min", "max", "pow", "sqrt", "toFixed"
+        };
+        if (standardMethods.Contains(name)) return true;
+
+        return false;
+    }
+
+    public static string ReindentByBraceDepth(string code, string baseIndent, string indentUnit = "  ")
+    {
+        var lines = code.Split('\n');
+        var result = new List<string>();
+        var depth = 0;
+        var inSQ = false;
+        var inDQ = false;
+        var inTmpl = false;
+        var inVerbatim = false;
+        var inLineComment = false;
+        var inBlockComment = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                result.Add(line);
+                continue;
+            }
+            if (inVerbatim || inBlockComment)
+            {
+                result.Add(line);
+            }
+            else
+            {
+                var effectiveDepth = trimmed[0] == '}' ? depth - 1 : depth;
+                if (effectiveDepth < 0) effectiveDepth = 0;
+
+                var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, effectiveDepth));
+                result.Add(indent + trimmed);
+            }
+
+            for (var i = 0; i < trimmed.Length; i++)
+            {
+                var c = trimmed[i];
+                var p = i > 0 ? trimmed[i - 1] : '\0';
+
+                if (inLineComment) break;
+
+                if (inBlockComment)
+                {
+                    if (c == '*' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
+                    {
+                        inBlockComment = false;
+                        i++;
+                    }
+                    continue;
+                }
+
+                if (inVerbatim)
+                {
+                    if (c == '"')
+                    {
+                        if (i + 1 < trimmed.Length && trimmed[i + 1] == '"')
+                        {
+                            i++;
+                        }
+                        else
+                        {
+                            inVerbatim = false;
+                        }
+                    }
+                    continue;
+                }
+
+                if (inSQ || inDQ || inTmpl)
+                {
+                    if (c == '\\' && (inDQ || inTmpl)) { i++; continue; }
+                    if (c == '\'' && inSQ) inSQ = false;
+                    else if (c == '"' && inDQ) inDQ = false;
+                    else if (c == '`' && inTmpl) inTmpl = false;
+                    continue;
+                }
+
+                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '/')
+                {
+                    inLineComment = true;
+                    break;
+                }
+                if (c == '/' && i + 1 < trimmed.Length && trimmed[i + 1] == '*')
+                {
+                    inBlockComment = true;
+                    i++;
+                    continue;
+                }
+                if (c == '@' && i + 1 < trimmed.Length && trimmed[i + 1] == '"')
+                {
+                    inVerbatim = true;
+                    i++;
+                    continue;
+                }
+                if (c == '\'') { inSQ = true; continue; }
+                if (c == '"') { inDQ = true; continue; }
+                if (c == '`') { inTmpl = true; continue; }
+
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+            }
+
+            inLineComment = false;
+            if (depth < 0) depth = 0;
+        }
+
+        return string.Join("\n", result);
+    }
+    public static string? DetectHallucinatedProperties(string oldStr, string newStr, string fileContent, string relPath)
+    {
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        if (ext is not (".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")) return null;
+
+        var newProps = new HashSet<string>(StringComparer.Ordinal);
+        // Match .X in this.X or obj.X
+        foreach (Match m in Regex.Matches(newStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
+        {
+            var name = m.Groups[1].Value;
+            if (!IsBuiltinIdentifier(name)) newProps.Add(name);
+        }
+
+        var oldProps = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match m in Regex.Matches(oldStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
+        {
+            oldProps.Add(m.Groups[1].Value);
+        }
+
+        var introducedProps = newProps.Except(oldProps).ToList();
+        var trulyInvented = new List<string>();
+
+        var fileWords = new HashSet<string>(fileContent.Split(new[] { ' ', '\n', '\r', '\t', '.', ';', ',', '(', ')', '[', ']', '{', '}', '<', '>', '=', '!', '?', '|', '&', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries));
+
+        foreach (var prop in introducedProps)
+        {
+            if (Regex.IsMatch(newStr, $@"\b{Regex.Escape(prop)}\s*[:=]")) { continue; }
+            if (fileWords.Contains(prop)) { continue; }
+
+            var existingSimilar = fileWords.FirstOrDefault(w =>
+                (w.Length > 3) &&
+                ((w + "s" == prop) || (w + "es" == prop) ||
+                 (prop + "s" == w) || (prop + "es" == w) ||
+                 (w + "Array" == prop) || (w + "List" == prop) ||
+                 (prop + "Array" == w) || (prop + "List" == w)));
+
+            if (existingSimilar != null)
+            {
+                trulyInvented.Add($"{prop} (did you mean '{existingSimilar}'?)");
+            }
+        }
+
+        if (trulyInvented.Count > 0)
+        {
+            var preview = string.Join(", ", trulyInvented.Take(5));
+            return $"HALLUCINATED PROPERTY — newString references [{preview}] which do NOT appear anywhere in {relPath}. " +
+                   "The LLM invented properties by modifying the name of existing properties (e.g., pluralizing). " +
+                   "Use ONLY properties that already appear in the file. If you need a collection, check if the existing singular property can be used, or explicitly declare the new property in the same edit.";
+        }
+
+        return null;
+    }
+    public static async Task<string?> DetectTestFramework(string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            foreach (var csproj in Directory.EnumerateFiles(projectRoot, "*.csproj", SearchOption.AllDirectories))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(csproj, Encoding.UTF8, ct);
+                if (content.Contains("xunit", StringComparison.OrdinalIgnoreCase)) return "xunit";
+                if (content.Contains("nunit", StringComparison.OrdinalIgnoreCase)) return "nunit";
+                if (content.Contains("MSTest", StringComparison.OrdinalIgnoreCase)) return "mstest";
+            }
+        }
+        catch { }
+        return null;
+    }
     public static (string family, bool supportsFormatC, string llmHint) GetLanguageProfile(string ext)
     {
         return ext.ToLowerInvariant() switch
@@ -1885,7 +2174,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(s)) return s ?? "";
         return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
-    } 
+    }
     public static bool IsSqlLike(string content)
     {
         var lower = content.ToLower();
@@ -2143,7 +2432,7 @@ public static class AgentUtilities
     private static bool LooksLikePlanJson(string text) =>
         !string.IsNullOrWhiteSpace(text) &&
         Regex.IsMatch(text, @"""?plan""?\s*:", RegexOptions.IgnoreCase);
-        
+
     public static AgentPlan? ParsePlan(string jsonString)
     {
         if (string.IsNullOrWhiteSpace(jsonString)) return null;
