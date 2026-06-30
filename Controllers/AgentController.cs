@@ -2184,6 +2184,36 @@ public class AgentController : ControllerBase
             }
         }
 
+        var serviceCallMatch = Regex.Match(step.Change ?? "", @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
+        if (!serviceCallMatch.Success)
+        {
+            // Also check the target file content if it was attached
+            serviceCallMatch = Regex.Match(ctx.ToString(), @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
+        }
+        if (serviceCallMatch.Success)
+        {
+            var serviceName = serviceCallMatch.Groups[1].Value;
+            var serviceFiles = Directory.GetFiles(projectRoot, $"{serviceName}.ts", SearchOption.AllDirectories)
+                .Where(f => !f.Contains("node_modules") && !f.Contains("dist"))
+                .Take(1)
+                .ToList();
+
+            foreach (var sf in serviceFiles)
+            {
+                var rel = Path.GetRelativePath(projectRoot, sf).Replace('\\', '/');
+                if (AddFileRead(rel))
+                {
+                    var content = await System.IO.File.ReadAllTextAsync(sf, Encoding.UTF8, ct);
+                    ctx.AppendLine($"### {rel} (deterministic service injection)");
+                    ctx.AppendLine("```typescript");
+                    ctx.AppendLine(content);
+                    ctx.AppendLine("```");
+                    ctx.AppendLine();
+                    await EmitLog(emitSse, "info", $"  🎯 Auto-injected service: {rel}", ct: ct);
+                }
+            }
+        }
+
         var refinedChange = step.Change;
         string? targetSymbol = null;
         string? lineRange = null;
@@ -2210,7 +2240,7 @@ public class AgentController : ControllerBase
         {
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             var excerpt = content.Length > 5_000
-                ? AgentUtilities.ExtractRelevantExcerpt(content, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                ? AgentUtilities.ExtractRelevantExcerpt(content, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
                 : content;
 
             ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
@@ -2293,7 +2323,7 @@ public class AgentController : ControllerBase
                             var matchFull = Path.GetFullPath(Path.Combine(projectRoot, correctPath.Replace('/', Path.DirectorySeparatorChar)));
                             var matchContent = await System.IO.File.ReadAllTextAsync(matchFull, Encoding.UTF8, ct);
                             var matchExcerpt = matchContent.Length > 3_500
-                                ? AgentUtilities.ExtractRelevantExcerpt(matchContent, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                                ? AgentUtilities.ExtractRelevantExcerpt(matchContent, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
                                 : matchContent;
                             if (ctx.Length + matchExcerpt.Length <= MaxContextChars)
                             {
@@ -2335,7 +2365,7 @@ public class AgentController : ControllerBase
 
                 var fc = await System.IO.File.ReadAllTextAsync(fp, Encoding.UTF8, ct);
                 var excerpt = fc.Length > 3_500
-                    ? AgentUtilities.ExtractRelevantExcerpt(fc, step.Change, step.OldString, cfg4.fileBodyTruncationChars)
+                    ? AgentUtilities.ExtractRelevantExcerpt(fc, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
                     : fc;
 
                 if (ctx.Length + excerpt.Length > MaxContextChars)
@@ -3054,6 +3084,23 @@ public class AgentController : ControllerBase
         if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
             return null;
 
+        var serviceCallMatch = Regex.Match(step.Change ?? "", @"this\.([A-Z]\w+Service)\.", RegexOptions.IgnoreCase);
+        if (serviceCallMatch.Success)
+        {
+            var serviceName = serviceCallMatch.Groups[1].Value;
+            // If the step DOES NOT explicitly mention constructor, we must add a step for it
+            if (!(step.Change ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase))
+            {
+                var result = new List<PlanStep>
+                {
+                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority },
+                    new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority }
+                };
+                await EmitLog(emitSse, "info", $"⚙️ Deterministic decoupling: Injecting constructor step for {serviceName}", ct: ct);
+                return result;
+            }
+        }
+        
         var ch = (step.Change ?? "").ToLowerInvariant();
 
         if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
@@ -5391,8 +5438,9 @@ emitSse, ct);
             " * Return \"abandon\" if ANY of these are true:\n" +
             "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
             "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
-            "    - The edit changed the method signature (return type, name, or parameter list).\n" +
+            "    - The edit changed an existing method's signature (return type, name, or parameter list).\n" +
             "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
+            "    - SIGNATURE MISMATCH: The edit calls a service or external method with the WRONG number of parameters or wrong types (e.g., calling `this.myService.doSomething('text')` when the service expects `doSomething(id: number, name: string)`). ABANDON immediately if parameters do not match the service definition.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
             "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
