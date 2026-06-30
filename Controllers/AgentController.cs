@@ -6762,12 +6762,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
         "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
         "If the service method does not exist, plan a step to create it.\n" +
-        "21. SCAFFOLDING (CRITICAL): When the task asks to CREATE a new component, service, directive, or pipe in a frontend project, " +
+       "21. SCAFFOLDING (CRITICAL & MANDATORY): When the task asks to CREATE a new component... " +
         "your plan MUST contain the following steps in order:\n" +
         "   1. A `_command` step to run the framework's CLI generator. Use `;` to separate commands (e.g., `cd maxhanna.client; npx ng g c components/recipe --skip-tests`). NEVER use `&&` as it fails in PowerShell.\n" +
-        "   2. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files to implement the actual logic and template.\n" +
-        "   3. If the component needs to be registered in a module (`app.module.ts`) or routing file, add an edit step for that.\n" +
-        "   Do NOT manually create the files with `_create_file`. If the CLI fails, the replanner will handle manual creation.\n" +
+        "   2. An edit step for `app.module.ts` to register the new component in the declarations array. This is MANDATORY.\n" +
+        "   3. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files.\n" +
+        "   Do NOT manually create the files with `_create_file`. Do NOT bypass scaffolding by using `edit` with `fullFile` on a non-existent file. The system will inject the scaffolding command automatically if you forget.\n" +
         "22. COMPONENT TEMPLATE WIRING: When the task involves adding UI elements (buttons, inputs) that trigger new " +
         "actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript " +
         "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
@@ -8424,7 +8424,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
         }
 
-        // Phase 2.9: Plan Pre-Audit — check for already-done steps and multi-concern steps
+        plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot);
+        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot); 
+ 
         if (plan?.Plan?.Count > 0)
         {
             var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);

@@ -291,7 +291,126 @@ public static class AgentUtilities
 
         return null; // needs full pipeline
     }
+    /// <summary>
+    /// Deterministically ensures that plans creating new C# controllers 
+    /// also update the Angular proxy.conf.js file with the new API route.
+    /// </summary>
+    public static AgentPlan? EnforceProxyConfigForControllers(AgentPlan? plan, string projectRoot)
+    {
+        if (plan?.Plan == null || plan.Plan.Count == 0) return plan;
 
+        // 1. Check if proxy.conf.js exists in the project
+        var proxyFiles = Directory.GetFiles(projectRoot, "proxy.conf.js", SearchOption.AllDirectories);
+        if (proxyFiles.Length == 0) return plan;
+
+        var proxyRelPath = Path.GetRelativePath(projectRoot, proxyFiles[0]).Replace('\\', '/');
+
+        // 2. Check if proxy.conf.js is already being updated in the plan
+        bool hasProxyUpdate = plan.Plan.Any(p =>
+            p.File != null &&
+            p.File.EndsWith("proxy.conf.js", StringComparison.OrdinalIgnoreCase));
+
+        if (hasProxyUpdate) return plan;
+
+        // 3. Check if the plan creates a new Controller.cs file
+        var controllerStep = plan.Plan.FirstOrDefault(p =>
+            p.File != null &&
+            p.File.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase) &&
+            AgentUtilities.IsRelativePath(p.File));
+
+        if (controllerStep == null) return plan;
+
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, controllerStep.File.Replace('/', Path.DirectorySeparatorChar)));
+
+        // If the controller file already exists, it's an edit, not a creation. Skip.
+        if (System.IO.File.Exists(fullPath)) return plan;
+
+        // 4. Extract controller name to generate the route (e.g., HealthTrackerController -> /healthtracker)
+        var controllerName = Path.GetFileNameWithoutExtension(controllerStep.File);
+        var baseName = controllerName.EndsWith("Controller", StringComparison.OrdinalIgnoreCase)
+            ? controllerName.Substring(0, controllerName.Length - "Controller".Length)
+            : controllerName;
+
+        var route = "/" + baseName.ToLowerInvariant();
+
+        // 5. Inject the proxy.conf.js update step at the end of the plan
+        plan.Plan.Add(new PlanStep
+        {
+            File = proxyRelPath,
+            Change = $"Add the new route '{route}' to the context array in proxy.conf.js so the Angular dev server proxies API calls to the new backend controller. Do NOT duplicate existing routes.",
+            Priority = 1
+        });
+
+        return plan;
+    }
+    /// <summary>
+    /// Deterministically ensures that plans creating new Angular components 
+    /// use the CLI scaffolding command and update app.module.ts.
+    /// </summary>
+    public static AgentPlan? EnforceAngularScaffolding(AgentPlan plan, string projectRoot)
+    {
+        if (plan?.Plan == null || plan.Plan.Count == 0) return plan;
+
+        // 1. Check if the plan creates a new .component.ts file that doesn't exist yet
+        var compStep = plan.Plan.FirstOrDefault(p =>
+            p.File != null &&
+            p.File.EndsWith(".component.ts", StringComparison.OrdinalIgnoreCase) &&
+            IsRelativePath(p.File));
+
+        if (compStep == null) return plan;
+
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, compStep.File.Replace('/', Path.DirectorySeparatorChar)));
+
+        // If the file already exists, it's an edit, not a creation. Skip injection.
+        if (File.Exists(fullPath)) return plan;
+
+        // 2. Check if a scaffolding command already exists
+        bool hasScaffoldCommand = plan.Plan.Any(p =>
+            p.File == "_command" &&
+            p.Change != null &&
+            p.Change.Contains("ng g c", StringComparison.OrdinalIgnoreCase));
+
+        if (!hasScaffoldCommand)
+        {
+            // Extract project root folder (e.g., "maxhanna.client")
+            var rootFolder = compStep.File.Split('/')[0];
+            var dir = Path.GetDirectoryName(compStep.File)?.Replace('\\', '/');
+            var name = Path.GetFileNameWithoutExtension(compStep.File).Replace(".component", "");
+
+            // Generate the CLI command
+            var cmd = $"{(rootFolder.Contains(".") ? $"cd {rootFolder}; " : "")}npx ng g c {dir}/{name} --skip-tests";
+
+            // Insert the scaffolding command at the very beginning
+            plan.Plan.Insert(0, new PlanStep
+            {
+                File = "_command",
+                Change = cmd,
+                Priority = 1
+            });
+        }
+
+        // 3. Check if app.module.ts is being updated
+        bool hasModuleUpdate = plan.Plan.Any(p =>
+            p.File != null &&
+            p.File.EndsWith("app.module.ts", StringComparison.OrdinalIgnoreCase));
+
+        if (!hasModuleUpdate)
+        {
+            var rootFolder = compStep.File.Split('/')[0];
+            var modulePath = $"{rootFolder}/src/app/app.module.ts";
+            var componentName = Path.GetFileNameWithoutExtension(compStep.File).Replace(".component", "");
+
+            // Insert the module update step at index 1 (after scaffolding, before edits)
+            plan.Plan.Insert(1, new PlanStep
+            {
+                File = modulePath,
+                Change = $"Register the new {componentName} component in the @NgModule declarations array",
+                Priority = 1
+            });
+        }
+
+        return plan;
+    }
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||
