@@ -898,7 +898,8 @@ public class AgentController : ControllerBase
         if (!string.IsNullOrWhiteSpace(explorationContext))
         {
             var distilled = DistillExplorationContext(
-                explorationContext, relPath, step.Change, targetSymbol);
+                explorationContext, relPath, step.Change ?? "", targetSymbol);
+
             if (!string.IsNullOrWhiteSpace(distilled))
             {
                 sb.AppendLine();
@@ -920,7 +921,7 @@ public class AgentController : ControllerBase
             {
                 sb.AppendLine($"FILE SIZE: {fileContent.Length} chars, {lineCount} lines. Showing relevant excerpt:");
                 sb.AppendLine("```");
-                sb.AppendLine(AgentUtilities.ExtractRelevantExcerpt(fileContent, step.Change, step.OldString, cfg5.fileBodyTruncationChars));
+                sb.AppendLine(AgentUtilities.ExtractRelevantExcerpt(fileContent, step.Change ?? "", step.OldString, cfg5.fileBodyTruncationChars));
                 sb.AppendLine("```");
                 sb.AppendLine();
                 sb.AppendLine($"For CODE files ({string.Join(", ", new[] { ".cs", ".ts", ".js", ".java", ".go", ".rs", ".swift", ".kt", ".php", ".rb" })}): "
@@ -1070,7 +1071,7 @@ public class AgentController : ControllerBase
                             sb.AppendLine($"  {hint}");
                         }
                     }
-                    var targetSectionHint = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change, 10);
+                    var targetSectionHint = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change ?? "", 10);
                     if (!string.IsNullOrWhiteSpace(targetSectionHint))
                     {
                         sb.AppendLine();
@@ -1172,7 +1173,7 @@ public class AgentController : ControllerBase
                     sb.AppendLine("  4. In newString: include that unchanged line, then add your new elements around it.");
                     sb.AppendLine("  ⚠ Do NOT use <div class=\"popupPanelActions\"> alone — it appears multiple times. Use a more specific line.");
                     sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected.");
-                    var targetSectionForEscalation = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change, 8);
+                    var targetSectionForEscalation = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change ?? "", 8);
                     if (targetSectionForEscalation != null)
                     {
                         sb.AppendLine();
@@ -3628,7 +3629,7 @@ emitSse, ct);
 
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentUtilities.DetectWrongSectionEdit(oldStr!, fileContent, step.Change, relPath);
+                    wipeReason = AgentUtilities.DetectWrongSectionEdit(oldStr!, fileContent, step.Change ?? "", relPath);
                 }
 
                 if (wipeReason != null)
@@ -3645,8 +3646,7 @@ emitSse, ct);
 
                     _ = Task.Run(async () =>
                     {
-                        try { await _editKnowledge.RecordOutcomeAsync(projectRoot, relPath, step.Change, prompt ?? step.Change, oldStr, newStr, outcome: "abandoned", reason: wipeReason, ct); }
-                        catch { }
+                        await _editKnowledge.RecordOutcomeAsync(projectRoot, relPath, step.Change ?? "", prompt ?? step.Change ?? "", oldStr, newStr, outcome: "abandoned", reason: wipeReason, ct);
                     }, CancellationToken.None);
 
                     if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
@@ -4050,9 +4050,8 @@ emitSse, ct);
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
                 var (llmGateDecision, llmGateReason, llmGateScore) = await LlmVerifyEditStepAsync(
-                    relPath, prompt ?? step.Change, step.Change,
-                    oldStr!, newStr!, preEditContent, newContent,
-                    emitSse, ct,
+                    relPath, prompt ?? step.Change ?? "", step.Change ?? "",
+                    oldStr!, newStr!, preEditContent, newContent, emitSse, ct,
                     priorAttempts: attemptScores.Count > 0
                         ? attemptScores.Select(a => (a.score, a.reason, a.failedNew)).ToList()
                         : null);
@@ -4132,10 +4131,8 @@ emitSse, ct);
                     {
                         try
                         {
-                            await _editKnowledge.RecordOutcomeAsync(
-                            projectRoot, relPath, step.Change, prompt ?? step.Change,
-                            oldStr, newStr,
-                            outcome: "abandoned", reason: $"LLM verify (score {llmGateScore}): {llmGateReason}", ct);
+                            await _editKnowledge.RecordOutcomeAsync(projectRoot, relPath, step.Change ?? "", prompt ?? step.Change ?? "",
+                             oldStr, newStr, outcome: "abandoned", reason: $"LLM verify (score {llmGateScore}): {llmGateReason}", ct);
                         }
                         catch { /* swallow */ }
                     }, CancellationToken.None);
@@ -4211,8 +4208,8 @@ emitSse, ct);
                 try
                 {
                     await _editKnowledge.RecordOutcomeAsync(
-                    projectRoot, relPath, step.Change, prompt ?? step.Change,
-                    oldStr, newStr, outcome: "success", reason: successReason, ct);
+                        projectRoot, relPath, step.Change ?? "", prompt ?? step.Change ?? "",
+                        oldStr, newStr, outcome: "success", reason: successReason, ct);
                 }
                 catch { /* swallow */ }
             }, CancellationToken.None);
@@ -4272,9 +4269,9 @@ emitSse, ct);
             try
             {
                 await _editKnowledge.RecordOutcomeAsync(
-                projectRoot, step.File, step.Change, prompt ?? step.Change,
-                step.OldString, step.NewString,
-                outcome: "failure", reason: $"{lastErr}\n\n{failureContext}", ct);
+                    projectRoot, step.File, step.Change ?? "", prompt ?? step.Change ?? "",
+                    step.OldString, step.NewString,
+                    outcome: "failure", reason: $"{lastErr}\n\n{failureContext}", ct);
             }
             catch { /* swallow */ }
         }, CancellationToken.None);
@@ -4305,7 +4302,7 @@ emitSse, ct);
             throw new StepFatalException(
                 $"Replan step failed after {history.Count} attempts: {relPath} — {lastErr}",
                 relPath,
-                step.Change,
+                step.Change ?? "",
                 failureContext);
         }
 
@@ -4334,7 +4331,7 @@ emitSse, ct);
                 $"Score your new plan 85+ only if it addresses the specific failure reasons above.";
 
             var replanSteps = await GenerateReplanStepsAsync(
-                prompt ?? step.Change, allResults, plan,
+                prompt ?? step.Change ?? "", allResults, plan,
                 replanSteering, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles,
                 qualityCheckReason: failureContext);
@@ -4408,7 +4405,7 @@ emitSse, ct);
         throw new StepFatalException(
             $"Step failed after {history.Count} attempts and {MaxReplanAttempts} replan cycles: {relPath} — {lastErr}",
             relPath,
-            step.Change,
+            step.Change ?? "",
             failureContext);
     }
 
