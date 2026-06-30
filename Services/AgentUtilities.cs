@@ -332,6 +332,19 @@ public static class AgentUtilities
             : controllerName;
 
         var route = "/" + baseName.ToLowerInvariant();
+        
+        try
+        {
+            var proxyContent = System.IO.File.ReadAllText(proxyFiles[0]);
+            // Check for "/route" or "/route,"
+            if (proxyContent.Contains($"\"{route}\"", StringComparison.OrdinalIgnoreCase) ||
+                proxyContent.Contains($"\"{route},", StringComparison.OrdinalIgnoreCase))
+            {
+                // Route already exists, don't inject the step!
+                return plan;
+            }
+        }
+        catch { /* if read fails, proceed with injection */ }
 
         // 5. Inject the proxy.conf.js update step at the end of the plan
         plan.Plan.Add(new PlanStep
