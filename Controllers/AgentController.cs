@@ -8364,10 +8364,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
 
-        // Prepend edit-knowledge header to the discovery context so the planner
-        // sees it on every planning iteration. Putting it AFTER the discovery
-        // context keeps file content primary; the knowledge header is a
-        // focused, short summary that won't blow up the token budget.
+        if (attachedFiles != null && attachedFiles.Count > 0)
+        {
+            var attachedSteering = "The user has explicitly attached the following files for editing:\n" +
+                                   string.Join("\n", attachedFiles.Select(f => $"- {f}")) +
+                                   "\n\nYou MUST plan your edits to target THESE files. Do NOT add _explore steps. Do NOT inspect the project structure. Read the attached files in the DISCOVERY CONTEXT and plan the required edits directly. If the files are empty, plan steps to populate them with the necessary code based on the user's task.";
+
+            steeringContext = string.IsNullOrWhiteSpace(steeringContext)
+                ? attachedSteering
+                : $"{steeringContext}\n\n{attachedSteering}";
+        }
+        
         if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
         {
             discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
