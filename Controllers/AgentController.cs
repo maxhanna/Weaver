@@ -2184,10 +2184,13 @@ public class AgentController : ControllerBase
             }
         }
 
-        var serviceCallMatch = Regex.Match(step.Change ?? "", @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
-        if (!serviceCallMatch.Success)
+        var serviceCallMatch = Regex.Match(step.Change ?? "", @"(?:this\.)?([A-Za-z]\w*Service)\.", RegexOptions.IgnoreCase);
+        if (!serviceCallMatch.Success && fullPlan?.Summary != null)
         {
-            // Also check the target file content if it was attached
+            serviceCallMatch = Regex.Match(fullPlan.Summary, @"([A-Za-z]\w*Service)", RegexOptions.IgnoreCase);
+        }
+        if (!serviceCallMatch.Success)
+        { 
             serviceCallMatch = Regex.Match(ctx.ToString(), @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
         }
         if (serviceCallMatch.Success)
@@ -3105,15 +3108,14 @@ public class AgentController : ControllerBase
             {
                 var method1 = multiMethodMatch.Groups[1].Value;
                 var method2 = multiMethodMatch.Groups[2].Value;
-
-                // If the original step also mentioned constructor, keep a step for the constructor
                 if (chLower.Contains("constructor"))
                 {
                     result.Add(new PlanStep { File = step.File, Change = $"Inject {serviceName} into the constructor parameters.", Priority = step.Priority });
                 }
 
-                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method1} method.", Priority = step.Priority });
-                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method2} method.", Priority = step.Priority });
+                var originalChange = step.Change ?? "";
+                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method1} method. Original task: {originalChange}", Priority = step.Priority });
+                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method2} method. Original task: {originalChange}", Priority = step.Priority });
             }
             else
             {
@@ -3139,7 +3141,7 @@ public class AgentController : ControllerBase
 
         if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
             return null;
-            
+
         var hasMultipleConcerns =
             ch.Contains(" and ") || ch.Contains(" & ") ||
             ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
@@ -4154,7 +4156,8 @@ emitSse, ct);
                     oldStr!, newStr!, preEditContent, newContent, emitSse, ct,
                     priorAttempts: attemptScores.Count > 0
                         ? attemptScores.Select(a => (a.score, a.reason, a.failedNew)).ToList()
-                        : null);
+                        : null,
+                    explorationContext: explorationContext);
 
                 attemptScores.Add((attempt + 1, llmGateScore, llmGateReason, newStr));
 
@@ -4597,7 +4600,9 @@ emitSse, ct);
                         Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%]\s*\d") ||  // `5*5` `5 *5` `5* 5` missing spaces
                         Regex.IsMatch(fileLines[i], @"(?<![=!<>])=(?!=)\d") || // `=1` no space after = (but not ==, !=, <=, >=)
                         Regex.IsMatch(fileLines[i], @"[\w\)\]]\s*[+*/%<>]\s*\d") || // `length>0`, `count+1`, `val*2`
-                        Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%<>]\s*[\w\(]"))   // `0+count`, `1*foo`, `1-1`
+                        Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%<>]\s*[\w\(]") ||
+                        Regex.IsMatch(fileLines[i], @"[\w\)]\s*[<>]\s*[\w\(]") || // `length>0`, `a<b`
+                        Regex.IsMatch(fileLines[i], @"[\w\)]\s*-\s*\w") && !fileLines[i].Contains("-=")) // `scores.length -1` (but not `-=`))   // `0+count`, `1*foo`, `1-1`
                     {
                         hasSpacingIssue = true;
                     }
@@ -5414,7 +5419,8 @@ emitSse, ct);
         string postEditContent,
         bool emitSse,
         CancellationToken ct,
-        List<(int score, string reason, string failedNew)>? priorAttempts = null)
+        List<(int score, string reason, string failedNew)>? priorAttempts = null,
+        string? explorationContext = null)
     {
         var anchor = newStr.Split('\n')
             .Select(l => l.Trim())
@@ -5501,7 +5507,8 @@ emitSse, ct);
             $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
             $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
             $"### FILE ###\n{relPath}\n\n" +
-            $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" +
+            (string.IsNullOrWhiteSpace(explorationContext) ? "" : $"### RELATED SERVICE/MODEL CONTEXT ###\n{explorationContext}\n\n") +
+            $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" + 
             $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
             $"### POST-EDIT CONTEXT WINDOW (10 lines around the edit) ###\n```\n{contextWindow}\n```\n" +
             (priorAttempts != null && priorAttempts.Count > 0 ? priorBlock.ToString() : "") +
@@ -5648,7 +5655,7 @@ emitSse, ct);
                 {
                     bool isConstructorInjection = (stepChange ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase) &&
                                                   oldSigLine.Contains("constructor(", StringComparison.OrdinalIgnoreCase);
- 
+
                     if (!isConstructorInjection)
                     {
                         var oldSig = string.Join(" ", oldTokens);
@@ -5656,7 +5663,7 @@ emitSse, ct);
                         return $"SIGNATURE CHANGE — method declaration changed from [{oldSig}] to [{newSig}]. " +
                                "The task is to tweak the body, not change the contract (return type / name / params). " +
                                "RESTORE the original signature line and only modify the body lines below it.";
-                    } 
+                    }
                 }
             }
         }
@@ -8456,7 +8463,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 ? attachedSteering
                 : $"{steeringContext}\n\n{attachedSteering}";
         }
-        
+
         if (!string.IsNullOrWhiteSpace(editKnowledgeHeader))
         {
             discoveryContext = editKnowledgeHeader + "\n\n" + discoveryContext;
