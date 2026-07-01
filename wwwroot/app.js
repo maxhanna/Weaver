@@ -1850,8 +1850,7 @@
       if (!vm.planItems || !vm.planItems.length) return;
       var changed = false;
       vm.planItems.forEach(function (item) {
-        if (item.done) return;
-        // Match by planItemIndex from SSE step events (most precise)
+        if (item.done) return; 
         var doneSteps = vm.streamingSteps.filter(function (s) {
           if (s.status !== 'done' && s.status !== 'skipped' && s.status !== 'error') return false;
           if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
@@ -1866,11 +1865,16 @@
         }
       });
       var activeCard = findCardById(vm.activeCardId);
-      if (activeCard && activeCard._plan) {
-        activeCard._plan.items = angular.copy(vm.planItems);
+      if (activeCard && activeCard._plan) { 
+        if (changed) {
+          activeCard._plan.items = angular.copy(vm.planItems);
+        }
       }
-      if (changed && vm.saveCards) {
-        vm.saveCards();
+      if (changed && vm.saveCards) { 
+        if (vm._saveCardsTimer) $timeout.cancel(vm._saveCardsTimer);
+        vm._saveCardsTimer = $timeout(function () {
+          if (vm.saveCards) vm.saveCards();
+        }, 500);
       }
     }
 
@@ -2114,8 +2118,23 @@
                           case 'plan':
                             if (parsed && parsed.items && parsed.items.length) {
                               var isResumed = parsed.resumed === true;
+                              var existingItems = vm.planItems || [];
                               vm.planItems = parsed.items.map(function (item, i) {
-                                return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, done: false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
+                                // Preserve 'done' status from existing items if they are already checked off
+                                var existing = existingItems.find(function (p) { return p.index === i; });
+                                var isDone = existing ? existing.done : false;
+                                // Or use the backend's 'done' flag if provided
+                                if (item.done !== undefined) isDone = item.done;
+
+                                return {
+                                  index: i,
+                                  file: item.File || item.file || '?',
+                                  change: item.Change || item.change || '',
+                                  priority: item.Priority || item.priority || i + 1,
+                                  done: isDone,
+                                  oldString: item.OldString || item.oldString || '',
+                                  newString: item.NewString || item.newString || ''
+                                };
                               });
                               if (parsed.summary) {
                                 pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
