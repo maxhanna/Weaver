@@ -1147,7 +1147,6 @@ h1 .brand-e:hover::before {
 	gap: 8px;
 	padding: 8px 12px;
 	border-radius: 12px;
-	background: var(--brand-gradient);
 	color: #012;
 	font-weight: 700;
 	font-size: 16px;
@@ -2936,7 +2935,7 @@ h3 .small.ghost:hover {
 	}
 }
 
-.activeCardTextReview { 
+.activeCardTextReview {
 	white-space: break-spaces;
 	margin: 8px 0 0 0;
 	font-size: 12px;

@@ -2190,7 +2190,7 @@ public class AgentController : ControllerBase
             serviceCallMatch = Regex.Match(fullPlan.Summary, @"([A-Za-z]\w*Service)", RegexOptions.IgnoreCase);
         }
         if (!serviceCallMatch.Success)
-        { 
+        {
             serviceCallMatch = Regex.Match(ctx.ToString(), @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
         }
         if (serviceCallMatch.Success)
@@ -5508,7 +5508,7 @@ emitSse, ct);
             $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
             $"### FILE ###\n{relPath}\n\n" +
             (string.IsNullOrWhiteSpace(explorationContext) ? "" : $"### RELATED SERVICE/MODEL CONTEXT ###\n{explorationContext}\n\n") +
-            $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" + 
+            $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" +
             $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
             $"### POST-EDIT CONTEXT WINDOW (10 lines around the edit) ###\n```\n{contextWindow}\n```\n" +
             (priorAttempts != null && priorAttempts.Count > 0 ? priorBlock.ToString() : "") +
@@ -7999,6 +7999,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (keywords.Any(kw => codeLines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
             {
                 for (var w = Math.Max(0, i - 3); w <= Math.Min(codeLines.Count - 1, i + 3); w++)
+                    included.Add(w);
+            }
+            // Matches: `async methodName(...)`, `public methodName(...): Type`, `methodName(...) {`
+            if (Regex.IsMatch(codeLines[i], @"^\s*((public|private|protected|static|async|export|function|get|set)\s+)*\w+\s*(<[^>]+>)?\s*\([^)]*\)\s*(:\s*[^{;]+)?\s*[{;]", RegexOptions.IgnoreCase))
+            {
+                // Keep the signature and the next 5 lines (body/return type)
+                for (var w = Math.Max(0, i - 1); w <= Math.Min(codeLines.Count - 1, i + 5); w++)
                     included.Add(w);
             }
         }

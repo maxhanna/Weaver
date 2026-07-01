@@ -18,6 +18,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       // state loaded from the server when available.
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
 
+
       function loadBoardData() {
         $http.get('/api/boarddata/load').then(function (resp) {
           try {
@@ -27,6 +28,26 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             }
             if (data && (data.todo || data.doing || data.done || data.archived || data.selfImproving)) {
               vm.state = data;
+
+              if (vm.activeCardId && vm.planItems && vm.planItems.length) {
+                var activeCard = findCardById(vm.activeCardId);
+                if (activeCard) {
+                  var serverItems = (activeCard._plan && activeCard._plan.items)
+                    ? activeCard._plan.items : [];
+                  if (serverItems.length < vm.planItems.length) {
+                    var restoredItems = angular.copy(vm.planItems);
+                    serverItems.forEach(function (si) {
+                      var match = restoredItems.find(function (ri) { return ri.index === si.index; });
+                      if (match && si.done) match.done = true;
+                    });
+                    activeCard._plan = {
+                      items: restoredItems,
+                      summary: vm.streamingSummary || (activeCard._plan ? activeCard._plan.summary : ''),
+                      score: (activeCard._plan ? activeCard._plan.score : 0)
+                    };
+                  }
+                }
+              }
             }
           } catch (e) {
             console.warn('Failed to parse boarddata from server, using default state');

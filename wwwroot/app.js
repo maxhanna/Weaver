@@ -45,7 +45,7 @@
     vm.aiChatLoading = false;
     vm.searchFilter = '';
     vm.chatMode = 'ask';
-    vm.playSound = function() {
+    vm.playSound = function () {
       var audio = new Audio('/wwwroot/zen.mp3');
       audio.play();
     };
@@ -76,7 +76,7 @@
       vm.showToast(message); // Implement your own toast/snackbar UI
     };
 
-    vm.sendSystemToast = function() {
+    vm.sendSystemToast = function () {
       if (navigator.userAgent.indexOf('Win') !== -1) {
         vm.showNotification('Done');
         vm.playSound();
@@ -119,6 +119,7 @@
     vm.streamingActive = false;
     vm.streamingThinking = '';
     vm.streamingSummary = '';
+    vm._agentStopped = false;
     vm.streamingPhase = '';
     vm.streamingContextSize = 0;
     vm.streamingSteps = [];
@@ -1850,7 +1851,7 @@
       if (!vm.planItems || !vm.planItems.length) return;
       var changed = false;
       vm.planItems.forEach(function (item) {
-        if (item.done) return; 
+        if (item.done) return;
         var doneSteps = vm.streamingSteps.filter(function (s) {
           if (s.status !== 'done' && s.status !== 'skipped' && s.status !== 'error') return false;
           if (s.planItemIndex !== undefined && s.planItemIndex !== null) {
@@ -1865,12 +1866,12 @@
         }
       });
       var activeCard = findCardById(vm.activeCardId);
-      if (activeCard && activeCard._plan) { 
+      if (activeCard && activeCard._plan) {
         if (changed) {
           activeCard._plan.items = angular.copy(vm.planItems);
         }
       }
-      if (changed && vm.saveCards) { 
+      if (changed && vm.saveCards) {
         if (vm._saveCardsTimer) $timeout.cancel(vm._saveCardsTimer);
         vm._saveCardsTimer = $timeout(function () {
           if (vm.saveCards) vm.saveCards();
@@ -1956,8 +1957,8 @@
         }
 
         function startAgent() {
-          // Reset
           vm.agentResult = null;
+          vm._agentStopped = false;
           vm.aiResponse = '';
           vm.streamingThinking = '';
           vm.streamingSummary = '';
@@ -2003,12 +2004,13 @@
             vm.activeCardIds = new Set();
           }
           vm.activeCardIds.add(card.id);
+          var localAbortController = vm.abortController;
 
           fetch('/api/agent/execute-stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
-            signal: vm.abortController.signal
+            signal: localAbortController.signal
           }).then(function (response) {
             console.log("Executing stream", payload);
             if (!response.ok) {
@@ -2238,9 +2240,7 @@
                             resumeTerminalPolling();
                             vm.steeringContext = '';
                             var editsApplied = parsed && parsed.editsApplied;
-                            // Check if agent finished with no file edits and no more cards to process
                             if (!editsApplied && !vm.activeCardId) {
-                              // Stop the agent properly
                               vm.stopAgent();
                             }
                             var incomplete = parsed && parsed.incomplete;
@@ -2275,7 +2275,11 @@
                               vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog);
                             }
 
-                            // Card is only done when all plan steps are checked off
+                            if (vm._agentStopped || card.id !== vm.activeCardId) {
+                              $scope.$applyAsync();
+                              return;
+                            }
+
                             if (vm.planItems && vm.planItems.length) {
                               var allDone = vm.planItems.every(function (pi) { return pi.done; });
                               if (!allDone) {
@@ -2374,7 +2378,8 @@
                             resumeTerminalPolling();
                             pushAgentLog('error', parsed ? parsed.message : data);
                             vm.agentResult = { error: parsed ? parsed.message : data };
-                            vm.aiResponse = 'Error: ' + (parsed ? parsed.message : data);
+                            vm.activeCardId = null;
+                            vm.activeCardIds = new Set();
                             break;
                         }
                       }
@@ -2384,10 +2389,13 @@
                   readNext();
                 }).catch(function (readErr) {
                   if (readErr && readErr.name === 'AbortError') return;
+                  if (localAbortController !== vm.abortController) return;
                   vm.streamingActive = false;
                   vm._lastStreamMs = null;
                   resumeTerminalPolling();
                   vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
+                  vm.activeCardId = null;
+                  vm.activeCardIds = new Set();
                   $scope.$applyAsync();
                 });
               } catch (e) {
@@ -2398,12 +2406,16 @@
 
           }).catch(function (err) {
             console.log("eating all errs", err);
+            if (localAbortController !== vm.abortController) return;
+
             vm.streamingActive = false;
             resumeTerminalPolling();
             if (err.name === 'AbortError') {
               vm.agentResult = { warning: 'Agent stopped by user.' };
             } else {
               vm.agentResult = { error: 'Connection failed: ' + err.message };
+              vm.activeCardId = null;
+              vm.activeCardIds = new Set();
             }
           });
         }
@@ -2688,6 +2700,7 @@
 
     vm.stopAgent = function (card) {
       console.log("Stopping agent.");
+      vm._agentStopped = true;
       if (vm.abortController) {
         console.log("abort signal launched");
         vm.abortController.abort();
@@ -2753,4 +2766,4 @@
       if (_terminalInterval) { $interval.cancel(_terminalInterval); _terminalInterval = null; }
       if (_approvalInterval) { $interval.cancel(_approvalInterval); _approvalInterval = null; }
     });
-  }]); 
+  }]);
