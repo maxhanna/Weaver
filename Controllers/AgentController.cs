@@ -3097,6 +3097,12 @@ public class AgentController : ControllerBase
             var result = new List<PlanStep>();
             var serviceName = serviceMatch.Success ? serviceMatch.Groups[1].Value : "Service";
 
+            if (step.File.EndsWith(".service.ts", StringComparison.OrdinalIgnoreCase) ||
+       step.File.EndsWith(".service.js", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
             // 1. Always ensure the import is a separate step (if not already explicitly asked for)
             if (serviceMatch.Success && !chLower.Contains("import"))
             {
@@ -3543,7 +3549,9 @@ emitSse, ct);
                     (step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase);
 
                 var allowFullFileEscalation = (history.Count >= 3 || isCssDeletion) && fileAlreadyExists
-     && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs");
+                    && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs"
+                    or ".ts" or ".tsx" or ".js" or ".jsx"); 
+
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
                     var e = fullFileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"
