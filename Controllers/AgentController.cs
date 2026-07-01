@@ -3550,7 +3550,7 @@ emitSse, ct);
 
                 var allowFullFileEscalation = (history.Count >= 3 || isCssDeletion) && fileAlreadyExists
                     && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs"
-                    or ".ts" or ".tsx" or ".js" or ".jsx"); 
+                    or ".ts" or ".tsx" or ".js" or ".jsx");
 
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
