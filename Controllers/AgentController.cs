@@ -179,8 +179,10 @@ public class AgentController : ControllerBase
             "25. PRIOR STEP REUSE: If the PRIOR STEPS CONTEXT section indicates that a method, property, or variable was added in a previous step, you MUST use that exact symbol in your current edit. " +
                 "Do NOT reinvent the logic inline. Do NOT hallucinate alternative property names. " +
                 "For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`." +
-            "26. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " +
-                "which does NOT already exist in the file (no CREATE TABLE, FROM, JOIN, or other reference to that table name appears in the current file content), " +
+            "26. STRUCTURAL MOVES: When moving an element into a new container, adapt its structure/styling to match the existing children of the target container. " +
+                "For example, if moving a standalone div into a container where all children are wrapped in a specific class (like `optionsStatsDiv`), " +
+                "wrap the moved element in that same class rather than inserting it raw. " +
+            "27. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " + "which does NOT already exist in the file (no CREATE TABLE, FROM, JOIN, or other reference to that table name appears in the current file content), " +
                 "you MUST include a CREATE TABLE IF NOT EXISTS statement for that table in your newString, placed BEFORE the INSERT/UPDATE statements. " +
                 "The CREATE TABLE must define ALL columns that the INSERT/UPDATE references, with appropriate MySQL data types. " +
                 "Place it strategically at the beginning of the new code block, before any INSERT/UPDATE that depends on it. " +
@@ -1728,6 +1730,23 @@ public class AgentController : ControllerBase
                 {
                     return (PreEditVerdict.AlreadyDone, $"Method '{methodName}' already exists in the file");
                 }
+            }
+        }
+        if (changeLower.StartsWith("move ") || changeLower.StartsWith("insert "))
+        {
+            // If we're moving/inserting a block of code, check if the newString (or a significant part of it)
+            // is already in the file. This prevents duplicate insertions when a step was partially completed
+            // by a prior step.
+            if (!string.IsNullOrWhiteSpace(step.NewString))
+            {
+                var newStr = AgentUtilities.NormalizeLineEndings(step.NewString);
+                if (content.Contains(newStr, StringComparison.Ordinal))
+                    return (PreEditVerdict.AlreadyDone, "code already moved/inserted into file");
+
+                var collapsedNew = CollapseWhitespace(newStr);
+                if (collapsedNew.Length >= 15 &&
+                    CollapseWhitespace(content).Contains(collapsedNew, StringComparison.Ordinal))
+                    return (PreEditVerdict.AlreadyDone, "code already moved/inserted into file (whitespace differences only)");
             }
         }
         if (changeLower.StartsWith("add ") &&
@@ -9322,6 +9341,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("check for ALL of the following:");
         sb.AppendLine("1. Is the original task fully implemented? Evaluate ONLY against what the original task asks for.");
         sb.AppendLine("   Ignore existing code that predates this task — the task may be meant to REPLACE it.");
+        sb.AppendLine("   CRITICAL: If the task asks to MOVE code, SEARCH THE ENTIRE FILE for the code in its new location. Do NOT report it as 'missing' or 'not moved' just because it is no longer in its original spot. Verify the actual file content provided above.");
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
