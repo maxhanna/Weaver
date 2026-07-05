@@ -175,7 +175,15 @@ public class AgentController : ControllerBase
                 "Every `.propertyName` you access MUST exactly match a property defined in the file content or declared in your newString." +
             "25. PRIOR STEP REUSE: If the PRIOR STEPS CONTEXT section indicates that a method, property, or variable was added in a previous step, you MUST use that exact symbol in your current edit. " +
                 "Do NOT reinvent the logic inline. Do NOT hallucinate alternative property names. " +
-                "For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`.";
+                "For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`." +
+            "26. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " +
+                "which does NOT already exist in the file (no CREATE TABLE, FROM, JOIN, or other reference to that table name appears in the current file content), " +
+                "you MUST include a CREATE TABLE IF NOT EXISTS statement for that table in your newString, placed BEFORE the INSERT/UPDATE statements. " +
+                "The CREATE TABLE must define ALL columns that the INSERT/UPDATE references, with appropriate MySQL data types. " +
+                "Place it strategically at the beginning of the new code block, before any INSERT/UPDATE that depends on it. " +
+                "NEVER emit INSERT INTO or UPDATE for a table that has not been created yet — always prepend the CREATE TABLE first. " +
+                "Example: if your new code does `INSERT INTO user_settings (user_id, setting_key, setting_value) VALUES (...)` but `user_settings` " +
+                "does not exist in the file, prepend: `CREATE TABLE IF NOT EXISTS user_settings (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, setting_key VARCHAR(255) NOT NULL, setting_value TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);` before the INSERT.";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -732,7 +740,8 @@ public class AgentController : ControllerBase
           string? originalPrompt = null,
           string? preservationDirective = null,
           AgentPlan? fullPlan = null,
-          int planItemIndex = -1)
+          int planItemIndex = -1,
+          string? filteredEditKnowledge = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -756,6 +765,12 @@ public class AgentController : ControllerBase
                           "For example, if the original request says 'under nicehash bot note', your edit MUST place the text near 'NiceHash'. " +
                           "If it says 'users need kraken api key', your edit MUST include that exact requirement.");
             sb.AppendLine();
+        }
+
+        // Inject filtered edit knowledge (architecture, relevant patterns, recent failures for this file/task)
+        if (!string.IsNullOrWhiteSpace(filteredEditKnowledge))
+        {
+            sb.AppendLine(filteredEditKnowledge);
         }
 
         if (fullPlan?.Plan?.Count > 0 && planItemIndex >= 0)
@@ -3539,6 +3554,13 @@ public class AgentController : ControllerBase
         var bestScore = 0;
         var bestAttempt = -1;
 
+        // Load filtered edit knowledge for this specific file + task so the resolve prompt
+        // only sees relevant patterns, failures, and architecture facts.
+        var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
+        var editKnowledge = await _editKnowledge.LoadAsync(projectRoot, ct);
+        var filteredEditKnowledge = EditKnowledgeService.FormatForContext(
+            editKnowledge, fileExt, step.Change ?? prompt ?? "");
+
         await EmitLog(emitSse, "info",
             $"▶ Resolving: {relPath} — {step.Change}", new { prompt, plan, stepIndex, allResults }, ct: ct);
 
@@ -3598,7 +3620,7 @@ public class AgentController : ControllerBase
 
         var exploration = await RunStepExplorationLoop(
             step, projectRoot,
-            prompt ?? step.Change,   // fall back to the step's own description
+            prompt ?? step.Change ?? "",   // fall back to the step's own description
             plan, planItemIndex, emitSse, ct, cardId, attachedFiles);
 
         step = exploration.EnrichedStep;
@@ -3688,7 +3710,8 @@ emitSse, ct);
       originalPrompt: prompt,
       preservationDirective: preservationDirective,
       fullPlan: plan,
-      planItemIndex: planItemIndex);
+      planItemIndex: planItemIndex,
+      filteredEditKnowledge: filteredEditKnowledge);
 
                 if (resolveError == null)
                 {
@@ -3940,6 +3963,11 @@ emitSse, ct);
                     wipeReason = AgentUtilities.DetectWrongSectionEdit(oldStr!, fileContent, step.Change ?? "", relPath);
                 }
 
+                if (wipeReason == null)
+                {
+                    wipeReason = DetectMissingCreateTable(oldStr!, newStr!, fileContent, relPath);
+                }
+
                 if (wipeReason != null)
                 {
                     await EmitLog(emitSse, "warn",
@@ -3963,9 +3991,7 @@ emitSse, ct);
                     continue; // Forces retry with feedback
                 }
             }
-
-            var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
-
+ 
             if (!replaced)
             {
                 var err = matchError ?? "oldString not found verbatim";
@@ -4519,6 +4545,14 @@ emitSse, ct);
                     await _editKnowledge.RecordOutcomeAsync(
                         projectRoot, relPath, step.Change ?? "", prompt ?? step.Change ?? "",
                         oldStr, newStr, outcome: "success", reason: successReason, ct);
+                }
+                catch { /* swallow */ }
+                try
+                {
+                    // Update architecture facts (endpoints, schemas, method sigs, build tools)
+                    // from the successfully applied content.
+                    await _editKnowledge.UpdateArchitectureAsync(
+                        projectRoot, relPath, newStr ?? "", ct);
                 }
                 catch { /* swallow */ }
             }, CancellationToken.None);
@@ -5774,7 +5808,68 @@ emitSse, ct);
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
     }
+    /// <summary>
+    /// Detects when newStr contains INSERT INTO or UPDATE statements referencing
+    /// SQL tables that do NOT appear to exist in the current file (no CREATE TABLE,
+    /// FROM, JOIN, or other reference found). When triggered, instructs the LLM to
+    /// prepend a CREATE TABLE IF NOT EXISTS statement before the INSERT/UPDATE.
+    /// </summary>
+    private static string? DetectMissingCreateTable(
+        string oldStr, string newStr, string fileContent, string relPath)
+    {
+        if (string.IsNullOrWhiteSpace(newStr) || string.IsNullOrWhiteSpace(fileContent))
+            return null;
 
+        // ── Extract table names from INSERT INTO / UPDATE in newStr ──────────
+        var insertUpdateRegex = new Regex(
+            @"\b(?:INSERT\s+INTO|UPDATE)\s+`?(\w+)`?",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        var referencedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in insertUpdateRegex.Matches(newStr))
+        {
+            var tbl = m.Groups[1].Value;
+            // Filter out SQL keywords that might be captured as table names
+            if (tbl.Length <= 2 || char.IsDigit(tbl[0])) continue;
+            referencedTables.Add(tbl);
+        }
+
+        if (referencedTables.Count == 0) return null;
+
+        // ── Collect tables that already exist (CREATE TABLE in newStr or file) ──
+        var createTableRegex = new Regex(
+            @"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?(\w+)`?",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        var existingTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in createTableRegex.Matches(newStr))
+            existingTables.Add(m.Groups[1].Value);
+        foreach (Match m in createTableRegex.Matches(fileContent))
+            existingTables.Add(m.Groups[1].Value);
+
+        // Also treat tables referenced in FROM/JOIN/INTO in existing file as existing
+        var tableMentionRegex = new Regex(
+            @"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+`?(\w+)`?",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        foreach (Match m in tableMentionRegex.Matches(fileContent))
+            existingTables.Add(m.Groups[1].Value);
+
+        // ── Find tables referenced by INSERT/UPDATE but not known to exist ──
+        var missingTables = referencedTables
+            .Where(t => !existingTables.Contains(t))
+            .ToList();
+
+        if (missingTables.Count == 0) return null;
+
+        var preview = string.Join(", ", missingTables.Take(5));
+        return $"MISSING CREATE TABLE — newString contains INSERT/UPDATE statements referencing table(s) [{preview}] " +
+               "that do NOT appear to exist in the current file (no CREATE TABLE, FROM, JOIN, or other reference found). " +
+               "You MUST add a CREATE TABLE IF NOT EXISTS statement for each missing table, placed BEFORE the INSERT/UPDATE " +
+               "statements that reference it. Define all columns referenced by the INSERT/UPDATE with appropriate MySQL data types " +
+               "(INT, VARCHAR, TEXT, TIMESTAMP, etc.). Place the CREATE TABLE strategically at the beginning of the new code block, " +
+               "before any INSERT/UPDATE that depends on it. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
+    }
+ 
     private static string? DetectFunctionalityWipe(
         string oldStr, string newStr, string fileContent, string relPath, string? stepChange = null)
     {
@@ -6984,6 +7079,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "  \"_done\"               — Task is already complete; put reason in \"change\"\n" +
         "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
         "### RULES ###\n" +
+        "0. OUTPUT DISCIPLINE (CRITICAL): Do NOT write step-by-step reasoning, analysis, or exploratory prose before the JSON. " +
+            "Any internal reasoning belongs ONLY inside the \"thinking\" field (max 1-2 sentences). " +
+            "Your response MUST begin with '{' as the very first character — no preamble, no \"Looking at...\", no walkthrough.\n" +
         "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
         "   If the right file is not in discovery context but its path is listed or strongly implied, use _explore with the exact project-relative path.\n" +
         "   If you are unsure which file owns a symbol, choose the most likely path from filenames/imports and use _explore before planning an edit.\n" +
@@ -7246,7 +7344,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var (raw, _, llmError) = await CallLlmRawStreaming(
             planningPrompt, userPrompt.ToString(), emitSse, ct,
-            requestTimeout: _infiniteTimeout, maxTokens: 2048);
+            requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 2048);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -7259,7 +7357,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (plan == null && (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
             raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase) ||
             raw.Contains("STEP", StringComparison.OrdinalIgnoreCase)))
-            plan = AgentUtilities.ParseDelimitedPlan(raw);
+        {
+            plan = AgentUtilities.ParseDelimitedPlan(raw); 
+        }
+
+        if (plan == null) {
+            plan = await RecoverPlanFromRamblingAsync(emitSse, ct, raw);
+        }
 
         if (plan == null)
         {
@@ -9295,9 +9399,39 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return planItems;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  EXECUTE PLAN  — progressive checklist, per-step resolve+retry
-    // ═══════════════════════════════════════════════════════════════════════
+    private async Task<AgentPlan?> RecoverPlanFromRamblingAsync(
+        bool emitSse, CancellationToken ct, string ramblingRaw)
+    {
+        // If there's already a '{' somewhere, ParsePlan's truncation-repair path
+        // handles it — this recovery is only for pure-prose, no-JSON-at-all failures.
+        if (ramblingRaw.Contains('{')) return null;
+
+        await EmitLog(emitSse, "warn",
+            "Planner produced pure prose with no JSON — attempting recovery from its own reasoning", ct: ct);
+
+        var tail = ramblingRaw.Length > 3000 ? ramblingRaw[^3000..] : ramblingRaw;
+        var recoveryPrompt =
+            "You were asked to plan code changes and output ONLY a JSON object, but instead you wrote " +
+            "free-form reasoning and never produced the JSON. Here is the reasoning you already wrote:\n\n" +
+            $"```\n{tail}\n```\n\n" +
+            "STOP reasoning further. Based on the analysis above, output ONLY the JSON plan now. " +
+            "Start your response with '{' as the very first character. No prose, no markdown fences.";
+
+        var (raw, _, _) = await CallLlmRawStreaming(
+            BuildPlanningPrompt(), recoveryPrompt, emitSse, ct,
+            requestTimeout: TimeSpan.FromMinutes(3), maxTokens: 2048);
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var plan = AgentUtilities.ParsePlan(raw);
+        if (plan == null && raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase))
+            plan = AgentUtilities.ParseDelimitedPlan(raw);
+
+        if (plan != null)
+            await EmitLog(emitSse, "success", "Recovery pass produced a valid plan from prior reasoning", ct: ct);
+
+        return plan;
+    }
 
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
@@ -12542,6 +12676,13 @@ Respond with JSON only:
         // ── FileHints augmentation (same as normal edit path) ──
         try { _fileHints.LearnFromAppliedEdit(projectRoot, fullPath, fullContent); }
         catch { /* never let hint-learning crash the edit pipeline */ }
+
+        // ── Architecture update ──
+        _ = Task.Run(async () =>
+        {
+            try { await _editKnowledge.UpdateArchitectureAsync(projectRoot, relPath, fullContent); }
+            catch { /* swallow */ }
+        }, CancellationToken.None);
 
         return stepIndex + 1;
     }
