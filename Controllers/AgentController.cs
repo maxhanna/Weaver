@@ -132,6 +132,7 @@ public class AgentController : ControllerBase
             "8b. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
             "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping\n" +
             "10. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
+            "10b. NO-OP PREVENTION (CRITICAL): oldString and newString MUST be DIFFERENT. If the step asks you to ADD or INSERT code, the new code MUST appear in newString but MUST NOT appear in oldString. Do not copy the same block of code into both fields. If you are adding a line, oldString should be the 1-2 anchor lines BEFORE the insertion point, and newString should be those anchor lines PLUS the new line.\n" +
             "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
             "12. FORMAT C supported extensions:\n" +
                 "REQUIRED (.cs): Roslyn AST — oldString/newString WILL fail for C#\n" +
@@ -140,11 +141,13 @@ public class AgentController : ControllerBase
                 "NOT SUPPORTED (use oldString/newString): .html .css .json .yaml .toml .xml .svg .md .sql .sh .py .lua .ex\n" +
             "12b. targetType='class': ONLY to REPLACE the ENTIRE class body. " +
                 "To add a single property/field, use oldString/newString instead.\n" +
-            "13. oldString STRICT LIMIT: MAXIMUM 10 lines — APPLIES ONLY to oldString/newString format." +
-                "FORMAT C (targetType/targetName/newCode) is EXEMPT from this limit: the system extracts " +
-                "the entire method body from the AST automatically. You SHOULD use FORMAT C for any " +
-                "method longer than 10 lines. Do NOT truncate newCode to fit 10 lines — output the " +
-                "complete replacement method body." +
+            "13. oldString LIMIT: MAXIMUM 10 lines for the oldString field. " +
+                "CRITICAL: Do NOT use FORMAT C just because a method is longer than 10 lines. " +
+                "If the CHANGE REQUIRED is small (e.g., 1-5 lines changing in a 200-line method), " +
+                "you MUST use oldString/newString targeting JUST the specific lines that need to change. " +
+                "Use FORMAT C ONLY if the majority of the method body is being rewritten. " +
+                "NEVER rewrite a super long method with lots of logic if you only need to change a couple of lines — " +
+                "target the exact lines with oldString/newString instead to avoid reinventing the method and breaking existing logic." +
             "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
             "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
             "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
@@ -866,8 +869,11 @@ public class AgentController : ControllerBase
         var isLarge = fileContent.Length > 3000 || lineCount > 80;
         if (isLarge)
         {
+            sb.AppendLine("⚠ LARGE FILE/METHOD WARNING: If the target method is super long (e.g., 100+ lines) and the change is small, " +
+                          "using FORMAT C to rewrite the entire method will almost certainly cause hallucinations and break existing logic. " +
+                          "You MUST use oldString/newString to target just the lines that need changing. Do NOT reinvent the wheel.");
             if (langSupportsFormatC && ext != ".cs")
-                sb.AppendLine("⚠ Large file — prefer FORMAT C (targetType/targetName) to avoid fragile text matching.");
+                sb.AppendLine("⚠ Only use FORMAT C (targetType/targetName) if you are rewriting the ENTIRE method body. For small changes, use oldString/newString.");
             else if (ext != ".cs")
                 sb.AppendLine("⚠ Large file — use a tight oldString (3–6 lines max). " +
                               "The excerpt above is the ONLY portion shown; your oldString MUST appear in it.");
@@ -908,10 +914,12 @@ public class AgentController : ControllerBase
         sb.AppendLine("  • For SMALL targeted changes (1-5 lines, e.g. add a column to SQL, add a property, change a return value):");
         sb.AppendLine("    USE oldString/newString. Copy 2-3 lines verbatim from the file as oldString.");
         sb.AppendLine("    Include the line above and below your change as anchor context, repeating them unchanged in newString.");
-        sb.AppendLine("  • For FULL method/class replacements (entire method body rewrite):");
+        sb.AppendLine("  • For FULL method/class replacements (entire method body rewrite - ONLY if the change is massive):");
         sb.AppendLine("    USE FORMAT C (targetType/targetName/newCode). AST-based, bypasses text matching.");
         sb.AppendLine("    CRITICAL: Preserve the existing attribute(s), return type, method name, and parameter list VERBATIM from the file.");
         sb.AppendLine("    Only change the method BODY. Do NOT change [FromBody], route templates, or parameter names.");
+        sb.AppendLine("    ⚠ WARNING: If the method is very long, rewriting it via FORMAT C is highly likely to fail or hallucinate logic. " +
+                      "STRONGLY PREFER oldString/newString for targeted changes in long methods.");
         sb.AppendLine("  • To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
         sb.AppendLine("  • Do NOT use targetType=\"class\" — that replaces the entire class.");
         sb.AppendLine("INDENTATION: newCode MUST include proper C# indentation.");
@@ -980,6 +988,9 @@ public class AgentController : ControllerBase
                       "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
                       "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
                       "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
+        sb.AppendLine("To INSERT a new HTML element/block (or move an existing one): oldString MUST be the 1-2 lines IMMEDIATELY BEFORE the insertion point. " +
+                      "newString MUST be those exact same anchor lines PLUS the new element(s) appended after them. " +
+                      "CRITICAL: The new element MUST NOT be present in oldString. If oldString and newString are identical, the edit is a no-op and will fail.");
         sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
         sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
 
@@ -2582,7 +2593,7 @@ public class AgentController : ControllerBase
         var methodNameMatch = Regex.Match(stepChange,
             @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(?:the|this|that|a|an)?\s*(\w+)",
             RegexOptions.IgnoreCase);
-            
+
         var methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
 
         string? methodBody = null;
@@ -2691,7 +2702,8 @@ public class AgentController : ControllerBase
             "FileStream", "BinaryReader", "BinaryWriter", "TextReader", "TextWriter",
             "DateTime", "DateTimeOffset", "TimeSpan", "Guid", "Uri", "Version",
             "Regex", "Match", "Group", "Capture", "StringComparison",
-            "Encoding", "UTF8", "Unicode", "ASCII",
+            "Encoding", "UTF8", "Unicode", "ASCII", "Declare", "TryParse",
+             "Parse", "Convert", "Math", "Random",
             "Exception", "InvalidOperationException", "ArgumentNullException",
             "ArgumentException", "IOException", "FormatException",
             "Response", "Request", "Delegate", "Func", "Action", "Predicate",
@@ -2700,7 +2712,7 @@ public class AgentController : ControllerBase
             "Startup", "Program", "MySqlConnection", "MySqlCommand", "MySqlDataReader",
             "MySqlParameter", "MySqlTransaction", "MySqlException",
             "SqlConnection", "SqlCommand", "SqlDataReader",
-            "NpgsqlConnection", "NpgsqlCommand", "NpgsqlDataReader",
+            "NpgsqlConnection", "NpgsqlCommand", "NpgsqlDataReader", "?",
             "IConfiguration", "Log", "JsonDocument", "JsonNode", "JsonObject",
             "JsonArray", "JsonValue", "JsonSerializer", "JsonSerializerOptions"
         };
@@ -2712,8 +2724,8 @@ public class AgentController : ControllerBase
 
         var typeRefs = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match m in Regex.Matches(searchScope,
-     @"(?:public|private|protected|readonly|static)?\s*(?:\w+)\s*:\s*([A-Z][A-Za-z0-9_]+)",
-     RegexOptions.Compiled))
+            @"(?:public|private|protected|readonly|static)?\s*(?:\w+)\s*:\s*([A-Z][A-Za-z0-9_]+)",
+            RegexOptions.Compiled))
         {
             var name = m.Groups[1].Value;
             if (!skipTypes.Contains(name) && name.Length > 2 &&
@@ -7184,11 +7196,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   g. Component Template (.html): Build the UI (canvas, buttons, list).\n" +
         "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
         "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n";
-
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
         var p = prompt.ToLowerInvariant();
+
+        // "Move inside/into/under" is a DOM structural change, not a CSS positioning task.
+        if (Regex.IsMatch(p, @"\bmove\b.{0,60}\b(inside|into|to|under|below|above|after|before)\b"))
+            return false;
+
         return p.Contains("position") || p.Contains("layout") || p.Contains("align") ||
                p.Contains("margin") || p.Contains("padding") || p.Contains("spacing") ||
                p.Contains("move ") || p.Contains("overlap") || p.Contains("z-index") ||
@@ -8448,12 +8464,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.Append(fileContents);
             sb.AppendLine();
         }
-
         sb.AppendLine("STOP AND THINK: does the CURRENT FILE CONTENT shown above ALREADY satisfy the ORIGINAL TASK, even imperfectly?");
         sb.AppendLine("If the explicit request is met, return an EMPTY plan — do NOT propose restructuring, renaming, moving code");
         sb.AppendLine("between methods, or 'cleanup' the user did not ask for.");
         sb.AppendLine("Only add a step if you can name a SPECIFIC piece of the ORIGINAL TASK that is VERIFIABLY absent from the");
         sb.AppendLine("current file content above.");
+        sb.AppendLine("⚠ CRITICAL: The Quality Check assessment below may claim something is missing. DO NOT blindly trust it.");
+        sb.AppendLine("Read the file content yourself. If the code IS already there, return an EMPTY plan. The quality check LLM often hallucinates failures.");
 
         // FIX: Only enforce the "NEVER introduce" rule if there is no quality check reason.
         // If the quality check identified a missing method, the LLM MUST be allowed to introduce it.
@@ -9327,7 +9344,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var (raw, _, error) = await CallLlmRawStreaming(
             verifySystemPrompt, sb.ToString(), emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(3), maxTokens: 512);
+            requestTimeout: _infiniteTimeout, maxTokens: 512);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
