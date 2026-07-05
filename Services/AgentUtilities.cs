@@ -356,7 +356,89 @@ public static class AgentUtilities
 
         return plan;
     }
+    /// <summary>
+    /// Fixes indentation for multiline method arguments inside (), [], and {}
+    /// when the LLM or ReindentByBraceDepth flattens them to the base indent.
+    /// </summary>
+    public static string FixMultilineParenIndentation(string code)
+    {
+        var lines = code.Split('\n');
+        if (lines.Length <= 2) return code;
 
+        var indentUnit = "    ";
+        var changed = false;
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.TrimStart();
+            if (trimmed.Length == 0) continue;
+
+            var lastChar = trimmed[^1];
+            if (lastChar == '(' || lastChar == '[' || lastChar == '{')
+            {
+                var openChar = lastChar;
+                var closeChar = openChar == '(' ? ')' : openChar == '[' ? ']' : '}';
+
+                var depth = 0;
+                var closedOnSameLine = false;
+                foreach (var c in trimmed)
+                {
+                    if (c == openChar) depth++;
+                    else if (c == closeChar) depth--;
+                    if (depth == 0 && c == closeChar) { closedOnSameLine = true; break; }
+                }
+
+                if (!closedOnSameLine)
+                {
+                    var currentIndent = line.Substring(0, line.Length - trimmed.Length);
+                    var nextIndent = currentIndent + indentUnit;
+
+                    var blockDepth = 1;
+                    for (var j = i + 1; j < lines.Length; j++)
+                    {
+                        var innerLine = lines[j];
+                        var innerTrimmed = innerLine.TrimStart();
+
+                        if (string.IsNullOrWhiteSpace(innerLine))
+                        {
+                            continue;
+                        }
+
+                        var innerCurrentIndent = innerLine.Substring(0, innerLine.Length - innerTrimmed.Length);
+                        var startsWithAnyClose = innerTrimmed.StartsWith("}") || innerTrimmed.StartsWith("]") || innerTrimmed.StartsWith(")");
+                        var isClosingLine = innerTrimmed.StartsWith(closeChar);
+
+                        foreach (var c in innerTrimmed)
+                        {
+                            if (c == openChar) blockDepth++;
+                            else if (c == closeChar) blockDepth--;
+                        }
+
+                        if (isClosingLine && blockDepth <= 0)
+                        {
+                            if (innerCurrentIndent.Length != currentIndent.Length)
+                            {
+                                lines[j] = currentIndent + innerTrimmed;
+                                changed = true;
+                            }
+                            break;
+                        }
+                        else if (!startsWithAnyClose)
+                        {
+                            if (innerCurrentIndent.Length < nextIndent.Length)
+                            {
+                                lines[j] = nextIndent + innerTrimmed;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return changed ? string.Join("\n", lines) : code;
+    }
     public static List<string> ExtractSignatureTokens(string sigLine)
     {
         if (string.IsNullOrWhiteSpace(sigLine))

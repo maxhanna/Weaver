@@ -560,7 +560,6 @@ public class AgentController : ControllerBase
         }
         return new string(' ', min is > 0 and < int.MaxValue ? min : 4);
     }
-
     private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
     {
         var oldLines = oldSource.Split('\n');
@@ -614,12 +613,23 @@ public class AgentController : ControllerBase
                 return ReindentHtmlTags(newCode, baseIndent, DetectIndentUnit(oldSource));
             }
 
-            return AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
+            var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
+ 
+            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
+            {
+                reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
+            }
+            return reindented;
+        }
+ 
+        var ext2 = Path.GetExtension(filePath ?? "").ToLowerInvariant();
+        if (ext2 is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
+        {
+            shifted = AgentUtilities.FixMultilineParenIndentation(shifted);
         }
 
         return shifted;
     }
-
     private static string ReindentHtmlTags(string code, string baseIndent, string indentUnit = "  ")
     {
         var lines = code.Split('\n');
@@ -2184,15 +2194,18 @@ public class AgentController : ControllerBase
             }
         }
 
-        var serviceCallMatch = Regex.Match(step.Change ?? "", @"(?:this\.)?([A-Za-z]\w*Service)\.", RegexOptions.IgnoreCase);
+        var serviceCallMatch = Regex.Match(step.Change ?? "", @"(?:this\.)?([A-Za-z]\w*Service)\b", RegexOptions.IgnoreCase);
+
         if (!serviceCallMatch.Success && fullPlan?.Summary != null)
         {
-            serviceCallMatch = Regex.Match(fullPlan.Summary, @"([A-Za-z]\w*Service)", RegexOptions.IgnoreCase);
+            serviceCallMatch = Regex.Match(fullPlan.Summary, @"([A-Za-z]\w*Service)\b", RegexOptions.IgnoreCase);
         }
+
         if (!serviceCallMatch.Success)
         {
-            serviceCallMatch = Regex.Match(ctx.ToString(), @"this\.(\w+Service)\.", RegexOptions.IgnoreCase);
+            serviceCallMatch = Regex.Match(ctx.ToString(), @"this\.(\w+Service)\b", RegexOptions.IgnoreCase);
         }
+
         if (serviceCallMatch.Success)
         {
             var serviceName = serviceCallMatch.Groups[1].Value;
@@ -2856,7 +2869,8 @@ public class AgentController : ControllerBase
         "WHERE the data being modified comes from. Example: 'Images come from FileEntry.romMetadata." +
         "screenshotsJson (parsed from JSON string) and romMetadata.coverUrl, NOT from filtering " +
         "FileEntry objects by file type.' If you cannot state the data source, you are NOT ready.\n" +
-        "14. SERVICE METHOD SIGNATURES (CRITICAL): If the change involves calling a service method (e.g., `this.myService.doSomething(data)`), you MUST read the service file to verify the exact method name and parameters. If the method accepts an interface/model (e.g., `UserEvent`), you MUST read that interface definition to know the exact properties required. Do NOT guess the method signature or model properties.\n";
+        "14. SERVICE METHOD SIGNATURES (CRITICAL): If the change involves calling a service method (e.g., `this.myService.doSomething(data)`), you MUST read the service file to verify the exact method name and parameters. If the method accepts an interface/model (e.g., `UserEvent`), you MUST read that interface definition to know the exact properties required. Do NOT guess the method signature or model properties.\n" +
+        "15. DEPENDENCY INJECTION SCOPE: If a service is injected into the constructor (e.g., `private userEventService: UserEventService`), you MUST call it using `this.userEventService.methodName()`. Do NOT access it via `this.parentRef?.userEventService` or other component references unless explicitly instructed.\n";
 
     private static string BuildStepExplorationPrompt(
         PlanStep step,
@@ -3079,8 +3093,8 @@ public class AgentController : ControllerBase
 
 
     private async Task<List<PlanStep>?> CheckAndDecoupleStepAsync(
-      PlanStep step, int itemIdx, string projectRoot, bool emitSse,
-      CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
+   PlanStep step, int itemIdx, string projectRoot, bool emitSse,
+   CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
     {
         if (step == null || string.IsNullOrWhiteSpace(step.Change))
             return null;
@@ -3097,42 +3111,173 @@ public class AgentController : ControllerBase
             var result = new List<PlanStep>();
             var serviceName = serviceMatch.Success ? serviceMatch.Groups[1].Value : "Service";
 
-            if (step.File.EndsWith(".service.ts", StringComparison.OrdinalIgnoreCase) ||
-       step.File.EndsWith(".service.js", StringComparison.OrdinalIgnoreCase))
+            var fileWithoutExt = Path.GetFileNameWithoutExtension(step.File);
+            if (string.Equals(fileWithoutExt, serviceName, StringComparison.OrdinalIgnoreCase))
             {
                 return null;
             }
 
+            var originalChange = step.Change ?? "";
+
             // 1. Always ensure the import is a separate step (if not already explicitly asked for)
             if (serviceMatch.Success && !chLower.Contains("import"))
             {
-                result.Add(new PlanStep { File = step.File, Change = $"Add the import statement for {serviceName} at the top of the file.", Priority = step.Priority });
+                result.Add(new PlanStep
+                {
+                    File = step.File,
+                    Change = $"Add the import statement for {serviceName} at the top of the file.",
+                    Priority = step.Priority
+                });
             }
 
-            // 2. Handle Multi-Method Split
+            // 2. Handle explicit Multi-Method Split ("X and Y methods")
             if (multiMethodMatch.Success)
             {
                 var method1 = multiMethodMatch.Groups[1].Value;
                 var method2 = multiMethodMatch.Groups[2].Value;
                 if (chLower.Contains("constructor"))
                 {
-                    result.Add(new PlanStep { File = step.File, Change = $"Inject {serviceName} into the constructor parameters.", Priority = step.Priority });
+                    result.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = $"Inject {serviceName} into the constructor parameters.",
+                        Priority = step.Priority
+                    });
                 }
 
-                var originalChange = step.Change ?? "";
-                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method1} method. Original task: {originalChange}", Priority = step.Priority });
-                result.Add(new PlanStep { File = step.File, Change = $"Apply the requested changes to the {method2} method. Original task: {originalChange}", Priority = step.Priority });
+                result.Add(new PlanStep
+                {
+                    File = step.File,
+                    Change = $"Apply the requested changes to the {method1} method. Original task: {originalChange}",
+                    Priority = step.Priority
+                });
+                result.Add(new PlanStep
+                {
+                    File = step.File,
+                    Change = $"Apply the requested changes to the {method2} method. Original task: {originalChange}",
+                    Priority = step.Priority
+                });
             }
             else
             {
-                // 3. Handle Single-Method Service Constructor Injection
-                if (serviceMatch.Success && !chLower.Contains("constructor"))
+                // 3. Single-Method Service — detect if the change mentions BOTH constructor
+                //    and method modification. If so, split into separate atomic steps:
+                //    one for constructor injection, one per method modification.
+                var hasConstructorMention = chLower.Contains("constructor");
+
+                // Extract method names from the change description using multiple patterns
+                var methodNames = new List<string>();
+                var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
-                    result.Add(new PlanStep { File = step.File, Change = $"Add private {serviceName} to the constructor parameters.", Priority = step.Priority });
+                    "the", "a", "an", "add", "new", "existing", "this", "into", "and",
+                    "modify", "update", "change", "edit", "in", "to", "by", "so", "that",
+                    "after", "before", "when", "if", "for", "with", "from", "call", "use",
+                    "insert", "remove", "delete", "create", "implement", "initialize"
+                };
+
+                // Pattern A: "modify/update/change/edit <methodName> method"
+                foreach (Match m in Regex.Matches(originalChange,
+                    @"(?:modify|update|change|edit|in|to|into|the)\s+(\w+)\s+method",
+                    RegexOptions.IgnoreCase))
+                {
+                    var name = m.Groups[1].Value;
+                    if (name.Length > 2 && !stopWords.Contains(name))
+                        methodNames.Add(name);
                 }
 
-                // 4. Keep the original step
-                result.Add(new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority });
+                // Pattern B: "<methodName> method" (catch-all if Pattern A found nothing)
+                if (methodNames.Count == 0)
+                {
+                    foreach (Match m in Regex.Matches(originalChange,
+                        @"(\w+)\s+method\b", RegexOptions.IgnoreCase))
+                    {
+                        var name = m.Groups[1].Value;
+                        if (name.Length > 2 && !stopWords.Contains(name))
+                            methodNames.Add(name);
+                    }
+                }
+
+                // Pattern C: method call syntax like "addIdentifiedPlant(" 
+                if (methodNames.Count == 0)
+                {
+                    foreach (Match m in Regex.Matches(originalChange,
+                        @"\b([a-z]\w{2,})\s*\(", RegexOptions.IgnoreCase))
+                    {
+                        var name = m.Groups[1].Value;
+                        if (name.Length > 2 && !stopWords.Contains(name))
+                            methodNames.Add(name);
+                    }
+                }
+
+                methodNames = methodNames
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var hasMethodMention = chLower.ContainsAny("method", "function", "handler", "call", "insert")
+                    || methodNames.Count > 0;
+
+                if (hasConstructorMention && hasMethodMention)
+                {
+                    // ── SPLIT: constructor step + one step per method ──
+                    result.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = $"Inject {serviceName} into the constructor parameters.",
+                        Priority = step.Priority
+                    });
+
+                    if (methodNames.Count > 0)
+                    {
+                        foreach (var methodName in methodNames)
+                        {
+                            result.Add(new PlanStep
+                            {
+                                File = step.File,
+                                Change = $"Modify the {methodName} method to call {serviceName} for the requested functionality. Original task: {originalChange}",
+                                Priority = step.Priority
+                            });
+                        }
+                    }
+                    else
+                    {
+                        // Could not extract method name — keep original for the method part only.
+                        // This sub-step is NOT the same string as the original, so
+                        // alreadyDecoupled will not block a future decoupling pass.
+                        result.Add(new PlanStep
+                        {
+                            File = step.File,
+                            Change = $"Apply the method-level changes described here (constructor injection handled in prior step). Original task: {originalChange}",
+                            Priority = step.Priority
+                        });
+                    }
+                }
+                else if (!hasConstructorMention)
+                {
+                    // Constructor not mentioned in original — add constructor injection as a
+                    // separate step, then keep original for the method work.
+                    result.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = $"Add private {serviceName} to the constructor parameters.",
+                        Priority = step.Priority
+                    });
+                    result.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = originalChange,
+                        Priority = step.Priority
+                    });
+                }
+                else
+                {
+                    // Only constructor mentioned, no method — keep original as-is (already atomic).
+                    result.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = originalChange,
+                        Priority = step.Priority
+                    });
+                }
             }
 
             // If we successfully generated a multi-step plan, return it
@@ -3175,15 +3320,67 @@ public class AgentController : ControllerBase
             if (serviceCallMatch.Success)
             {
                 var serviceName = serviceCallMatch.Groups[1].Value;
-                var result = new List<PlanStep>
+                var originalChange = step.Change ?? "";
+
+                // Extract method names so we can split constructor + each method into
+                // separate atomic steps rather than keeping the combined original.
+                var fallbackMethodNames = new List<string>();
+                var fallbackStopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 {
-                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority },
-                    new PlanStep { File = step.File, Change = step.Change ?? "", Priority = step.Priority }
+                    "the", "a", "an", "add", "new", "existing", "this", "into", "and",
+                    "modify", "update", "change", "edit", "in", "to", "by", "so", "that",
+                    "after", "before", "when", "if", "for", "with", "from", "call", "use",
+                    "insert", "remove", "delete", "create", "implement", "initialize"
                 };
-                return result;
+                foreach (Match m in Regex.Matches(originalChange,
+                    @"(?:modify|update|change|edit|in|to|into|the)\s+(\w+)\s+method",
+                    RegexOptions.IgnoreCase))
+                {
+                    var name = m.Groups[1].Value;
+                    if (name.Length > 2 && !fallbackStopWords.Contains(name))
+                        fallbackMethodNames.Add(name);
+                }
+                if (fallbackMethodNames.Count == 0)
+                {
+                    foreach (Match m in Regex.Matches(originalChange, @"(\w+)\s+method\b", RegexOptions.IgnoreCase))
+                    {
+                        var name = m.Groups[1].Value;
+                        if (name.Length > 2 && !fallbackStopWords.Contains(name))
+                            fallbackMethodNames.Add(name);
+                    }
+                }
+                fallbackMethodNames = fallbackMethodNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+                var fallbackResult = new List<PlanStep>
+                {
+                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority }
+                };
+
+                if (fallbackMethodNames.Count > 0)
+                {
+                    foreach (var mn in fallbackMethodNames)
+                    {
+                        fallbackResult.Add(new PlanStep
+                        {
+                            File = step.File,
+                            Change = $"Modify the {mn} method to use {serviceName}. Original task: {originalChange}",
+                            Priority = step.Priority
+                        });
+                    }
+                }
+                else
+                {
+                    fallbackResult.Add(new PlanStep
+                    {
+                        File = step.File,
+                        Change = $"Apply the method-level changes (constructor injection handled in prior step). Original task: {originalChange}",
+                        Priority = step.Priority
+                    });
+                }
+
+                return fallbackResult;
             }
         }
-
 
         if (!hasMultipleConcerns) return null;
 
@@ -3320,6 +3517,7 @@ public class AgentController : ControllerBase
         }
         catch { return null; }
     }
+
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -7513,13 +7711,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info",
             $"Router → {pipelineType}",
             new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
-
-        // ── LLM verification of pipeline choice ────────────────────────────
-        // If the user provided code in the prompt, it's definitely a CodeEdit task.
+ 
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
-
-        // DETERMINISTIC CHECK: If the prompt explicitly mentions code files, components, or services,
-        // it is ALWAYS a CodeEdit task. Do not ask the LLM router.
+ 
         bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php)\b", RegexOptions.IgnoreCase) ||
                                  prompt.Contains("component", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("service", StringComparison.OrdinalIgnoreCase) ||
@@ -7555,16 +7749,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                  prompt.Contains("render", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("display", StringComparison.OrdinalIgnoreCase);
 
-        if ((hasCodeInPrompt || mentionsCodeFiles || mentionsCodeLogic) && pipelineType != PipelineType.CodeEdit)
+        // If the user explicitly attached files, they want them edited — ALWAYS use CodeEdit.
+        bool hasAttachedFiles = attachedFiles != null && attachedFiles.Count > 0;
+
+        if ((hasCodeInPrompt || mentionsCodeFiles || mentionsCodeLogic || hasAttachedFiles) && pipelineType != PipelineType.CodeEdit)
         {
-            await EmitLog(emitSse, "info", $"Code files, components, or UI logic detected in prompt — forcing CodeEdit pipeline", ct: ct);
+            await EmitLog(emitSse, "info", $"Code files, components, UI logic, or attached files detected — forcing CodeEdit pipeline", ct: ct);
             pipelineType = PipelineType.CodeEdit;
         }
 
         PipelineType? chainedNext = null;
         List<(PipelineType Pipeline, string Summary)>? stages = null;
 
-        if (!hasCodeInPrompt && !mentionsCodeFiles && !mentionsCodeLogic)
+        if (!hasCodeInPrompt && !mentionsCodeFiles && !mentionsCodeLogic && !hasAttachedFiles)
         {
             var verifyPrompt = $"Verify this routing decision.\n\nTask: \"{prompt}\"\nRouter selected: {pipelineType} (commandScore={cmdScore}, editScore={editScore})\n\nPipeline types:\n- CommandExecution: running shell/terminal commands, downloading files via URL, file system operations OUTSIDE the codebase logic.\n- UnifiedPipeline (CodeEdit): modifying, adding, or refactoring source code in the project (e.g., .cs, .ts, .html, .css files). This includes implementing upload logic, modifying components, or changing API calls.\n\nIs this routing correct? \n- If the task mentions modifying or creating code in specific files (like 'upload.component.ts' or 'file.service.ts'), it MUST be UnifiedPipeline.\n- If the task asks to 'create a method', 'add a variable', or 'change logic', it MUST be UnifiedPipeline.\n- DO NOT route to CommandExecution just because the task mentions 'uploading files', 'fetch data', or 'files' — if the upload/fetch logic is being implemented in code, it's UnifiedPipeline.\n- Only suggest chaining if the task EXPLICITLY requires running terminal scripts, downloading files from URLs, or querying a database BEFORE code can be edited.\n\nReply ONLY with JSON:\n{{\"decision\": \"confirm\"}}\n{{\"decision\": \"override\", \"pipeline\": \"CommandExecution|UnifiedPipeline\"}}\n{{\"decision\": \"chain\", \"stages\": [{{\"pipeline\": \"CommandExecution\", \"summary\": \"...\"}}, {{\"pipeline\": \"UnifiedPipeline\", \"summary\": \"...\"}}]}}";
             var (vRaw, _, vErr) = await CallLlmRaw(
@@ -8172,6 +8369,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("    your new step must EXTEND X, not replace it with approach Y. If you think X is wrong, return");
         sb.AppendLine("    an EMPTY plan — the user will steer, not the replanner.");
         sb.AppendLine("  * Do NOT add new files, features, refactors, or improvements the user did not ask for.");
+        sb.AppendLine("  * Do NOT invent new helper methods in service files. If you need to call a service, use the EXISTING methods. For example, if UserEventService has `insertUserEvent`, call it directly. Do NOT create `insertUserEventWithPlantName`.");
         sb.AppendLine("  * If a step in the EXISTING PLAN added a property/variable/CSS-rule/method, that name NOW EXISTS");
         sb.AppendLine("    in the file. Reuse it. Do NOT introduce a parallel mechanism.");
         sb.AppendLine("  * If the verification gaps can be closed by EDITING the code that step 1 already added, do that —");
