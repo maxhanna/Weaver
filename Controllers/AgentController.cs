@@ -2580,8 +2580,9 @@ public class AgentController : ControllerBase
         var targetContent = await System.IO.File.ReadAllTextAsync(targetFullPath, Encoding.UTF8, ct);
 
         var methodNameMatch = Regex.Match(stepChange,
-            @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(\w+)\s*[\(<]?",
+            @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(?:the|this|that|a|an)?\s*(\w+)",
             RegexOptions.IgnoreCase);
+            
         var methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
 
         string? methodBody = null;
