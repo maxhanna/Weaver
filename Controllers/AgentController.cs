@@ -7404,8 +7404,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private async Task<AgentPlan?> AnalyzePromptAndPlanCodeChanges(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse,
-        CancellationToken ct = default, string? steeringContext = null)
+     string prompt, string discoveryContext, string projectRoot, bool emitSse,
+     CancellationToken ct = default, string? steeringContext = null)
     {
         var planningPrompt = BuildPlanningPrompt();
 
@@ -7424,62 +7424,78 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         userPrompt.AppendLine("### DISCOVERY CONTEXT (only use paths listed here) ###");
         userPrompt.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
 
+        const int MaxRetries = 3;
+        string? raw = null;
+        string? llmError = null;
 
-        Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
-
-        var (raw, _, llmError) = await CallLlmRawStreaming(
-            planningPrompt, userPrompt.ToString(), emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 2048);
-
-        if (string.IsNullOrWhiteSpace(raw))
+        for (var attempt = 1; attempt <= MaxRetries; attempt++)
         {
-            await EmitLog(emitSse, "error",
-                $"LLM returned empty plan response: {llmError ?? "no content"}", ct: ct);
-            return null;
-        }
+            if (attempt > 1)
+                await EmitLog(emitSse, "warn", $"Retrying plan generation (attempt {attempt}/{MaxRetries})...", ct: ct);
+            else
+                await EmitLog(emitSse, "info", "Generating plan...", ct: ct);
 
-        AgentPlan? plan = AgentUtilities.ParsePlan(raw);
-        if (plan == null && (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
-            raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase) ||
-            raw.Contains("STEP", StringComparison.OrdinalIgnoreCase)))
-        {
-            plan = AgentUtilities.ParseDelimitedPlan(raw); 
-        }
+            Console.WriteLine($"### CALLING LLM WITH PROMPT >>> {planningPrompt} >>> {userPrompt}");
 
-        if (plan == null) {
-            plan = await RecoverPlanFromRamblingAsync(emitSse, ct, raw);
-        }
+            (raw, _, llmError) = await CallLlmRawStreaming(
+                planningPrompt, userPrompt.ToString(), emitSse, ct,
+                requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 2048);
 
-        if (plan == null)
-        {
-            bool containsLLMError = false;
-            bool containsLLMLoading = false;
-            if (!string.IsNullOrEmpty(raw))
+            if (string.IsNullOrWhiteSpace(raw))
             {
-                if (raw.ToLower().Contains("error"))
-                {
-                    containsLLMError = true;
-                }
-                if (raw.ToLower().Contains("loading model"))
-                {
-                    containsLLMLoading = true;
-                }
+                await EmitLog(emitSse, "error",
+                    $"LLM returned empty plan response: {llmError ?? "no content"}", ct: ct);
+                continue; // retry
             }
-            string errorMessage = containsLLMLoading ? " Model Loading. Please retry after a short period of time."
-                                    : containsLLMError ? " LLM Returned Error state. Check LLM."
-                                    : "";
-            await EmitLog(emitSse, "error", "Failed to parse plan." + errorMessage, raw, ct: ct);
-            return null;
+
+            AgentPlan? plan = AgentUtilities.ParsePlan(raw);
+            if (plan == null && (raw.Contains("<<<STEP", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("### STEP", StringComparison.OrdinalIgnoreCase) ||
+                raw.Contains("STEP", StringComparison.OrdinalIgnoreCase)))
+            {
+                plan = AgentUtilities.ParseDelimitedPlan(raw);
+            }
+
+            if (plan == null)
+            {
+                plan = await RecoverPlanFromRamblingAsync(emitSse, ct, raw);
+            }
+
+            if (plan == null)
+            {
+                bool containsLLMError = false;
+                bool containsLLMLoading = false;
+                if (!string.IsNullOrEmpty(raw))
+                {
+                    if (raw.ToLower().Contains("error"))
+                    {
+                        containsLLMError = true;
+                    }
+                    if (raw.ToLower().Contains("loading model"))
+                    {
+                        containsLLMLoading = true;
+                    }
+                }
+                string errorMessage = containsLLMLoading ? " Model Loading. Please retry after a short period of time."
+                                        : containsLLMError ? " LLM Returned Error state. Check LLM."
+                                        : "";
+                await EmitLog(emitSse, "error", "Failed to parse plan." + errorMessage, raw, ct: ct);
+                continue; // retry
+            }
+
+            var webViolation = DetectMissingWebSearch(prompt, plan);
+            if (webViolation != null)
+                await EmitLog(emitSse, "warn", $"Plan may need web search: {webViolation}", ct: ct);
+
+            await EmitLog(emitSse, "info",
+                $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
+
+            return plan;
         }
 
-        var webViolation = DetectMissingWebSearch(prompt, plan);
-        if (webViolation != null)
-            await EmitLog(emitSse, "warn", $"Plan may need web search: {webViolation}", ct: ct);
-
-        await EmitLog(emitSse, "info",
-            $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
-
-        return plan;
+        await EmitLog(emitSse, "error",
+            $"LLM failed to produce a valid plan after {MaxRetries} attempts.", ct: ct);
+        return null;
     }
 
     private async Task<(AgentPlan? plan, string? error)> ParseAndScore(
