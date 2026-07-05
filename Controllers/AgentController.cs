@@ -152,7 +152,14 @@ public class AgentController : ControllerBase
             "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
             "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
             "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
-            "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one.\n" +
+            "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one." +
+            "18b. INSERTIONS INTO STRUCTURED CONTAINERS: When inserting an element into a container that uses a specific wrapper class for its children (e.g., `optionsStatsDiv`), " +
+                "you MUST wrap the inserted element in that same class structure. Do NOT insert raw elements if the siblings use wrappers. " +
+                "Example: If inserting 'Lunar Phase' into a div where siblings are `<div class=\"optionsStatsDiv\"><div class=\"optionsStatsHeader\">...</div><div class=\"optionsStatsDescription\">...</div></div>`, " +
+                "your newString MUST wrap the lunar phase content in that exact `optionsStatsDiv` structure." +
+            "18c. NO-OP PREVENTION (CRITICAL): When asked to ADD or INSERT code, the new code MUST appear in newString but MUST NOT appear in oldString. " +
+                "Do not copy the same block of code into both fields. If you are adding a line, oldString should be the 1-2 anchor lines BEFORE the insertion point, " +
+                "and newString should be those anchor lines PLUS the new line(s)." +
             "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
             "20. NEVER INVENT type names. Every type (class/record/struct/interface) you reference in newString MUST already exist in the project. " +
                 "The RELATED FILE CONTEXT / AUTO-ENRICHED CONTEXT sections show type definitions found across the project. " +
@@ -182,7 +189,13 @@ public class AgentController : ControllerBase
             "26. STRUCTURAL MOVES: When moving an element into a new container, adapt its structure/styling to match the existing children of the target container. " +
                 "For example, if moving a standalone div into a container where all children are wrapped in a specific class (like `optionsStatsDiv`), " +
                 "wrap the moved element in that same class rather than inserting it raw. " +
-            "27. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " + "which does NOT already exist in the file (no CREATE TABLE, FROM, JOIN, or other reference to that table name appears in the current file content), " +
+            "27. ATOMIC STEPS (CRITICAL): The plan is split into atomic steps. You MUST execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
+            "  - If the step says 'Remove [X]', your oldString MUST be [X] (plus minimal anchor lines), and your newString MUST be ONLY the anchor lines (the [X] code is deleted). Do NOT add [X] anywhere else in newString.\n" +
+            "  - If the step says 'Add [X]' or 'Insert [X]', your oldString MUST be the 1-2 anchor lines at the target location, and your newString MUST be those anchor lines PLUS [X]. Do NOT remove [X] from elsewhere in newString.\n" +
+            "28. EXACT CONTEXT (CRITICAL): When modifying an existing loop or block, you MUST copy the EXACT variables, function names, and structure from the file content shown above. " +
+                "Do NOT invent new helper methods (e.g., `renderMesh`, `setUniforms`), new variables (e.g., `this.explosions` if the file uses `explosions`), or new matrix functions (e.g., `mat4.mul` if the file uses `mat4.multiply`). " +
+                "If the existing code uses `this.drawMesh(this.getExplosionMesh(), ...)`, your newString MUST use that exact same pattern.\n" +
+            "29. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " +
                 "you MUST include a CREATE TABLE IF NOT EXISTS statement for that table in your newString, placed BEFORE the INSERT/UPDATE statements. " +
                 "The CREATE TABLE must define ALL columns that the INSERT/UPDATE references, with appropriate MySQL data types. " +
                 "Place it strategically at the beginning of the new code block, before any INSERT/UPDATE that depends on it. " +
@@ -932,7 +945,7 @@ public class AgentController : ControllerBase
 
         if (!string.IsNullOrWhiteSpace(explorationContext))
         {
-            var distilled = DistillExplorationContext(
+            var distilled = AgentUtilities.DistillExplorationContext(
                 explorationContext, relPath, step.Change ?? "", targetSymbol);
 
             if (!string.IsNullOrWhiteSpace(distilled))
@@ -1011,7 +1024,6 @@ public class AgentController : ControllerBase
                     sb.AppendLine("  ⚠ CRITICAL: Your newCode was IDENTICAL to the existing method — nothing changed.");
                     sb.AppendLine("  You reproduced code that is already in the file. This is NOT what CHANGE REQUIRED asks for.");
 
-                    // Check if a prior attempt wrote genuinely different code (but had the wrong signature)
                     var priorDifferentAttempt = history
                         .Take(i)
                         .FirstOrDefault(prev =>
@@ -1149,33 +1161,7 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine();
-        // ── STRATEGY LADDER ─────────────────────────────────────────────────
-        // Each successive retry escalates to a more directive strategy so the
-        // LLM cannot just regenerate the same broken oldString. The history
-        // block above already shows what failed; the directives below FORCE
-        // a different approach.
-        //
-        // Strategy 0 (history.Count == 0): no special directive — LLM uses
-        //   its own judgment within the system prompt rules.
-        //
-        // Strategy 1 (history.Count == 1): VERBATIM_COPY — instruct the LLM
-        //   to copy the EXACT file lines from the snippet we showed (the
-        //   "EXACT lines from the file" block from BuildExactMatchBlock)
-        //   character-for-character, including every space and comma.
-        //
-        // Strategy 2 (history.Count == 2): SINGLE_LINE_ANCHOR — instruct the
-        //   LLM to drop multi-line oldStrings entirely and pick the SINGLE
-        //   most-distinctive line in the target region as oldString, with
-        //   one line of surrounding context only.
-        //
-        // Strategy 3+ (history.Count >= 3): LINE_RANGE_REPLACEMENT — instruct
-        //   the LLM to switch to a totally different edit format: identify
-        //   the target by line number range and produce a fullFile replacement.
-        //   This bypasses oldString matching entirely.
-        //
-        // Without this ladder, the LLM would happily regenerate the same
-        // broken oldString 4-5 times in a row, wasting tokens and time before
-        // the stuckCount check finally aborts.
+   
         if (history?.Count > 0)
         {
             sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
@@ -1729,6 +1715,60 @@ public class AgentController : ControllerBase
                 if (Regex.IsMatch(content, $@"\b(void|Task|async\s+Task|public|private|protected|internal)\s+.*\b{Regex.Escape(methodName)}\s*\(", RegexOptions.IgnoreCase))
                 {
                     return (PreEditVerdict.AlreadyDone, $"Method '{methodName}' already exists in the file");
+                }
+            }
+        }
+
+        // Check if an element to be added/moved is already in its target container
+        if (changeLower.StartsWith("add ") || changeLower.StartsWith("insert ") || changeLower.StartsWith("move "))
+        {
+            var elementMatch = Regex.Match(step.Change ?? "", @"(?:add|insert|move)\s+(?:the\s+)?([\w-]+)\s+(?:div|element|span|button|table|code|block|method)", RegexOptions.IgnoreCase);
+            var containerMatch = Regex.Match(step.Change ?? "", @"(?:inside|into|to|before|after|within)\s+(?:the\s+)?([\w-]+)\s+(?:div|container|element|section|method|class)", RegexOptions.IgnoreCase);
+
+            if (elementMatch.Success && containerMatch.Success)
+            {
+                var elementKeyword = elementMatch.Groups[1].Value.ToLowerInvariant();
+                var containerKeyword = containerMatch.Groups[1].Value.ToLowerInvariant();
+
+                if (elementKeyword != containerKeyword && elementKeyword.Length > 2 && containerKeyword.Length > 2)
+                {
+                    var contentLower = content.ToLowerInvariant();
+                    var containerIdx = contentLower.IndexOf(containerKeyword, StringComparison.Ordinal);
+                    if (containerIdx >= 0)
+                    {
+                        var elementIdx = contentLower.IndexOf(elementKeyword, containerIdx, StringComparison.Ordinal);
+                        if (elementIdx >= 0 && elementIdx - containerIdx < 500)
+                        {
+                            return (PreEditVerdict.AlreadyDone, $"'{elementKeyword}' already appears inside '{containerKeyword}' in the file");
+                        }
+                    }
+                }
+            }
+        }
+        // If the step asks to REMOVE a specific block of code, check if it's already gone.
+        if (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete "))
+        {
+            if (!string.IsNullOrWhiteSpace(step.OldString))
+            {
+                var oldStr = AgentUtilities.NormalizeLineEndings(step.OldString);
+                if (!content.Contains(oldStr, StringComparison.Ordinal))
+                {
+                    var trimOld = string.Join("\n", oldStr.Split('\n').Select(l => l.TrimEnd()));
+                    var trimFile = string.Join("\n", content.Split('\n').Select(l => l.TrimEnd()));
+                    if (!trimFile.Contains(trimOld, StringComparison.Ordinal))
+                        return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(step.Change))
+            {
+                // Extract quoted code or key identifiers from the change description to see if it's already gone.
+                // This is a fallback when OldString is not provided by the planner.
+                var codeMatch = Regex.Match(step.Change, @"`([^`]+)`|'([^']+)'");
+                if (codeMatch.Success)
+                {
+                    var codeToRemove = codeMatch.Groups[1].Value;
+                    if (!string.IsNullOrWhiteSpace(codeToRemove) && !content.Contains(codeToRemove, StringComparison.Ordinal))
+                        return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
                 }
             }
         }
@@ -3999,6 +4039,24 @@ emitSse, ct);
                 {
                     wipeReason = DetectMissingCreateTable(oldStr!, newStr!, fileContent, relPath);
                 }
+ 
+                // Enforce atomic steps: if the step says "Remove", the newString must NOT re-add the element elsewhere
+                var changeLower = (step.Change ?? "").ToLowerInvariant();
+                if (wipeReason == null &&  (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete ")))
+                {
+                    var elementMatch = Regex.Match(step.Change ?? "", @"(?:remove|delete)\s+(?:the\s+)?([\w-]+)\s+(?:div|element|span|button|table|code|block|method)", RegexOptions.IgnoreCase);
+                    if (elementMatch.Success)
+                    {
+                        var elementKeyword = elementMatch.Groups[1].Value;
+                        if (!string.IsNullOrWhiteSpace(elementKeyword) &&
+                            newStr!.Contains(elementKeyword, StringComparison.OrdinalIgnoreCase) &&
+                            newStr.Length > oldStr!.Length)
+                        {
+                            wipeReason = $"ATOMIC STEP VIOLATION — Step asks to REMOVE '{elementKeyword}', but newString contains it and is longer than oldString. " +
+                                         "For a REMOVE step, newString MUST be the anchor lines ONLY (the element is deleted). Do NOT add the element anywhere else in newString.";
+                        }
+                    }
+                }
 
                 if (wipeReason != null)
                 {
@@ -5940,9 +5998,9 @@ emitSse, ct);
         cacheLinePatterns,
         new[]
         {
-            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),  // if (x.length == 0)
-            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),         // if (!this.displayRadioFilters)
-            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),           // if (!X && Y)
+            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),  
+            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),         
+            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),           
         }
     }.SelectMany(x => x).ToArray();
 
@@ -5959,8 +6017,15 @@ emitSse, ct);
                 if (pat.IsMatch(trimmed)) { isCacheLine = true; break; }
             }
             if (!isCacheLine) continue;
-
-            // FIX: Compare using normalized whitespace instead of exact trimmed match
+ 
+            if (newStr.Contains("// Render explosion mesh here") ||
+                newStr.Contains("// TODO: implement") ||
+                newStr.Contains("// ... existing code ..."))
+            {
+                return "PLACEHOLDER DETECTED — newString replaced actual implementation logic with a placeholder comment. " +
+                       "You MUST copy the exact implementation from oldString and modify it, not replace it with a stub.";
+            }
+ 
             var normalizedOld = NormalizeForComparison(trimmed);
             if (!newLinesSet.Contains(normalizedOld))
                 lostCacheLines.Add(trimmed);
@@ -6021,7 +6086,7 @@ emitSse, ct);
             return false;
         return Regex.IsMatch(line,
             @"^\s*(?:(?:public|private|protected|internal|static|async|export|function|override|sealed|virtual|abstract|readonly|partial)\s+)*"
-            + @"(?:<[^>]+>\s*)?"                 // optional generic return type
+            + @"(?:<[^>]+>\s*)?"                  
             + @"~?\w+\s*\(",
             RegexOptions.Compiled);
     }
@@ -6231,12 +6296,8 @@ emitSse, ct);
         }
         return sb.ToString();
     }
-    /// <summary>
-    /// Checks the plan as a whole: every symbol a step REFERENCES (method, property,
-    /// array, variable) must either exist in the CURRENT file content or be INTRODUCED
-    /// by a PRIOR step. Catches cross-step name mismatches and missing initializations
-    /// before execution starts.
-    /// </summary>
+
+
     private async Task<AgentPlan> RunPlanCoherenceCheckAsync(
         AgentPlan plan,
         string projectRoot,
@@ -6260,7 +6321,6 @@ emitSse, ct);
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
 
-        // Load current content of every file the plan touches
         sb.AppendLine("## CURRENT FILE CONTENTS");
         var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var step in plan.Plan)
@@ -6359,7 +6419,6 @@ emitSse, ct);
                 }
             }
 
-            // Apply the corrected plan if it's at least as large as the original
             if (root.TryGetProperty("correctedPlan", out var cpArr) && cpArr.ValueKind == JsonValueKind.Array)
             {
                 var corrected = new List<PlanStep>();
@@ -6494,7 +6553,6 @@ emitSse, ct);
         var warnings = new List<string>();
         if (string.IsNullOrWhiteSpace(css)) return (css, warnings);
 
-        // ── Parse CSS into top-level rules ──
         var rules = new List<CssRule>();
         var i = 0;
         var depth = 0;
@@ -6559,7 +6617,6 @@ emitSse, ct);
                     selectorStart = i;
                     continue;
                 }
-                // It's a block at-rule — find matching close brace
                 var blockDepth = 1;
                 var k = j + 1;
                 while (k < css.Length && blockDepth > 0)
@@ -6702,7 +6759,6 @@ emitSse, ct);
             if (colonIdx <= 0) continue;
 
             var prop = stripped[..colonIdx].Trim();
-            // Value is everything between colon and the trailing ';'
             var value = stripped[(colonIdx + 1)..].TrimEnd(';').Trim();
             var indent = LeadingWhitespaceCss(line);
             props.Add((prop, value, indent));
@@ -6750,7 +6806,6 @@ emitSse, ct);
                     var existingItems = cardObj["_plan"]?.AsObject()?["items"] as JsonArray;
                     if (append && existingItems != null)
                     {
-                        // Preserve existing plan items, mark them as done
                         foreach (var existing in existingItems)
                         {
                             if (existing is JsonObject eo)
@@ -6850,7 +6905,6 @@ emitSse, ct);
         string projectRoot, bool emitSse, CancellationToken ct,
         int stepIndex, List<object> allResults, string? cardId)
     {
-        // ── Detect method signature change ──────────────────────────────
         var oldMatch = MethodDeclRegex.Match(oldStr);
         var newMatch = MethodDeclRegex.Match(newStr);
         if (!oldMatch.Success || !newMatch.Success)
@@ -6859,17 +6913,16 @@ emitSse, ct);
         var oldMethodName = oldMatch.Groups[1].Value;
         var newMethodName = newMatch.Groups[1].Value;
         if (!string.Equals(oldMethodName, newMethodName, StringComparison.Ordinal))
-            return stepIndex; // different method — not a signature change
+            return stepIndex; 
 
         var oldParams = oldMatch.Groups[2].Value;
         var newParams = newMatch.Groups[2].Value;
         if (string.Equals(oldParams, newParams, StringComparison.Ordinal))
-            return stepIndex; // params identical — not a signature change
+            return stepIndex; 
 
         await EmitLog(emitSse, "info",
             $"Method signature change detected: {oldMethodName}({oldParams}) → {newMethodName}({newParams}). Searching for call sites...", ct: ct);
 
-        // ── Find all .cs files in the project ──────────────────────────
         var csFiles = new List<string>();
         try
         {
@@ -6890,16 +6943,14 @@ emitSse, ct);
             return stepIndex;
         }
 
-        // ── Find files containing the method name ──────────────────────
         var methodNameLower = oldMethodName.ToLowerInvariant();
         var candidateFiles = new List<string>();
         foreach (var f in csFiles)
         {
             if (string.Equals(f, fullPath, StringComparison.OrdinalIgnoreCase))
-                continue; // skip the file that was just edited
+                continue; 
             try
             {
-                // Quick check: does the file contain the method name?
                 using var sr = new StreamReader(f, Encoding.UTF8);
                 var firstFewKb = new char[4096];
                 var read = await sr.ReadAsync(firstFewKb, 0, firstFewKb.Length);
@@ -6919,7 +6970,6 @@ emitSse, ct);
         await EmitLog(emitSse, "info",
             $"Found {candidateFiles.Count} file(s) containing '{oldMethodName}' — checking for call sites...", ct: ct);
 
-        // ── For each candidate file, use LLM to find and fix call sites ─
         foreach (var candidateFile in candidateFiles)
         {
             ct.ThrowIfCancellationRequested();
@@ -6976,7 +7026,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "info",
                 $"  {candidateRelPath}: {callSiteEdits.Count} call site edit(s) suggested", ct: ct);
 
-            // ── Apply each suggested call site edit ─────────────────
             var fileContentMut = fileContent;
             var appliedCount = 0;
             foreach (var edit in callSiteEdits)
@@ -7066,7 +7115,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             OldString = si["oldString"]?.GetValue<string>() ?? "",
                             NewString = si["newString"]?.GetValue<string>() ?? ""
                         };
-                        // Use stored index if available, otherwise position in array
+
                         var idx = si["index"]?.GetValue<int>() ?? i;
                         steps.Add(step);
                         var done = si["done"]?.GetValue<bool>() ?? false;
@@ -8234,149 +8283,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         return (allSteps, plan, complete);
     }
-    /// <summary>
-    /// Produces a compact version of the exploration context for the edit-resolve LLM:
-    /// - Removes the target file entirely (it is already shown in the main prompt)
-    /// - For each auxiliary file: keeps imports, type/class declarations, property signatures,
-    ///   and a ±3-line window around any keyword/symbol match — strips method bodies
-    /// - Caps output at maxChars so the edit LLM isn't overwhelmed with unrelated code
-    /// </summary>
-    private static string DistillExplorationContext(
-        string explorationContext,
-        string targetRelPath,
-        string changeDesc,
-        string? targetSymbol,
-        int maxChars = 7_000)
-    {
-        if (string.IsNullOrWhiteSpace(explorationContext)) return "";
 
-        var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
-            .Where(k => k.Length >= 4)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (!string.IsNullOrWhiteSpace(targetSymbol))
-            keywords.Add(targetSymbol);
-
-        var normalizedTarget = targetRelPath.Replace('\\', '/');
-
-        // Split on section headers ("### ") — each file read in the loop produces one section
-        var sections = Regex.Split(explorationContext.Trim(), @"(?=^### )", RegexOptions.Multiline);
-        var result = new StringBuilder();
-
-        foreach (var rawSection in sections)
-        {
-            if (string.IsNullOrWhiteSpace(rawSection)) continue;
-
-            // Skip the target file — already shown verbatim in the main prompt
-            var firstLine = rawSection.Split('\n')[0];
-            if (firstLine.Contains("TARGET FILE:", StringComparison.OrdinalIgnoreCase)) continue;
-            var sectionPath = Regex.Match(firstLine, @"###\s+([^\s(]+)").Groups[1].Value
-                .Replace('\\', '/').Trim();
-            if (string.Equals(sectionPath, normalizedTarget, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var distilled = DistillFileSection(rawSection, keywords);
-            if (string.IsNullOrWhiteSpace(distilled)) continue;
-
-            var budget = maxChars - result.Length;
-            if (budget < 100) { result.AppendLine("... [context budget exhausted]"); break; }
-            if (distilled.Length > budget)
-                distilled = distilled[..budget] + "\n    // ... [truncated]";
-            result.AppendLine(distilled);
-        }
-
-        return result.ToString();
-    }
-
-    /// <summary>
-    /// From a single "### filepath\n```\n...\n```" section, extracts:
-    /// - First 20 lines of the code block (imports + class/type declarations)
-    /// - ±3 lines around any line that contains a keyword or target symbol
-    /// Skips all other implementation lines, reducing an average file from
-    /// 3 000+ chars to ~400–800 chars while preserving type information.
-    /// </summary>
-    private static string DistillFileSection(string section, HashSet<string> keywords, int maxCharsPerSection = 1_800)
-    {
-        var lines = section.Split('\n');
-        var headerLines = new List<string>();
-        var codeLines = new List<string>();
-        var openingFence = "";
-        var inFence = false;
-        var pastFirstFence = false;
-
-        foreach (var line in lines)
-        {
-            var trimmed = line.TrimStart();
-            if (trimmed.StartsWith("```"))
-            {
-                if (!pastFirstFence)
-                {
-                    pastFirstFence = true;
-                    inFence = true;
-                    openingFence = line;
-                }
-                else if (inFence)
-                {
-                    inFence = false;
-                    break; // stop after the first code block
-                }
-                continue;
-            }
-            if (inFence)
-                codeLines.Add(line);
-            else
-                headerLines.Add(line);
-        }
-
-        if (codeLines.Count == 0)
-            return string.Join("\n", headerLines); // prose-only section, keep as-is
-
-        // ── Determine which code lines to include ────────────────────────────
-        var included = new SortedSet<int>();
-
-        // Always include the first 20 lines — imports and type declarations live here
-        for (var i = 0; i < Math.Min(20, codeLines.Count); i++)
-            included.Add(i);
-
-        // Include ±3 lines around any keyword match throughout the rest of the file
-        for (var i = 20; i < codeLines.Count; i++)
-        {
-            if (keywords.Count == 0) break;
-            if (keywords.Any(kw => codeLines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
-            {
-                for (var w = Math.Max(0, i - 3); w <= Math.Min(codeLines.Count - 1, i + 3); w++)
-                    included.Add(w);
-            }
-            // Matches: `async methodName(...)`, `public methodName(...): Type`, `methodName(...) {`
-            if (Regex.IsMatch(codeLines[i], @"^\s*((public|private|protected|static|async|export|function|get|set)\s+)*\w+\s*(<[^>]+>)?\s*\([^)]*\)\s*(:\s*[^{;]+)?\s*[{;]", RegexOptions.IgnoreCase))
-            {
-                // Keep the signature and the next 5 lines (body/return type)
-                for (var w = Math.Max(0, i - 1); w <= Math.Min(codeLines.Count - 1, i + 5); w++)
-                    included.Add(w);
-            }
-        }
-
-        // ── Build output, inserting gap markers between non-contiguous ranges ─
-        var result = new List<string>(headerLines) { openingFence };
-        var prevIdx = -2;
-
-        foreach (var idx in included)
-        {
-            if (prevIdx >= 0 && idx > prevIdx + 1)
-                result.Add("    // ...");
-            result.Add(codeLines[idx]);
-            prevIdx = idx;
-        }
-
-        if (prevIdx < codeLines.Count - 1)
-            result.Add("    // ...");
-
-        result.Add("```");
-
-        var output = string.Join("\n", result);
-        return output.Length > maxCharsPerSection
-            ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
-            : output;
-    }
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
         var sb = new StringBuilder();
@@ -9342,6 +9249,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("1. Is the original task fully implemented? Evaluate ONLY against what the original task asks for.");
         sb.AppendLine("   Ignore existing code that predates this task — the task may be meant to REPLACE it.");
         sb.AppendLine("   CRITICAL: If the task asks to MOVE code, SEARCH THE ENTIRE FILE for the code in its new location. Do NOT report it as 'missing' or 'not moved' just because it is no longer in its original spot. Verify the actual file content provided above.");
+        sb.AppendLine("   CRITICAL: If the requested content is physically present in the file, even if the formatting or nesting is slightly incorrect, the task is COMPLETE. Do NOT report a failure for minor formatting issues.");
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");

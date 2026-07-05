@@ -128,7 +128,7 @@
     vm.streamingStableCount = 0;
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
-    vm.logFontSize = 10;
+    vm.logFontSize = 18;
     vm.pendingContextReview = null;
     vm.contextReviewCountdown = 0;
     vm.contextReviewTimer = null;
@@ -195,7 +195,7 @@
     };
 
     vm.increaseLogFont = function () {
-      vm.logFontSize = Math.min(vm.logFontSize + 2, 24);
+      vm.logFontSize = Math.min(vm.logFontSize + 2, 32);
     };
     vm.decreaseLogFont = function () {
       vm.logFontSize = Math.max(vm.logFontSize - 2, 6);

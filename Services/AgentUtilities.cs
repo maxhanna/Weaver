@@ -356,6 +356,136 @@ public static class AgentUtilities
 
         return plan;
     }
+
+    public static string DistillExplorationContext(
+        string explorationContext,
+        string targetRelPath,
+        string changeDesc,
+        string? targetSymbol,
+        int maxChars = 7_000)
+    {
+        if (string.IsNullOrWhiteSpace(explorationContext)) return "";
+
+        var keywords = AgentUtilities.ExtractMeaningfulKeywords(changeDesc.ToLowerInvariant())
+            .Where(k => k.Length >= 4)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(targetSymbol))
+            keywords.Add(targetSymbol);
+
+        var normalizedTarget = targetRelPath.Replace('\\', '/');
+
+        // Split on section headers ("### ") — each file read in the loop produces one section
+        var sections = Regex.Split(explorationContext.Trim(), @"(?=^### )", RegexOptions.Multiline);
+        var result = new StringBuilder();
+
+        foreach (var rawSection in sections)
+        {
+            if (string.IsNullOrWhiteSpace(rawSection)) continue;
+
+            // Skip the target file — already shown verbatim in the main prompt
+            var firstLine = rawSection.Split('\n')[0];
+            if (firstLine.Contains("TARGET FILE:", StringComparison.OrdinalIgnoreCase)) continue;
+            var sectionPath = Regex.Match(firstLine, @"###\s+([^\s(]+)").Groups[1].Value
+                .Replace('\\', '/').Trim();
+            if (string.Equals(sectionPath, normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var distilled = DistillFileSection(rawSection, keywords);
+            if (string.IsNullOrWhiteSpace(distilled)) continue;
+
+            var budget = maxChars - result.Length;
+            if (budget < 100) { result.AppendLine("... [context budget exhausted]"); break; }
+            if (distilled.Length > budget)
+                distilled = distilled[..budget] + "\n    // ... [truncated]";
+            result.AppendLine(distilled);
+        }
+
+        return result.ToString();
+    }
+
+    private static string DistillFileSection(string section, HashSet<string> keywords, int maxCharsPerSection = 1_800)
+    {
+        var lines = section.Split('\n');
+        var headerLines = new List<string>();
+        var codeLines = new List<string>();
+        var openingFence = "";
+        var inFence = false;
+        var pastFirstFence = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("```"))
+            {
+                if (!pastFirstFence)
+                {
+                    pastFirstFence = true;
+                    inFence = true;
+                    openingFence = line;
+                }
+                else if (inFence)
+                {
+                    inFence = false;
+                    break; // stop after the first code block
+                }
+                continue;
+            }
+            if (inFence)
+                codeLines.Add(line);
+            else
+                headerLines.Add(line);
+        }
+
+        if (codeLines.Count == 0)
+            return string.Join("\n", headerLines); // prose-only section, keep as-is
+
+        // ── Determine which code lines to include ────────────────────────────
+        var included = new SortedSet<int>();
+
+        // Always include the first 20 lines — imports and type declarations live here
+        for (var i = 0; i < Math.Min(20, codeLines.Count); i++)
+            included.Add(i);
+
+        // Include ±3 lines around any keyword match throughout the rest of the file
+        for (var i = 20; i < codeLines.Count; i++)
+        {
+            if (keywords.Count == 0) break;
+            if (keywords.Any(kw => codeLines[i].Contains(kw, StringComparison.OrdinalIgnoreCase)))
+            {
+                for (var w = Math.Max(0, i - 3); w <= Math.Min(codeLines.Count - 1, i + 3); w++)
+                    included.Add(w);
+            }
+            // Matches: `async methodName(...)`, `public methodName(...): Type`, `methodName(...) {`
+            if (Regex.IsMatch(codeLines[i], @"^\s*((public|private|protected|static|async|export|function|get|set)\s+)*\w+\s*(<[^>]+>)?\s*\([^)]*\)\s*(:\s*[^{;]+)?\s*[{;]", RegexOptions.IgnoreCase))
+            {
+                // Keep the signature and the next 5 lines (body/return type)
+                for (var w = Math.Max(0, i - 1); w <= Math.Min(codeLines.Count - 1, i + 5); w++)
+                    included.Add(w);
+            }
+        }
+
+        // ── Build output, inserting gap markers between non-contiguous ranges ─
+        var result = new List<string>(headerLines) { openingFence };
+        var prevIdx = -2;
+
+        foreach (var idx in included)
+        {
+            if (prevIdx >= 0 && idx > prevIdx + 1)
+                result.Add("    // ...");
+            result.Add(codeLines[idx]);
+            prevIdx = idx;
+        }
+
+        if (prevIdx < codeLines.Count - 1)
+            result.Add("    // ...");
+
+        result.Add("```");
+
+        var output = string.Join("\n", result);
+        return output.Length > maxCharsPerSection
+            ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
+            : output;
+    }
     /// <summary>
     /// Fixes indentation for multiline method arguments inside (), [], and {}
     /// when the LLM or ReindentByBraceDepth flattens them to the base indent.
