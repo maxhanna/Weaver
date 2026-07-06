@@ -1531,6 +1531,15 @@
       return vm.benchmarkPlanNames[level] || null;
     };
 
+    vm.formatBenchmarkDuration = function (ms) {
+      if (!ms) return '';
+      var secs = Math.floor(ms / 1000);
+      if (secs >= 60) {
+        return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+      }
+      return secs + 's';
+    };
+
     vm.openBenchmarksPanel = function () {
       vm.showBenchmarksPanel = true;
       vm.benchmarkRunning = false;
@@ -2126,6 +2135,8 @@
           vm.activeCardText = card.text;
           card._lastRunText = card.text;
 
+          vm._agentStartTime = Date.now();
+
           var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
           var payload = {
             prompt: card.text,
@@ -2385,6 +2396,16 @@
                             vm.streamingActive = false;
                             resumeTerminalPolling();
                             vm.steeringContext = '';
+                            var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
+                            var elapsedStr = '';
+                            if (elapsed > 0) {
+                              var secs = Math.floor(elapsed / 1000);
+                              if (secs >= 60) {
+                                elapsedStr = Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+                              } else {
+                                elapsedStr = secs + 's';
+                              }
+                            }
                             var editsApplied = parsed && parsed.editsApplied;
                             if (!editsApplied && !vm.activeCardId) {
                               vm.stopAgent();
@@ -2392,7 +2413,8 @@
                             var incomplete = parsed && parsed.incomplete;
                             if (parsed && parsed.warning) vm.aiResponse = parsed.warning;
                             pushAgentLog(editsApplied ? 'info' : 'warn', editsApplied ? 'Agent finished' : 'Agent finished without file edits',
-                              { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning });
+                              { filesEdited: (parsed && parsed.filesEdited) ? parsed.filesEdited.length : 0, warning: parsed && parsed.warning, duration: elapsedStr || undefined });
+                            pushAgentLog('info', '⏱ ' + (elapsedStr || elapsed + 'ms'));
                             var finalThinking = (parsed && parsed.thinking) || vm.streamingThinking;
                             var finalSummary = (parsed && parsed.summary) || vm.streamingSummary;
                             var finalSteps = (parsed && parsed.steps) ? parsed.steps.map(normalizeStep) : angular.copy(vm.streamingSteps);
@@ -2447,6 +2469,7 @@
                                 if (total === 0) total = vm.planItems.length;
                               }
                               if (total === 0) total = 1;
+                              var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                               var scoreData = {
                                 level: card._benchmarkLevel || 1,
                                 stepsCompleted: completed,
@@ -2455,6 +2478,7 @@
                                 status: completed === total ? 'completed' : completed > 0 ? 'partial' : 'failed',
                                 failedSteps: [],
                                 modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                durationMs: elapsed,
                                 errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
                               };
                               $http.post('/api/benchmark/save-score', scoreData).then(function () {
@@ -2573,10 +2597,12 @@
                             vm.activeCardId = null;
                             vm.activeCardIds = new Set();
                             if (card._benchmark) {
+                              var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                               var scoreData = {
                                 level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
                                 scorePercent: 0, status: 'error',
                                 modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                durationMs: elapsed,
                                 errorReason: parsed ? parsed.message : data
                               };
                               $http.post('/api/benchmark/save-score', scoreData);
@@ -2600,10 +2626,12 @@
                   vm.activeCardId = null;
                   vm.activeCardIds = new Set();
                   if (card._benchmark) {
+                    var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
                     var scoreData = {
                       level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
                       scorePercent: 0, status: 'error',
                       modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                      durationMs: elapsed,
                       errorReason: vm.agentResult.error
                     };
                     $http.post('/api/benchmark/save-score', scoreData);
@@ -2938,6 +2966,7 @@
           if (total === 0) total = vm.planItems.length;
         }
         if (total === 0) total = 1;
+        var elapsed = vm._agentStartTime ? Date.now() - vm._agentStartTime : 0;
         var scoreData = {
           level: card._benchmarkLevel || 1,
           stepsCompleted: completed,
@@ -2945,6 +2974,7 @@
           scorePercent: Math.round((completed / total) * 1000) / 10,
           status: 'stopped',
           modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+          durationMs: elapsed,
           errorReason: 'User stopped agent'
         };
         $http.post('/api/benchmark/save-score', scoreData);

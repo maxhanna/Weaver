@@ -1054,6 +1054,7 @@
               <th style="text-align:left;padding:4px 8px;">Steps</th>
               <th style="text-align:left;padding:4px 8px;">Score</th>
               <th style="text-align:left;padding:4px 8px;">Status</th>
+              <th style="text-align:left;padding:4px 8px;">Duration</th>
               <th style="text-align:left;padding:4px 8px;">Model</th>
               <th style="width:24px;"></th>
             </tr>
@@ -1065,6 +1066,7 @@
               <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
               <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
               <td style="padding:4px 8px;">{{s.status}}</td>
+              <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
               <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}</td>
               <td style="padding:4px 8px;">
                 <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"

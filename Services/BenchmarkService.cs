@@ -30,6 +30,16 @@ public class BenchmarkService
             OsVersion = Environment.OSVersion.ToString()
         };
 
+        PopulateWindowsHardwareInfo(info);
+
+        return info;
+    }
+
+    private static void PopulateWindowsHardwareInfo(SystemInfo info)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
         try
         {
             using var searcher = new System.Management.ManagementObjectSearcher("SELECT * FROM Win32_Processor");
@@ -82,7 +92,6 @@ public class BenchmarkService
         }
         catch { /* WMI not available */ }
 
-        return info;
     }
 
     public List<BenchmarkScore> LoadScores()
@@ -199,10 +208,9 @@ public class BenchmarkService
                 Description = "Basic file creation and editing",
                 Steps = new List<BenchmarkStep>
                 {
-                    new() { Index = 1, Change = "Create a folder called 'benchmark_test' on the desktop" },
-                    new() { Index = 2, Change = "Create a file called 'test.md' inside the benchmark_test folder" },
-                    new() { Index = 3, Change = "In test.md write 'Hello world'" },
-                    new() { Index = 4, Change = "In test.md write 'The capital of France is Paris'" }
+                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_1' at the project root" },
+                    new() { Index = 2, Change = "Create a file called 'test.md' inside the benchmark_test_1 folder and write 'Hello world' in it" },
+                    new() { Index = 3, Change = "In benchmark_test_1/test.md append 'The capital of France is Paris'" }
                 }
             },
             new BenchmarkPlanDefinition
@@ -302,6 +310,7 @@ public class BenchmarkScore
     public string ModelUsed { get; set; } = "";
     public List<string> FailedSteps { get; set; } = new();
     public string? ErrorReason { get; set; }
+    public double DurationMs { get; set; }
 }
 
 public class SystemInfo

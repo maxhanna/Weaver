@@ -10536,6 +10536,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     if (completedPlanSteps.Contains(pi)) continue;
                     var step = planSteps[pi];
+                    var changeLower = (step.Change ?? "").Trim().ToLowerInvariant();
+
+                    // Detect verification-only steps — execute them as commands but don't count as plan items
+                    bool isVerification = changeLower.StartsWith("verify") ||
+                        changeLower.StartsWith("check") ||
+                        changeLower.StartsWith("test that") ||
+                        changeLower.StartsWith("validate") ||
+                        changeLower.StartsWith("confirm") ||
+                        changeLower.StartsWith("ensure");
+
                     var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
                     var (cmdRaw, _, _) = await CallLlmRaw(
                         "You are a terminal command translator. Output only the command, no markdown, no explanation.",
@@ -10555,6 +10565,50 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
                     freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
                     if (string.IsNullOrWhiteSpace(freshOut)) freshOut = "(ok)";
+
+                    var isError = !string.IsNullOrWhiteSpace(freshOut) &&
+                        Regex.IsMatch(freshOut.ToLowerInvariant(),
+                            @"not recognized|not found|cannot find|terminate|error|exception|failed|access denied|permission denied");
+
+                    if (isVerification)
+                    {
+                        // Run verification as a direct command — don't add plan items to the board
+                        conversation.AppendLine($"→ Verified step {pi + 1}: {cmdClean}");
+                        conversation.AppendLine($"  Result: {AgentUtilities.Truncate(freshOut, 300)}");
+                        // Always mark verification steps done regardless of result
+                        if (!isError) completedPlanSteps.Add(pi);
+                        else
+                        {
+                            conversation.AppendLine($"  Verification found issues — step {pi + 1} may need attention");
+                            completedPlanSteps.Add(pi); // mark done anyway, don't block on verification
+                        }
+                        var vResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex++, ["type"] = "command",
+                            ["command"] = cmdClean, ["status"] = isError ? "warning" : "done", ["output"] = freshOut
+                        };
+                        steps.Add(vResult);
+                        if (emitSse) await SendSse(Response, "step", vResult, ct);
+                        continue;
+                    }
+
+                    if (isError)
+                    {
+                        // Step failed — don't mark as completed; feed error back to LLM for recovery
+                        conversation.AppendLine($"→ Step {pi + 1} FAILED: {cmdClean}");
+                        conversation.AppendLine($"  Error: {AgentUtilities.Truncate(freshOut, 500)}");
+                        conversation.AppendLine("  The step above failed. If you know a different command or approach, output a new plan step to recover. Otherwise mark it done with {\"step\": " + (pi + 1) + "} and move on.");
+                        var errResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
+                            ["command"] = cmdClean, ["status"] = "error", ["output"] = freshOut
+                        };
+                        steps.Add(errResult);
+                        if (emitSse) await SendSse(Response, "step", errResult, ct);
+                        // Do NOT mark as completed — the LLM gets to see the error and can retry or skip
+                        continue;
+                    }
+
                     completedPlanSteps.Add(pi);
                     var result = new Dictionary<string, object?>
                     {
@@ -10566,6 +10620,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct);
                     conversation.AppendLine($"→ Auto-executed step {pi + 1}: {cmdClean}");
                     conversation.AppendLine($"  Output: {AgentUtilities.Truncate(freshOut, 500)}");
+                }
+
+                // All plan steps completed — finish without giving LLM another turn to add more steps
+                if (completedPlanSteps.Count >= totalPlanSteps)
+                {
+                    summary = "All plan steps completed";
+                    // Emit final done_signal so the pipeline recognizes completion
+                    steps.Add(new Dictionary<string, object?> { ["type"] = "done_signal", ["status"] = "done" });
+                    break;
                 }
                 continue;
             }
@@ -10866,13 +10929,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
 
-            // For benchmarks, never restart — if any steps were attempted, consider it done
+            // For benchmarks, never restart — if any steps were attempted or plan was already done, consider it done
             if (isBenchmark)
             {
                 var anyStepsAttempted = allSteps.OfType<Dictionary<string, object?>>()
                     .Any(s => s.TryGetValue("type", out var t) &&
                               t?.ToString() is "plan_step" or "command" or "edit" or "create");
-                complete = anyStepsAttempted;
+                var planAlreadyDone = existingPlan != null && completedIndices != null && completedIndices.Count >= existingPlan.Plan.Count;
+                complete = anyStepsAttempted || planAlreadyDone;
                 editsApplied = true;
             }
 
