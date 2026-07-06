@@ -1255,9 +1255,45 @@ public class AgentController : ControllerBase
             using var jDoc = JsonDocument.Parse(cleaned);
             var jRoot = jDoc.RootElement;
 
-            // Already done
+            // Already done 
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
-            {
+            { 
+
+                var (verdict, _) = PreEditValidation(fileContent, step);
+                if (verdict == PreEditVerdict.AlreadyDone)
+                {
+                    return (null, null, false, null, true, null, false);
+                }
+ 
+                var changeLower = (step.Change ?? "").ToLowerInvariant();
+                var contentLower = (fileContent ?? "").ToLowerInvariant();
+
+                var stopWords = new HashSet<string> {
+                    "the", "and", "for", "with", "that", "this", "from", "into", "file",
+                    "method", "function", "code", "step", "create", "modify", "update",
+                    "change", "add", "remove", "delete", "implement", "ensure", "make",
+                    "user", "their", "your", "will", "should", "must", "have", "been",
+                    "which", "where", "when", "then", "them", "they", "were", "what",
+                    "have", "has", "had", "does", "doing", "wants", "want"
+                };
+
+                var keywords = Regex.Matches(changeLower, @"\b[a-z]{4,}\b")
+                    .Select(m => m.Value)
+                    .Where(w => !stopWords.Contains(w))
+                    .Distinct()
+                    .Take(4)
+                    .ToList();
+
+                var missingKeywords = keywords.Where(k => !contentLower.Contains(k)).ToList();
+
+                if (missingKeywords.Count > 0)
+                {
+                    return (null, null, false, null, false,
+                        $"LLM returned {{\"alreadyDone\": true}} but file content is missing keywords: [{string.Join(", ", missingKeywords)}]. " +
+                        "Do NOT claim alreadyDone if the requested functionality is missing from the CURRENT FILE CONTENT above. " +
+                        "Output the actual edit instead.", false);
+                }
+
                 return (null, null, false, null, true, null, false);
             }
 
@@ -7838,11 +7874,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return deterministic.Concat(candidates).Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
     }
 
-
-    // ═══════════════════════════════════════════════════════════════════════
-    //  ORCHESTRATOR
-    // ═══════════════════════════════════════════════════════════════════════
-
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> Orchestrate(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct = default,
         List<string>? attachedFiles = null, bool skipContextReview = false,
@@ -7866,49 +7897,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── Fast-path: "fix the build" — skip discovery, go straight to repair ─
         var fixBuildMatch = Regex.Match(prompt.ToLowerInvariant(),
             @"fix\s+(all\s+)?(the\s+)?build\s+(errors?|warnings?|issues?)");
-        if (fixBuildMatch.Success)
+        if (fixBuildMatch.Success && buildCommands != null && buildCommands.Trim().Length > 0)
         {
-            await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);
-            var cfg = await _configFile.LoadConfigAsync();
-            var cmds = ParseBuildCommands(cfg.buildCommands);
-            string? buildOutput = null;
-            if (cmds.Count > 0)
-            {
-                _terminal.Start();
-                foreach (var cmd in cmds)
-                {
-                    await _terminal.SendCommandAsync(cmd, projectRoot);
-                    await Task.Delay(3000);
-                }
-                buildOutput = _terminal.ReadAll();
-            }
-            var resultSteps = new List<object>();
-            await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
-            return (resultSteps, null, true);
+            return await RepairBuildPipeline(prompt, projectRoot, emitSse, buildCommands, ct);
+        }
+        else if (buildCommands == null || buildCommands.Trim().Length == 0)
+        {
+            await EmitLog(emitSse, "warn", "Build repair prompt detected but no build commands provided — skipping repair.", ct: ct);
         }
 
-        // ── Resume from existing plan (skip replanning) ─────────────────────
         if (existingPlan != null && existingPlan.Plan.Count > 0)
         {
             var resumeSteps = new List<object>();
-            // ... existing code ...
             await ExecutePlan(prompt, projectRoot, emitSse, "", existingPlan, ct, resumeSteps,
                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                 completedStepIndices: completedStepIndices, cardId: cardId);
 
-            // FIX: Check for step errors before declaring complete
             var resumeHasErrors = resumeSteps.OfType<Dictionary<string, object?>>()
                 .Any(s => s.TryGetValue("status", out var st) && st?.ToString() == "error");
 
             var allStepsAlreadyDone = completedStepIndices != null && completedStepIndices.Count >= existingPlan.Plan.Count;
-
-            // FIX: Don't mark complete if there are errors
             bool resumeComplete = !resumeHasErrors && ((resumeSteps.Count > 0) || allStepsAlreadyDone);
 
-            if (resumeHasErrors)
-            {
-                await EmitLog(emitSse, "error",
-                    "Resumed plan has step errors — task NOT complete", ct: ct);
+            if (resumeHasErrors) {
+                await EmitLog(emitSse, "error", "Resumed plan has step errors — task NOT complete", ct: ct);
             }
 
             return (resumeSteps, existingPlan, resumeComplete);
@@ -7917,7 +7929,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var (pipelineType, cmdScore, editScore) = AgentUtilities.ClassifyTask(prompt);
         await EmitLog(emitSse, "info",
             $"Router → {pipelineType}",
-            new { CommandScore = cmdScore, EditScore = editScore }, ct: ct);
+            new { CommandScore = cmdScore, EditScore = editScore, BuildCommands = buildCommands }, ct: ct);
  
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
  
@@ -8301,6 +8313,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (allSteps, plan, complete);
     }
 
+    private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> RepairBuildPipeline(string prompt, string projectRoot, bool emitSse, string? buildCommands, CancellationToken ct)
+    {
+        await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);
+        var cmds = ParseBuildCommands(buildCommands);
+        string? buildOutput = null;
+        if (cmds.Count > 0)
+        {
+            _terminal.Start();
+            foreach (var cmd in cmds)
+            {
+                await _terminal.SendCommandAsync(cmd, projectRoot);
+                await Task.Delay(3000);
+            }
+            buildOutput = _terminal.ReadAll();
+        }
+        var resultSteps = new List<object>();
+        await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
+        return (resultSteps, null, true);
+    }
+
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
         var sb = new StringBuilder();
@@ -8474,21 +8506,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             failedCodeSnippets.AppendLine();
         }
 
-        // Read current content of all files that were modified or attached
-        var fileContents = new StringBuilder();
-        var pathsToRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var step in executedSteps.OfType<Dictionary<string, object?>>())
+        (StringBuilder fileContents, string warn) = await AgentUtilities.GetReplanFileContents(executedSteps, projectRoot, attachedFiles, ct);
+        if (!string.IsNullOrEmpty(warn) && emitSse)
         {
-            var p = step.GetValueOrDefault("path")?.ToString();
-            if (!string.IsNullOrWhiteSpace(p)) pathsToRead.Add(p.Replace('\\', '/'));
-        }
-        if (attachedFiles != null)
-        {
-            foreach (var f in attachedFiles) pathsToRead.Add(f.Replace('\\', '/'));
-        }
-
-        // ... (existing file reading code stays the same) ...
-        // [keep the existing typeFilesToInclude logic here]
+            await EmitLog(emitSse, "warn", warn, ct: ct);
+        } 
 
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
             steeringContext, existingPlan, executedSteps, qualityCheckReason,
@@ -9549,15 +9571,61 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (planFile.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
             {
-                var stepSkipped = false;
                 await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
-                var prevCount = allResults.Count;
-                var cr = await HandleCreateFile(changeDesc, projectRoot, prompt, discoveryContext, stepIndex, emitSse, ct, null, attachedFiles);
-                stepIndex += cr.stepsCount; allResults.AddRange(cr.results);
-                await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
-                planItems = await TryReplanAfterStep(prompt, allResults, plan,
-                    steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
-                    stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "create",
+                        status = "running",
+                        path = changeDesc,
+                        description = item.Change,
+                        planItemIndex = itemIdx
+                    }, ct);
+
+                var newFileRelPath = changeDesc;
+                var newFileFullPath = Path.GetFullPath(Path.Combine(projectRoot, newFileRelPath.Replace('/', Path.DirectorySeparatorChar)));
+                var contentToWrite = item.NewString ?? "";
+
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(newFileFullPath)!);
+                    await System.IO.File.WriteAllTextAsync(newFileFullPath, contentToWrite, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "success", $"Created {newFileRelPath} ({contentToWrite.Length} chars)", ct: ct);
+
+                    var createResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "done",
+                        ["path"] = newFileRelPath,
+                        ["description"] = item.Change,
+                        ["planItemIndex"] = itemIdx
+                    };
+
+                    // BUG #4 FIX: Send the completion event and persist the step status
+                    if (emitSse) await SendSse(Response, "step", createResult, ct);
+                    allResults.Add(createResult);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "error", $"Failed to create {newFileRelPath}: {ex.Message}", ct: ct);
+                    var errResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "error",
+                        ["path"] = newFileRelPath,
+                        ["error"] = ex.Message,
+                        ["planItemIndex"] = itemIdx
+                    };
+                    if (emitSse) await SendSse(Response, "step", errResult, ct);
+                    allResults.Add(errResult);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                }
+
+                stepIndex++;
                 continue;
             }
 

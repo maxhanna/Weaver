@@ -714,8 +714,15 @@ public static class AgentUtilities
 
         var frontendExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".html", ".js", ".css", ".mjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte" };
+        
         if (frontendExts.Contains(Path.GetExtension(name)))
-            return "wwwroot/";
+        {
+            var wwwrootPath = Path.Combine(projectRoot, "wwwroot");
+            if (Directory.Exists(wwwrootPath))
+            {
+                return "wwwroot/";
+            }
+        } 
 
         var configFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -2014,6 +2021,58 @@ public static class AgentUtilities
         var projectSegment = string.IsNullOrWhiteSpace(project) ? "" :
             project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
+    }
+
+    public static async Task<(StringBuilder fileContents, string warn)> GetReplanFileContents(List<object> executedSteps, string projectRoot, List<string>? attachedFiles, CancellationToken ct)
+    { 
+        var fileContents = new StringBuilder();
+        var pathsToRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string warn = "";
+        foreach (var step in executedSteps.OfType<Dictionary<string, object?>>())
+        {
+            var p = step.GetValueOrDefault("path")?.ToString();
+            if (!string.IsNullOrWhiteSpace(p)) pathsToRead.Add(p.Replace('\\', '/'));
+        }
+        if (attachedFiles != null) { foreach (var f in attachedFiles) pathsToRead.Add(f.Replace('\\', '/')); }
+
+        foreach (var relPath in pathsToRead)
+        {
+            if (string.IsNullOrWhiteSpace(relPath)) continue;
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(
+                    Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            catch
+            { 
+                continue;
+            }
+            if (!System.IO.File.Exists(fullPath)) continue;
+            if (!IsPathUnderRoot(fullPath, projectRoot)) continue;
+
+            try
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+ 
+                const int MaxCharsPerFile = 8000;
+                if (content.Length > MaxCharsPerFile)
+                    content = content[..MaxCharsPerFile]
+                              + $"\n… (truncated — full file is {content.Length} chars)";
+
+                fileContents.AppendLine($"### {relPath}");
+                fileContents.AppendLine("```");
+                fileContents.AppendLine(content);
+                fileContents.AppendLine("```");
+                fileContents.AppendLine();
+            }
+            catch (Exception ex)
+            { 
+                warn = $"Replan: could not read {relPath} for context: {ex.Message}";
+            }
+        }
+
+        return (fileContents, warn);
     }
 
     /// <summary>

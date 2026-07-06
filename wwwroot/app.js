@@ -334,15 +334,12 @@
         }
       });
     };
-
-    // NOTE: loadFileHints() is NOT called at init — vm.projects is still []
-    // at this point (loadConfig() is async and hasn't returned yet), so an
-    // init-time call produces a useless empty fileHintsData=[]. The real
-    // load happens in openSettingsPanel() when the user opens settings.
-
-    // Helper used by the template to safely access a project's hints array.
-    // Returns [] if the project has no entry in fileHintsData yet, so the
-    // template's ng-repeat never crashes on undefined.
+    
+    vm.getProjectBuildCommands = function (projectIndex) {
+      console.log(vm.projects, projectIndex);
+      if (!vm.projects || !vm.projects[projectIndex]) return '';
+      return vm.projects[projectIndex].BuildCommands || '';
+    }
     vm.getProjectHints = function (projectIndex) {
       if (!vm.fileHintsData) vm.fileHintsData = [];
       if (!vm.fileHintsData[projectIndex]) {
@@ -542,7 +539,6 @@
           if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
           if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
           vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
-          vm.buildCommands = cfg.buildCommands || "";
           vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
           vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
           vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
@@ -662,7 +658,6 @@
         cfg.showCalendar = vm.showCalendar !== false;
         cfg.prByDefault = vm.prByDefault !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
-        cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
@@ -1387,12 +1382,14 @@
       $http.post('/api/config/projects/add', {
         Name: vm.newProjectName,
         Path: vm.newProjectPath.replace(/\\/g, '/'),
-        Description: vm.newProjectDescription || ''
+        Description: vm.newProjectDescription || '',
+        BuildCommands: vm.newProjectBuildCommands || ''
       }).then(function () {
         vm.loadConfig();
         vm.newProjectName = '';
         vm.newProjectPath = '';
         vm.newProjectDescription = '';
+        vm.newProjectBuildCommands = '';
       }, function (err) {
         $window.alert('Failed to add project: ' + (err.data || err.statusText));
       });
@@ -1413,6 +1410,7 @@
         cfg.projects[idx].Name = p.Name;
         cfg.projects[idx].Path = newPath;
         cfg.projects[idx].Description = p.Description || '';
+        cfg.projects[idx].BuildCommands = p.BuildCommands || '';
         $http.post('/api/config/save', cfg).then(function () {
           vm.loadConfig();
         }, function (err) { $window.alert('Failed to save: ' + (err.data || err.statusText)); });
@@ -2148,7 +2146,7 @@
             cardId: card.id,
             isBenchmark: card._benchmark || false,
             benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) ? vm.systemInfoCustom.benchmarkProjectRoot : null,
-            buildCommands: vm.buildCommands || null,
+            buildCommands: vm.getProjectBuildCommands(proj) || null,
           };
 
           // Move to Doing

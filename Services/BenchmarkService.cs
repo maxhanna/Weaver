@@ -219,11 +219,10 @@ public class BenchmarkService
                 Name = "Benchmark 2",
                 Description = "Simple code generation",
                 Steps = new List<BenchmarkStep>
-                {
-                    new() { Index = 1, Change = "Create a file called 'hello.py' at the project root folder" },
-                    new() { Index = 2, Change = "In hello.py write a Python script that prints 'Hello, World!'" },
-                    new() { Index = 3, Change = "Modify hello.py to ask for the user's name and greet them" },
-                    new() { Index = 4, Change = "Create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console" }
+                { 
+                    new() { Index = 1, Change = "Create a file called 'hello.py' at the project root folder and write a Python script that prints 'Hello, World!' in it" },
+                    new() { Index = 2, Change = "Modify hello.py to ask for the user's name and greet them" },
+                    new() { Index = 3, Change = "Create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console" }
                 }
             },
             new BenchmarkPlanDefinition
