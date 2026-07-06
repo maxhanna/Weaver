@@ -1520,6 +1520,125 @@
       }
     };
 
+    // === Benchmarks ===
+    vm.benchmarkScores = [];
+    vm.benchmarkRunning = false;
+    vm.benchmarkLevel = null;
+    vm.selectedBenchmarkScore = null;
+    vm.benchmarkPlanNames = {};
+
+    vm.benchmarkLevelName = function (level) {
+      return vm.benchmarkPlanNames[level] || null;
+    };
+
+    vm.openBenchmarksPanel = function () {
+      vm.showBenchmarksPanel = true;
+      vm.benchmarkRunning = false;
+      vm.showSystemInfoEditor = false;
+      vm.systemInfoSaved = false;
+      $http.get('/api/benchmark/scores').then(function (resp) {
+        vm.benchmarkScores = resp.data || [];
+      }, function () {
+        vm.benchmarkScores = [];
+      });
+      $http.get('/api/benchmark/plans').then(function (resp) {
+        vm.benchmarkPlans = resp.data || [];
+        var names = {};
+        (resp.data || []).forEach(function (p) { names[p.level] = p.name; });
+        vm.benchmarkPlanNames = names;
+      }, function () {
+        vm.benchmarkPlans = [];
+      });
+      $http.get('/api/benchmark/system-info').then(function (resp) {
+        vm.systemInfoDetected = resp.data.detected || {};
+        vm.systemInfoCustom = resp.data.custom || { os: '', cpu: '', ramGb: null, gpu: '' };
+      }, function () {
+        vm.systemInfoDetected = {};
+        vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '' };
+      });
+      var backdrop = document.getElementById('backdrop');
+      if (backdrop) backdrop.style.display = 'block';
+    };
+
+    vm.saveSystemInfo = function () {
+      var data = {
+        os: vm.systemInfoCustom.os || null,
+        cpu: vm.systemInfoCustom.cpu || null,
+        ramGb: vm.systemInfoCustom.ramGb || null,
+        gpu: vm.systemInfoCustom.gpu || null
+      };
+      $http.post('/api/benchmark/system-info', data).then(function () {
+        vm.systemInfoSaved = true;
+        $timeout(function () { vm.systemInfoSaved = false; }, 2000);
+      }, function () {
+        $window.alert('Failed to save system info');
+      });
+    };
+
+    vm.resetSystemInfo = function () {
+      vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '' };
+      $http.post('/api/benchmark/system-info', { os: null, cpu: null, ramGb: null, gpu: null }).then(function () {
+        vm.systemInfoSaved = true;
+        $timeout(function () { vm.systemInfoSaved = false; }, 2000);
+      }, function () {
+        $window.alert('Failed to reset system info');
+      });
+    };
+
+    vm.closeBenchmarksPanel = function () {
+      vm.showBenchmarksPanel = false;
+      vm.selectedBenchmarkScore = null;
+      vm.benchmarkLevel = null;
+      var backdrop = document.getElementById('backdrop');
+      if (backdrop) backdrop.style.display = 'none';
+    };
+
+    vm.startBenchmark = function (level) {
+      if (vm.benchmarkRunning || vm.streamingActive) return;
+      vm.benchmarkRunning = true;
+      vm.benchmarkLevel = level;
+
+      $http.get('/api/benchmark/plans').then(function (resp) {
+        var plans = resp.data || [];
+        var plan = plans.find(function (p) { return p.level === level; });
+        if (!plan) {
+          vm.benchmarkRunning = false;
+          $window.alert('Benchmark level ' + level + ' not found');
+          return;
+        }
+
+        var fullPrompt = 'BENCHMARK TASK - Do these steps exactly in order:\n';
+        fullPrompt += '\n' + plan.name + ': ' + plan.description + '\n';
+        plan.steps.forEach(function (step) {
+          fullPrompt += step.index + '. ' + step.change + '\n';
+        });
+
+        var card = {
+          id: 'benchmark_' + level + '_' + Date.now(),
+          text: fullPrompt,
+          filePath: vm.selectedProject,
+          createdAt: new Date().toISOString(),
+          priority: 'high',
+          attached: [],
+          autoPr: false,
+          selfImproving: false,
+          createTests: false,
+          _benchmark: true,
+          _benchmarkLevel: level,
+          _benchmarkTotalSteps: plan.steps.length,
+          ready: true
+        };
+
+        vm.state.todo.push(card);
+        vm.saveCards();
+        vm.startCard(card);
+        vm.closeBenchmarksPanel();
+      }, function () {
+        vm.benchmarkRunning = false;
+        $window.alert('Failed to load benchmark plans');
+      });
+    };
+
     // === Cards (managed by KanbanMixin) ===
     KanbanMixin.init(vm, $scope);
     vm.countArchivedCards();
@@ -2290,19 +2409,64 @@
                               }
                             }
 
+                            function recordBenchmarkScore() {
+                              if (!card._benchmark) return;
+                              vm.benchmarkRunning = false;
+                              vm.benchmarkLevel = null;
+                              var completed = 0;
+                              var total = card._benchmarkTotalSteps || 0;
+                              if (vm.planItems && vm.planItems.length) {
+                                completed = vm.planItems.filter(function (pi) { return pi.done; }).length;
+                                if (total === 0) total = vm.planItems.length;
+                              }
+                              if (total === 0) total = 1;
+                              var scoreData = {
+                                level: card._benchmarkLevel || 1,
+                                stepsCompleted: completed,
+                                totalSteps: total,
+                                scorePercent: Math.round((completed / total) * 1000) / 10,
+                                status: completed === total ? 'completed' : completed > 0 ? 'partial' : 'failed',
+                                failedSteps: [],
+                                errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
+                              };
+                              $http.post('/api/benchmark/save-score', scoreData).then(function () {
+                                pushAgentLog('info', 'Benchmark score saved: ' + completed + '/' + total);
+                              }, function () {
+                                pushAgentLog('warn', 'Failed to save benchmark score');
+                              });
+                              // Delete the benchmark card
+                              var idx = vm.state.todo.indexOf(card);
+                              if (idx < 0) idx = vm.state.doing.indexOf(card);
+                              if (idx < 0) idx = vm.state.done.indexOf(card);
+                              if (idx >= 0) {
+                                var col = vm.state.todo.indexOf(card) >= 0 ? 'todo'
+                                  : vm.state.doing.indexOf(card) >= 0 ? 'doing' : 'done';
+                                vm.state[col].splice(idx, 1);
+                                vm.saveCards();
+                              }
+                            }
+
                             function finishCard() {
+                              // If this is a benchmark card and we're done (completed or max iterations reached), save score
+                              if (card._benchmark && !incomplete) {
+                                recordBenchmarkScore();
+                                return;
+                              }
                               if (!incomplete) {
                                 targetCol = card.selfImproving ? 'Self-Improving' : 'Done';
                                 pushAgentLog('log', `Plan completed — moving card to ${targetCol} column.`);
                                 vm.moveCardToDone(card);
                               }
                               if (incomplete && card.id === vm.activeCardId) {
-                                // Increment iteration counter; bail if too many restarts
                                 card._agentIteration = (card._agentIteration || 0) + 1;
                                 var MAX_ITERATIONS = 5;
                                 if (card._agentIteration >= MAX_ITERATIONS) {
                                   pushAgentLog('warn', 'Max iterations (' + MAX_ITERATIONS + ') reached — stopping');
                                   incomplete = false;
+                                  if (card._benchmark) {
+                                    recordBenchmarkScore();
+                                    return;
+                                  }
                                 } else {
                                   var pendingCount = 0;
                                   if (vm.planItems) {
@@ -2380,6 +2544,15 @@
                             vm.agentResult = { error: parsed ? parsed.message : data };
                             vm.activeCardId = null;
                             vm.activeCardIds = new Set();
+                            if (card._benchmark) {
+                              var scoreData = {
+                                level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
+                                scorePercent: 0, status: 'error', errorReason: parsed ? parsed.message : data
+                              };
+                              $http.post('/api/benchmark/save-score', scoreData);
+                              var idx2 = vm.state.doing.indexOf(card);
+                              if (idx2 >= 0) { vm.state.doing.splice(idx2, 1); vm.saveCards(); }
+                            }
                             break;
                         }
                       }
@@ -2396,6 +2569,15 @@
                   vm.agentResult = { error: 'Stream read error: ' + (readErr && readErr.message || readErr) };
                   vm.activeCardId = null;
                   vm.activeCardIds = new Set();
+                  if (card._benchmark) {
+                    var scoreData = {
+                      level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
+                      scorePercent: 0, status: 'error', errorReason: vm.agentResult.error
+                    };
+                    $http.post('/api/benchmark/save-score', scoreData);
+                    var idx3 = vm.state.doing.indexOf(card);
+                    if (idx3 >= 0) { vm.state.doing.splice(idx3, 1); vm.saveCards(); }
+                  }
                   $scope.$applyAsync();
                 });
               } catch (e) {
@@ -2716,6 +2898,24 @@
       }
       vm.activeCardId = null;
       vm.activeCardIds = new Set();
+      if (card && card._benchmark) {
+        var completed = 0;
+        var total = card._benchmarkTotalSteps || 0;
+        if (vm.planItems && vm.planItems.length) {
+          completed = vm.planItems.filter(function (pi) { return pi.done; }).length;
+          if (total === 0) total = vm.planItems.length;
+        }
+        if (total === 0) total = 1;
+        var scoreData = {
+          level: card._benchmarkLevel || 1,
+          stepsCompleted: completed,
+          totalSteps: total,
+          scorePercent: Math.round((completed / total) * 1000) / 10,
+          status: 'stopped',
+          errorReason: 'User stopped agent'
+        };
+        $http.post('/api/benchmark/save-score', scoreData);
+      }
     };
 
     vm.cancelPlanStep = function (card, stepIndex) {

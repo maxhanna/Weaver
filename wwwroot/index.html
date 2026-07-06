@@ -196,6 +196,7 @@
           <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit
             Projects</button>
           <button class="brand-link" ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
+          <button class="brand-link" ng-click="vm.openBenchmarksPanel(); vm.toggleProjectOptions()">📊 Benchmarks</button>
           <div class="form-row">
             <label>
               <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
@@ -1011,6 +1012,112 @@
       <div class="popup-footer">
         <button ng-click="vm.saveSettings()" class="primary">Save</button>
         <button ng-click="vm.closeSettingsPanel()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BENCHMARKS PANEL -->
+  <div class="popup-overlay" ng-if="vm.showBenchmarksPanel" ng-click="vm.closeBenchmarksPanel()">
+    <div class="popup-panel" style="max-width:600px;" ng-click="$event.stopPropagation()">
+      <div class="popup-header">
+        <strong>📊 Benchmarks</strong>
+        <button ng-click="vm.closeBenchmarksPanel()">✕</button>
+      </div>
+      <div class="popup-body">
+        <div style="margin-bottom:16px;">
+          <div ng-if="vm.benchmarkPlans.length > 0">
+            <div ng-repeat="plan in vm.benchmarkPlans" style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <strong>{{plan.name}}</strong>
+                  <span class="text-sm muted" style="margin-left:8px;">{{plan.description}}</span>
+                  <span class="text-xs muted" style="margin-left:4px;">({{plan.steps.length}} steps)</span>
+                </div>
+                <button ng-click="vm.startBenchmark(plan.level)" class="primary small"
+                  ng-disabled="vm.benchmarkRunning">▶ Run</button>
+              </div>
+            </div>
+          </div>
+          <div ng-if="!vm.benchmarkPlans || vm.benchmarkPlans.length === 0" class="text-sm muted" style="padding:8px 0;">
+            Loading benchmark plans...
+          </div>
+          <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark {{vm.benchmarkLevel}} running...</div>
+        </div>
+        <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
+          No benchmark scores yet. Run a benchmark above.
+        </div>
+        <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);">
+              <th style="text-align:left;padding:4px 8px;">Date</th>
+              <th style="text-align:left;padding:4px 8px;">Benchmark</th>
+              <th style="text-align:left;padding:4px 8px;">Steps</th>
+              <th style="text-align:left;padding:4px 8px;">Score</th>
+              <th style="text-align:left;padding:4px 8px;">Status</th>
+              <th style="text-align:left;padding:4px 8px;">Model</th>
+              <th style="width:24px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;" ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
+              <td style="padding:4px 8px;font-size:12px;">{{s.timestamp | date:'short'}}</td>
+              <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
+              <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
+              <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
+              <td style="padding:4px 8px;">{{s.status}}</td>
+              <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}</td>
+              <td style="padding:4px 8px;">
+                <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
+                  style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong style="font-size:13px;">System Specs</strong>
+            <button ng-click="vm.showSystemInfoEditor = !vm.showSystemInfoEditor" class="small"
+              style="font-size:11px;">{{vm.showSystemInfoEditor ? 'Done' : '✎ Edit'}}</button>
+          </div>
+          <div ng-if="!vm.showSystemInfoEditor" style="font-size:12px;">
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+              <span class="muted">OS:</span><span>{{vm.systemInfoDetected.os || '—'}}</span>
+              <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span>
+              <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') : (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') : '—')}}</span>
+              <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '—'}}</span>
+            </div>
+          </div>
+          <div ng-if="vm.showSystemInfoEditor" style="font-size:12px;">
+            <div style="margin-bottom:6px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">OS</label>
+              <input type="text" ng-model="vm.systemInfoCustom.os" placeholder="{{vm.systemInfoDetected.os}}"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            </div>
+            <div style="margin-bottom:6px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">CPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.cpu" placeholder="{{vm.systemInfoDetected.cpu}}"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            </div>
+            <div style="margin-bottom:6px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">RAM (GB)</label>
+              <input type="number" step="0.1" ng-model="vm.systemInfoCustom.ramGb" placeholder="e.g. 32"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            </div>
+            <div style="margin-bottom:8px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">GPU</label>
+              <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            </div>
+            <div style="display:flex;gap:6px;">
+              <button ng-click="vm.saveSystemInfo()" class="primary small">Save</button>
+              <button ng-click="vm.resetSystemInfo()" class="small">Reset to Detected</button>
+            </div>
+            <div ng-if="vm.systemInfoSaved" style="margin-top:6px;color:var(--accent);font-size:11px;">✓ Saved</div>
+          </div>
+        </div>
+      </div>
+      <div class="popup-footer">
+        <button ng-click="vm.closeBenchmarksPanel()">Close</button>
       </div>
     </div>
   </div>
