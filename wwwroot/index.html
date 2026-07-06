@@ -625,16 +625,21 @@
         <button ng-click="vm.closeEditProjectsPanel()">✕</button>
       </div>
       <div class="popup-body">
-        <div ng-repeat="p in vm.projects track by $index"
-          style="padding:6px 0; border-bottom:1px solid var(--border,#e0e0e0);">
-          <div style="display:flex; gap:6px; align-items:center;">
-            <input ng-model="p.Name" placeholder="Name" style="flex:2; min-width:0;" />
-            <input ng-model="p.Path" placeholder="Path" style="flex:3; min-width:0;" />
-            <input ng-model="p.Description" placeholder="Description" style="flex:3; min-width:0;" />
-            <button ng-click="vm.saveProject(p)" class="small primary" style="white-space:nowrap;">Save</button>
-            <button ng-click="vm.removeProject(p, $event)" class="small">Remove</button>
+          <div ng-repeat="p in vm.projects track by $index"
+            style="padding:6px 0; border-bottom:1px solid var(--border,#e0e0e0);">
+            <div style="display:flex; gap:6px; align-items:center;">
+              <input ng-model="p.Name" placeholder="Name" style="flex:2; min-width:0;" />
+              <input ng-model="p.Path" placeholder="Path" style="flex:3; min-width:0;" />
+              <input ng-model="p.Description" placeholder="Description" style="flex:3; min-width:0;" />
+              <button ng-click="vm.saveProject(p)" class="small primary" style="white-space:nowrap;">Save</button>
+              <button ng-click="vm.removeProject(p, $event)" class="small">Remove</button>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+              <span class="muted" style="font-size:11px;white-space:nowrap;">Build commands:</span>
+              <input ng-model="p.BuildCommands" placeholder="e.g. dotnet clean & dotnet build"
+                style="flex:1; min-width:0; font-size:11px;" />
+            </div>
           </div>
-        </div>
         <div style="padding:10px 0;">
           <strong>Add New Project</strong>
           <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
@@ -781,11 +786,6 @@
         <details>
           <summary class="settings-header">Llama.cpp / Ollama URL</summary>
           <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
-        </details>
-        <details>
-          <summary class="settings-header">Build Commands</summary>
-          <textarea id="settings-build-commands" ng-model="vm.buildCommands"
-            placeholder="Enter build commands, one per line" rows="4"></textarea>
         </details>
         <details>
           <summary class="settings-header">Context Size Limits</summary>

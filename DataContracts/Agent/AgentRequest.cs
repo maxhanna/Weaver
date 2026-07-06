@@ -15,6 +15,7 @@ public class AgentRequest
     public bool CreateTests { get; set; }
     public bool IsBenchmark { get; set; }
     public string? BenchmarkProjectRoot { get; set; }
+    public string? BuildCommands { get; set; }
 
     /// <summary>Indices of plan steps already completed (0-based).</summary>
     public List<int>? CompletedStepIndices { get; set; }

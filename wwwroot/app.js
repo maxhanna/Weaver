@@ -389,7 +389,6 @@
         cfg.showCalendar = vm.showCalendar !== false;
         cfg.prByDefault = vm.prByDefault !== false;
         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
-        cfg.buildCommands = vm.buildCommands;
         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) {
           return r.trim().toLowerCase();
@@ -522,7 +521,7 @@
 
     // === Project config ===
     function normalizeProjects(raw) {
-      return raw.map(function (p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '' }; });
+      return raw.map(function (p) { return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '' }; });
     }
 
     vm.loadConfig = function (project) {
@@ -796,7 +795,7 @@
         clientId: vm.bughostedClientId,
         kanbanData: JSON.stringify({
           projects: (vm.projects || []).map(function (p) {
-            return { Name: p.Name, Path: p.Path, Description: p.Description };
+            return { Name: p.Name, Path: p.Path, Description: p.Description, BuildCommands: p.BuildCommands };
           }),
           state: vm.state,
           agentActive: vm.streamingActive || false,
@@ -819,7 +818,6 @@
         }),
         settings: JSON.stringify({
           llamaUrl: vm.llamaUrl,
-          buildCommands: vm.buildCommands,
           terminalApprovalMode: vm.terminalApprovalMode,
           approvedTerminalRoots: vm.approvedTerminalRoots,
           disallowedTerminalRoots: vm.disallowedTerminalRoots,
@@ -1254,7 +1252,6 @@
       } else if (cmd.command === 'updateSettings' && cmd.params) {
         console.log('Updating settings from remote command:', cmd);
         if (cmd.params.llamaUrl !== undefined) vm.llamaUrl = cmd.params.llamaUrl;
-        if (cmd.params.buildCommands !== undefined) vm.buildCommands = cmd.params.buildCommands;
         if (cmd.params.terminalApprovalMode !== undefined) vm.terminalApprovalMode = cmd.params.terminalApprovalMode;
         if (cmd.params.approvedTerminalRoots !== undefined) {
           vm.approvedTerminalRoots = cmd.params.approvedTerminalRoots;
@@ -2150,7 +2147,8 @@
             createTests: card.createTests || false,
             cardId: card.id,
             isBenchmark: card._benchmark || false,
-            benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) ? vm.systemInfoCustom.benchmarkProjectRoot : null
+            benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) ? vm.systemInfoCustom.benchmarkProjectRoot : null,
+            buildCommands: vm.buildCommands || null,
           };
 
           // Move to Doing

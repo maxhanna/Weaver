@@ -7848,7 +7848,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         List<string>? attachedFiles = null, bool skipContextReview = false,
         string? steeringContext = null, bool skipQualityCheck = false,
         AgentPlan? existingPlan = null, HashSet<int>? completedStepIndices = null,
-        string? cardId = null, bool createTests = false)
+        string? cardId = null, bool createTests = false, string? buildCommands = null)
     {
         _gracefulStop = false;
 
@@ -8266,10 +8266,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // ── Build check ───────────────────────────────────────────────────
         bool buildOk = true;
-        if (allSteps.Count > 0 && isEdited)
-        {
-            var cfg = await _configFile.LoadConfigAsync();
-            var cmds = ParseBuildCommands(cfg.buildCommands);
+        if (allSteps.Count > 0 && isEdited && buildCommands != null && !string.IsNullOrWhiteSpace(buildCommands))
+        { 
+            var cmds = ParseBuildCommands(buildCommands);
             if (cmds.Count > 0)
             {
                 if (emitSse)
@@ -10946,7 +10945,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 existingPlan: existingPlan,
                 completedStepIndices: completedIndices,
                 cardId: req.CardId,
-                createTests: req.CreateTests);
+                createTests: req.CreateTests,
+                buildCommands: req.BuildCommands);
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
