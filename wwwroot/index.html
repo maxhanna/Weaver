@@ -1083,7 +1083,7 @@
           </div>
           <div ng-if="!vm.showSystemInfoEditor" style="font-size:12px;">
             <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
-              <span class="muted">OS:</span><span>{{vm.systemInfoDetected.os || '—'}}</span>
+              <span class="muted">OS:</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span>
               <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span>
               <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') : (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') : '—')}}</span>
               <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '—'}}</span>
