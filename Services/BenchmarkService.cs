@@ -219,10 +219,11 @@ public class BenchmarkService
                 Name = "Benchmark 2",
                 Description = "Simple code generation",
                 Steps = new List<BenchmarkStep>
-                { 
-                    new() { Index = 1, Change = "Create a file called 'hello.py' at the project root folder and write a Python script that prints 'Hello, World!' in it" },
-                    new() { Index = 2, Change = "Modify hello.py to ask for the user's name and greet them" },
-                    new() { Index = 3, Change = "Create a JavaScript file 'hello.js' that logs 'Hello from JS' to the console" }
+                {
+                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_2' at the project root" },
+                    new() { Index = 2, Change = "Create a file called 'hello.py' inside the benchmark_test_2 folder and write a Python script that prints 'Hello, World!' in it" },
+                    new() { Index = 3, Change = "Modify benchmark_test_2/hello.py to ask for the user's name and greet them" },
+                    new() { Index = 4, Change = "Create a JavaScript file 'hello.js' inside the benchmark_test_2 folder that logs 'Hello from JS' to the console" }
                 }
             },
             new BenchmarkPlanDefinition
@@ -232,11 +233,13 @@ public class BenchmarkService
                 Description = "HTML/CSS layout tasks",
                 Steps = new List<BenchmarkStep>
                 {
-                    new() { Index = 1, Change = "Create 'page.html' on the desktop/benchmark_test folder with a basic HTML skeleton" },
-                    new() { Index = 2, Change = "Add a heading that says 'Benchmark Page' and a paragraph of lorem ipsum text" },
-                    new() { Index = 3, Change = "Create 'style.css' and link it to the page; set the background color to light blue" },
-                    new() { Index = 4, Change = "Add a centered div with a border, padding, and a shadow" },
-                    new() { Index = 5, Change = "Add a button that changes the paragraph text when clicked (inline script)" }
+                    new() { Index = 1, Change = "Create a folder called 'benchmark_test_3' at the project root" },
+                    new() { Index = 2, Change = "Create 'page.html' in the 'benchmark_test_3' folder with a basic HTML skeleton" },
+                    new() { Index = 3, Change = "Add a heading that says 'Benchmark Page' and a paragraph of lorem ipsum text" },
+                    new() { Index = 4, Change = "Create 'style.css', put it in the 'benchmark_test_3' folder" },
+                    new() { Index = 5, Change = "Link styles.css to page.html" },
+                    new() { Index = 7, Change = "Add a centered div with a border, padding, and a shadow" },
+                    new() { Index = 8, Change = "Add a button that changes the paragraph text when clicked (inline script)" }
                 }
             },
             new BenchmarkPlanDefinition

@@ -65,20 +65,24 @@ public class AgentController : ControllerBase
     private const string D_DONE = "<<<ALREADY_DONE>>>";
 
     private const string EditResolveSystemPrompt =
-        "You are a surgical code editor. Output ONLY a JSON object.\n\n" +
-                "FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
-        "{\n" +
-        "  \"oldString\": [\n" +
-        "    \"  first line EXACTLY as it appears in the file\",\n" +
-        "    \"  second line\",\n" +
-        "    \"  third line\"\n" +
-        "  ],\n" +
-        "  \"newString\": [\n" +
-        "    \"  first line\",\n" +
-        "    \"  replacement second line\"\n" +
-        "  ]\n" +
-        "}\n" +
-        "  CRITICAL: Each array element is ONE line of code. If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), you MUST output the `\\n` escaped inside that single array element. NEVER split a line of code across multiple array elements.\n\n" +
+"You are a surgical code editor. Output ONLY a JSON object.\n\n" +
+"FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
+"{\n" +
+"  \"oldString\": [\n" +
+"    \"  first line EXACTLY as it appears in the file\",\n" +
+"    \"  second line\",\n" +
+"    \"  third line\"\n" +
+"  ],\n" +
+"  \"newString\": [\n" +
+"    \"  first line\",\n" +
+"    \"  replacement second line\"\n" +
+"  ]\n" +
+"}\n" +
+"  CRITICAL: Each array element is ONE line of code. If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), you MUST output the `\\n` escaped inside that single array element. NEVER split a line of code across multiple array elements.\n" +
+"  NEVER combine multiple lines of code into a single array element. One element = one line. If you have 2 statements, output 2 elements.\n" +
+"TRAILING WHITESPACE: You MAY omit trailing spaces at the END of a line of code (before the newline). " +
+"However, trailing spaces INSIDE string literals are sometimes INTENTIONAL and must be preserved verbatim. " +
+"Example: Python's `input(\"What is your name? \")` uses a trailing space inside the string to separate the prompt from the user's typed input — this is CORRECT Python idiom and must NOT be removed.\n\n" + 
 "FORMAT B — single-line (escape newlines as \\n):\n" +
 "{\n" +
 "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
@@ -1315,6 +1319,7 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(body))
                 {
                     body = StripFullFileFence(body);
+                    body = AgentUtilities.AutoFixPythonStatements(body, relPath);
                     return (null, null, true, body, false, null, false);
                 }
             }
@@ -1332,6 +1337,7 @@ public class AgentController : ControllerBase
 
                 if (!string.IsNullOrWhiteSpace(targetType) && !string.IsNullOrWhiteSpace(targetName) && newCodeStr != null)
                 {
+                    newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     var insertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl) && iaEl.GetBoolean();
 
                     if (insertAfter)
@@ -1574,6 +1580,13 @@ public class AgentController : ControllerBase
 
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
+                newStr = AgentUtilities.AutoFixPythonStatements(newStr ?? "", relPath);
+
+                if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
+                {
+                    var pyKeywords = "print|return|if|for|while|def|class|import|from|with|try|except|finally|raise|yield|assert|del|global|nonlocal|pass|break|continue";
+                    newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
+                }
             }
 
             if (string.IsNullOrWhiteSpace(oldStr) &&
@@ -1621,7 +1634,8 @@ public class AgentController : ControllerBase
                 if (oldLines.Count > 0)
                 {
                     oldStr = string.Join("\n", oldLines);
-                    newStr = string.Join("\n", newLines);
+                    newStr = string.Join("\n", newLines);  
+                    newStr = AgentUtilities.AutoFixPythonStatements(newStr, relPath);
 
                     return (oldStr, newStr ?? "", false, null, false, null, false);
                 }
@@ -1708,6 +1722,7 @@ public class AgentController : ControllerBase
 
             oldStr = raw[(oS + D_OLD.Length)..oE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
             newStr = raw[(nS + D_NEW.Length)..nE].TrimStart('\r', '\n').TrimEnd('\r', '\n');
+            newStr = AgentUtilities.AutoFixPythonStatements(newStr, relPath);
 
             if (string.IsNullOrWhiteSpace(oldStr))
                 return (null, null, false, null, false, "OLD section is empty", false);
@@ -4335,15 +4350,28 @@ emitSse, ct);
         continueResolveLoop:;
             if (replaced && !string.IsNullOrWhiteSpace(newStr))
             {
-                var fixedSqlContent = AutoFixSqlWhitespace(newContent);
+                var fixedSqlContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
                 if (fixedSqlContent != newContent)
                 {
                     await EmitLog(emitSse, "info", $"Pre-verify SQL fix: corrected spacing in {relPath}", ct: ct);
                     newContent = fixedSqlContent;
-                    newStr = AutoFixSqlWhitespace(newStr);
+                    newStr = AgentUtilities.AutoFixSqlWhitespace(newStr);
+                }
+                if (Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
+                {
+                    var fixedPyContent = AgentUtilities.AutoFixPythonStatements(newContent, relPath);
+                    if (fixedPyContent != newContent)
+                    {
+                        await EmitLog(emitSse, "info", $"Pre-verify Python fix: split single-line statements in {relPath}", ct: ct);
+                        newContent = fixedPyContent;
+                        newStr = AgentUtilities.AutoFixPythonStatements(newStr, relPath);
+                    }
                 }
 
-                var formatted = AutoFormatEditedRegion(newContent, newStr);
+                var formatted = AgentUtilities.IsWhitespaceSignificant(relPath)
+                    ? newContent            
+                    : AutoFormatEditedRegion(newContent, newStr);
+
                 if (formatted != newContent)
                 {
                     await EmitLog(emitSse, "info",
@@ -4360,10 +4388,10 @@ emitSse, ct);
 
             if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
-                var correctedContent = AutoFixSqlWhitespace(newContent);
+                var correctedContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
                 if (correctedContent != newContent)
                 {
-                    var correctedNewStr = AutoFixSqlWhitespace(newStr ?? "");
+                    var correctedNewStr = AgentUtilities.AutoFixSqlWhitespace(newStr ?? "");
                     (approved, verifyReason, _) =
                         VerifyEdit(oldStr!, correctedNewStr, fileContent, correctedContent, fromFormatC);
                     if (approved)
@@ -7201,11 +7229,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n" +
         "Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n" +
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
-        "### STEP TYPES (the \"file\" field) ###\n" +
+               "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
         "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
-        "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations (fetching data, creating files outside the project). NEVER use mkdir/rmdir/del for project files — use edit steps instead.\n" +
-        "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty\n" +
+        "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.\n" +
+        "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.\n" +
         "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
         "  \"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"\n" +
         "  \"_git\"                — Git operation (commit/pull/push/branch/revert)\n" +
@@ -7349,34 +7377,42 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // Safety check: ask user to confirm _command steps that modify project structure
         if (plan?.Plan != null)
         {
-            foreach (var step in plan.Plan)
+            string? lastImpliedDir = null;
+
+            for (var i = 0; i < plan.Plan.Count; i++)
             {
+                var step = plan.Plan[i];
                 if (string.Equals(step.File, "_command", StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrWhiteSpace(step.Change))
                 {
                     var cmd = step.Change.ToLowerInvariant();
                     if (cmd.Contains("mkdir") || cmd.Contains("rmdir") || cmd.Contains("rm -rf") ||
                         cmd.Contains("del /") || cmd.Contains("rd /"))
-                    {
-                        if (!cmd.Contains("desktop") && !cmd.Contains("temp") && !cmd.Contains("tmp") &&
-                            !cmd.Contains("download") && !cmd.Contains("$home") && !cmd.Contains("~"))
+                    { 
+                        var mkdirMatch = Regex.Match(step.Change, @"(?:mkdir|md)\s+([^\s;|&]+)", RegexOptions.IgnoreCase);
+                        if (mkdirMatch.Success)
                         {
-                            var answer = await AskUserAsync(
-                                $"The plan includes a potentially unsafe command:\n\n`{step.Change}`\n\nThis could modify project structure. Allow it?",
-                                new List<QuestionField>
-                                {
-                                    new() { Key = "confirm", Label = "Allow this command?", Type = "select", DefaultValue = "no" }
-                                }, ct);
-                            if (answer.Count == 0) // timeout — user didn't respond
-                            {
-                                _gracefulStop = true;
-                                return null; // skip this card gracefully
-                            }
-                            var confirmed = answer.TryGetValue("confirm", out var val) &&
-                                           val?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
-                            if (!confirmed)
-                                return $"_command step uses '{cmd.Split(' ')[0]}' which may modify project structure — user rejected the command. Replanning.";
+                            lastImpliedDir = mkdirMatch.Groups[1].Value.Trim('/', '\\', '"', '\'');
+                            step.File = "_create_directory";
+                            step.Change = lastImpliedDir;
+                            await EmitLog(true, "warn",
+                                $"Converted directory manipulation command '{step.Change}' to a _create_directory step.", ct: ct);
                         }
+                        else
+                        { 
+                            plan.Plan.RemoveAt(i);
+                            i--;
+                            await EmitLog(true, "warn", "Removed unparseable directory manipulation command.", ct: ct);
+                        }
+                    }
+                }
+
+                // Apply the directory context to subsequent _create_file steps that lack a path
+                if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase) && lastImpliedDir != null)
+                {
+                    if (!step.Change.Contains("/") && !step.Change.Contains("\\"))
+                    {
+                        step.Change = $"Create file in directory {lastImpliedDir}: {step.Change}";
                     }
                 }
             }
@@ -8215,19 +8251,49 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
  
                     if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
-                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct); 
+                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct);
+                        
                         var scopedSteering = "The original plan's steps all succeeded. Only add steps for work the " +
                             "user EXPLICITLY requested that is still genuinely missing. Do NOT invent extra files, " +
                             "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
                             "missing, return an empty plan." +
                             (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
-                       
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                           scopedSteering, projectRoot, emitSse, ct,
-                           attachedFiles: attachedFiles, qualityCheckReason: reason);
+                            scopedSteering, projectRoot, emitSse, ct,
+                            attachedFiles: attachedFiles, qualityCheckReason: reason);
  
                         if (newSteps?.Count > 0)
                         {
+                            var revertKeywords = new[] { "revert", "undo", "restore", "roll back", "rollback", "replace current content with" };
+                            var safeSteps = new List<PlanStep>();
+
+                            foreach (var s in newSteps)
+                            {
+                                var changeLower = (s.Change ?? "").ToLowerInvariant();
+                                if (revertKeywords.Any(k => changeLower.Contains(k)))
+                                {
+                                    await EmitLog(emitSse, "warn", $"🚫 Replan generated a revert/undo step: '{s.Change}'. Blocking to prevent infinite loop.", ct: ct);
+                                }
+                                else
+                                {
+                                    safeSteps.Add(s);
+                                }
+                            }
+
+                            if (safeSteps.Count == 0)
+                            {
+                                await EmitLog(emitSse, "warn", "Replan only generated revert/undo steps — ignoring.", ct: ct);
+                                newSteps = null;
+                            }
+                            else
+                            {
+                                newSteps = safeSteps;
+                            }
+                        }
+
+                        if (newSteps?.Count > 0)
+                        {
+                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
                             var existingChanges = plan!.Plan
                                 .Select(p => NormalizeChangeForDedup(p.Change))
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -8857,7 +8923,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot);
-        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot);
+        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot); 
+        
+        if (emitSse && plan?.Plan?.Count > 0)
+        {
+            await SendSse(Response, "plan",
+                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+        }
+
         if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
         {
             await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct, summary: plan.Summary ?? "", score: plan.Score);
@@ -8974,14 +9047,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // ── Post-execution verification: re-check with LLM that task is 100% complete ──
         var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
-        if (!taskComplete)
+        if (taskComplete)
+        { 
+            allSteps.Add(new Dictionary<string, object?>
+            {
+                ["type"] = "verified_complete",
+                ["status"] = "done",
+                ["reason"] = verificationDetails
+            });
+        }
+        else
         {
             await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
 
-            // ── Collect failure context from all failed/abandoned steps ──────
             var allFailures = allSteps.OfType<Dictionary<string, object?>>()
                 .Where(s => s.GetValueOrDefault("status")?.ToString() is "error" or "verify-abandoned")
                 .ToList();
+
 
             var failureContextForReplan = new StringBuilder();
             foreach (var f in allFailures)
@@ -9587,7 +9669,64 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 allResults.Add(new Dictionary<string, object?> { ["status"] = "done", ["type"] = "show", ["output"] = text });
                 continue;
             }
+            // ── Handle explicit directory creation ─────────────────────────────
+            if (planFile.Equals("_create_directory", StringComparison.OrdinalIgnoreCase))
+            {
+                var dirRelPath = changeDesc.Replace('\\', '/');
+                var dirFullPath = Path.GetFullPath(Path.Combine(projectRoot, dirRelPath.Replace('/', Path.DirectorySeparatorChar)));
 
+                await EmitLog(emitSse, "info", $"Creating directory: {dirRelPath}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "create",
+                        status = "running",
+                        path = dirRelPath,
+                        description = item.Change,
+                        planItemIndex = itemIdx
+                    }, ct);
+
+                try
+                {
+                    Directory.CreateDirectory(dirFullPath);
+                    await EmitLog(emitSse, "success", $"Created directory {dirRelPath}", ct: ct);
+
+                    var createResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "done",
+                        ["path"] = dirRelPath,
+                        ["description"] = item.Change,
+                        ["planItemIndex"] = itemIdx
+                    };
+
+                    if (emitSse) await SendSse(Response, "step", createResult, ct);
+                    allResults.Add(createResult);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "error", $"Failed to create directory {dirRelPath}: {ex.Message}", ct: ct);
+                    var errResult = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex,
+                        ["type"] = "create",
+                        ["status"] = "error",
+                        ["path"] = dirRelPath,
+                        ["error"] = ex.Message,
+                        ["planItemIndex"] = itemIdx
+                    };
+                    if (emitSse) await SendSse(Response, "step", errResult, ct);
+                    allResults.Add(errResult);
+                    await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                }
+
+                stepIndex++;
+                continue;
+            }
+ 
             if (planFile.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
             {
                 await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
@@ -9601,7 +9740,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         description = item.Change,
                         planItemIndex = itemIdx
                     }, ct);
- 
+
+                // BUG #5 FIX: Use a quick LLM call to extract the exact relative file path from the instruction.
                 var extractSysPrompt = "You extract file paths from instructions. Output ONLY the relative file path (e.g., 'folder/file.ext'). No quotes, no markdown, no explanation.";
                 var (extractedPath, _, _) = await CallLlmRaw(extractSysPrompt, changeDesc, ct, TimeSpan.FromSeconds(15), maxTokens: 64);
 
@@ -9654,7 +9794,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         ["planItemIndex"] = itemIdx
                     };
 
-                    // Send the completion event and persist the step status
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
@@ -10376,10 +10515,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
 
-        var fixedOld = AutoFixSqlWhitespace(normOldContent);
-        var fixedNew = AutoFixSqlWhitespace(normNewContent);
-        var oldTables = ExtractSqlTableNames(fixedOld);
-        var newTables = ExtractSqlTableNames(fixedNew);
+        var fixedOld = AgentUtilities.AutoFixSqlWhitespace(normOldContent);
+        var fixedNew = AgentUtilities.AutoFixSqlWhitespace(normNewContent);
+        var oldTables = AgentUtilities.ExtractSqlTableNames(fixedOld);
+        var newTables = AgentUtilities.ExtractSqlTableNames(fixedNew);
         if (oldTables.Count > 0 && newTables.Count > 0)
         {
             var missingTables = oldTables.Where(t => !newTables.Contains(t)).ToList();
@@ -10414,82 +10553,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         return (true, "Programmatic check passed", 10);
-    }
-    private static HashSet<string> ExtractSqlTableNames(string source)
-    {
-        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "the", "and", "or", "not", "in", "on", "at", "to", "for", "of", "by",
-            "as", "is", "it", "from", "join", "inner", "outer", "left", "right",
-            "where", "set", "values", "select", "insert", "update", "delete",
-            "order", "group", "having", "limit", "offset", "true", "false", "null",
-            "count", "sum", "avg", "min", "max", "distinct",
-            "date", "time", "year", "month", "day", "hour", "minute", "second",
-            "now", "between", "like", "exists", "case", "when", "then", "else", "end",
-            "return", "returns", "declare", "begin", "if", "else",
-            "start", "stop", "commit", "rollback", "savepoint",
-            "int", "integer", "bigint", "smallint", "tinyint",
-            "decimal", "numeric", "float", "double", "real",
-            "char", "varchar", "text", "blob", "binary",
-            "enum", "set", "json", "boolean", "bit",
-            "default", "unique", "index", "key", "primary", "foreign",
-            "cascade", "restrict", "action", "check",
-            "auto_increment", "unsigned", "signed", "zerofill",
-            "character", "collate", "charset", "engine", "row_format"
-        };
-        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match sm in Regex.Matches(source,
-            @"@?""(?:[^""\\]*(?:\\.[^""\\]*)*)""", RegexOptions.Singleline))
-        {
-            var val = sm.Value;
-            if (!Regex.IsMatch(val, @"\b(SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.IgnoreCase))
-                continue;
-            foreach (Match m in Regex.Matches(val,
-                @"(?:FROM|JOIN|INTO|UPDATE|TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+`?(\w+(?:\.\w+)?)`?",
-                RegexOptions.IgnoreCase))
-            {
-                var tbl = m.Groups[1].Value;
-                if (tbl.Contains('.')) tbl = tbl.Split('.')[^1];
-                if (tbl.Length > 2 && !skip.Contains(tbl) && !char.IsDigit(tbl[0]))
-                    tables.Add(tbl);
-            }
-        }
-        return tables;
-    }
-
-    private static string AutoFixSqlWhitespace(string content)
-    {
-        if (string.IsNullOrWhiteSpace(content)) return content;
-        var result = content;
-        var changed = false;
-
-        var stringRegex = new Regex(@"@?""(?:[^""\\]|\\.|"""")*""", RegexOptions.Singleline);
-        var matches = stringRegex.Matches(result);
-        foreach (Match m in matches)
-        {
-            var sqlStr = m.Value;
-
-            if (!Regex.IsMatch(sqlStr, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE)\b", RegexOptions.IgnoreCase))
-                continue;
-
-            var fixedSql = sqlStr;
-
-            var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP|SELECT|DELETE|UPDATE|INSERT|FROM|WHERE|JOIN|AND|OR|NOT|IN|ON|AS|BY|ORDER|GROUP|HAVING|UNION|INTO|VALUES|SET|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL)(\d)", RegexOptions.IgnoreCase);
-            fixedSql = keywordDigit.Replace(fixedSql, "$1 $2");
-
-            var keywordStar = new Regex(@"\b(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);
-            fixedSql = keywordStar.Replace(fixedSql, "$1 *");
-
-            var keywordParen = new Regex(@"\b(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(", RegexOptions.IgnoreCase);
-            fixedSql = keywordParen.Replace(fixedSql, "$1 (");
-
-            if (fixedSql != sqlStr)
-            {
-                result = result.Replace(sqlStr, fixedSql);
-                changed = true;
-            }
-        }
-
-        return changed ? result : content;
     }
 
     private async Task<List<PlanStep>?> ReplanRemainingSteps(

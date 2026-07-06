@@ -673,6 +673,121 @@ public static class AgentUtilities
         }
 
         return plan;
+    } 
+    public static HashSet<string> ExtractSqlTableNames(string source)
+    {
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "the", "and", "or", "not", "in", "on", "at", "to", "for", "of", "by",
+            "as", "is", "it", "from", "join", "inner", "outer", "left", "right",
+            "where", "set", "values", "select", "insert", "update", "delete",
+            "order", "group", "having", "limit", "offset", "true", "false", "null",
+            "count", "sum", "avg", "min", "max", "distinct",
+            "date", "time", "year", "month", "day", "hour", "minute", "second",
+            "now", "between", "like", "exists", "case", "when", "then", "else", "end",
+            "return", "returns", "declare", "begin", "if", "else",
+            "start", "stop", "commit", "rollback", "savepoint",
+            "int", "integer", "bigint", "smallint", "tinyint",
+            "decimal", "numeric", "float", "double", "real",
+            "char", "varchar", "text", "blob", "binary",
+            "enum", "set", "json", "boolean", "bit",
+            "default", "unique", "index", "key", "primary", "foreign",
+            "cascade", "restrict", "action", "check",
+            "auto_increment", "unsigned", "signed", "zerofill",
+            "character", "collate", "charset", "engine", "row_format"
+        };
+        var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match sm in Regex.Matches(source,
+            @"@?""(?:[^""\\]*(?:\\.[^""\\]*)*)""", RegexOptions.Singleline))
+        {
+            var val = sm.Value;
+            if (!Regex.IsMatch(val, @"\b(SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.IgnoreCase))
+                continue;
+            foreach (Match m in Regex.Matches(val,
+                @"(?:FROM|JOIN|INTO|UPDATE|TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+`?(\w+(?:\.\w+)?)`?",
+                RegexOptions.IgnoreCase))
+            {
+                var tbl = m.Groups[1].Value;
+                if (tbl.Contains('.')) tbl = tbl.Split('.')[^1];
+                if (tbl.Length > 2 && !skip.Contains(tbl) && !char.IsDigit(tbl[0]))
+                    tables.Add(tbl);
+            }
+        }
+        return tables;
+    }
+    public static string AutoFixSqlWhitespace(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+        var result = content;
+        var changed = false;
+
+        var stringRegex = new Regex(@"@?""(?:[^""\\]|\\.|"""")*""", RegexOptions.Singleline);
+        var matches = stringRegex.Matches(result);
+        foreach (Match m in matches)
+        {
+            var sqlStr = m.Value;
+
+            if (!Regex.IsMatch(sqlStr, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE)\b", RegexOptions.IgnoreCase))
+                continue;
+
+            var fixedSql = sqlStr;
+
+            var keywordDigit = new Regex(@"\b(INTERVAL|MINUTE|HOUR|DAY|MONTH|YEAR|SECOND|MICROSECOND|WEEK|QUARTER|LIMIT|OFFSET|TOP|SELECT|DELETE|UPDATE|INSERT|FROM|WHERE|JOIN|AND|OR|NOT|IN|ON|AS|BY|ORDER|GROUP|HAVING|UNION|INTO|VALUES|SET|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH|ALL)(\d)", RegexOptions.IgnoreCase);
+            fixedSql = keywordDigit.Replace(fixedSql, "$1 $2");
+
+            var keywordStar = new Regex(@"\b(SELECT|DELETE|DISTINCT|ALL)\*", RegexOptions.IgnoreCase);
+            fixedSql = keywordStar.Replace(fixedSql, "$1 *");
+
+            var keywordParen = new Regex(@"\b(SELECT|FROM|WHERE|JOIN|INNER|LEFT|RIGHT|OUTER|AND|OR|NOT|IN|BETWEEN|LIKE|IS|ON|AS|BY|ORDER|GROUP|HAVING|LIMIT|OFFSET|UNION|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|ALTER|DROP|CASE|WHEN|THEN|ELSE|END|EXISTS|DISTINCT|WITH)\(", RegexOptions.IgnoreCase);
+            fixedSql = keywordParen.Replace(fixedSql, "$1 (");
+
+            if (fixedSql != sqlStr)
+            {
+                result = result.Replace(sqlStr, fixedSql);
+                changed = true;
+            }
+        }
+
+        return changed ? result : content;
+    }
+    public static string AutoFixPythonStatements(string content, string relPath)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+        if (!Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase)) return content;
+
+        // ✅ DETERMINISTIC FIX: Remove trailing spaces inside string literals.
+        // This enforces the rule "NEVER add trailing spaces inside string literals" 
+        // which the LLM frequently ignores for Python input() prompts.
+        content = Regex.Replace(content, @"(?<!\\)([""'])([^\r\n]*?)(?<!\\)\1", m =>
+        {
+            var quote = m.Groups[1].Value;
+            var strContent = m.Groups[2].Value;
+
+            // Skip if it's a triple-quoted string
+            if (strContent.StartsWith(quote)) return m.Value;
+
+            if (strContent.EndsWith(" ") || strContent.EndsWith("\t"))
+            {
+                strContent = strContent.TrimEnd(' ', '\t');
+                return $"{quote}{strContent}{quote}";
+            }
+            return m.Value;
+        });
+
+        // Remove trailing whitespace from lines (LLMs often add spaces before newlines in JSON arrays)
+        content = Regex.Replace(content, @"[ \t]+\r?\n", "\n");
+
+        var pyKeywords = "print|return|if|for|while|def|class|import|from|with|try|except|finally|raise|yield|assert|del|global|nonlocal|pass|break|continue";
+
+        // Fix `) print(` -> `)\nprint(` (with or without spaces)
+        content = Regex.Replace(content, $@"\)\s*({pyKeywords})\b", ")\n$1");
+        // Fix `; print(` -> `;\nprint(`
+        content = Regex.Replace(content, $@";\s*({pyKeywords})\b", ";\n$1");
+        // Fix `] print(` -> `]\nprint(`
+        content = Regex.Replace(content, $@"\]\s*({pyKeywords})\b", "]\n$1");
+        // Fix `} print(` -> `}\nprint(`
+        content = Regex.Replace(content, $@"\}}\s*({pyKeywords})\b", "}\n$1");
+
+        return content;
     }
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
