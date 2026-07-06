@@ -774,6 +774,8 @@ public class AgentController : ControllerBase
         var fileContent = fileExists
             ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
             : string.Empty;
+
+
         var sb = new StringBuilder();
 
         if (!string.IsNullOrWhiteSpace(originalPrompt))
@@ -1893,8 +1895,8 @@ public class AgentController : ControllerBase
     }
 
     private async Task<PlanAuditResult?> PlanPreAuditAsync(
-        AgentPlan plan, string projectRoot, bool emitSse,
-        CancellationToken ct, string? originalPrompt = null)
+     AgentPlan plan, string projectRoot, bool emitSse,
+     CancellationToken ct, string? originalPrompt = null)
     {
         if (plan?.Plan == null || plan.Plan.Count == 0) return null;
 
@@ -1903,42 +1905,26 @@ public class AgentController : ControllerBase
 
         sb.AppendLine("You are auditing a code-change plan BEFORE execution. Your job: detect problems that would waste time or cause bugs.");
         sb.AppendLine();
-        sb.AppendLine("For EACH step in the plan, examine the target file's content and determine:");
+        sb.AppendLine("For EACH step in the plan, examine the target file's content, the original prompt, and determine:");
         sb.AppendLine("1. alreadyDone = true/false — Is the proposed change ALREADY present in the file?");
-        sb.AppendLine("   Example: if step says \"Add CalendarNotificationsEnabled property to UserSettings\"");
-        sb.AppendLine("   but the file ALREADY has `public bool CalendarNotificationsEnabled { get; set; } = true;`,");
-        sb.AppendLine("   then alreadyDone = true.");
         sb.AppendLine("2. needsDecoupling = true/false — Does this step combine TWO OR MORE distinct");
-        sb.AppendLine("   changes that should be separate steps?");
+        sb.AppendLine("   changes at DIFFERENT LOCATIONS that should be separate steps?");
         sb.AppendLine();
         sb.AppendLine("   PATTERNS THAT NEED DECOUPLING:");
         sb.AppendLine("   a) Cross-file: \"Add property to X AND wire up in Y\" → 2 steps");
         sb.AppendLine("   b) Move: \"Move X from A to B\" → 2 steps (add at B, remove from A)");
         sb.AppendLine("   c) SAME-FILE MULTI-LOCATION: \"Add field AND initialize in constructor AND add method\"");
         sb.AppendLine("      → 3 steps (field decl, constructor init, method def)");
-        sb.AppendLine("   d) Any step containing 'then' that chains two add/create/implement actions → split");
-        sb.AppendLine("   e) Any step mentioning 2+ of {field, property, constructor, method, handler} → likely split");
-        sb.AppendLine("   f) Wrap: \"Wrap X in a container\" → 2 steps (open tag + close tag)");
+        sb.AppendLine("   d) MIRROR/COPY: If the step says 'mirror X' or 'copy pattern from X', it usually requires");
+        sb.AppendLine("      modifying EXISTING elements (like a title bar) to emit events, AND adding the new UI structure.");
+        sb.AppendLine("      This MUST be split into separate steps for each location (e.g., 1. Modify title bar, 2. Add panel).");
+        sb.AppendLine("   e) WRAPPING: \"Wrap X in a container\" → 2 steps (open tag + close tag)");
         sb.AppendLine();
         sb.AppendLine("   CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
-        sb.AppendLine("   LOCATIONS (e.g., add a field at top of class, initialize in constructor, add method");
-        sb.AppendLine("   at bottom), that is MULTIPLE distinct edits. Each location needs its own anchor and");
-        sb.AppendLine("   edit strategy. Combining them forces the editor into full-class rewrites that fail.");
+        sb.AppendLine("   LOCATIONS (e.g., modify a title bar AND add a popup panel at the bottom), that is MULTIPLE distinct edits.");
+        sb.AppendLine("   Combining them forces the editor into massive block replacements that fail. Each location needs its own step.");
         sb.AppendLine();
-        sb.AppendLine("   Example: \"Move the link button from the action column into the todo text cell\"");
-        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
-        sb.AppendLine("     { file: \"...\", change: \"Append link button after the todo text content\" },");
-        sb.AppendLine("     { file: \"...\", change: \"Remove link button from the action column\" }");
-        sb.AppendLine("   ]");
-        sb.AppendLine();
-        sb.AppendLine("   Example: \"Add _fifteenMinuteTimer field and initialize it in the constructor,");
-        sb.AppendLine("   then add a RunFifteenMinuteTasks method\"");
-        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
-        sb.AppendLine("     { file: \"...\", change: \"Add _fifteenMinuteTimer field declaration after the last existing timer field\" },");
-        sb.AppendLine("     { file: \"...\", change: \"Initialize _fifteenMinuteTimer in the constructor after existing timer initializations\" },");
-        sb.AppendLine("     { file: \"...\", change: \"Add RunFifteenMinuteTasks method after the last existing RunXxxTasks method\" }");
-        sb.AppendLine("   ]");
-        sb.AppendLine("3. If needsDecoupling, provide decoupledSteps as an array of {file, change} objects.");
+        sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
         sb.AppendLine();
         sb.AppendLine("Output ONLY valid JSON:");
         sb.AppendLine("{");
@@ -2020,7 +2006,9 @@ public class AgentController : ControllerBase
         {
             using var jDoc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
             var root = jDoc.RootElement;
-            if (!root.TryGetProperty("steps", out var stepsArr) || stepsArr.ValueKind != JsonValueKind.Array)
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("steps", out var stepsArr) ||
+                stepsArr.ValueKind != JsonValueKind.Array)
             {
                 await EmitLog(emitSse, "warn", "Plan audit response missing 'steps' array", ct: ct);
                 return null;
@@ -2028,13 +2016,20 @@ public class AgentController : ControllerBase
 
             foreach (var stepEl in stepsArr.EnumerateArray())
             {
+                if (stepEl.ValueKind != JsonValueKind.Object) continue;  
+
                 var idx = stepEl.TryGetProperty("index", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number
                     ? idxEl.GetInt32() : -1;
                 if (idx < 0 || idx >= plan.Plan.Count) continue;
 
-                var alreadyDone = stepEl.TryGetProperty("alreadyDone", out var adEl) && adEl.GetBoolean();
-                var needsDecoupling = stepEl.TryGetProperty("needsDecoupling", out var ndEl) && ndEl.GetBoolean();
-                var reason = stepEl.TryGetProperty("reason", out var rEl) ? rEl.GetString() : null;
+                var alreadyDone = stepEl.TryGetProperty("alreadyDone", out var adEl) &&
+                                  adEl.ValueKind == JsonValueKind.True && adEl.GetBoolean();
+
+                var needsDecoupling = stepEl.TryGetProperty("needsDecoupling", out var ndEl) &&
+                                      ndEl.ValueKind == JsonValueKind.True && ndEl.GetBoolean();
+
+                string? reason = stepEl.TryGetProperty("reason", out var rEl) && rEl.ValueKind == JsonValueKind.String
+                    ? rEl.GetString() : null;
 
                 List<PlanStep>? decoupled = null;
                 if (needsDecoupling && stepEl.TryGetProperty("decoupledSteps", out var dcArr) && dcArr.ValueKind == JsonValueKind.Array)
@@ -2042,8 +2037,14 @@ public class AgentController : ControllerBase
                     decoupled = new List<PlanStep>();
                     foreach (var dc in dcArr.EnumerateArray())
                     {
-                        var dcFile = dc.TryGetProperty("file", out var fEl) ? fEl.GetString() ?? plan.Plan[idx].File : plan.Plan[idx].File;
-                        var dcChange = dc.TryGetProperty("change", out var cEl) ? cEl.GetString() ?? plan.Plan[idx].Change : plan.Plan[idx].Change;
+                        if (dc.ValueKind != JsonValueKind.Object) continue;  
+
+                        var dcFile = dc.TryGetProperty("file", out var fEl) && fEl.ValueKind == JsonValueKind.String
+                            ? fEl.GetString() ?? plan.Plan[idx].File : plan.Plan[idx].File;
+
+                        var dcChange = dc.TryGetProperty("change", out var cEl) && cEl.ValueKind == JsonValueKind.String
+                            ? cEl.GetString() ?? plan.Plan[idx].Change : plan.Plan[idx].Change;
+
                         if (!string.IsNullOrWhiteSpace(dcChange) && dcChange != plan.Plan[idx].Change)
                         {
                             decoupled.Add(new PlanStep
@@ -2086,6 +2087,7 @@ public class AgentController : ControllerBase
             return null;
         }
     }
+
     private static readonly HashSet<string> _builtInTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "string", "int", "long", "double", "float", "decimal", "bool", "char", "byte",
@@ -2427,7 +2429,7 @@ public class AgentController : ControllerBase
 
             if (string.IsNullOrWhiteSpace(raw)) break;
 
-            var parsed = ParseStepExplorationResponse(raw);
+            var parsed = AgentUtilities.ParseStepExplorationResponse(raw);
 
             if (!string.IsNullOrWhiteSpace(parsed.RefinedChange))
             {
@@ -3075,60 +3077,7 @@ public class AgentController : ControllerBase
 
         return sb.ToString();
     }
-    private static StepExplorationResponse ParseStepExplorationResponse(string raw)
-    {
-        var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
-        if (string.IsNullOrWhiteSpace(raw)) return empty;
-        try
-        {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
-            {
-                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```",
-                    RegexOptions.IgnoreCase);
-                if (m.Success) cleaned = m.Groups[1].Value.Trim();
-            }
-            var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
-            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
-
-            using var doc = JsonDocument.Parse(cleaned,
-                new JsonDocumentOptions { AllowTrailingCommas = true });
-            var root = doc.RootElement;
-
-            var ready = root.TryGetProperty("ready", out var rEl) && rEl.GetBoolean();
-
-            var files = new List<string>();
-            if (root.TryGetProperty("filesToRead", out var fArr) &&
-                fArr.ValueKind == JsonValueKind.Array)
-                foreach (var f in fArr.EnumerateArray())
-                {
-                    var s = f.GetString();
-                    if (!string.IsNullOrWhiteSpace(s))
-                        files.Add(s.Replace('\\', '/'));
-                }
-
-            var refined = root.TryGetProperty("refinedChange",
-                out var rcEl) ? rcEl.GetString() : null;
-            var symbol = root.TryGetProperty("targetSymbol",
-                out var tsEl) ? tsEl.GetString() : null;
-            var range = root.TryGetProperty("estimatedLineRange",
-                out var lrEl) ? lrEl.GetString() : null;
-            var conf = root.TryGetProperty("confidence", out var cEl) &&
-                          cEl.ValueKind == JsonValueKind.Number ? cEl.GetInt32() : 0;
-
-            return new StepExplorationResponse
-            {
-                Ready = ready,
-                FilesToRead = files,
-                RefinedChange = refined,
-                TargetSymbol = symbol,
-                LineRange = range,
-                Confidence = conf
-            };
-        }
-        catch { return empty; }
-    }
-
+    
     private async Task PersistStepExplorationAsync(
         string? cardId, int planItemIndex, object explorationData,
         bool emitSse, CancellationToken ct)
@@ -3227,434 +3176,7 @@ public class AgentController : ControllerBase
             }
         }
         catch { /* non-critical */ }
-    }
-
-
-    private async Task<List<PlanStep>?> CheckAndDecoupleStepAsync(
-   PlanStep step, int itemIdx, string projectRoot, bool emitSse,
-   CancellationToken ct, List<object> allResults, string? cardId, string originalPrompt)
-    {
-        if (step == null || string.IsNullOrWhiteSpace(step.Change))
-            return null;
-        if (!AgentUtilities.IsRelativePath(step.File) || AgentUtilities.IsSpecialMarker(step.File))
-            return null;
-
-        // ✅ DETERMINISTIC SERVICE DECOUPLING (MUST BE AT THE TOP)
-        var serviceMatch = Regex.Match(step.Change ?? "", @"([A-Z][a-zA-Z0-9]*Service)", RegexOptions.IgnoreCase);
-        var multiMethodMatch = Regex.Match(step.Change ?? "", @"(?:both\s+)?([a-zA-Z]\w*)\s+(?:and|&)\s+([a-zA-Z]\w*)\s+methods", RegexOptions.IgnoreCase);
-
-        if (serviceMatch.Success || multiMethodMatch.Success)
-        {
-            var chLower = (step.Change ?? "").ToLowerInvariant();
-            var result = new List<PlanStep>();
-            var serviceName = serviceMatch.Success ? serviceMatch.Groups[1].Value : "Service";
-
-            var fileWithoutExt = Path.GetFileNameWithoutExtension(step.File);
-            if (string.Equals(fileWithoutExt, serviceName, StringComparison.OrdinalIgnoreCase))
-            {
-                return null;
-            }
-
-            var originalChange = step.Change ?? "";
-
-            // 1. Always ensure the import is a separate step (if not already explicitly asked for)
-            if (serviceMatch.Success && !chLower.Contains("import"))
-            {
-                result.Add(new PlanStep
-                {
-                    File = step.File,
-                    Change = $"Add the import statement for {serviceName} at the top of the file.",
-                    Priority = step.Priority
-                });
-            }
-
-            // 2. Handle explicit Multi-Method Split ("X and Y methods")
-            if (multiMethodMatch.Success)
-            {
-                var method1 = multiMethodMatch.Groups[1].Value;
-                var method2 = multiMethodMatch.Groups[2].Value;
-                if (chLower.Contains("constructor"))
-                {
-                    result.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = $"Inject {serviceName} into the constructor parameters.",
-                        Priority = step.Priority
-                    });
-                }
-
-                result.Add(new PlanStep
-                {
-                    File = step.File,
-                    Change = $"Apply the requested changes to the {method1} method. Original task: {originalChange}",
-                    Priority = step.Priority
-                });
-                result.Add(new PlanStep
-                {
-                    File = step.File,
-                    Change = $"Apply the requested changes to the {method2} method. Original task: {originalChange}",
-                    Priority = step.Priority
-                });
-            }
-            else
-            {
-                // 3. Single-Method Service — detect if the change mentions BOTH constructor
-                //    and method modification. If so, split into separate atomic steps:
-                //    one for constructor injection, one per method modification.
-                var hasConstructorMention = chLower.Contains("constructor");
-
-                // Extract method names from the change description using multiple patterns
-                var methodNames = new List<string>();
-                var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "the", "a", "an", "add", "new", "existing", "this", "into", "and",
-                    "modify", "update", "change", "edit", "in", "to", "by", "so", "that",
-                    "after", "before", "when", "if", "for", "with", "from", "call", "use",
-                    "insert", "remove", "delete", "create", "implement", "initialize"
-                };
-
-                // Pattern A: "modify/update/change/edit <methodName> method"
-                foreach (Match m in Regex.Matches(originalChange,
-                    @"(?:modify|update|change|edit|in|to|into|the)\s+(\w+)\s+method",
-                    RegexOptions.IgnoreCase))
-                {
-                    var name = m.Groups[1].Value;
-                    if (name.Length > 2 && !stopWords.Contains(name))
-                        methodNames.Add(name);
-                }
-
-                // Pattern B: "<methodName> method" (catch-all if Pattern A found nothing)
-                if (methodNames.Count == 0)
-                {
-                    foreach (Match m in Regex.Matches(originalChange,
-                        @"(\w+)\s+method\b", RegexOptions.IgnoreCase))
-                    {
-                        var name = m.Groups[1].Value;
-                        if (name.Length > 2 && !stopWords.Contains(name))
-                            methodNames.Add(name);
-                    }
-                }
-
-                // Pattern C: method call syntax like "addIdentifiedPlant(" 
-                if (methodNames.Count == 0)
-                {
-                    foreach (Match m in Regex.Matches(originalChange,
-                        @"\b([a-z]\w{2,})\s*\(", RegexOptions.IgnoreCase))
-                    {
-                        var name = m.Groups[1].Value;
-                        if (name.Length > 2 && !stopWords.Contains(name))
-                            methodNames.Add(name);
-                    }
-                }
-
-                methodNames = methodNames
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                var hasMethodMention = chLower.ContainsAny("method", "function", "handler", "call", "insert")
-                    || methodNames.Count > 0;
-
-                if (hasConstructorMention && hasMethodMention)
-                {
-                    // ── SPLIT: constructor step + one step per method ──
-                    result.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = $"Inject {serviceName} into the constructor parameters.",
-                        Priority = step.Priority
-                    });
-
-                    if (methodNames.Count > 0)
-                    {
-                        foreach (var methodName in methodNames)
-                        {
-                            result.Add(new PlanStep
-                            {
-                                File = step.File,
-                                Change = $"Modify the {methodName} method to call {serviceName} for the requested functionality. Original task: {originalChange}",
-                                Priority = step.Priority
-                            });
-                        }
-                    }
-                    else
-                    {
-                        // Could not extract method name — keep original for the method part only.
-                        // This sub-step is NOT the same string as the original, so
-                        // alreadyDecoupled will not block a future decoupling pass.
-                        result.Add(new PlanStep
-                        {
-                            File = step.File,
-                            Change = $"Apply the method-level changes described here (constructor injection handled in prior step). Original task: {originalChange}",
-                            Priority = step.Priority
-                        });
-                    }
-                }
-                else if (!hasConstructorMention)
-                {
-                    // Constructor not mentioned in original — add constructor injection as a
-                    // separate step, then keep original for the method work.
-                    result.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = $"Add private {serviceName} to the constructor parameters.",
-                        Priority = step.Priority
-                    });
-                    result.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = originalChange,
-                        Priority = step.Priority
-                    });
-                }
-                else
-                {
-                    // Only constructor mentioned, no method — keep original as-is (already atomic).
-                    result.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = originalChange,
-                        Priority = step.Priority
-                    });
-                }
-            }
-
-            // If we successfully generated a multi-step plan, return it
-            if (result.Count > 1)
-            {
-                await EmitLog(emitSse, "info", $"⚙️ Deterministic decoupling: Splitting complex step into {result.Count} atomic steps.", ct: ct);
-                return result;
-            }
-        }
-
-        var ch = (step.Change ?? "").ToLowerInvariant();
-
-        if (Regex.IsMatch(ch, @"^(implement|modify|update|change|edit|fix|refactor)\s+(the\s+)?\w+\s+method"))
-            return null;
-
-        var hasMultipleConcerns =
-            ch.Contains(" and ") || ch.Contains(" & ") ||
-            ch.Contains(" + ") || ch.Contains(" wrap ") || ch.StartsWith("wrap ") ||
-            ch.Contains(" move ") || ch.StartsWith("move ") ||
-            ch.Contains(" then ") || ch.StartsWith("then ") ||
-            // property/field combined with method/logic/constructor
-            (ch.ContainsAny("propert", "field", "variable", "global") &&
-            ch.ContainsAny("method", "function", "logic", "implement", "handler", "control", "constructor", "init")) ||
-            // constructor combined with method
-            (ch.Contains("constructor") && ch.ContainsAny("method", "function", "handler", "task")) ||
-            // "add X then add Y" or "add X, then add Y" chaining pattern
-            Regex.IsMatch(ch, @"\b(add|create|implement|initialize)\b.{5,80}\bthen\b.{0,80}\b(add|create|implement|initialize)\b") ||
-            // "add X, implement Y" style
-            Regex.IsMatch(ch, @"\b(add|create|implement)\b.{5,60}\b(add|create|implement)\b") ||
-            // field + constructor pattern (e.g., "add field and initialize in constructor")
-            (ch.ContainsAny("field", "propert") && ch.ContainsAny("constructor", "init")) ||
-            // pagination / navigation / sort with controls
-            Regex.IsMatch(ch, @"\b(pagination|navigation|filter|sort)\b.{0,50}\b(control|button|logic|method)\b") ||
-            // more than one comma-separated noun phrase
-            (ch.Split(',').Length >= 3 && ch.Length > 40);
-
-        if (hasMultipleConcerns && ch.Contains("constructor") && ch.ContainsAny("method", "call", "insert", "add"))
-        {
-            var serviceCallMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Service)", RegexOptions.IgnoreCase);
-            if (serviceCallMatch.Success)
-            {
-                var serviceName = serviceCallMatch.Groups[1].Value;
-                var originalChange = step.Change ?? "";
-
-                // Extract method names so we can split constructor + each method into
-                // separate atomic steps rather than keeping the combined original.
-                var fallbackMethodNames = new List<string>();
-                var fallbackStopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "the", "a", "an", "add", "new", "existing", "this", "into", "and",
-                    "modify", "update", "change", "edit", "in", "to", "by", "so", "that",
-                    "after", "before", "when", "if", "for", "with", "from", "call", "use",
-                    "insert", "remove", "delete", "create", "implement", "initialize"
-                };
-                foreach (Match m in Regex.Matches(originalChange,
-                    @"(?:modify|update|change|edit|in|to|into|the)\s+(\w+)\s+method",
-                    RegexOptions.IgnoreCase))
-                {
-                    var name = m.Groups[1].Value;
-                    if (name.Length > 2 && !fallbackStopWords.Contains(name))
-                        fallbackMethodNames.Add(name);
-                }
-                if (fallbackMethodNames.Count == 0)
-                {
-                    foreach (Match m in Regex.Matches(originalChange, @"(\w+)\s+method\b", RegexOptions.IgnoreCase))
-                    {
-                        var name = m.Groups[1].Value;
-                        if (name.Length > 2 && !fallbackStopWords.Contains(name))
-                            fallbackMethodNames.Add(name);
-                    }
-                }
-                fallbackMethodNames = fallbackMethodNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-
-                var fallbackResult = new List<PlanStep>
-                {
-                    new PlanStep { File = step.File, Change = $"Import {serviceName} and add it as a private parameter in the constructor.", Priority = step.Priority }
-                };
-
-                if (fallbackMethodNames.Count > 0)
-                {
-                    foreach (var mn in fallbackMethodNames)
-                    {
-                        fallbackResult.Add(new PlanStep
-                        {
-                            File = step.File,
-                            Change = $"Modify the {mn} method to use {serviceName}. Original task: {originalChange}",
-                            Priority = step.Priority
-                        });
-                    }
-                }
-                else
-                {
-                    fallbackResult.Add(new PlanStep
-                    {
-                        File = step.File,
-                        Change = $"Apply the method-level changes (constructor injection handled in prior step). Original task: {originalChange}",
-                        Priority = step.Priority
-                    });
-                }
-
-                return fallbackResult;
-            }
-        }
-
-        if (!hasMultipleConcerns) return null;
-
-        var relPath = step.File.Replace('\\', '/');
-        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
-
-        var sb = new StringBuilder();
-        sb.AppendLine("You are auditing ONE step of a code-change plan before execution.");
-        sb.AppendLine("Your job: detect if this step combines multiple distinct changes and should be split into separate steps.");
-        sb.AppendLine();
-        sb.AppendLine($"--- STEP ---");
-        sb.AppendLine($"File:   {step.File}");
-        sb.AppendLine($"Change: {step.Change}");
-        sb.AppendLine();
-        sb.AppendLine("Split if the change describes TWO OR MORE distinct edits:");
-        sb.AppendLine("  - Adding a property AND wiring it up in the template (2 files or 2 concerns)");
-        sb.AppendLine("  - Adding code AND removing old code (e.g. move = add + delete)");
-        sb.AppendLine("  - Changing logic AND adding UI elements");
-        sb.AppendLine("  - Adding a backend endpoint AND frontend code");
-        sb.AppendLine("  - WRAPPING content in a new container/tag (needs open + close = 2 edits)");
-        sb.AppendLine("  - SAME-FILE MULTI-LOCATION: Adding a field/property AND initializing it in a");
-        sb.AppendLine("    constructor AND adding a method — these are 3 edits at 3 different locations");
-        sb.AppendLine("    in the same file, each requiring a different anchor and edit strategy.");
-        sb.AppendLine("  - Any step containing 'then' that chains two add/create/implement actions");
-        sb.AppendLine("  - Any step mentioning 2+ of {field, property, constructor, method, handler}");
-        sb.AppendLine("  - ADDING a new method/property AND MODIFYING/UPDATING an existing method/property (even in the same file). " +
-                      "    These MUST be split into separate steps: one to add the new member, and one to update the existing logic. " +
-                      "    Example: 'Add a isFileLimitReached() method and update uploadSubmitClicked to use it' -> MUST split.");
-        sb.AppendLine();
-        sb.AppendLine("CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
-        sb.AppendLine("LOCATIONS (e.g., add a field at the top of a class, initialize it in the");
-        sb.AppendLine("constructor, add a method at the bottom), that is MULTIPLE distinct edits.");
-        sb.AppendLine("Each sub-step should target a SINGLE LOCATION with a SINGLE edit strategy.");
-        sb.AppendLine();
-        sb.AppendLine("Example: \"Add _timer field and initialize in constructor, then add RunTimerTasks method\"");
-        sb.AppendLine("→ decoupledSteps: [");
-        sb.AppendLine("  { file: \"...\", change: \"Add _timer field declaration after the last existing timer field\" },");
-        sb.AppendLine("  { file: \"...\", change: \"Initialize _timer in the constructor after existing timer initializations\" },");
-        sb.AppendLine("  { file: \"...\", change: \"Add RunTimerTasks method after the last existing RunXxxTasks method\" }");
-        sb.AppendLine("]");
-        sb.AppendLine();
-        sb.AppendLine("Also check the TARGET FILE CONTENT below: if it introduces new method calls,");
-        sb.AppendLine("property references, or component bindings that would need implementation in a");
-        sb.AppendLine("DIFFERENT file (e.g. .ts, .js, .cs), add a separate step for that file.");
-        sb.AppendLine("Example: HTML adds (click)=\"toggleKanbanCollapse()\" → add step in .ts to implement it.");
-        sb.AppendLine();
-        sb.AppendLine("Do NOT split if the step is a single coherent edit (e.g. \"Modify the X method to Y\").");
-        sb.AppendLine();
-        sb.AppendLine("Output ONLY valid JSON:");
-        sb.AppendLine("{");
-        sb.AppendLine("  \"needsDecoupling\": false,");
-        sb.AppendLine("  \"decoupledSteps\": []");
-        sb.AppendLine("}");
-        sb.AppendLine("Each decoupledStep: { \"file\": \"...\", \"change\": \"...\" }");
-
-        if (System.IO.File.Exists(fullPath) && AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
-        {
-            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            sb.AppendLine();
-            var changeKeywords = (step.Change ?? "")
-                .Split(new[] { ' ', ',', '.', '(', ')', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(w => w.Trim().ToLowerInvariant())
-                .Where(w => w.Length > 3)
-                .Distinct()
-                .ToList();
-            var relevantIdx = -1;
-            if (changeKeywords.Count > 0)
-            {
-                relevantIdx = changeKeywords
-                    .Select(kw => content.IndexOf(kw, StringComparison.OrdinalIgnoreCase))
-                    .FirstOrDefault(idx => idx >= 0);
-            }
-            if (relevantIdx > 3000)
-            {
-                var start = Math.Max(0, relevantIdx - 1500);
-                var previewLen = Math.Min(4500, content.Length - start);
-                sb.AppendLine("TARGET FILE CONTENT (relevant excerpt around step's target area):");
-                sb.AppendLine("```");
-                sb.AppendLine((start > 0 ? "...\n" : "") +
-                    content.Substring(start, previewLen) +
-                    (start + previewLen < content.Length ? "\n..." : ""));
-                sb.AppendLine("```");
-            }
-            else
-            {
-                sb.AppendLine("TARGET FILE CONTENT (first 4500 chars):");
-                sb.AppendLine("```");
-                sb.AppendLine(content.Length > 4500 ? content[..4500] + "\n..." : content);
-                sb.AppendLine("```");
-            }
-        }
-
-        sb.AppendLine();
-        sb.AppendLine("### ORIGINAL TASK ###");
-        sb.AppendLine(originalPrompt.Length > 500 ? originalPrompt[..500] + "..." : originalPrompt);
-
-        var (raw, _, _) = await CallLlmRawStreaming(
-            "You output ONLY valid JSON. Never add explanation.",
-            sb.ToString(), emitSse, ct, TimeSpan.FromSeconds(30), maxTokens: 1024);
-
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-
-        try
-        {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
-            using var doc = JsonDocument.Parse(cleaned);
-            var root = doc.RootElement;
-            if (!root.TryGetProperty("needsDecoupling", out var nd) || !nd.GetBoolean())
-                return null;
-            if (!root.TryGetProperty("decoupledSteps", out var dcArr) || dcArr.ValueKind != JsonValueKind.Array)
-                return null;
-
-            var result = new List<PlanStep>();
-            foreach (var el in dcArr.EnumerateArray())
-            {
-                var f = el.TryGetProperty("file", out var fEl) ? fEl.GetString() ?? "" : "";
-                var c = el.TryGetProperty("change", out var cEl) ? cEl.GetString() ?? "" : "";
-                if (!string.IsNullOrWhiteSpace(f) && !string.IsNullOrWhiteSpace(c))
-                    result.Add(new PlanStep { File = f, Change = c, Priority = step.Priority });
-            }
-
-            if (result.Count <= 1) return null;
-
-            var distinctChanges = new HashSet<string>(result.Select(s => s.Change), StringComparer.OrdinalIgnoreCase);
-            if (distinctChanges.Count != result.Count) return null;
-
-            if (result.Any(s => string.Equals(s.Change, step.Change, StringComparison.OrdinalIgnoreCase)))
-            {
-                return null;
-            }
-
-            return result;
-        }
-        catch { return null; }
-    }
+    } 
 
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
@@ -3669,10 +3191,54 @@ public class AgentController : ControllerBase
         string? cardId = null,
         List<string>? attachedFiles = null,
         int replanDepth = 0)
-    {
-        var cfg8 = await LoadConfigAsync();
+    { 
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+ 
+        if (!System.IO.File.Exists(fullPath) && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
+        {
+            await EmitLog(emitSse, "info",
+                $"⚠ Step targeted '{relPath}' which doesn't exist, but has NewString content. Treating as _create_file.", ct: ct);
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+
+                var fileContent = step.NewString;
+                var createExt = Path.GetExtension(relPath).ToLowerInvariant();
+                
+                if (createExt == ".css" || createExt == ".scss" || createExt == ".less")
+                {
+                    fileContent = AgentUtilities.AutoFixCssWhitespace(fileContent);
+                }
+                else if (createExt == ".html" || createExt == ".htm" || createExt == ".cshtml" || createExt == ".razor" || createExt == ".vue" || createExt == ".svelte")
+                {
+                    fileContent = AgentUtilities.AutoFixHtmlIndentation(fileContent);
+                }
+
+                await System.IO.File.WriteAllTextAsync(fullPath, fileContent, Encoding.UTF8, ct);
+
+                var r = new Dictionary<string, object?>
+                {
+                    ["index"] = stepIndex,
+                    ["type"] = "create",
+                    ["status"] = "done",
+                    ["path"] = relPath,
+                    ["description"] = step.Change,
+                    ["planItemIndex"] = planItemIndex
+                };
+                if (emitSse) await SendSse(Response, "step", r, ct);
+                allResults.Add(r);
+                await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                return stepIndex + 1;
+            }
+            catch (Exception ex)
+            {
+                await EmitLog(emitSse, "error", $"Failed to create file {relPath}: {ex.Message}", ct: ct); 
+            }
+        }
+
+        var cfg8 = await LoadConfigAsync();
         var attemptScores = new List<(int attempt, int score, string reason, string failedNew)>();
         var bestScore = 0;
         var bestAttempt = -1;
@@ -4484,9 +4050,18 @@ emitSse, ct);
                     newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
                 }
             }
+ 
+            var ext = Path.GetExtension(relPath).ToLowerInvariant();
+            if (ext == ".css" || ext == ".scss" || ext == ".less")
+            {
+                newContent = AgentUtilities.AutoFixCssWhitespace(newContent);
+            }
+            else if (ext == ".html" || ext == ".htm" || ext == ".cshtml" || ext == ".razor" || ext == ".vue" || ext == ".svelte")
+            {
+                newContent = AgentUtilities.AutoFixHtmlIndentation(newContent);
+            }
 
             var preEditContent = fileContent;
-
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
 
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
@@ -7346,7 +6921,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   f. Component Logic (.ts): Inject the new service in the constructor and implement the methods to save/load paintings.\n" +
         "   g. Component Template (.html): Build the UI (canvas, buttons, list).\n" +
         "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
-        "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n";
+        "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n" +
+        "26. NUMBERED LIST ADHERENCE: If the user's request contains a numbered list of tasks (e.g., '1. Create folder, 2. Create file, 3. Add heading'), your plan MUST contain AT LEAST that many steps. Do NOT combine multiple numbered items into a single step. Follow the user's structure exactly.\n" +
+        "27. FILE CREATION MARKER: When creating a new file that does not exist yet, you MUST use \"_create_file\" as the step type. Put the full file path in the \"file\" field and the complete file content in the \"newString\" field. NEVER use a relative path as the file marker for a new file — the executor will treat it as an edit to an existing file and fail.\n";
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
@@ -8675,17 +8252,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // change description (normalized). The planner often hallucinates the
             // same step repeatedly despite "AT MOST 2 steps" in the prompt.
             plan.Plan = DeduplicateSteps(plan.Plan);
-
-            // Cap total steps — the planner should produce ≤2 per iteration, but
-            // we enforce a hard limit as a safety net against runaway hallucination.
-            const int MaxPlanSteps = 5;
-            if (plan.Plan.Count > MaxPlanSteps)
-            {
-                await EmitLog(emitSse, "warn",
-                    $"Plan has {plan.Plan.Count} steps (max {MaxPlanSteps}) — truncating to first {MaxPlanSteps}", ct: ct);
-                plan.Plan = plan.Plan.Take(MaxPlanSteps).ToList();
-            }
-
+ 
             // If the planner asked to read more files, gather that context and replan.
             // Exploration rounds never count as a converged plan, so _explore steps can
             // never leak into the executable plan.
@@ -9937,54 +9504,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 if (!alreadyDecoupled.Contains(item.Change ?? ""))
                 {
-                    alreadyDecoupled.Add(item.Change ?? "");
-
-                    var decoupledSubSteps = await CheckAndDecoupleStepAsync(
-                        item, itemIdx, projectRoot, emitSse, ct, allResults, cardId, prompt);
-
-                    if (decoupledSubSteps?.Count > 0)
-                    {
-                        foreach (var sub in decoupledSubSteps)
-                        {
-                            alreadyDecoupled.Add(sub.Change ?? "");
-                        }
-
-                        await EmitLog(emitSse, "info",
-                            $"Step {itemIdx + 1} decoupled into {decoupledSubSteps.Count} sub-steps: " +
-                            string.Join(" | ", decoupledSubSteps.Select(s => s.Change)), ct: ct);
-
-                        planItems.RemoveAt(itemIdx);
-                        planItems.InsertRange(itemIdx, decoupledSubSteps);
-                        if (!string.IsNullOrWhiteSpace(cardId))
-                        {
-                            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct);
-                        }
-
-                        var planItemsJson = new JsonArray();
-                        for (var pi = 0; pi < planItems.Count; pi++)
-                        {
-                            planItemsJson.Add(new JsonObject
-                            {
-                                ["index"] = pi,
-                                ["file"] = planItems[pi].File ?? "",
-                                ["change"] = planItems[pi].Change ?? "",
-                                ["priority"] = planItems[pi].Priority,
-                                ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict &&
-                                    dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal &&
-                                    piiVal == pi &&
-                                    dict.TryGetValue("status", out var st) && st is string stStr && stStr == "done")
-                            });
-                        }
-                        await SendSse(Response, "plan", new
-                        {
-                            thinking = $"Step {itemIdx + 2} decoupled into {decoupledSubSteps.Count} sub-steps",
-                            summary = "Plan updated after decoupling",
-                            items = planItemsJson
-                        }, ct);
-
-                        itemIdx--;
-                        continue;
-                    }
+                    alreadyDecoupled.Add(item.Change ?? ""); 
                 }
 
                 var prevCount = allResults.Count;

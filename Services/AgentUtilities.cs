@@ -261,8 +261,8 @@ public static class AgentUtilities
             };
         }
 
-        // ── Ping / connectivity ───────────────────────────────────────────────
-        if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
+        // ── Ping / connectivity ─────────────────────────────────────────────── 
+        if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+(it|this|that|the\s+(server|host|site|website|service|database|connection|network))\s+(up|alive|reachable|down|online|offline))\b"))
         {
             return new AgentPlan
             {
@@ -789,6 +789,236 @@ public static class AgentUtilities
 
         return content;
     }
+    public static string AutoFixHtmlIndentation(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+
+        var lines = content.Split('\n');
+        var result = new List<string>();
+        var depth = 0;
+        var inCodeBlock = false;
+        var codeBlockBaseIndent = -1;
+        var jsBraceDepth = 0;
+
+        var voidElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr" };
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var originalLine = lines[i];
+            var trimmed = originalLine.Trim();
+
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                result.Add("");
+                continue;
+            }
+
+            // Preserve and re-align formatting inside script/style/pre blocks
+            if (inCodeBlock)
+            {
+                // Handle the closing tag of the code block
+                if (trimmed.Contains("</script>", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.Contains("</style>", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.Contains("</pre>", StringComparison.OrdinalIgnoreCase))
+                {
+                    inCodeBlock = false;
+                    codeBlockBaseIndent = -1;
+                    jsBraceDepth = 0;
+                    result.Add(new string(' ', (depth - 1) * 2) + trimmed);
+                    depth = Math.Max(0, depth - 1);
+                    continue;
+                }
+
+                if (codeBlockBaseIndent == -1)
+                {
+                    codeBlockBaseIndent = (depth + 1) * 2;
+                }
+
+                int currentJsIndent = codeBlockBaseIndent + (jsBraceDepth * 2);
+
+                // Dedent lines that start with closing braces/parens
+                if (trimmed.StartsWith("}") || trimmed.StartsWith(")") || trimmed.StartsWith("]"))
+                {
+                    currentJsIndent = Math.Max(0, currentJsIndent - 2);
+                }
+
+                result.Add(new string(' ', currentJsIndent) + trimmed);
+
+                // Update brace depth for subsequent lines
+                int opens = trimmed.Count(c => c == '{');
+                int closes = trimmed.Count(c => c == '}');
+                jsBraceDepth = Math.Max(0, jsBraceDepth + opens - closes);
+
+                continue;
+            }
+
+            var matches = Regex.Matches(trimmed, @"<(/?)([a-zA-Z0-9]+)[^>]*?(/?)>");
+            int adjust = 0;
+            bool startsWithClosing = trimmed.StartsWith("</");
+
+            foreach (Match m in matches)
+            {
+                bool isClosing = m.Groups[1].Value == "/";
+                string tag = m.Groups[2].Value.ToLower();
+                bool isSelfClosing = m.Groups[3].Value == "/" || voidElements.Contains(tag);
+
+                if (!isClosing && !isSelfClosing)
+                {
+                    adjust++;
+                    if ((tag == "script" || tag == "style" || tag == "pre") &&
+                        !trimmed.Contains($"</{tag}>", StringComparison.OrdinalIgnoreCase))
+                    {
+                        inCodeBlock = true;
+                    }
+                }
+                else if (isClosing)
+                {
+                    adjust--;
+                }
+            }
+
+            int currentDepth = depth;
+            if (startsWithClosing) currentDepth = Math.Max(0, depth - 1);
+
+            result.Add(new string(' ', currentDepth * 2) + trimmed);
+
+            depth = Math.Max(0, depth + adjust);
+        }
+
+        return string.Join("\n", result);
+    }
+    public static string AutoFixCssWhitespace(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+
+        var lines = content.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.TrimStart();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+            // Skip comments, at-rules, selectors, and lines with URLs/strings to avoid corruption
+            if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*") ||
+                trimmed.StartsWith("@") || trimmed.StartsWith("&") ||
+                trimmed.Contains("{") || trimmed.Contains("}") ||
+                trimmed.Contains("url(") || trimmed.Contains("\""))
+            {
+                continue;
+            }
+
+            // Find the first colon that is not inside parentheses
+            int colonIdx = -1;
+            int parenDepth = 0;
+            for (int j = 0; j < trimmed.Length; j++)
+            {
+                if (trimmed[j] == '(') parenDepth++;
+                else if (trimmed[j] == ')') parenDepth = Math.Max(0, parenDepth - 1);
+                else if (trimmed[j] == ':' && parenDepth == 0)
+                {
+                    colonIdx = j;
+                    break;
+                }
+            }
+
+            if (colonIdx <= 0 || colonIdx == trimmed.Length - 1) continue;
+
+            var prop = trimmed.Substring(0, colonIdx).TrimEnd();
+            var valueWithSemi = trimmed.Substring(colonIdx + 1);
+
+            string trailingComment = "";
+            var commentIdx = valueWithSemi.IndexOf("//");
+            if (commentIdx >= 0)
+            {
+                trailingComment = " " + valueWithSemi.Substring(commentIdx).TrimEnd();
+                valueWithSemi = valueWithSemi.Substring(0, commentIdx);
+            }
+
+            var value = valueWithSemi.Trim();
+            if (value.Length == 0) continue;
+
+            // 1. Space after comma: `0,0` -> `0, 0`
+            value = Regex.Replace(value, @",(?!\s)", ", ");
+
+            // 2. Space between unit and number: `10px20px` -> `10px 20px`
+            value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=\d)", "$1 ");
+
+            // 3. Space between unit and word: `10pxauto` -> `10px auto`
+            value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=[a-z])", "$1 ");
+
+            // 4. Space between word and number: `bold12px` -> `bold 12px` (but avoid breaking hex colors like #fff0)
+            value = Regex.Replace(value, @"(?<!#)([a-z])(\d)", "$1 $2");
+
+            // 5. Clean up double spaces just in case
+            value = Regex.Replace(value, @"\s+", " ").Trim();
+
+            var leadingWhitespace = line.Substring(0, line.Length - trimmed.Length);
+            lines[i] = leadingWhitespace + prop + ": " + value + trailingComment;
+        }
+
+        return string.Join("\n", lines);
+    }
+    public static StepExplorationResponse ParseStepExplorationResponse(string raw)
+    {
+        var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
+        if (string.IsNullOrWhiteSpace(raw)) return empty;
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```",
+                    RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
+
+            using var doc = JsonDocument.Parse(cleaned,
+                new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object) return empty;
+
+            var ready = root.TryGetProperty("ready", out var rEl) && rEl.ValueKind == JsonValueKind.True && rEl.GetBoolean();
+
+            var files = new List<string>();
+            if (root.TryGetProperty("filesToRead", out var fArr) &&
+                fArr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var f in fArr.EnumerateArray())
+                {
+                    if (f.ValueKind == JsonValueKind.String)
+                    {
+                        var s = f.GetString();
+                        if (!string.IsNullOrWhiteSpace(s))
+                            files.Add(s.Replace('\\', '/'));
+                    }
+                }
+            }
+
+            var refined = root.TryGetProperty("refinedChange", out var rcEl) && rcEl.ValueKind == JsonValueKind.String ? rcEl.GetString() : null;
+            var symbol = root.TryGetProperty("targetSymbol", out var tsEl) && tsEl.ValueKind == JsonValueKind.String ? tsEl.GetString() : null;
+            var range = root.TryGetProperty("estimatedLineRange", out var lrEl) && lrEl.ValueKind == JsonValueKind.String ? lrEl.GetString() : null;
+
+            var conf = 0;
+            if (root.TryGetProperty("confidence", out var cEl) && cEl.ValueKind == JsonValueKind.Number)
+                conf = cEl.GetInt32();
+
+            return new StepExplorationResponse
+            {
+                Ready = ready,
+                FilesToRead = files,
+                RefinedChange = refined,
+                TargetSymbol = symbol,
+                LineRange = range,
+                Confidence = conf
+            };
+        }
+        catch { return empty; }
+    }
+
     public static bool IsSpecialMarker(string file) =>
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||

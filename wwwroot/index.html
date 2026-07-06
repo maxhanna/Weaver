@@ -784,7 +784,7 @@
           </div>
         </details>
         <details>
-          <summary class="settings-header">Llama.cpp / Ollama URL</summary>
+          <summary class="settings-header">OpenAI/llama.cpp/Ollama Endpoint Url</summary>
           <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
         </details>
         <details>
@@ -969,10 +969,7 @@
                 Map keywords to files so the agent knows where to look.
               </span>
               <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
-                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
-                <!-- Use vm.getProjectHints() instead of vm.fileHintsData[$parent.$index].hints.
-                     The helper auto-creates the entry if missing and never returns undefined,
-                     so this ng-repeat can't crash the panel when fileHintsData isn't populated yet. -->
+                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary> 
                 <div ng-repeat="hint in vm.getProjectHints($index) track by $index"
                   style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">

@@ -234,12 +234,11 @@ public class BenchmarkService
                 Steps = new List<BenchmarkStep>
                 {
                     new() { Index = 1, Change = "Create a folder called 'benchmark_test_3' at the project root" },
-                    new() { Index = 2, Change = "Create 'page.html' in the 'benchmark_test_3' folder with a basic HTML skeleton" },
-                    new() { Index = 3, Change = "Add a heading that says 'Benchmark Page' and a paragraph of lorem ipsum text" },
-                    new() { Index = 4, Change = "Create 'style.css', put it in the 'benchmark_test_3' folder" },
-                    new() { Index = 5, Change = "Link styles.css to page.html" },
-                    new() { Index = 7, Change = "Add a centered div with a border, padding, and a shadow" },
-                    new() { Index = 8, Change = "Add a button that changes the paragraph text when clicked (inline script)" }
+                    new() { Index = 2, Change =
+                    @"Create 'page.html' in the 'benchmark_test_3' folder with a basic HTML skeleton. 
+                    Add a heading that says 'Benchmark Page' and a paragraph of lorem ipsum text. Link styles.css to page.html. 
+                    Add a centered div with a border, padding, and a shadow. Use styles.css to define the styles. Add a button that changes the paragraph text when clicked (inline script)." },
+                    new() { Index = 3, Change = "Create 'style.css', put it in the 'benchmark_test_3' folder. Give the body element a red background color and style the page.html page elements with CSS." }, 
                 }
             },
             new BenchmarkPlanDefinition
