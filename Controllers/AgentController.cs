@@ -4386,26 +4386,33 @@ emitSse, ct);
 
             if (!approved)
             {
-                await EmitLog(emitSse, "warn",
-                    $"Verify failed for {relPath}: {verifyReason}", ct: ct);
+                await EmitLog(emitSse, "warn", $"Verify failed for {relPath}: {verifyReason}", ct: ct);
                 history.Add((oldStr!, newStr ?? "", verifyReason));
+
                 var isIdenticalError =
-    verifyReason.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
-    verifyReason.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase);
+                    verifyReason.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
+                    verifyReason.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase);
+
                 var trackBy = isIdenticalError
                     ? AgentUtilities.NormalizeLineEndings(newStr ?? "")
                     : AgentUtilities.NormalizeLineEndings(oldStr ?? "");
 
                 if (string.Equals(trackBy, AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal))
+                { 
                     stuckCount++;
-                else { stuckCount = 0; lastOld = trackBy; }
-                if (stuckCount >= 2) goto RecordFailure;
+                }
+                else 
+                { 
+                    stuckCount = 0; 
+                    lastOld = trackBy; 
+                }
+                
+                if (stuckCount >= 2) { goto RecordFailure; }
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr) &&
-    !newContent.Contains(
-        AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
+            if (!string.IsNullOrWhiteSpace(newStr) 
+                && !newContent.Contains(AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
                 var trimmedNew = string.Join("\n",
                     AgentUtilities.StripLineLeadingWhitespace(AgentUtilities.NormalizeLineEndings(newStr))
@@ -4438,6 +4445,16 @@ emitSse, ct);
                 Path.GetExtension(relPath).Equals(".jsx", StringComparison.OrdinalIgnoreCase))
             {
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
+            }
+
+            if (Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
+            {
+                var pyKeywords = "print|return|if|for|while|def|class|import|from|with|try|except|finally|raise|yield|assert|del|global|nonlocal|pass|break|continue";
+                newContent = Regex.Replace(newContent, $@"\)\s+({pyKeywords})\b", ")\n$1");
+                if (!string.IsNullOrWhiteSpace(newStr))
+                {
+                    newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
+                }
             }
 
             var preEditContent = fileContent;
@@ -8150,14 +8167,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!ok)
                 {
                     await EmitLog(emitSse, "warn", $"Quality check: {reason}", ct: ct);
-
-                    // Build completedStepIndices from existing results
+ 
                     var doneIndices = new HashSet<int>();
                     for (var i = 0; i < (plan?.Plan?.Count ?? 0); i++)
                     {
-                        var step = plan!.Plan[i];
                         var result = allSteps.OfType<Dictionary<string, object?>>()
-                            .LastOrDefault(s => string.Equals(s.GetValueOrDefault("path")?.ToString(), step.File, StringComparison.OrdinalIgnoreCase) &&
+                            .LastOrDefault(s =>
+                                s.TryGetValue("planItemIndex", out var pIdxObj) &&
+                                pIdxObj is int pIdx &&
+                                pIdx == i &&
                                 s.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped" &&
                                 s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
                         if (result != null) doneIndices.Add(i);
@@ -8311,27 +8329,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         return (allSteps, plan, complete);
-    }
-
-    private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> RepairBuildPipeline(string prompt, string projectRoot, bool emitSse, string? buildCommands, CancellationToken ct)
-    {
-        await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);
-        var cmds = ParseBuildCommands(buildCommands);
-        string? buildOutput = null;
-        if (cmds.Count > 0)
-        {
-            _terminal.Start();
-            foreach (var cmd in cmds)
-            {
-                await _terminal.SendCommandAsync(cmd, projectRoot);
-                await Task.Delay(3000);
-            }
-            buildOutput = _terminal.ReadAll();
-        }
-        var resultSteps = new List<object>();
-        await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
-        return (resultSteps, null, true);
-    }
+    } 
 
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
@@ -9582,8 +9580,40 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         description = item.Change,
                         planItemIndex = itemIdx
                     }, ct);
+ 
+                var extractSysPrompt = "You extract file paths from instructions. Output ONLY the relative file path (e.g., 'folder/file.ext'). No quotes, no markdown, no explanation.";
+                var (extractedPath, _, _) = await CallLlmRaw(extractSysPrompt, changeDesc, ct, TimeSpan.FromSeconds(15), maxTokens: 64);
 
-                var newFileRelPath = changeDesc;
+                var newFileRelPath = extractedPath.Trim().Trim('"', '\'', '`', ' ');
+
+                // Fallback validation: if the LLM failed, try regex. If regex fails, log error.
+                if (string.IsNullOrWhiteSpace(newFileRelPath) || newFileRelPath.Contains(' ') || !newFileRelPath.Contains('.'))
+                {
+                    var match = Regex.Match(changeDesc, @"([\w\-/\\]+\.\w{1,5})");
+                    if (match.Success)
+                    {
+                        newFileRelPath = match.Groups[1].Value;
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "error", $"Could not extract valid file path from _create_file description: {changeDesc}", ct: ct);
+                        var errResult = new Dictionary<string, object?>
+                        {
+                            ["index"] = stepIndex,
+                            ["type"] = "create",
+                            ["status"] = "error",
+                            ["path"] = changeDesc,
+                            ["error"] = "Missing filename in _create_file description",
+                            ["planItemIndex"] = itemIdx
+                        };
+                        if (emitSse) await SendSse(Response, "step", errResult, ct);
+                        allResults.Add(errResult);
+                        await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
+                        stepIndex++;
+                        continue;
+                    }
+                }
+
                 var newFileFullPath = Path.GetFullPath(Path.Combine(projectRoot, newFileRelPath.Replace('/', Path.DirectorySeparatorChar)));
                 var contentToWrite = item.NewString ?? "";
 
@@ -9603,7 +9633,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         ["planItemIndex"] = itemIdx
                     };
 
-                    // BUG #4 FIX: Send the completion event and persist the step status
+                    // Send the completion event and persist the step status
                     if (emitSse) await SendSse(Response, "step", createResult, ct);
                     allResults.Add(createResult);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct);
@@ -13017,8 +13047,26 @@ Respond with JSON only:
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
         return Task.CompletedTask;
+    } 
+    private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> RepairBuildPipeline(string prompt, string projectRoot, bool emitSse, string buildCommands, CancellationToken ct)
+    {
+        await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);
+        var cmds = ParseBuildCommands(buildCommands);
+        string? buildOutput = null;
+        if (cmds.Count > 0)
+        {
+            _terminal.Start();
+            foreach (var cmd in cmds)
+            {
+                await _terminal.SendCommandAsync(cmd, projectRoot);
+                await Task.Delay(3000);
+            }
+            buildOutput = _terminal.ReadAll();
+        }
+        var resultSteps = new List<object>();
+        await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
+        return (resultSteps, null, true);
     }
-
     private Task ExecuteGrepStep(AgentStep step, string projectRoot, Dictionary<string, object?> result)
     {
         var query = step.Query ?? step.Pattern ?? "";
