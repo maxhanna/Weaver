@@ -8979,7 +8979,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         new { thinking = plan.Thinking, summary = "Re-plan: added steps", items = plan.Plan }, ct);
 
                 await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
-                    summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: true);
+                    summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: false);
 
                 var mergedDone = new HashSet<int>();
                 for (var i = 0; i < originalStepCount && i < plan.Plan.Count; i++)
@@ -9961,7 +9961,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             planItems.InsertRange(itemIdx + 1, reflectedSteps);
                             await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
                                 summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
-                                append: true);
+                                append: false);
 
                             if (emitSse)
                                 await SendSse(Response, "plan", new
@@ -10594,18 +10594,42 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                     if (isError)
                     {
-                        // Step failed — don't mark as completed; feed error back to LLM for recovery
-                        conversation.AppendLine($"→ Step {pi + 1} FAILED: {cmdClean}");
-                        conversation.AppendLine($"  Error: {AgentUtilities.Truncate(freshOut, 500)}");
-                        conversation.AppendLine("  The step above failed. If you know a different command or approach, output a new plan step to recover. Otherwise mark it done with {\"step\": " + (pi + 1) + "} and move on.");
-                        var errResult = new Dictionary<string, object?>
+                        // Discard PowerShell boilerplate lines from error detection
+                        var errorText = freshOut.ToLowerInvariant();
+                        // Check for benign errors — command succeeded despite PowerShell error output
+                        bool isBenign = errorText.Contains("already exists")  // "already exists" for mkdir/New-Item means the directory was already created → success          
+                            || (errorText.Contains("access denied") && errorText.Contains("already exists")); // "access denied" when the file already has the desired content or state
+
+                        if (isBenign)
                         {
-                            ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
-                            ["command"] = cmdClean, ["status"] = "error", ["output"] = freshOut
-                        };
-                        steps.Add(errResult);
-                        if (emitSse) await SendSse(Response, "step", errResult, ct);
-                        // Do NOT mark as completed — the LLM gets to see the error and can retry or skip
+                            // Benign "error" — the step's goal was already achieved; mark done
+                            completedPlanSteps.Add(pi);
+                            var benignResult = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
+                                ["command"] = cmdClean, ["status"] = "done", ["output"] = freshOut
+                            };
+                            steps.Add(benignResult);
+                            if (emitSse) await SendSse(Response, "step", benignResult, ct);
+                            await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct);
+                            conversation.AppendLine($"→ Step {pi + 1} OK (already existed): {cmdClean}");
+                            conversation.AppendLine($"  Output: {AgentUtilities.Truncate(freshOut, 300)}");
+                        }
+                        else
+                        {
+                            // Step genuinely failed — don't mark as completed; feed error back to LLM for recovery
+                            conversation.AppendLine($"→ Step {pi + 1} FAILED: {cmdClean}");
+                            conversation.AppendLine($"  Error: {AgentUtilities.Truncate(freshOut, 500)}");
+                            conversation.AppendLine("  The step above failed. If you know a different command or approach, output a new plan step to recover. Otherwise mark it done with {\"step\": " + (pi + 1) + "} and move on.");
+                            var errResult = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
+                                ["command"] = cmdClean, ["status"] = "error", ["output"] = freshOut
+                            };
+                            steps.Add(errResult);
+                            if (emitSse) await SendSse(Response, "step", errResult, ct);
+                            // Do NOT mark as completed — the LLM gets to see the error and can retry or skip
+                        }
                         continue;
                     }
 
@@ -10626,8 +10650,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (completedPlanSteps.Count >= totalPlanSteps)
                 {
                     summary = "All plan steps completed";
-                    // Emit final done_signal so the pipeline recognizes completion
-                    steps.Add(new Dictionary<string, object?> { ["type"] = "done_signal", ["status"] = "done" });
                     break;
                 }
                 continue;
