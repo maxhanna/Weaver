@@ -2015,6 +2015,23 @@ public static class AgentUtilities
             project.Trim().TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return Path.GetFullPath(Path.Combine(workspaceRoot, projectSegment));
     }
+
+    /// <summary>
+    /// Returns a platform-agnostic sandbox directory for benchmark tasks.
+    /// Windows: %USERPROFILE%\Desktop\benchmark_sandbox
+    /// Linux:   ~/Desktop/benchmark_sandbox  (or ~/benchmark_sandbox if no Desktop)
+    /// macOS:   ~/Desktop/benchmark_sandbox
+    /// </summary>
+    public static string GetBenchmarkSandboxPath()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        var root = !string.IsNullOrEmpty(desktop) ? desktop : Path.Combine(home, "Desktop");
+        if (!Directory.Exists(root))
+            root = home;
+        return Path.Combine(root, "benchmark_sandbox");
+    }
+
     public static bool IsWhitespaceSignificant(string? filePath)
     {
         if (string.IsNullOrWhiteSpace(filePath)) return false;

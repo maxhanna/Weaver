@@ -7070,19 +7070,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return stepIndex;
     }
 
-    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices)> LoadPlanFromBoardDataAsync(string? cardId)
+    private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark)> LoadPlanFromBoardDataAsync(string? cardId)
     {
         if (string.IsNullOrWhiteSpace(cardId))
-            return (null, null);
+            return (null, null, false);
 
         try
         {
             var raw = await _boardData.LoadRawAsync();
-            if (string.IsNullOrWhiteSpace(raw)) return (null, null);
+            if (string.IsNullOrWhiteSpace(raw)) return (null, null, false);
 
             using var jsonDoc = JsonDocument.Parse(raw);
             var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
-            if (root == null) return (null, null);
+            if (root == null) return (null, null, false);
 
             var columns = new[] { "todo", "doing", "done", "selfImproving" };
             foreach (var column in columns)
@@ -7094,6 +7094,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
                         continue;
+
+                    var isBenchmark = cardObj["_benchmark"]?.GetValue<bool>() ?? false;
 
                     if (cardObj["_plan"] is not JsonObject planObj)
                         continue;
@@ -7122,7 +7124,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         if (done) completed.Add(idx);
                     }
 
-                    if (steps.Count == 0) return (null, null);
+                    if (steps.Count == 0) return (null, null, isBenchmark);
 
                     var plan = new AgentPlan
                     {
@@ -7130,7 +7132,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         Plan = steps
                     };
 
-                    return (plan, completed.Count > 0 ? completed : null);
+                    return (plan, completed.Count > 0 ? completed : null, isBenchmark);
                 }
             }
         }
@@ -7139,7 +7141,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(true, "warn", "Failed to load plan from board data", new { cardId, error = ex.Message });
         }
 
-        return (null, null);
+        return (null, null, false);
     }
 
     private static string BuildPlanningPrompt() =>
@@ -10508,7 +10510,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     .ToList();
                 if (deduped.Count == 0)
                 {
-                    conversation.AppendLine("Step(s) already in plan — not added. Execute existing steps or plan something new.");
+                    if (totalPlanSteps > 0 && completedPlanSteps.Count >= totalPlanSteps)
+                        conversation.AppendLine("All plan steps are already completed. If the task is done, respond with: {\"done\": true, \"summary\": \"...\"}");
+                    else
+                        conversation.AppendLine("Step(s) already in plan — not added. Execute existing steps or plan something new.");
                     continue;
                 }
                 planSteps.AddRange(deduped);
@@ -10525,6 +10530,43 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 for (var pi = 0; pi < planSteps.Count; pi++)
                     conversation.AppendLine($"  Step {pi + 1}: [{planSteps[pi].File}] {planSteps[pi].Change}");
                 conversation.AppendLine("### END PLAN ###");
+
+                // Auto-execute uncompleted plan steps: translate each to a terminal command and run it
+                for (var pi = 0; pi < planSteps.Count; pi++)
+                {
+                    if (completedPlanSteps.Contains(pi)) continue;
+                    var step = planSteps[pi];
+                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}). Desktop: {desktopPath}. Project: {projectRoot}.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
+                    var (cmdRaw, _, _) = await CallLlmRaw(
+                        "You are a terminal command translator. Output only the command, no markdown, no explanation.",
+                        translatePrompt, ct, TimeSpan.FromSeconds(20));
+                    if (string.IsNullOrWhiteSpace(cmdRaw)) continue;
+                    var cmdClean = cmdRaw.Trim();
+                    if (cmdClean.StartsWith("```")) cmdClean = cmdClean.Split('\n').LastOrDefault()?.Replace("```", "").Trim() ?? cmdClean;
+
+                    var beforeLen = _terminal.ReadAll().Length;
+                    await _terminal.SendCommandAsync(cmdClean, projectRoot);
+                    var marker = "__DONE_" + Guid.NewGuid().ToString("N") + "__";
+                    await _terminal.WriteStdinAsync("echo '" + marker + "'");
+                    var timeout2 = DateTime.UtcNow.AddMinutes(5);
+                    while (!ct.IsCancellationRequested && DateTime.UtcNow < timeout2)
+                    { await Task.Delay(500); if (_terminal.ReadAll().Contains(marker)) break; }
+                    var fullOut = _terminal.ReadAll();
+                    var freshOut = beforeLen < fullOut.Length ? fullOut[beforeLen..] : "";
+                    freshOut = string.Join("\n", (freshOut ?? "").Split('\n').Where(l => !l.Contains("__DONE_")));
+                    if (string.IsNullOrWhiteSpace(freshOut)) freshOut = "(ok)";
+                    completedPlanSteps.Add(pi);
+                    var result = new Dictionary<string, object?>
+                    {
+                        ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
+                        ["command"] = cmdClean, ["status"] = "done", ["output"] = freshOut
+                    };
+                    steps.Add(result);
+                    if (emitSse) await SendSse(Response, "step", result, ct);
+                    await PersistBoardDataPlanStepAsync(cardId, pi, emitSse, ct);
+                    conversation.AppendLine($"→ Auto-executed step {pi + 1}: {cmdClean}");
+                    conversation.AppendLine($"  Output: {AgentUtilities.Truncate(freshOut, 500)}");
+                }
                 continue;
             }
 
@@ -10791,11 +10833,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // Load existing plan from board data (by cardId) — no need for frontend to pass it
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
+            bool isBenchmark = false;
             if (!string.IsNullOrWhiteSpace(req.CardId))
             {
-                var (loadedPlan, loadedCompleted) = await LoadPlanFromBoardDataAsync(req.CardId);
+                var (loadedPlan, loadedCompleted, loadedBenchmark) = await LoadPlanFromBoardDataAsync(req.CardId);
                 existingPlan = loadedPlan;
                 completedIndices = loadedCompleted;
+                isBenchmark = loadedBenchmark;
+            }
+
+            // Sandbox benchmark tasks to a temp directory, not the user's project
+            if (isBenchmark)
+            {
+                projectRoot = AgentUtilities.GetBenchmarkSandboxPath();
+                await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
+                await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
 
             var (allSteps, plan, complete) = await Orchestrate(
