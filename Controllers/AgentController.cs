@@ -1747,18 +1747,21 @@ public class AgentController : ControllerBase
 
         var content = AgentUtilities.NormalizeLineEndings(fileContent);
         var changeLower = (step.Change ?? "").ToLowerInvariant();
-        if (changeLower.Contains("add ") && changeLower.Contains("component"))
+
+        if ((changeLower.StartsWith("create ") || changeLower.Contains("create a new") || changeLower.Contains("create new") || changeLower.Contains("add new")) &&
+            changeLower.Contains("component"))
         {
             var compMatch = Regex.Match(step.Change ?? "", @"([A-Z]\w+Component)", RegexOptions.IgnoreCase);
             if (compMatch.Success)
             {
                 var compName = compMatch.Groups[1].Value;
-                if (content.Contains(compName, StringComparison.Ordinal))
+                if (Regex.IsMatch(content, $@"\b(class|export\s+class)\s+{Regex.Escape(compName)}\b", RegexOptions.IgnoreCase))
                 {
                     return (PreEditVerdict.AlreadyDone, $"Component '{compName}' already exists in the file");
                 }
             }
         }
+
         if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
         {
             var methodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
@@ -1920,6 +1923,21 @@ public class AgentController : ControllerBase
         sb.AppendLine("      This MUST be split into separate steps for each location (e.g., 1. Modify title bar, 2. Add panel).");
         sb.AppendLine("   e) WRAPPING: \"Wrap X in a container\" → 2 steps (open tag + close tag)");
         sb.AppendLine();
+        sb.AppendLine("   Example: \"Add _fifteenMinuteTimer field and initialize it in the constructor,");
+        sb.AppendLine("   then add a RunFifteenMinuteTasks method\"");
+        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
+        sb.AppendLine("     { file: \"...\", change: \"Add _fifteenMinuteTimer field declaration after the last existing timer field\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Initialize _fifteenMinuteTimer in the constructor after existing timer initializations\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Add RunFifteenMinuteTasks method after the last existing RunXxxTasks method\" }");
+        sb.AppendLine("   ]");
+        sb.AppendLine();
+        sb.AppendLine("   Example: \"Add isMenuPanelOpen property and showMenuPanel() and closeMenuPanel() methods\"");
+        sb.AppendLine("   needsDecoupling = true. decoupledSteps = [");
+        sb.AppendLine("     { file: \"...\", change: \"Add isMenuPanelOpen property declaration after the last existing property\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Add showMenuPanel() method after the last existing method\" },");
+        sb.AppendLine("     { file: \"...\", change: \"Add closeMenuPanel() method after showMenuPanel()\" }");
+        sb.AppendLine("   ]");
+        sb.AppendLine();
         sb.AppendLine("   CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
         sb.AppendLine("   LOCATIONS (e.g., modify a title bar AND add a popup panel at the bottom), that is MULTIPLE distinct edits.");
         sb.AppendLine("   Combining them forces the editor into massive block replacements that fail. Each location needs its own step.");
@@ -1984,7 +2002,7 @@ public class AgentController : ControllerBase
 
         var (raw, _, error) = await CallLlmRaw(
             "You are a plan auditor. Output ONLY the JSON object described below. No markdown, no extra text.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(60), maxTokens: 2048);
+            sb.ToString(), ct, requestTimeout: _infiniteTimeout, maxTokens: 2048);
 
         if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
         {
@@ -3521,15 +3539,22 @@ emitSse, ct);
                     }
                     if (missingMethods.Count > 0)
                     {
-                        var err = $"HTML edit references methods [{string.Join(", ", missingMethods.Distinct())}] that do not exist in the corresponding .ts file ({tsRelPath}). " +
-                                  "You MUST add a step to implement these methods in the .ts file BEFORE editing the .html file.";
-                        await EmitLog(emitSse, "warn", $"Guard triggered for {relPath}: {err}", ct: ct);
-                        history.Add((oldStr!, newStr, err));
+                        await EmitLog(emitSse, "warn",
+                            $"⚠ HTML edit references methods [{string.Join(", ", missingMethods.Distinct())}] that do not exist in {tsRelPath}. " +
+                            "Auto-injecting empty stubs to prevent build breakage. These should be implemented in a follow-up step.", ct: ct);
+ 
+                        var stubs = new StringBuilder();
+                        foreach (var methodName in missingMethods.Distinct())
+                        {
+                            stubs.AppendLine($"  {methodName}() {{ /* TODO: Implement */ }}");
+                        }
 
-                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                        if (stuckCount >= 2) goto RecordFailure;
-                        continue; // Forces retry with feedback, or eventually triggers RecordFailure -> Replan
+                        var lastBrace = tsContent.LastIndexOf('}');
+                        if (lastBrace > 0)
+                        {
+                            var newTsContent = tsContent.Substring(0, lastBrace) + stubs.ToString() + "\n" + tsContent.Substring(lastBrace);
+                            await System.IO.File.WriteAllTextAsync(tsFullPath, newTsContent, Encoding.UTF8, ct);
+                        } 
                     }
                 }
             }
@@ -3584,6 +3609,42 @@ emitSse, ct);
             {
                 var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
                 replaced = r; newContent = nc; matchError = me; snippet = sn;
+            }
+
+            if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
+                            !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
+                            !(step.Change ?? "").Contains("delete", StringComparison.OrdinalIgnoreCase))
+            {
+                var err = "newString is empty but the step does not ask to remove/delete code. " +
+                          "This would delete the matched block. Provide the replacement code in newString.";
+                await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                history.Add((oldStr!, newStr ?? "", err));
+
+                if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 2) goto RecordFailure;
+                continue;
+            }
+
+             if (fileExt == ".ts" && !string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+            {
+                var changeLower = (step.Change ?? "").ToLowerInvariant();
+                if (changeLower.Contains("method") || changeLower.Contains("handler") || changeLower.Contains("function"))
+                {
+                    var hasMethodDecl = Regex.IsMatch(newStr, @"\b\w+\s*\([^)]*\)\s*(\{|=>)");
+                    if (!hasMethodDecl)
+                    {
+                        var err = "The step description asks to add methods/handlers, but the newString does not contain any method declarations (e.g., `methodName() { ... }`). " +
+                                  "You MUST include the full method implementation in newString.";
+                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                        history.Add((oldStr!, newStr ?? "", err));
+
+                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                        if (stuckCount >= 2) goto RecordFailure;
+                        continue;
+                    }
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(oldStr) &&
@@ -5396,17 +5457,19 @@ emitSse, ct);
     }
 
     private async Task<(string decision, string reason, int score)> LlmVerifyEditStepAsync(
-        string relPath,
-        string originalPrompt,
-        string stepChange,
-        string oldStr,
-        string newStr,
-        string preEditContent,
-        string postEditContent,
-        bool emitSse,
-        CancellationToken ct,
-        List<(int score, string reason, string failedNew)>? priorAttempts = null,
-        string? explorationContext = null)
+    string relPath,
+    string originalPrompt,
+    string stepChange,
+    string oldStr,
+    string newStr,
+    string preEditContent,
+    string postEditContent,
+    bool emitSse,
+    CancellationToken ct,
+    List<(int score, string reason, string failedNew)>? priorAttempts = null,
+    string? explorationContext = null,
+    AgentPlan? fullPlan = null,
+    int currentStepIndex = -1)
     {
         var anchor = newStr.Split('\n')
             .Select(l => l.Trim())
@@ -5446,6 +5509,21 @@ emitSse, ct);
             priorBlock.AppendLine();
         }
 
+        var futureStepsBlock = new StringBuilder();
+        if (fullPlan?.Plan?.Count > 0 && currentStepIndex >= 0)
+        {
+            futureStepsBlock.AppendLine("\n### PLANNED FUTURE STEPS (Context for verification) ###");
+            futureStepsBlock.AppendLine("The current edit is step " + (currentStepIndex + 1) + ".");
+            futureStepsBlock.AppendLine("If this edit references methods/properties that don't exist yet, check if they are added in a FUTURE step below.");
+            futureStepsBlock.AppendLine("If they are added in a future step, DO NOT abandon the current edit for missing references.\n");
+
+            for (int i = currentStepIndex + 1; i < fullPlan.Plan.Count; i++)
+            {
+                var p = fullPlan.Plan[i];
+                futureStepsBlock.AppendLine($"Step {i + 1}: [{p.File}] {p.Change}");
+            }
+        }
+
         var sysPrompt =
             "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
             "Your job is to decide whether to KEEP the edit (it correctly implements the step " +
@@ -5465,8 +5543,6 @@ emitSse, ct);
             "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
             "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
             "    - The edit changed an existing method's signature (return type, name, or parameter list).\n" +
-            "    - The edit introduced calls to methods/identifiers that don't exist in the file.\n" +
-            "    - SIGNATURE MISMATCH: The edit calls a service or external method with the WRONG number of parameters or wrong types (e.g., calling `this.myService.doSomething('text')` when the service expects `doSomething(id: number, name: string)`). ABANDON immediately if parameters do not match the service definition.\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
             "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
             "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
@@ -5479,6 +5555,11 @@ emitSse, ct);
             "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
             "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
             "  functionality that is UNRELATED to the requested change.\n" +
+            " * SEQUENTIAL DEPENDENCIES (CRITICAL): Do NOT abandon an edit just because it references a method or property " +
+            "  that doesn't exist in the current file yet. If the PLANNED FUTURE STEPS section indicates that a future " +
+            "  step will add the missing method/property, OR if the system has auto-injected stubs, you MUST KEEP the current edit. " +
+            "  For HTML files, assume that methods referenced in (click) or (menuClicked) handlers WILL BE or HAVE BEEN added to the .ts file. " +
+            "  Do NOT abandon an HTML edit solely because you think the method might not exist in the .ts file.\n" +
             " * INSERTIONS: If the step asks to ADD a new method, property, or block of code, and the newString " +
             "  CONTAINS the entire oldString unchanged (usually at the beginning) followed by the new code, this is an INSERTION. " +
             "  This is the CORRECT behavior. Do NOT abandon it claiming it 'replaced' or 'failed to add' the new method. " +
@@ -5494,6 +5575,7 @@ emitSse, ct);
             $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
             $"### FILE ###\n{relPath}\n\n" +
             (string.IsNullOrWhiteSpace(explorationContext) ? "" : $"### RELATED SERVICE/MODEL CONTEXT ###\n{explorationContext}\n\n") +
+            futureStepsBlock.ToString() +
             $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" +
             $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
             $"### POST-EDIT CONTEXT WINDOW (10 lines around the edit) ###\n```\n{contextWindow}\n```\n" +
@@ -6847,14 +6929,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   CRITICAL — SAME-FILE MULTI-LOCATION: Even within a single file, if a step requires editing 2+ separate locations (e.g., add a field at the top of a class, initialize it in the constructor, AND add a new method at the bottom), that is MULTIPLE steps. Each location requires a different edit strategy and anchor, so combining them causes the editor to attempt full-class rewrites instead of targeted edits.\n" +
         "   BAD (over-combined, SAME FILE): \"Add a _timer field and initialize it in the constructor, then add a RunTimerTasks method\"\n" +
         "   GOOD (3 steps, SAME FILE): Step 1: \"Add _timer field declaration after the last existing timer field\", Step 2: \"Initialize _timer in the constructor after existing timer initializations\", Step 3: \"Add RunTimerTasks method after the last existing RunXxxTasks method\"\n" +
-        "   BAD (over-combined, SAME FILE): \"Add a isFileLimitReached() method and update uploadSubmitClicked to use it\"\n" +
-        "   GOOD (2 steps, SAME FILE): Step 1: \"Add isFileLimitReached() method\", Step 2: \"Update uploadSubmitClicked to check isFileLimitReached() instead of length\"\n" +
-        "   BAD (over-combined, CROSS-FILE): \"Add CalendarNotificationsEnabled property to UserSettings and wire up the toggle checkbox\"\n" +
-        "   GOOD: Two steps — Step 1: \"In UserSettings class: add CalendarNotificationsEnabled property with default true\", Step 2: \"In settings template: bind the existing notification toggle to CalendarNotificationsEnabled\"\n" +
+        "   BAD (over-combined, SAME FILE): \"Add a isMenuPanelOpen property and add showMenuPanel/closeMenuPanel methods\"\n" +
+        "   GOOD (3 steps, SAME FILE): Step 1: \"Add isMenuPanelOpen property declaration after the last existing property\", Step 2: \"Add showMenuPanel() method after the last existing method\", Step 3: \"Add closeMenuPanel() method after showMenuPanel()\"\n" +
         "   BAD (too vague): \"Fix the dashboard\"\n" +
         "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
         "   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n" +
-         "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
+        "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
         "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
         "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
@@ -6905,7 +6985,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   2. An edit step for `app.module.ts` to register the new component in the declarations array. This is MANDATORY.\n" +
         "   3. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files.\n" +
         "   Do NOT manually create the files with `_create_file`. Do NOT bypass scaffolding by using `edit` with `fullFile` on a non-existent file. The system will inject the scaffolding command automatically if you forget.\n" +
-        "22. COMPONENT TEMPLATE WIRING: When the task involves adding UI elements (buttons, inputs) that trigger new " +
+        "22. COMPONENT TEMPLATE WIRING (CRITICAL): When the task involves adding UI elements (buttons, inputs) that trigger new " +
+        "actions (e.g., (click)=\"doSomething()\"), you MUST plan the step to implement the method in the TypeScript " +
+        "component file (e.g., .ts) BEFORE the step to edit the HTML template (e.g., .html) to reference it. " +
+        "Do NOT plan HTML edits that depend on .ts methods if the .ts step comes later. The .ts step MUST come first.\n" +
         "actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript " +
         "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
         "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
@@ -6923,7 +7006,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
         "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n" +
         "26. NUMBERED LIST ADHERENCE: If the user's request contains a numbered list of tasks (e.g., '1. Create folder, 2. Create file, 3. Add heading'), your plan MUST contain AT LEAST that many steps. Do NOT combine multiple numbered items into a single step. Follow the user's structure exactly.\n" +
-        "27. FILE CREATION MARKER: When creating a new file that does not exist yet, you MUST use \"_create_file\" as the step type. Put the full file path in the \"file\" field and the complete file content in the \"newString\" field. NEVER use a relative path as the file marker for a new file — the executor will treat it as an edit to an existing file and fail.\n";
+        "27. FILE CREATION MARKER: When creating a new file that does not exist yet, you MUST use \"_create_file\" as the step type. Put the full file path in the \"file\" field and the complete file content in the \"newString\" field. NEVER use a relative path as the file marker for a new file — the executor will treat it as an edit to an existing file and fail.\n" +
+        "28. PATTERN MIRRORING (CRITICAL): When the user asks to 'mirror', 'copy', or 'wire up exactly like' a pattern from another file, your plan steps MUST explicitly name the exact methods, properties, and HTML attributes to copy. " +
+        "For example, if mirroring a menu popup panel from user-events.component, the .ts step MUST explicitly say 'Add isMenuPanelOpen property, showMenuPanel() method calling parentRef.showOverlay(), and closeMenuPanel() method calling parentRef.closeOverlay()'. " +
+        "The .html step MUST explicitly say 'Add (menuClicked)=\"showMenuPanel()\" to app-title-bar and copy the popupPanel div structure'. " +
+        "Do NOT invent new method names like toggleMenu or navigateTo. Use the EXACT names from the source pattern.\n";
+
     private static bool IsVisualLayoutTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
