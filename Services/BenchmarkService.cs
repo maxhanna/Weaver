@@ -271,6 +271,8 @@ public class CustomSystemInfo
     public string? Cpu { get; set; }
     public double? RamGb { get; set; }
     public string? Gpu { get; set; }
+    public string? BenchmarkProjectRoot { get; set; }
+    public string? Model { get; set; }
 }
 
 public class BenchmarkPlanDefinition

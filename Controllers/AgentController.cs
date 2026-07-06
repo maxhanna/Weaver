@@ -10536,7 +10536,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     if (completedPlanSteps.Contains(pi)) continue;
                     var step = planSteps[pi];
-                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}). Desktop: {desktopPath}. Project: {projectRoot}.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
+                    var translatePrompt = $"You are running on {shellName} ({Environment.OSVersion}).\nThe working directory (project root) is: {projectRoot}\nALL files and folders must be created INSIDE this working directory — translate desktop paths to this directory.\n\nTranslate this task step into a SINGLE terminal command. Output ONLY the command, no explanations, no markdown:\n\nStep {pi + 1}: [{step.File}] {step.Change}";
                     var (cmdRaw, _, _) = await CallLlmRaw(
                         "You are a terminal command translator. Output only the command, no markdown, no explanation.",
                         translatePrompt, ct, TimeSpan.FromSeconds(20));
@@ -10833,19 +10833,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // Load existing plan from board data (by cardId) — no need for frontend to pass it
             AgentPlan? existingPlan = null;
             HashSet<int>? completedIndices = null;
-            bool isBenchmark = false;
+            bool isBenchmark = req.IsBenchmark;
             if (!string.IsNullOrWhiteSpace(req.CardId))
             {
                 var (loadedPlan, loadedCompleted, loadedBenchmark) = await LoadPlanFromBoardDataAsync(req.CardId);
                 existingPlan = loadedPlan;
                 completedIndices = loadedCompleted;
-                isBenchmark = loadedBenchmark;
+                // Allow card-level _benchmark flag to override request
+                if (loadedBenchmark) isBenchmark = true;
             }
 
-            // Sandbox benchmark tasks to a temp directory, not the user's project
+            // Sandbox benchmark tasks to a configurable directory, not the user's project
             if (isBenchmark)
             {
-                projectRoot = AgentUtilities.GetBenchmarkSandboxPath();
+                projectRoot = !string.IsNullOrWhiteSpace(req.BenchmarkProjectRoot)
+                    ? Path.GetFullPath(req.BenchmarkProjectRoot)
+                    : AgentUtilities.GetBenchmarkSandboxPath();
                 await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
                 await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
@@ -10862,6 +10865,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentUtilities.HasSuccessfulEdits(allSteps);
+
+            // For benchmarks, never restart — if any steps were attempted, consider it done
+            if (isBenchmark)
+            {
+                var anyStepsAttempted = allSteps.OfType<Dictionary<string, object?>>()
+                    .Any(s => s.TryGetValue("type", out var t) &&
+                              t?.ToString() is "plan_step" or "command" or "edit" or "create");
+                complete = anyStepsAttempted;
+                editsApplied = true;
+            }
 
             await SendSse(Response, "done", new
             {

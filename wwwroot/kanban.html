@@ -93,6 +93,7 @@
           </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
@@ -102,10 +103,6 @@
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
-            <!-- <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
-              title="Decomposing card — will automatically decompose into smaller tasks. Use for big tasks.">
-              <input type="checkbox" ng-model="card.isDecomposing" /> DECOMPOSE
-            </label> -->
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create tests for the code changes">
               <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
@@ -126,7 +123,8 @@
               Run'}}</button>
             <button ng-click="vm.splitCardIntoSubtasks(card); $event.stopPropagation()" class="small ghost"
               title="Split into smaller tasks">✂ Split</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card">✕
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'todo')" class="small ghost" title="Delete card"
+              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
           <!-- Previous analysis on returned Todo cards -->
@@ -241,6 +239,7 @@
           </div>
 
           <div class="card-tags">
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
@@ -400,16 +399,22 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'doing','done')"
+            <button ng-if="!card._benchmark"
+              ng-click="vm.moveCard(card.id,'doing','done')"
               class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small"
               title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
+            <button ng-if="card._benchmark"
+              ng-click="vm.deleteCard(card.id, 'doing')"
+              class="small" style="color:#e5c07b;"
+              ng-disabled="vm.streamingActive && vm.activeCardId === card.id">🗑 Done & Delete</button>
             <button ng-click="vm.stopAgent(card)" class="small"
               ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
               title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
-              ng-disabled="vm.activeCardId === card.id">✕
+              ng-disabled="vm.activeCardId === card.id"
+              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -473,6 +478,7 @@
           </div>
 
           <div class="card-tags">
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
@@ -590,9 +596,11 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
+            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
-            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card">✕
+            <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
+              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>

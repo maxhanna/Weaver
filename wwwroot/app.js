@@ -1551,10 +1551,15 @@
       });
       $http.get('/api/benchmark/system-info').then(function (resp) {
         vm.systemInfoDetected = resp.data.detected || {};
-        vm.systemInfoCustom = resp.data.custom || { os: '', cpu: '', ramGb: null, gpu: '' };
+        vm.systemInfoCustom = resp.data.custom || { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' };
+        vm.defaultBenchmarkRoot = resp.data.defaultBenchmarkRoot || '';
+        if (!vm.systemInfoCustom.benchmarkProjectRoot) {
+          vm.systemInfoCustom.benchmarkProjectRoot = vm.defaultBenchmarkRoot;
+        }
       }, function () {
         vm.systemInfoDetected = {};
-        vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '' };
+        vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: '' };
+        vm.defaultBenchmarkRoot = '';
       });
       var backdrop = document.getElementById('backdrop');
       if (backdrop) backdrop.style.display = 'block';
@@ -1565,7 +1570,9 @@
         os: vm.systemInfoCustom.os || null,
         cpu: vm.systemInfoCustom.cpu || null,
         ramGb: vm.systemInfoCustom.ramGb || null,
-        gpu: vm.systemInfoCustom.gpu || null
+        gpu: vm.systemInfoCustom.gpu || null,
+        model: vm.systemInfoCustom.model || null,
+        benchmarkProjectRoot: vm.systemInfoCustom.benchmarkProjectRoot || null
       };
       $http.post('/api/benchmark/system-info', data).then(function () {
         vm.systemInfoSaved = true;
@@ -1576,8 +1583,11 @@
     };
 
     vm.resetSystemInfo = function () {
-      vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '' };
-      $http.post('/api/benchmark/system-info', { os: null, cpu: null, ramGb: null, gpu: null }).then(function () {
+      vm.systemInfoCustom = { os: '', cpu: '', ramGb: null, gpu: '', model: '', benchmarkProjectRoot: vm.defaultBenchmarkRoot || '' };
+      var data = {
+        os: null, cpu: null, ramGb: null, gpu: null, model: null, benchmarkProjectRoot: vm.defaultBenchmarkRoot || null
+      };
+      $http.post('/api/benchmark/system-info', data).then(function () {
         vm.systemInfoSaved = true;
         $timeout(function () { vm.systemInfoSaved = false; }, 2000);
       }, function () {
@@ -2127,7 +2137,9 @@
             selfImproving: card.selfImproving || false,
             isDecomposing: card.isDecomposing || false,
             createTests: card.createTests || false,
-            cardId: card.id
+            cardId: card.id,
+            isBenchmark: card._benchmark || false,
+            benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) ? vm.systemInfoCustom.benchmarkProjectRoot : null
           };
 
           // Move to Doing
@@ -2442,6 +2454,7 @@
                                 scorePercent: Math.round((completed / total) * 1000) / 10,
                                 status: completed === total ? 'completed' : completed > 0 ? 'partial' : 'failed',
                                 failedSteps: [],
+                                modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
                                 errorReason: vm.agentResult && (vm.agentResult.error || vm.agentResult.warning) || ''
                               };
                               $http.post('/api/benchmark/save-score', scoreData).then(function () {
@@ -2562,7 +2575,9 @@
                             if (card._benchmark) {
                               var scoreData = {
                                 level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
-                                scorePercent: 0, status: 'error', errorReason: parsed ? parsed.message : data
+                                scorePercent: 0, status: 'error',
+                                modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                                errorReason: parsed ? parsed.message : data
                               };
                               $http.post('/api/benchmark/save-score', scoreData);
                               var idx2 = vm.state.doing.indexOf(card);
@@ -2587,7 +2602,9 @@
                   if (card._benchmark) {
                     var scoreData = {
                       level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1,
-                      scorePercent: 0, status: 'error', errorReason: vm.agentResult.error
+                      scorePercent: 0, status: 'error',
+                      modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
+                      errorReason: vm.agentResult.error
                     };
                     $http.post('/api/benchmark/save-score', scoreData);
                     var idx3 = vm.state.doing.indexOf(card);
@@ -2927,6 +2944,7 @@
           totalSteps: total,
           scorePercent: Math.round((completed / total) * 1000) / 10,
           status: 'stopped',
+          modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '',
           errorReason: 'User stopped agent'
         };
         $http.post('/api/benchmark/save-score', scoreData);

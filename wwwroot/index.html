@@ -1108,6 +1108,16 @@
               <input type="text" ng-model="vm.systemInfoCustom.gpu" placeholder="{{vm.systemInfoDetected.gpu}}"
                 style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
             </div>
+            <div style="margin-bottom:8px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">Model</label>
+              <input type="text" ng-model="vm.systemInfoCustom.model" placeholder="e.g. GPT-4, Claude 3.5 Sonnet"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;" />
+            </div>
+            <div style="margin-bottom:8px;">
+              <label class="muted" style="display:block;margin-bottom:2px;">Benchmark Project Root</label>
+              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.defaultBenchmarkRoot}}"
+                style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;font-family:monospace;" />
+            </div>
             <div style="display:flex;gap:6px;">
               <button ng-click="vm.saveSystemInfo()" class="primary small">Save</button>
               <button ng-click="vm.resetSystemInfo()" class="small">Reset to Detected</button>

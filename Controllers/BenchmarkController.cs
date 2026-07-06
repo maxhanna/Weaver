@@ -55,7 +55,8 @@ public class BenchmarkController : ControllerBase
     {
         var custom = _benchmark.LoadCustomSystemInfo();
         var detected = BenchmarkService.DetectSystemInfo();
-        return Ok(new { detected, custom });
+        var defaultRoot = AgentUtilities.GetBenchmarkSandboxPath();
+        return Ok(new { detected, custom, defaultBenchmarkRoot = defaultRoot });
     }
 
     [HttpPost("system-info")]

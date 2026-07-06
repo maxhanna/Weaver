@@ -274,6 +274,15 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         vm.deleteCardConfirm = null;
       };
 
+      vm.deleteCard = function (id, col) {
+        col = col || 'todo';
+        var idx = vm.state[col].findIndex(function (c) { return c.id === id; });
+        if (idx !== -1) {
+          vm.state[col].splice(idx, 1);
+          vm.saveCards();
+        }
+      };
+
       vm.onSelfImprovingToggle = function (card) {
         if (card.selfImproving) {
           var idx = vm.state.todo.findIndex(function (c) { return c.id === card.id; });
