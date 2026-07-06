@@ -4406,7 +4406,7 @@ emitSse, ct);
                     stuckCount = 0; 
                     lastOld = trackBy; 
                 }
-                
+
                 if (stuckCount >= 2) { goto RecordFailure; }
                 continue;
             }
@@ -8185,8 +8185,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                     if (hasIncomplete)
                     {
-                        // Retry incomplete steps from the existing plan first
-                        await EmitLog(emitSse, "info",
+                         await EmitLog(emitSse, "info",
                             $"Replan: retrying {plan!.Plan.Count - doneIndices.Count} incomplete step(s)…", ct: ct);
                         var retryResults = new List<object>();
                         await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, retryResults,
@@ -8197,8 +8196,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
                         complete = ok2;
                     }
-
-                    // Rebuild doneIndices after retry for the check below
+ 
                     if (!complete && plan?.Plan?.Count > 0)
                     {
                         for (var i = 0; i < plan.Plan.Count; i++)
@@ -8214,25 +8212,44 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             if (result != null) doneIndices.Add(i);
                         }
                     }
-
-                    // Only generate new steps if all original steps are done but quality check still failed
+ 
                     if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
-                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct);
-                        // Every planned step succeeded, so any extra steps must be anchored to the
-                        // user's explicit request — not invented scope. GenerateReplanStepsAsync
-                        // returns an empty plan when nothing is genuinely missing, which stops here.
+                        await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct); 
                         var scopedSteering = "The original plan's steps all succeeded. Only add steps for work the " +
                             "user EXPLICITLY requested that is still genuinely missing. Do NOT invent extra files, " +
                             "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
                             "missing, return an empty plan." +
                             (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
+                       
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                            scopedSteering, projectRoot, emitSse, ct,
-                            attachedFiles: attachedFiles, qualityCheckReason: reason);
+                           scopedSteering, projectRoot, emitSse, ct,
+                           attachedFiles: attachedFiles, qualityCheckReason: reason);
+ 
                         if (newSteps?.Count > 0)
                         {
-                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
+                            var existingChanges = plan!.Plan
+                                .Select(p => NormalizeChangeForDedup(p.Change))
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                            var filteredNewSteps = newSteps
+                                .Where(s => !existingChanges.Contains(NormalizeChangeForDedup(s.Change)))
+                                .ToList();
+
+                            if (filteredNewSteps.Count == 0)
+                            {
+                                await EmitLog(emitSse, "warn", "Replan generated duplicate steps of completed work — ignoring.", ct: ct);
+                                newSteps = null;
+                            }
+                            else
+                            {
+                                newSteps = filteredNewSteps;
+                            }
+                        }
+
+                        if (newSteps?.Count > 0)
+                        {
+                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps }); 
                             if (emitSse)
                                 await SendSse(Response, "plan",
                                     new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
@@ -8437,6 +8454,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             sb.Append(fileContents);
             sb.AppendLine();
         }
+        sb.AppendLine("⚠ CRITICAL: The plan may involve SEQUENTIAL steps (e.g. 'Create file with X, then modify it to Y').");
+        sb.AppendLine("If the file content matches Y (the final state), do NOT report X as missing. X was intentionally replaced by Y.");
+        sb.AppendLine("Do NOT generate steps to revert the file to an earlier state. Only generate steps if the FINAL requested state is missing.");
+        sb.AppendLine();
         sb.AppendLine("STOP AND THINK: does the CURRENT FILE CONTENT shown above ALREADY satisfy the ORIGINAL TASK, even imperfectly?");
         sb.AppendLine("If the explicit request is met, return an EMPTY plan — do NOT propose restructuring, renaming, moving code");
         sb.AppendLine("between methods, or 'cleanup' the user did not ask for.");
@@ -8515,7 +8536,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString());
 
         var (raw, _, llmError) = await CallLlmRaw(
-                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 1-2 steps. Empty array if all done.",
+                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
                 replanPrompt, ct, TimeSpan.FromSeconds(30));
 
         if (string.IsNullOrWhiteSpace(raw)) return null;
