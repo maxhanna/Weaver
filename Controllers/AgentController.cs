@@ -8883,12 +8883,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                     summary: plan.Summary ?? "", score: plan.Score);
         }
-
+ 
         // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
         if (emitSse)
         {
             await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
+        }
+
+        var fileBackups = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var step in plan?.Plan ?? [])
+        {
+            if (!AgentUtilities.IsRelativePath(step.File)) continue;
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (!fileBackups.ContainsKey(fullPath))
+            {
+                fileBackups[fullPath] = System.IO.File.Exists(fullPath)
+                    ? System.IO.File.ReadAllText(fullPath, Encoding.UTF8)
+                    : null;
+            }
         }
 
         try
@@ -8976,49 +8989,46 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             else
             {
-                // ── LAST RESORT: try once more with explicit failure code feedback ──
+                // ── LAST RESORT: revert files and replan from scratch with verification feedback ──
+                await EmitLog(emitSse, "warn",
+                    "Re-plan returned no steps. Reverting changes and generating a fresh plan with verification feedback...", ct: ct);
+
+                // 1. Revert files to their state before ExecutePlan
+                foreach (var kvp in fileBackups)
+                {
+                    try
+                    {
+                        if (kvp.Value != null)
+                            await System.IO.File.WriteAllTextAsync(kvp.Key, kvp.Value, Encoding.UTF8, ct);
+                        else if (System.IO.File.Exists(kvp.Key))
+                            System.IO.File.Delete(kvp.Key);
+                    }
+                    catch { /* swallow */ }
+                }
+
+                // 2. Generate a new plan using the verification failure as steering
+                var freshPlanSteering = "A previous attempt to complete this task failed verification with the following issues:\n" +
+                                         $"{verificationDetails}\n\n";
                 if (allFailures.Count > 0)
                 {
-                    await EmitLog(emitSse, "warn",
-                        "Replan returned no steps — trying last-resort replan with explicit failed code feedback…", ct: ct);
+                    freshPlanSteering += "Prior execution failures:\n" + failureContextForReplan.ToString() + "\n";
+                }
+                freshPlanSteering += "The previous changes have been REVERTED. You MUST generate a completely new plan that addresses these issues and correctly completes the task. Do NOT repeat the mistakes of the previous attempt.";
 
-                    var lastResortSteering =
-                        "The previous attempts ALL FAILED. Here is exactly what went wrong:\n\n" +
-                        failureContextForReplan.ToString() +
-                        "\n\nYou MUST generate at least ONE step that takes a completely different approach. " +
-                        "Do NOT return an empty plan. The code snippets above were rejected — try something different.\n" +
-                        "Consider: smaller edits, different edit format, editing a different section of the file.";
+                var (freshPlan, _) = await RunPlanningConvergenceLoop(
+                    prompt, discoveryContext, projectRoot, emitSse, ct, freshPlanSteering);
 
-                    var lastResortSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                        lastResortSteering, projectRoot, emitSse, ct,
-                        attachedFiles: attachedFiles, qualityCheckReason: verificationDetails);
+                if (freshPlan != null && freshPlan.Plan.Count > 0)
+                {
+                    plan = freshPlan;
 
-                    if (lastResortSteps != null && lastResortSteps.Count > 0)
-                    {
-                        plan = MergePlans(plan ?? new AgentPlan(),
-                            new AgentPlan { Plan = lastResortSteps, Summary = "Last-resort replan", Score = 0 });
-
-                        if (emitSse)
-                            await SendSse(Response, "plan",
-                                new { thinking = plan.Thinking, summary = "Last-resort replan", items = plan.Plan }, ct);
-
-                        var lastResortResults = new List<object>();
-                        await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, lastResortResults,
-                            steeringContext: lastResortSteering, attachedFiles: attachedFiles,
-                            completedStepIndices: new HashSet<int>(Enumerable.Range(0, plan.Plan.Count - lastResortSteps.Count)),
-                            cardId: cardId);
-                        allSteps.AddRange(lastResortResults);
-                    }
-                    else
-                    {
-                        await EmitLog(emitSse, "warn",
-                            "Re-plan returned no additional steps — stopping with verification gaps unresolved.", ct: ct);
-                    }
+                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
+                        steeringContext: freshPlanSteering, attachedFiles: attachedFiles, cardId: cardId);
                 }
                 else
                 {
                     await EmitLog(emitSse, "warn",
-                        "Re-plan returned no additional steps — stopping with verification gaps unresolved.", ct: ct);
+                        "Fresh plan generation failed — stopping with verification gaps unresolved.", ct: ct);
                 }
             }
         }
