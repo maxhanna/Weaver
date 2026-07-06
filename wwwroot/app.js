@@ -1585,6 +1585,21 @@
       });
     };
 
+    vm.deleteBenchmarkScore = function (score, event) {
+      if (event) event.stopPropagation();
+      if (!$window.confirm('Delete this benchmark score for ' + (vm.benchmarkLevelName(score.level) || 'BM ' + score.level) + '?'))
+        return;
+      $http.delete('/api/benchmark/scores/' + encodeURIComponent(score.id)).then(function () {
+        var idx = vm.benchmarkScores.indexOf(score);
+        if (idx >= 0) {
+          vm.benchmarkScores.splice(idx, 1);
+          if (vm.selectedBenchmarkScore === score) vm.selectedBenchmarkScore = null;
+        }
+      }, function () {
+        $window.alert('Failed to delete benchmark score');
+      });
+    };
+
     vm.closeBenchmarksPanel = function () {
       vm.showBenchmarksPanel = false;
       vm.selectedBenchmarkScore = null;
