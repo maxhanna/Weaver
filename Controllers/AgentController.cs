@@ -128,7 +128,7 @@ public class AgentController : ControllerBase
         "}\n\n" +
         "CRITICAL RULES:\n" +
             "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
-            "2. oldString must appear exactly ONCE in the file — include 2-3 surrounding lines as anchor context\n" +
+            "2. oldString MUST be 1-5 lines. You DO NOT need to make it unique. If you are deleting an element, output ONLY the element being deleted (1-5 lines). NEVER include surrounding containers (like <div class=\"card-tags\">) in oldString.\n" +
             "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
             "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
             "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
@@ -196,12 +196,13 @@ public class AgentController : ControllerBase
                 "For example, if moving a standalone div into a container where all children are wrapped in a specific class (like `optionsStatsDiv`), " +
                 "wrap the moved element in that same class rather than inserting it raw. " +
             "27. ATOMIC STEPS (CRITICAL): The plan is split into atomic steps. You MUST execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
-            "  - If the step says 'Remove [X]', your oldString MUST be [X] (plus minimal anchor lines), and your newString MUST be ONLY the anchor lines (the [X] code is deleted). Do NOT add [X] anywhere else in newString.\n" +
-            "  - If the step says 'Add [X]' or 'Insert [X]', your oldString MUST be the 1-2 anchor lines at the target location, and your newString MUST be those anchor lines PLUS [X]. Do NOT remove [X] from elsewhere in newString.\n" +
+                "  - If the step says 'Remove [X]', your oldString MUST be [X] (1-5 lines max). Set newString to an empty array []. Do NOT include surrounding context unless absolutely necessary.\n" +
+                "  - HTML ELEMENT REMOVAL: If the step asks to remove an HTML element (e.g., a <span>), your oldString MUST be EXACTLY that element (usually 1 line). Set newString to []. DO NOT include the parent container.\n" +
+                "  - DISAMBIGUATION: If the element appears multiple times, output ONLY the element. The system uses the TARGET LINE to find the correct instance.\n" +
             "28. EXACT CONTEXT (CRITICAL): When modifying an existing loop or block, you MUST copy the EXACT variables, function names, and structure from the file content shown above. " +
-                "Do NOT invent new helper methods (e.g., `renderMesh`, `setUniforms`), new variables (e.g., `this.explosions` if the file uses `explosions`), or new matrix functions (e.g., `mat4.mul` if the file uses `mat4.multiply`). " +
-                "If the existing code uses `this.drawMesh(this.getExplosionMesh(), ...)`, your newString MUST use that exact same pattern.\n" +
-            "29. SQL TABLE CREATION (CRITICAL): When your newString contains INSERT INTO or UPDATE statements that reference a SQL table " +
+                    "Do NOT invent new helper methods (e.g., `renderMesh`, `setUniforms`), new variables (e.g., `this.explosions` if the file uses `explosions`), or new matrix functions (e.g., `mat4.mul` if the file uses `mat4.multiply`). " +
+                    "If the existing code uses `this.drawMesh(this.getExplosionMesh(), ...)`, your newString MUST use that exact same pattern.\n" +
+            "29. DUPLICATE BLOCKS (CRITICAL): If the file contains multiple identical sections (e.g., <div class=\"card-tags\"> appears 3 times), you MUST output ONLY the 1-10 lines you want to change. DO NOT include the entire <div> block. The system uses the TARGET LINE to find the correct instance. NEVER output more than 10 lines.\n" +
                 "you MUST include a CREATE TABLE IF NOT EXISTS statement for that table in your newString, placed BEFORE the INSERT/UPDATE statements. " +
                 "The CREATE TABLE must define ALL columns that the INSERT/UPDATE references, with appropriate MySQL data types. " +
                 "Place it strategically at the beginning of the new code block, before any INSERT/UPDATE that depends on it. " +
@@ -1240,14 +1241,35 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine();
-        sb.AppendLine("Output the edit now:");
+        var changeLower = (step.Change ?? "").ToLowerInvariant();
+        if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+        {
+            sb.AppendLine("⚠ CRITICAL DELETION INSTRUCTION: You are deleting code. Your oldString MUST be EXACTLY the 1-5 lines of code being deleted. Set newString to an empty array []. Do NOT include the parent <div> or any surrounding lines in oldString. Output ONLY the exact lines to delete.");
+        }
 
+        sb.AppendLine();
+        sb.AppendLine("Output the edit now:");
         if (emitSse)
             await SendSse(Response, "edit-resolve", new { }, ct);
-        var (raw, _, _) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 8192);
+        var (raw, _, resolveError2) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
+
+        if (!string.IsNullOrWhiteSpace(resolveError2) && resolveError2.Contains("Repetition loop detected", StringComparison.OrdinalIgnoreCase))
+        {
+            return (null, null, false, null, false, resolveError2, false);
+        }
 
         if (string.IsNullOrWhiteSpace(raw))
             return (null, null, false, null, false, "LLM returned empty response", false);
+
+        // ABORT EARLY: If the raw response is massive, the LLM fell into a repetition loop.
+        if (raw.Length > 3000 || raw.Split('\n').Length > 40)
+        {
+            return (null, null, false, null, false,
+                "LLM response was too long (" + raw.Length + " chars) and likely truncated due to a repetition loop. " +
+                "Do NOT output massive blocks. Use a 1-3 line anchor targeting the exact line to change. " +
+                "You DO NOT need to make oldString unique — the system uses the TARGET LINE to find it.", false);
+        }
+
 
         string? oldStr = null, newStr = null;
 
@@ -1280,7 +1302,6 @@ public class AgentController : ControllerBase
                     return (null, null, false, null, true, null, false);
                 }
 
-                var changeLower = (step.Change ?? "").ToLowerInvariant();
                 var contentLower = (fileContent ?? "").ToLowerInvariant();
 
                 var stopWords = new HashSet<string> {
@@ -1836,15 +1857,24 @@ public class AgentController : ControllerBase
             }
             else if (!string.IsNullOrWhiteSpace(step.Change))
             {
-                // Extract quoted code or key identifiers from the change description to see if it's already gone.
-                // This is a fallback when OldString is not provided by the planner.
-                var codeMatch = Regex.Match(step.Change, @"`([^`]+)`|'([^']+)'");
-                if (codeMatch.Success)
+                var htmlMatch = Regex.Match(step.Change, @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
+                string? codeToRemove = htmlMatch.Success ? htmlMatch.Value : null;
+
+                if (string.IsNullOrWhiteSpace(codeToRemove))
                 {
-                    var codeToRemove = codeMatch.Groups[1].Value;
-                    if (!string.IsNullOrWhiteSpace(codeToRemove) && !content.Contains(codeToRemove, StringComparison.Ordinal))
-                        return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
+                    var quoteMatch = Regex.Match(step.Change, @"`([^`]+)`|""([^""]+)""|'([^']+)'");
+                    if (quoteMatch.Success)
+                    {
+                        codeToRemove = quoteMatch.Groups[1].Success ? quoteMatch.Groups[1].Value
+                                     : quoteMatch.Groups[2].Success ? quoteMatch.Groups[2].Value
+                                     : quoteMatch.Groups[3].Value;
+                    }
                 }
+
+                // Require a meaningful length — short fragments produce false "still present" positives.
+                if (!string.IsNullOrWhiteSpace(codeToRemove) && codeToRemove.Length >= 20 &&
+                    !content.Contains(codeToRemove, StringComparison.Ordinal))
+                    return (PreEditVerdict.AlreadyDone, "code to be removed is already absent from file");
             }
         }
         if (changeLower.StartsWith("move ") || changeLower.StartsWith("insert "))
@@ -1963,6 +1993,14 @@ public class AgentController : ControllerBase
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
         sb.AppendLine();
+        sb.AppendLine("SPECIAL RULE FOR REMOVAL/DELETE STEPS:");
+        sb.AppendLine("  For steps that say 'Remove X' or 'Delete X':");
+        sb.AppendLine("  - alreadyDone = true ONLY if X is NOT present in the file content shown below.");
+        sb.AppendLine("  - If X IS present in the file (even once), alreadyDone MUST be false.");
+        sb.AppendLine("  - Do NOT reason about 'whether it would be present after other steps run'.");
+        sb.AppendLine("  - Check the ACTUAL file content shown above — search for the exact code pattern.");
+        sb.AppendLine("  - If the file content is truncated or shows excerpts, do NOT assume the pattern is absent — set alreadyDone = false if you can't see the whole file.");
+        sb.AppendLine(); 
         sb.AppendLine("Output ONLY valid JSON:");
         sb.AppendLine("{");
         sb.AppendLine("  \"steps\": [");
@@ -1999,12 +2037,46 @@ public class AgentController : ControllerBase
                 if (System.IO.File.Exists(fullPath) && AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
                 {
                     var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                    var changeLower = (step.Change ?? "").ToLowerInvariant();
+
                     sb.AppendLine("TARGET FILE CONTENT:");
                     sb.AppendLine("```");
-                    if (content.Length > 6000)
-                        sb.AppendLine(content[..6000] + $"\n... (truncated, full file is {content.Length} chars)");
+                    if (content.Length > 8000)
+                    {
+                        if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+                        {
+                            // For removal steps, extract relevant sections so LLM can see if the code is there
+                            var keywords = Regex.Matches(step.Change ?? "", @"[\w-]+")
+                                .Select(m => m.Value)
+                                .Where(w => w.Length > 4 && !new HashSet<string> { "remove", "delete" }.Contains(w.ToLowerInvariant()))
+                                .Take(3).ToList();
+
+                            var sb2 = new StringBuilder();
+                            var lines = content.Split('\n');
+                            for (var li = 0; li < lines.Length; li++)
+                            {
+                                if (keywords.Any(k => lines[li].Contains(k, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    var start = Math.Max(0, li - 2);
+                                    var end = Math.Min(lines.Length - 1, li + 2);
+                                    sb2.AppendLine($"--- around line {li + 1} ---");
+                                    for (var j = start; j <= end; j++)
+                                        sb2.AppendLine($"{j + 1}: {lines[j]}");
+                                    sb2.AppendLine();
+                                }
+                            }
+                            sb.AppendLine(sb2.ToString());
+                            sb.AppendLine($"... (showing relevant excerpts, full file is {content.Length} chars)");
+                        }
+                        else
+                        {
+                            sb.AppendLine(content[..6000] + $"\n... (truncated, full file is {content.Length} chars)");
+                        }
+                    }
                     else
+                    {
                         sb.AppendLine(content);
+                    }
                     sb.AppendLine("```");
                 }
                 else
@@ -2051,6 +2123,48 @@ public class AgentController : ControllerBase
                 return null;
             }
 
+            // Deterministic pre-check for removal steps
+            var preCheckedIndices = new HashSet<int>();
+            for (var i = 0; i < plan.Plan.Count; i++)
+            {
+                var step = plan.Plan[i];
+                var changeLower = (step.Change ?? "").ToLowerInvariant();
+
+                if (!changeLower.StartsWith("remove ") && !changeLower.StartsWith("delete "))
+                    continue;
+
+                // Extract HTML element to check
+                var htmlMatch = Regex.Match(step.Change ?? "", @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
+                string? codeToRemove = htmlMatch.Success ? htmlMatch.Value : null;
+
+                if (string.IsNullOrWhiteSpace(codeToRemove) || codeToRemove.Length < 20)
+                    continue;
+
+                var relPath = step.File.Replace('\\', '/');
+                var fullPath = Path.GetFullPath(
+                    Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+
+                if (!System.IO.File.Exists(fullPath)) continue;
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+
+                // If the code to remove IS present in the file, it is NOT already done
+                if (content.Contains(codeToRemove, StringComparison.Ordinal))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Audit: step {i + 1} — code to remove IS present in file, NOT already done (deterministic override)", ct: ct);
+
+                    auditSteps.Add(new AuditPlanStepResult
+                    {
+                        Index = i,
+                        AlreadyDone = false,
+                        NeedsDecoupling = false,
+                        Reason = "Code to be removed is present in file — step is needed",
+                        DecoupledSteps = null
+                    });
+                    preCheckedIndices.Add(i);
+                }
+            }
+
             foreach (var stepEl in stepsArr.EnumerateArray())
             {
                 if (stepEl.ValueKind != JsonValueKind.Object) continue;
@@ -2058,6 +2172,14 @@ public class AgentController : ControllerBase
                 var idx = stepEl.TryGetProperty("index", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number
                     ? idxEl.GetInt32() : -1;
                 if (idx < 0 || idx >= plan.Plan.Count) continue;
+
+                // Skip if deterministically pre-checked
+                if (preCheckedIndices.Contains(idx))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Audit: step {idx + 1} — using deterministic check (LLM verdict ignored)", ct: ct);
+                    continue;
+                }
 
                 var alreadyDone = stepEl.TryGetProperty("alreadyDone", out var adEl) &&
                                   adEl.ValueKind == JsonValueKind.True && adEl.GetBoolean();
@@ -2067,6 +2189,34 @@ public class AgentController : ControllerBase
 
                 string? reason = stepEl.TryGetProperty("reason", out var rEl) && rEl.ValueKind == JsonValueKind.String
                     ? rEl.GetString() : null;
+
+                // Post-LLM sanity check for removal steps
+                if (alreadyDone)
+                {
+                    var step = plan.Plan[idx];
+                    var changeLower = (step.Change ?? "").ToLowerInvariant();
+                    if (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete "))
+                    {
+                        var htmlMatch = Regex.Match(step.Change ?? "", @"<(\w+)\b[^>]*>.*?</\1>", RegexOptions.Singleline);
+                        if (htmlMatch.Success)
+                        {
+                            var relPath = step.File.Replace('\\', '/');
+                            var fullPath = Path.GetFullPath(
+                                Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                            if (System.IO.File.Exists(fullPath))
+                            {
+                                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                                if (content.Contains(htmlMatch.Value, StringComparison.Ordinal))
+                                {
+                                    await EmitLog(emitSse, "warn",
+                                        $"Audit sanity check: step {idx + 1} was marked 'already done' but code is present — overriding", ct: ct);
+                                    alreadyDone = false;
+                                    reason = "Override: code to be removed is still present in file";
+                                }
+                            }
+                        }
+                    }
+                }
 
                 List<PlanStep>? decoupled = null;
                 if (needsDecoupling && stepEl.TryGetProperty("decoupledSteps", out var dcArr) && dcArr.ValueKind == JsonValueKind.Array)
@@ -2654,16 +2804,16 @@ public class AgentController : ControllerBase
                 refinedChange = reDerived;
             }
         }
-
         var enrichedStep = new PlanStep
         {
             File = step.File,
             Change = (string.IsNullOrWhiteSpace(refinedChange) ? step.Change : refinedChange) ?? "",
             Priority = step.Priority,
+            LineNumber = step.LineNumber,   // ← ADDED: was being silently dropped, causing
+                                            //   self-heal/disambiguation to lose all line context
             OldString = astOldStringHint ?? step.OldString ?? "",
             NewString = step.NewString ?? ""
         };
-
         await PersistStepExplorationAsync(cardId, planItemIndex, new
         {
             status = "ready",
@@ -3584,6 +3734,40 @@ emitSse, ct);
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
 
+            // ── STRICT DELETION SAFETY GUARDS ──
+            // Prevent the LLM from deleting structural HTML or huge blocks when newStr is empty
+            if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+            {
+                var oldLinesCount = oldStr!.Split('\n').Length;
+                var oldTrimmed = oldStr.TrimStart();
+
+                // 1. Maximum 3 lines for a deletion
+                if (oldLinesCount > 3)
+                {
+                    var err = $"DELETION SIZE LIMIT: oldString is {oldLinesCount} lines long. When newString is empty (deletion), oldString MUST be 1-3 lines maximum. Output ONLY the exact element being deleted.";
+                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                    history.Add((oldStr!, newStr ?? "", err));
+                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2) goto RecordFailure;
+                    continue;
+                }
+
+                // 2. Prevent deletion of structural closing/opening tags
+                if (oldTrimmed.StartsWith("</div") || oldTrimmed.StartsWith("</label") || oldTrimmed.StartsWith("</span") ||
+                    oldTrimmed.StartsWith("<div class=\"card-tags\"") || oldTrimmed.StartsWith("<div class=\"attachments\"") ||
+                    oldTrimmed.StartsWith("<div class=\"card-actions\"") || oldTrimmed.StartsWith("<!--"))
+                {
+                    var err = "STRUCTURAL DELETION GUARD: Refusing to delete structural HTML elements (like </div>, container openings, or comments). Output ONLY the specific <span> or <label> being removed.";
+                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                    history.Add((oldStr!, newStr ?? "", err));
+                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2) goto RecordFailure;
+                    continue;
+                }
+            }
+
             var oldLines = oldStr?.Split('\n').Length ?? 0;
             var newLines = newStr?.Split('\n').Length ?? 0;
             var oldPreview = oldStr is { Length: > 0 }
@@ -3624,6 +3808,92 @@ emitSse, ct);
                     replaced = false;
                     newContent = fileContent;
                     matchError = "FORMAT C oldString not found in file (direct match failed)";
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(oldStr) && !fromFormatC)
+            {
+                var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+                var normOld = AgentUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
+                var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "").Trim('\n', '\r');
+
+                var fileLinesArr = normFile.Split('\n').ToList();
+                var oldLinesArr = normOld.Split('\n').ToList();
+                var newLinesArr = string.IsNullOrWhiteSpace(normNew)
+                    ? new List<string>()
+                    : normNew.Split('\n').ToList();
+
+                int matchIdx = -1;
+                var targetLineIdx = step.LineNumber > 0 ? step.LineNumber - 1 : -1;
+                var bestDist = int.MaxValue;
+
+                for (int i = 0; i <= fileLinesArr.Count - oldLinesArr.Count; i++)
+                {
+                    bool match = true;
+                    for (int j = 0; j < oldLinesArr.Count; j++)
+                    {
+                        // Ignore leading/trailing whitespace differences
+                        if (fileLinesArr[i + j].Trim() != oldLinesArr[j].Trim())
+                        {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match)
+                    {
+                        if (targetLineIdx >= 0)
+                        {
+                            var dist = Math.Abs(i - targetLineIdx);
+                            if (dist < bestDist)
+                            {
+                                bestDist = dist;
+                                matchIdx = i;
+                            }
+                        }
+                        else
+                        {
+                            matchIdx = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (matchIdx >= 0)
+                {
+                    var finalNewLines = new List<string>();
+                    if (newLinesArr.Count > 0)
+                    {
+                        var baseIndent = Regex.Match(fileLinesArr[matchIdx], @"^(\s*)").Value;
+                        var oldBaseIndent = Regex.Match(oldLinesArr[0], @"^(\s*)").Value;
+
+                        foreach (var nl in newLinesArr)
+                        {
+                            if (string.IsNullOrWhiteSpace(nl))
+                            {
+                                finalNewLines.Add(nl);
+                                continue;
+                            }
+
+                            var currentOldIndent = Regex.Match(nl, @"^(\s*)").Value;
+                            string relativeIndent = currentOldIndent.Length >= oldBaseIndent.Length
+                                ? currentOldIndent.Substring(oldBaseIndent.Length)
+                                : "";
+
+                            finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
+                        }
+                    }
+
+                    fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
+                    fileLinesArr.InsertRange(matchIdx, finalNewLines);
+
+                    newContent = string.Join("\n", fileLinesArr);
+                    replaced = true;
+                    matchError = null;
+                    snippet = null;
+                }
+                else
+                {
+                    var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
+                    replaced = r; newContent = nc; matchError = me; snippet = sn;
                 }
             }
             else
@@ -3806,9 +4076,19 @@ emitSse, ct);
                 var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
-                    // SAFETY CHECK: If correctedBlock is significantly longer than newStr, 
-                    // the LLM likely deleted code accidentally (e.g., hallucinated oldString structure).
-                    // Abort self-heal to prevent massive code deletion.
+                    var relevanceKeywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
+                    var isRelevant = relevanceKeywords.Count == 0 ||
+                        relevanceKeywords.Any(k => correctedBlock.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+                    if (!isRelevant)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Self-heal candidate for {relPath} shares no keywords with the change description " +
+                            $"[{string.Join(", ", relevanceKeywords)}] — refusing to apply. Treating as already done.", ct: ct);
+                        history.Add((oldStr!, newStr ?? "", "Self-heal candidate rejected: no relevant match found in file — target already absent."));
+                        continue;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(newStr) &&
                         correctedBlock.Split('\n').Length > newStr.Split('\n').Length + 4)
                     {
@@ -4087,7 +4367,7 @@ emitSse, ct);
             if (ext == ".css" || ext == ".scss" || ext == ".less")
             {
                 newContent = AgentUtilities.AutoFixCssWhitespace(newContent);
-            } 
+            }
 
             var preEditContent = fileContent;
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -7149,7 +7429,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return "Template event wiring is planned without the component script/context. Replan to inspect or edit the .ts/.js component before changing handlers, so method names are verified instead of invented.";
             }
         }
-        SkipLayoutCheck:;
+    SkipLayoutCheck:;
 
         var sb = new StringBuilder();
         sb.AppendLine("You are validating a code-change plan. Determine if the plan makes sense and is complete given the user's request.");
@@ -7523,12 +7803,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            await EmitLog(emitSse, "info",  $"Phase 1 — selecting from {candidatePool.Count} candidates…", ct: ct);
+            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates…", ct: ct);
             var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
             toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
         }
 
-        toRead = toRead.Where(f => {
+        toRead = toRead.Where(f =>
+        {
             var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
             return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
         }).ToList();
@@ -7662,7 +7943,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (buildCommands != null && buildCommands.Trim().Length > 0)
             {
                 var isBuildRepair = await ClassifyIsBuildRepairPromptAsync(prompt, ct);
-                if (isBuildRepair) {
+                if (isBuildRepair)
+                {
                     return await RepairBuildPipeline(prompt, projectRoot, emitSse, buildCommands, ct);
                 }
             }
@@ -8386,10 +8668,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 throw new InvalidOperationException("LLM returned an empty or unparseable plan.");
             }
 
-            // Deduplicate plan steps: merge steps with the same file and similar
-            // change description (normalized). The planner often hallucinates the
-            // same step repeatedly despite "AT MOST 2 steps" in the prompt.
             plan.Plan = DeduplicateSteps(plan.Plan);
+            plan.Plan = DeduplicateSimilarSteps(plan.Plan);
 
             // If the planner asked to read more files, gather that context and replan.
             // Exploration rounds never count as a converged plan, so _explore steps can
@@ -8574,7 +8854,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // Phase 2: Plan
         await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
-        if (emitSse) { 
+        if (emitSse)
+        {
             await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
         }
 
@@ -8688,10 +8969,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         newPlanItems.Add(plan.Plan[i]);
                     }
                     plan.Plan = newPlanItems;
+                    plan.Plan = DeduplicateSimilarSteps(plan.Plan);
 
                     if (emitSse)
-                        await SendSse(Response, "plan",
-                            new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+                    {
+                        await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+                    }
                 }
             }
         }
@@ -8755,6 +9038,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // ── Post-execution verification: re-check with LLM that task is 100% complete ──
         var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+
+        if (!taskComplete)
+        {
+            // Ground-truth override: if every edit the plan already ran (and logged as
+            // "done") genuinely removed its target from disk right now, the plan the
+            // user asked for has been fully executed. Don't let an LLM verification
+            // pass override that ground truth and spawn extra steps the user never
+            // asked for — that's exactly how the </div> corruption above happened.
+            if (await VerifyCompletedRemovalsGroundTruthAsync(allSteps, projectRoot, ct))
+            {
+                await EmitLog(emitSse, "info",
+                    "Post-execution verification claimed incomplete, but every planned removal is confirmed gone from disk — trusting the plan, not the verifier.", ct: ct);
+                taskComplete = true;
+            }
+        }
+
         if (taskComplete)
         {
             allSteps.Add(new Dictionary<string, object?>
@@ -10256,6 +10555,136 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var parsed = AgentUtilities.ParsePlan(cleaned);
         return parsed?.Plan?.Count > 0 ? parsed.Plan : null;
     }
+    /// <summary>
+    /// Collapses near-duplicate plan steps that target the same file and describe the
+    /// same underlying edit in different words. Exact-string dedup (DeduplicateSteps)
+    /// only catches identical text; it misses cases where the planner (or the per-step
+    /// decoupling audit) independently produces multiple steps that all mean "do the
+    /// same thing" with different phrasing. Left unchecked, that duplication multiplies
+    /// during decoupling — e.g. 3 duplicate "remove priority tag from all 3 columns"
+    /// steps each get decoupled into 3 column-specific sub-steps = 9 steps for 3 real
+    /// edits, with inconsistent guessed line numbers for each duplicate set.
+    ///
+    /// This NEVER reduces distinct, intentional steps: two steps that reference
+    /// different locations (todo vs. doing vs. done) are always kept, even if their
+    /// wording is otherwise very similar.
+    /// </summary>
+    private static List<PlanStep> DeduplicateSimilarSteps(List<PlanStep> steps, double similarityThreshold = 0.72)
+    {
+        if (steps.Count <= 1) return steps;
+
+        var keep = new List<PlanStep>();
+        var keptSignatures = new List<(HashSet<string> keywords, HashSet<string> quoted, string file, string? locationTag)>();
+
+        foreach (var step in steps)
+        {
+            var file = (step.File ?? "").Trim();
+            var change = step.Change ?? "";
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(change.ToLowerInvariant())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var quoted = ExtractQuotedSnippets(change);
+            var locationTag = ExtractLocationTag(change);
+
+            var isDuplicate = false;
+            for (var i = 0; i < keep.Count; i++)
+            {
+                var (existingKeywords, existingQuoted, existingFile, existingLocationTag) = keptSignatures[i];
+                if (!string.Equals(existingFile, file, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Different explicit locations (todo vs. doing vs. done) are ALWAYS distinct —
+                // never collapse steps just because their wording overlaps if they name
+                // different targets. This is what protects the user's actual 3-column intent.
+                if (locationTag != null && existingLocationTag != null &&
+                    !string.Equals(locationTag, existingLocationTag, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var keywordSim = JaccardSimilarity(keywords, existingKeywords);
+                var quotedOverlap = quoted.Count > 0 && existingQuoted.Count > 0 && quoted.Overlaps(existingQuoted);
+
+                if (keywordSim >= similarityThreshold || quotedOverlap)
+                {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+
+            if (isDuplicate) continue;
+
+            keep.Add(step);
+            keptSignatures.Add((keywords, quoted, file, locationTag));
+        }
+
+        return keep;
+    }
+
+    private static double JaccardSimilarity(HashSet<string> a, HashSet<string> b)
+    {
+        if (a.Count == 0 && b.Count == 0) return 0;
+        var intersection = a.Intersect(b, StringComparer.OrdinalIgnoreCase).Count();
+        var union = a.Union(b, StringComparer.OrdinalIgnoreCase).Count();
+        return union == 0 ? 0 : (double)intersection / union;
+    }
+
+    /// <summary>Extracts quoted code/HTML snippets from a step's change description for
+    /// exact-target comparison — two steps quoting the same element are the same edit
+    /// even if the surrounding prose differs.</summary>
+    private static HashSet<string> ExtractQuotedSnippets(string text)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(text)) return result;
+        foreach (Match m in Regex.Matches(text, @"<[^>]+>.*?</\w+>|`[^`]+`"))
+        {
+            var norm = Regex.Replace(m.Value.ToLowerInvariant(), @"\s+", " ").Trim();
+            if (norm.Length >= 15) result.Add(norm);
+        }
+        return result;
+    }
+
+    /// <summary>Extracts an explicit location tag (todo/doing/done/selfImproving) from a
+    /// step's change description, if present, so distinct-location steps are never merged.</summary>
+    private static string? ExtractLocationTag(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var m = Regex.Match(text, @"\b(todo|doing|done|selfimproving|self-improving)\b", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.ToLowerInvariant().Replace("-", "") : null;
+    }
+    private async Task<bool> VerifyCompletedRemovalsGroundTruthAsync(
+        List<object> allSteps, string projectRoot, CancellationToken ct)
+    {
+        var doneEdits = allSteps.OfType<Dictionary<string, object?>>()
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                        r.TryGetValue("status", out var st) && st?.ToString() == "done" &&
+                        r.TryGetValue("editAction", out var a) && a?.ToString() == "modified")
+            .ToList();
+
+        if (doneEdits.Count == 0) return false; // nothing concrete to confirm — don't override
+
+        var fileCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var edit in doneEdits)
+        {
+            var relPath = edit.GetValueOrDefault("path")?.ToString();
+            var oldPreview = edit.GetValueOrDefault("oldStringPreview")?.ToString();
+            var newPreview = edit.GetValueOrDefault("newStringPreview")?.ToString() ?? "";
+            if (string.IsNullOrWhiteSpace(relPath) || string.IsNullOrWhiteSpace(oldPreview)) continue;
+            if (!string.IsNullOrWhiteSpace(newPreview)) continue; // only checking pure removals
+
+            if (!fileCache.TryGetValue(relPath, out var content))
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!System.IO.File.Exists(fullPath)) continue;
+                content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                fileCache[relPath] = content;
+            }
+
+            var normContent = AgentUtilities.NormalizeLineEndings(content);
+            var normOld = AgentUtilities.NormalizeLineEndings(oldPreview);
+            if (normContent.Contains(normOld, StringComparison.Ordinal))
+                return false; // genuinely still present — verifier was right, don't override
+        }
+
+        return true;
+    }
 
     private async Task<(List<object> steps, AgentPlan? plan)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
@@ -11009,12 +11438,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
-        HttpClient client, string target, string model, object messages,
-        CancellationToken ct = default, int? maxTokens = null)
+      HttpClient client, string target, string model, object messages,
+      CancellationToken ct = default, int? maxTokens = null)
     {
         var cfg6 = await LoadConfigAsync();
         var mt = maxTokens ?? cfg6.defaultMaxTokens;
-        var reqBody = new { model, messages, stream = false, temperature = 0.05, max_tokens = mt };
+        var reqBody = new
+        {
+            model,
+            messages,
+            stream = false,
+            temperature = 0.05,
+            max_tokens = mt,
+            repeat_penalty = 1.3,
+            repeat_last_n = 256
+        };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         try
         {
@@ -11030,12 +11468,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmStreaming(
-        HttpClient client, string target, string model, object messages,
-        CancellationToken ct = default, int? maxTokens = null, bool emitSse = false)
+    HttpClient client, string target, string model, object messages,
+    CancellationToken ct = default, int? maxTokens = null, bool emitSse = false)
     {
         var cfg7 = await LoadConfigAsync();
         var mt = maxTokens ?? cfg7.defaultMaxTokens;
-        var reqBody = new { model, messages, stream = true, temperature = 0.05, max_tokens = mt };
+        var reqBody = new
+        {
+            model,
+            messages,
+            stream = true,
+            temperature = 0.05,
+            max_tokens = mt,
+            repeat_penalty = 1.3,
+            repeat_last_n = 256
+        };
         var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         try
         {
@@ -11048,9 +11495,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var reader = new StreamReader(stream);
             var sb = new StringBuilder();
 
+            // ── Repetition guard state ──────────────────────────────────────
+            // Tracks a sliding window of recent tokens and aborts the request
+            // (closing the HTTP response early) if the same substring keeps
+            // reappearing — the classic small-model degeneration loop where it
+            // gets stuck re-emitting the same block indefinitely.
+            const int WindowChars = 400;      // how much recent text to scan
+            const int ChunkLen = 40;          // size of the substring we hash/compare
+            const int RepeatThreshold = 4;    // how many times a chunk must repeat to trigger
+            using var repeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
             while (true)
             {
-                var line = await reader.ReadLineAsync();
+                repeatCts.Token.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync().WaitAsync(repeatCts.Token);
                 if (line == null) break;
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 if (line.Contains("[DONE]")) break;
@@ -11070,6 +11528,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             {
                                 if (emitSse) await SendSse(Response, "token", new { token }, ct);
                                 sb.Append(token);
+
+                                if (sb.Length >= ChunkLen * (RepeatThreshold + 1) &&
+                                    IsRepeatingLoop(sb, WindowChars, ChunkLen, RepeatThreshold))
+                                {
+                                    // Abort the HTTP stream immediately — don't wait for max_tokens.
+                                    try { resp.Dispose(); } catch { }
+                                    var truncated = sb.ToString();
+                                    return (truncated, null,
+                                        $"Repetition loop detected after {truncated.Length} chars — aborted early. " +
+                                        "The model got stuck re-emitting the same block. Retry with a smaller, more targeted anchor.");
+                                }
                             }
                         }
                     }
@@ -11084,6 +11553,41 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
         catch (Exception ex) { return ("", null, ex.Message); }
+    }
+
+    /// <summary>
+    /// Detects whether the tail of the accumulated response consists of the same
+    /// substring repeating back-to-back — the signature of a model stuck in a
+    /// degenerate copy-loop. Scans only the last <paramref name="windowChars"/>
+    /// characters for performance; O(window) per token, not O(total length).
+    /// </summary>
+    private static bool IsRepeatingLoop(StringBuilder sb, int windowChars, int chunkLen, int repeatThreshold)
+    {
+        var len = sb.Length;
+        var start = Math.Max(0, len - windowChars);
+        var window = sb.ToString(start, len - start);
+
+        if (window.Length < chunkLen * repeatThreshold) return false;
+
+        // Take the most recent chunk and count consecutive immediate repeats walking backward.
+        var tail = window[^chunkLen..];
+        if (string.IsNullOrWhiteSpace(tail.Trim())) return false; // don't flag runs of whitespace/newlines alone
+
+        var pos = window.Length - chunkLen;
+        var consecutive = 1;
+        pos -= chunkLen;
+        while (pos >= 0)
+        {
+            var candidate = window.Substring(pos, chunkLen);
+            if (candidate == tail)
+            {
+                consecutive++;
+                if (consecutive >= repeatThreshold) return true;
+                pos -= chunkLen;
+            }
+            else break;
+        }
+        return false;
     }
 
     private async Task<(string raw, string? error)> CallLlmRawText(
@@ -12101,10 +12605,18 @@ Respond with JSON only:
     }
 
     private static (bool replaced, string newContent, string? matchError, string? snippet) TryReplaceSafe(
-    string fileContent, string oldStr, string newStr, int targetLine = 0, string? changeDesc = null)
+     string fileContent, string oldStr, string newStr, int targetLine = 0, string? changeDesc = null)
     {
         if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(fileContent) && !string.IsNullOrEmpty(newStr))
             return (true, newStr, null, null);
+
+
+        if (string.IsNullOrEmpty(oldStr) && !string.IsNullOrEmpty(fileContent))
+        {
+            return (false, fileContent,
+                "oldString is empty but the file is non-empty — refusing to perform an unbounded replacement. " +
+                "Provide a non-empty, specific anchor.", null);
+        }
 
         var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
         var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
@@ -12112,13 +12624,16 @@ Respond with JSON only:
         // 1. Exact match search
         var matches = new List<int>();
         var searchPos = 0;
-        while (true)
+        var maxIterations = normFile.Length + 2; // hard cap — defense in depth
+        var iterations = 0;
+        while (iterations++ < maxIterations)
         {
             var idx = normFile.IndexOf(normOld, searchPos, StringComparison.Ordinal);
             if (idx < 0) break;
             matches.Add(idx);
-            searchPos = idx + normOld.Length;
+            searchPos = idx + Math.Max(1, normOld.Length); // never allow a zero-length advance
         }
+
 
         if (matches.Count == 1)
         {
@@ -12179,7 +12694,13 @@ Respond with JSON only:
             }
 
             var firstLine = normOld.Split('\n')[0].Trim();
-            return (false, fileContent, $"oldString found {matches.Count} times in file — include more surrounding lines as anchor context.", firstLine);
+            var uniqueLine = AgentUtilities.ExtractMostUniqueLine(normOld, normFile);
+
+            var err = $"oldString found {matches.Count} times in file — include more surrounding lines as anchor context.";
+            if (uniqueLine != null)
+                err += $" OR use ONLY this unique line as your entire oldString: `{uniqueLine.Trim()}`";
+
+            return (false, fileContent, err, firstLine);
         }
 
         // 2. Fuzzy match (prefix/suffix)
@@ -12201,7 +12722,7 @@ Respond with JSON only:
 
         return (false, fileContent, "oldString not found verbatim in file", null);
     }
- 
+
     private static string StripFullFileFence(string value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
@@ -12345,8 +12866,15 @@ Respond with JSON only:
         var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
 
         // Strategy 1: Extract full HTML block if oldStr starts with an HTML tag
-        var htmlBlock = AgentUtilities.ExtractFullHtmlBlock(normFile, oldStr);
-        if (htmlBlock != null) return htmlBlock;
+        // BUT only if we're not explicitly removing/deleting something (to avoid massive block extraction for simple deletions)
+        var changeLower = (changeDesc ?? "").ToLowerInvariant();
+        bool isRemoval = changeLower.Contains("remove") || changeLower.Contains("delete");
+
+        if (!isRemoval)
+        {
+            var htmlBlock = AgentUtilities.ExtractFullHtmlBlock(normFile, oldStr);
+            if (htmlBlock != null) return htmlBlock;
+        }
 
         var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
         var oldLines = normOld.Split('\n').Select(l => l.Trim()).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
@@ -12440,48 +12968,14 @@ Respond with JSON only:
         if (chosenCandidate >= 0)
         {
             var bestStart = candidates[chosenCandidate].startIdx;
-            // Do NOT add + 5. Return exactly oldLines.Count lines to prevent spillover.
             var endIdx = Math.Min(fileLines.Length, bestStart + oldLines.Count);
-            return string.Join("\n", fileLines.Skip(bestStart).Take(endIdx - bestStart));
+            var joined = string.Join("\n", fileLines.Skip(bestStart).Take(endIdx - bestStart));
+            return string.IsNullOrWhiteSpace(joined) ? null : joined;
         }
 
         return null;
     }
 
-    /// <summary>
-    /// Quick pre-flight check: detect truncated lines in oldString/newString before attempting edit.
-    /// A line is truncated if it has unbalanced double-quotes (odd count), or if the last line
-    /// is a prefix of any line in the file that's at least 50% longer.
-    /// </summary>
-    /// <summary>
-    /// Extend truncated lines in oldLines and newLines to match the full file content at the match position.
-    /// If a line of oldLines is a prefix of the file line (file line is longer), extend oldLines to match.
-    /// If a line of newLines is a prefix of the file line, extend newLines to match.
-    /// This prevents truncation from deleting parts of a line during replacement.
-    /// </summary>
-    private static (string[] oldLines, string[] newLines) ExtendTruncatedLines(
-        string[] fileLines, int matchLine, string[] oldLines, string[] newLines)
-    {
-        var adjOld = (string[])oldLines.Clone();
-        var adjNew = (string[])newLines.Clone();
-
-        for (var i = 0; i < adjOld.Length && (matchLine + i) < fileLines.Length; i++)
-        {
-            var oldTrim = adjOld[i].TrimEnd();
-            var fileTrim = fileLines[matchLine + i].TrimEnd();
-            if (oldTrim.Length < fileTrim.Length && fileTrim.StartsWith(oldTrim, StringComparison.Ordinal))
-                adjOld[i] = fileLines[matchLine + i];
-        }
-        for (var i = 0; i < adjNew.Length && (matchLine + i) < fileLines.Length; i++)
-        {
-            var newTrim = adjNew[i].TrimEnd();
-            var fileTrim = fileLines[matchLine + i].TrimEnd();
-            if (newTrim.Length < fileTrim.Length && fileTrim.StartsWith(newTrim, StringComparison.Ordinal))
-                adjNew[i] = fileLines[matchLine + i];
-        }
-
-        return (adjOld, adjNew);
-    }
 
     private static string? GetUnsafeEditPayloadReason(string oldString, string newString)
     {
@@ -12490,15 +12984,6 @@ Respond with JSON only:
                 newString.Contains(marker, StringComparison.OrdinalIgnoreCase))
                 return $"Edit contains placeholder marker '{marker}'.";
         return null;
-    }
-
-    private static string ReplaceLineBlock(string[] fileLines, int start, int count, string replacement)
-    {
-        var sb = new StringBuilder();
-        for (var i = 0; i < start; i++) { sb.Append(fileLines[i]); sb.Append('\n'); }
-        sb.Append(IndentReplacement(fileLines, start, replacement));
-        for (var i = start + count; i < fileLines.Length; i++) { sb.Append('\n'); sb.Append(fileLines[i]); }
-        return sb.ToString();
     }
 
     private static bool IsHtmlLikeContent(string content) =>

@@ -2984,13 +2984,15 @@ public static class AgentUtilities
                lower.Contains("delete ") || lower.Contains("from ") || lower.Contains("where ") ||
                lower.Contains("interval ") || lower.Contains("date_add") || lower.Contains("where ");
     }
+    
     public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return new List<string>();
         var stopWords = new HashSet<string> {
-        "from", "column", "tags", "section", "remove", "priority", "card", "edit", "add", "delete", "update",
-        "method", "function", "class", "property", "field", "variable", "code", "block", "line", "target",
-        "change", "modify", "replace", "insert", "create", "implement", "ensure", "make", "file"
+        "from", "remove", "delete", "update", "method", "function", "class",
+        "property", "field", "variable", "code", "block", "line", "target",
+        "change", "modify", "replace", "insert", "create", "implement",
+        "ensure", "make", "file", "edit", "add", "element", "span", "div"
     };
 
         return Regex.Matches(changeDesc.ToLowerInvariant(), @"\b[a-z]{4,}\b")
@@ -2998,6 +3000,29 @@ public static class AgentUtilities
             .Where(w => !stopWords.Contains(w))
             .Distinct()
             .ToList();
+    }
+
+    public static string? ExtractMostUniqueLine(string oldStr, string fileContent)
+    {
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+        var oldLines = oldStr.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (oldLines.Count <= 1) return null;
+
+        string? bestLine = null;
+        int bestCount = int.MaxValue;
+
+        foreach (var line in oldLines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length < 15) continue; // skip short lines like </div>
+            var count = normFile.Split(new[] { trimmed }, StringSplitOptions.None).Length - 1;
+            if (count < bestCount)
+            {
+                bestCount = count;
+                bestLine = line;
+            }
+        }
+        return bestLine;
     }
     public static string? ExtractFullHtmlBlock(string fileContent, string oldStr)
     {

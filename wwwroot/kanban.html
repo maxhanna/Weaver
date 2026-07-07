@@ -92,9 +92,8 @@
             </div>
           </div>
           <div class="card-tags">
-            <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+          <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+          <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
@@ -240,7 +239,6 @@
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <span class="card-tag" ng-if="vm.activeCardId === card.id" style="color: var(--accent);">ACTIVE</span>
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-self-improving" ng-if="card.selfImproving" style="color: var(--accent2);">🔄
               SELF-IMPROVING</span>
             <span class="card-tag tag-pr" ng-if="card.prStatus && card.prStatus.branch"
@@ -478,7 +476,6 @@
 
           <div class="card-tags">
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
             <span class="card-tag tag-pr" ng-if="card.autoPr && card.prStatus && card.prStatus.branch"
               title="Branch: {{card.prStatus.branch}}">PR: {{card.prStatus.branch}}</span>
             <span class="card-tag tag-pr-url" ng-if="card.autoPr && card.prStatus && card.prStatus.prUrl">
