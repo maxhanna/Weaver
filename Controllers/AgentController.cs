@@ -1591,6 +1591,16 @@ public class AgentController : ControllerBase
 
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
+
+                // Enforce 10-line limit strictly to prevent token exhaustion/truncation
+                if (!string.IsNullOrWhiteSpace(oldStr) && oldStr.Split('\n').Length > 15)
+                {
+                    return (null, null, false, null, false,
+                        $"oldString is {oldStr.Split('\n').Length} lines long — STRICT MAXIMUM IS 10 LINES. " +
+                        "You outputted a massive block which caused token exhaustion/truncation. " +
+                        "Use a 1-3 line anchor targeting the exact line to change.", false);
+                }
+
                 newStr = AgentUtilities.AutoFixPythonStatements(newStr ?? "", relPath);
 
                 if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
@@ -3618,7 +3628,7 @@ emitSse, ct);
             }
             else
             {
-                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber);
+                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
                 replaced = r; newContent = nc; matchError = me; snippet = sn;
             }
 
@@ -3775,60 +3785,56 @@ emitSse, ct);
             {
                 var err = matchError ?? "oldString not found verbatim";
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
+
+                // If we have a target line, show the LLM the ACTUAL code at that line
+                if (step.LineNumber > 0)
+                {
+                    var fileLinesArr = fileContent.Split('\n');
+                    var lineIdx = Math.Max(0, step.LineNumber - 1);
+                    var start = Math.Max(0, lineIdx - 10);
+                    var end = Math.Min(fileLinesArr.Length - 1, lineIdx + 10);
+                    var actualCode = string.Join("\n", fileLinesArr.Skip(start).Take(end - start + 1));
+
+                    err += $"\n⚠ TARGET LINE MISMATCH: The step targets line {step.LineNumber}, but your oldString was not found there. Here is the ACTUAL code around line {step.LineNumber}:\n```\n{actualCode}\n```\nCopy your oldString VERBATIM from this block.";
+                }
+
                 await EmitLog(emitSse, "warn",
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}",
                     new { step }, ct: ct);
 
                 // Self-heal: extract verbatim file lines at the fuzzy match location
-                var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!);
+                var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
-                    await EmitLog(emitSse, "info",
-                        $"Self-healing: found exact block in file:\n{correctedBlock}",
-                        ct: ct);
-                    // Re-indent the new string to match the file's indentation at the match position
-                    var corrIdx2 = fileContent.IndexOf(correctedBlock, StringComparison.Ordinal);
-                    var indentNewStr = newStr ?? string.Empty;
-                    if (corrIdx2 >= 0)
+                    // SAFETY CHECK: If correctedBlock is significantly longer than newStr, 
+                    // the LLM likely deleted code accidentally (e.g., hallucinated oldString structure).
+                    // Abort self-heal to prevent massive code deletion.
+                    if (!string.IsNullOrWhiteSpace(newStr) &&
+                        correctedBlock.Split('\n').Length > newStr.Split('\n').Length + 4)
                     {
-                        var allFileLines = fileContent.Split('\n');
-                        var lineIdx2 = fileContent[..corrIdx2].Count(c => c == '\n');
-                        indentNewStr = IndentReplacement(allFileLines, lineIdx2, indentNewStr);
-                        // Extend truncated newString lines to match the corrected block from the file
-                        var cbLines = correctedBlock.Split('\n');
-                        var nsLines = indentNewStr.Split('\n');
-                        var extended = false;
-                        for (var li = 0; li < nsLines.Length && li < cbLines.Length; li++)
-                        {
-                            var nsTrim = nsLines[li].TrimEnd();
-                            var cbTrim = cbLines[li].TrimEnd();
-                            if (nsTrim.Length < cbTrim.Length && cbTrim.StartsWith(nsTrim, StringComparison.Ordinal))
-                            {
-                                nsLines[li] = cbLines[li];
-                                extended = true;
-                            }
-                        }
-                        if (extended)
-                            indentNewStr = string.Join("\n", nsLines);
+                        await EmitLog(emitSse, "warn",
+                            $"Self-heal aborted: verbatim block ({correctedBlock.Split('\n').Length}L) is much larger than newString ({newStr.Split('\n').Length}L). LLM likely deleted code.", ct: ct);
                     }
-                    var (replaced2, newContent2, _, _) =
-                        TryReplaceSafe(fileContent, correctedBlock, indentNewStr);
-                    if (replaced2)
+                    else
                     {
-                        // Prefix leak check for self-healed block
-                        var fixFirstLine = correctedBlock.TrimStart().Split('\n', '\r')
-                            .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-                        if (fixFirstLine?.TrimStart().StartsWith('}') == true)
+                        await EmitLog(emitSse, "info",
+                            $"Self-healing: found exact block in file (scoped to line {step.LineNumber}):\n{correctedBlock}",
+                            ct: ct);
+
+                        var corrIdx2 = fileContent.IndexOf(correctedBlock, StringComparison.Ordinal);
+                        var indentNewStr = newStr ?? string.Empty;
+                        if (corrIdx2 >= 0)
                         {
-                            err = "oldString starts with '}' — includes previous method's closing brace. " +
-                                "Set oldString to start AT the target method declaration.";
+                            var allFileLines = fileContent.Split('\n');
+                            var lineIdx2 = fileContent[..corrIdx2].Count(c => c == '\n');
+                            indentNewStr = IndentReplacement(allFileLines, lineIdx2, indentNewStr);
+                            indentNewStr = AgentUtilities.ReconstructFromVerbatimDiff(correctedBlock, indentNewStr);
                         }
-                        else if (!string.IsNullOrEmpty(newStr) &&
-                            (double)newStr.Length / correctedBlock.Length < 0.1)
-                        {
-                            err = $"newString too short ({(double)newStr.Length / correctedBlock.Length:P1} of self-healed block)";
-                        }
-                        else
+
+                        var (replaced2, newContent2, _, _) =
+                            TryReplaceSafe(fileContent, correctedBlock, indentNewStr, step.LineNumber, step.Change);
+
+                        if (replaced2)
                         {
                             var (approved2, _, _) =
                                 VerifyEdit(correctedBlock, newStr ?? "", fileContent, newContent2, fromFormatC);
@@ -3852,70 +3858,6 @@ emitSse, ct);
                     }
                 }
 
-                // ── CSS/SCSS auto-shrink fallback ────────────────────
-                // If oldString is huge (>=8 lines) and the edit failed, try to
-                // extract just the lines that actually differ and apply those
-                // as independent 1-line edits.
-                if (!replaced && fileExt is ".css" or ".scss" or ".less" && oldStr != null &&
-                    newStr != null && oldStr.Split('\n').Length >= 8)
-                {
-                    var slimOldLines = oldStr.Split('\n');
-                    var slimNewLines = newStr.Split('\n');
-                    var slimFileLines = fileContent.Split('\n');
-                    var diffLines = new List<int>();
-                    for (var i = 0; i < Math.Min(slimOldLines.Length, slimNewLines.Length); i++)
-                    {
-                        var o = slimOldLines[i].Trim();
-                        var n = slimNewLines[i].Trim();
-                        if (!string.IsNullOrWhiteSpace(o) && o != n)
-                            diffLines.Add(i);
-                    }
-                    // Try each differing line as an independent 1-line replacement
-                    foreach (var li in diffLines)
-                    {
-                        var oldTrimmed = slimOldLines[li].TrimEnd();
-                        var newTrimmed = slimNewLines[li].TrimEnd();
-                        if (string.IsNullOrWhiteSpace(oldTrimmed) || oldTrimmed == newTrimmed)
-                            continue;
-                        // Find this line in the actual file (exact match)
-                        var found = false;
-                        for (var fi = 0; fi < slimFileLines.Length; fi++)
-                        {
-                            if (slimFileLines[fi].TrimEnd() != oldTrimmed) continue;
-                            if (found) { found = false; break; } // ambiguous
-                            found = true;
-                        }
-                        if (!found) continue;
-                        // Found a unique matching line — apply it
-                        var slimOld = slimOldLines[li];   // preserve exact whitespace from LLM
-                        var slimNew = slimNewLines[li];
-                        // But use the file's actual content for the oldString
-                        for (var fi = 0; fi < slimFileLines.Length; fi++)
-                        {
-                            if (slimFileLines[fi].TrimEnd() != oldTrimmed) continue;
-                            slimOld = slimFileLines[fi];
-                            break;
-                        }
-                        var (slimReplaced, slimContent, _, _) = TryReplaceSafe(fileContent, slimOld, slimNew);
-                        if (slimReplaced)
-                        {
-                            await EmitLog(emitSse, "info",
-                                $"CSS auto-shrink: replacing \"{slimOld.Trim()}\" with \"{slimNew.Trim()}\"",
-                                ct: ct);
-                            await System.IO.File.WriteAllTextAsync(fullPath, slimContent, Encoding.UTF8, ct);
-                            await EmitLog(emitSse, "success",
-                                $"✓ Edited {relPath} (CSS auto-shrink)", step, ct: ct);
-                            var r2 = new Dictionary<string, object?>();
-                            PopulateEditResult(r2, "modified", relPath, slimOld, slimNew, "css-auto-shrink");
-                            r2["index"] = stepIndex; r2["planItemIndex"] = planItemIndex;
-                            if (emitSse) await SendSse(Response, "step", r2, ct);
-                            allResults.Add(r2);
-                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
-                            return stepIndex + 1;
-                        }
-                    }
-                }
-
                 history.Add((oldStr!, newStr ?? "", err));
 
                 if (string.Equals(
@@ -3927,13 +3869,6 @@ emitSse, ct);
                 {
                     await EmitLog(emitSse, "error",
                         $"LLM keeps producing the same oldString — aborting {relPath}",
-                        ct: ct);
-                    goto RecordFailure;
-                }
-                if (attempt >= 4 && fileExt is ".css" or ".scss" or ".less")
-                {
-                    await EmitLog(emitSse, "error",
-                        $"CSS edit failed after {attempt + 1} attempts — aborting {relPath}",
                         ct: ct);
                     goto RecordFailure;
                 }
@@ -12165,119 +12100,108 @@ Respond with JSON only:
         return bestIdx >= 0 ? (bestIdx, bestScore, bestExact) : (-1, 0, 0);
     }
 
-    private static (bool ok, string content, string? error, string? snippet) TryReplaceSafe(
-        string content, string oldString, string newString, int preferredLine = 0)
+    private static (bool replaced, string newContent, string? matchError, string? snippet) TryReplaceSafe(
+    string fileContent, string oldStr, string newStr, int targetLine = 0, string? changeDesc = null)
     {
-        content = AgentUtilities.NormalizeLineEndings(content);
-        oldString = AgentUtilities.NormalizeLineEndings(oldString);
-        newString = AgentUtilities.NormalizeLineEndings(newString);
+        if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(fileContent) && !string.IsNullOrEmpty(newStr))
+            return (true, newStr, null, null);
 
-        if (string.IsNullOrEmpty(oldString))
-            return (false, content, "oldString is empty", null);
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
 
-        var fileLines = content.Split('\n');
-        var oldLines = oldString.Split('\n');
-        var newLines = newString.Split('\n');
-        if (oldLines.Length == 0) return (false, content, "oldString is empty", null);
-
-        // ── S1: Exact ordinal match ─────────────────────────────────────────
-        var idx = content.IndexOf(oldString, StringComparison.Ordinal);
-        if (idx >= 0)
+        // 1. Exact match search
+        var matches = new List<int>();
+        var searchPos = 0;
+        while (true)
         {
-            var sec = content.IndexOf(oldString, idx + oldString.Length, StringComparison.Ordinal);
-            if (sec >= 0) return (false, content,
-                "oldString appears more than once — use a longer unique anchor", null);
-            // Direct splice: LLM already provided correct indentation; don't re-indent.
-            return (true, content[..idx] + newString + content[(idx + oldString.Length)..], null, null);
+            var idx = normFile.IndexOf(normOld, searchPos, StringComparison.Ordinal);
+            if (idx < 0) break;
+            matches.Add(idx);
+            searchPos = idx + normOld.Length;
         }
 
-        // ── S2: Trailing-whitespace-trimmed exact match ────────────────────
-        var trimmedOld = oldLines.Select(l => l.TrimEnd()).ToArray();
-        var trimmedFile = fileLines.Select(l => l.TrimEnd()).ToArray();
-        var matchLine = FindLineBlock(trimmedFile, trimmedOld, StringComparison.Ordinal, preferredLine);
-        if (matchLine >= 0)
-            return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
-
-        // ── S3: Whitespace-collapsed match (SKIPPED for SQL to preserve spacing) ───────
-        // Skip aggressive whitespace collapsing for SQL content where spacing is critical
-        var isSql = AgentUtilities.IsSqlLike(oldString) || AgentUtilities.IsSqlLike(content);
-        if (!isSql)
+        if (matches.Count == 1)
         {
-            var wsOld = oldLines.Select(l => CollapseWhitespace(l)).ToArray();
-            var wsFile = fileLines.Select(l => CollapseWhitespace(l)).ToArray();
-            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal, preferredLine);
-            if (matchLine >= 0)
-                return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
-
-            // ── S4: Whitespace-collapsed case-insensitive match ────────────────
-            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase, preferredLine);
-            if (matchLine >= 0)
-                return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
+            var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+            return (true, normFile[..matches[0]] + normNew + normFile[(matches[0] + normOld.Length)..], null, null);
         }
 
-        // ── Guard: reject oldStrings that are too short or generic for fuzzy strategies ──
-        var meaningfulChars = oldLines.Sum(l => l.Trim().Length);
-        var maxMeaningfulLine = oldLines.Max(l => l.Trim().Length);
-        if (meaningfulChars < 20 || maxMeaningfulLine < 8)
+        if (matches.Count > 1)
         {
-            return (false, content,
-                $"oldString too short or generic ({meaningfulChars} meaningful chars, longest line {maxMeaningfulLine} chars)", null);
-        }
+            int chosenIdx = -1;
 
-        // S5: Fuzzy Levenshtein block match (high threshold → apply)
-        // Only allowed when line count is the same — fuzzy removal of lines is too risky
-        if (oldLines.Length == newLines.Length)
-        {
-            var (fl, score, hasExact) = FindBestFuzzyBlock(fileLines, oldLines, preferredLine);
-            if (fl >= 0 && score >= 0.95)
+            // Strategy A: Try line number (if close enough to trust)
+            if (targetLine > 0)
             {
-                var (adjustedOld, adjustedNew) = ExtendTruncatedLines(fileLines, fl, oldLines, newLines);
-                var snippet = $"fuzzy {score:P0} at line {fl + 1}";
-                return (true, ReplaceLineBlock(fileLines, fl, adjustedOld.Length, string.Join("\n", adjustedNew)), null, snippet);
-            }
-            // Lower threshold → report location hint only (don't apply)
-            if (fl >= 0 && score >= 0.88)
-            {
-                return (false, content, "oldString not found verbatim in file",
-                    $"fuzzy {score:P0} at line {fl + 1}: too low confidence ({score:P0} < 95%)");
-            }
-        }
-
-        // S6: Anchor-line block match (high threshold → apply)
-        // Only allowed when line count is the same — anchor removal without exact loss is too risky
-        if (oldLines.Length == newLines.Length)
-        {
-            var (al, score, exactCount) = FindBestAnchorLineBlock(fileLines, oldLines, preferredLine);
-            if (al >= 0 && score >= 0.90 && exactCount >= 2)
-            {
-                var (adjustedOld, adjustedNew) = ExtendTruncatedLines(fileLines, al, oldLines, newLines);
-                var snippet = $"anchor {score:P0} at line {al + 1} ({exactCount} exact line(s))";
-                return (true, ReplaceLineBlock(fileLines, al, adjustedOld.Length, string.Join("\n", adjustedNew)), null, snippet);
-            }
-        }
-
-        // S7: Single-line exact match (safe to apply — trimmed line appears exactly once)
-        if (oldLines.Length == 1)
-        {
-            var trimmed = oldLines[0].Trim();
-            if (trimmed.Length >= 15)
-            {
-                var occ = 0; var occIdx = -1;
-                for (var fi = 0; fi < fileLines.Length; fi++)
+                var bestDist = int.MaxValue;
+                for (int i = 0; i < matches.Count; i++)
                 {
-                    if (string.Equals(fileLines[fi].Trim(), trimmed, StringComparison.Ordinal))
-                    { occ++; occIdx = fi; }
+                    var matchLine = normFile[..matches[i]].Count(c => c == '\n') + 1;
+                    var dist = Math.Abs(matchLine - targetLine);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        chosenIdx = i;
+                    }
                 }
-                if (occ == 1)
-                    return (true, ReplaceLineBlock(fileLines, occIdx, 1, newString),
-                        null, $"single-line: line {occIdx + 1}");
+
+                // If the closest match is still very far away, the LLM likely hallucinated the line number.
+                // Fall back to contextual disambiguation.
+                if (bestDist > 50) chosenIdx = -1;
+            }
+
+            // Strategy B: Contextual Disambiguation
+            if (chosenIdx == -1)
+            {
+                var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+                if (keywords.Count > 0)
+                {
+                    int bestContextScore = -1;
+                    for (int i = 0; i < matches.Count; i++)
+                    {
+                        var lookbackStart = Math.Max(0, matches[i] - 2000);
+                        var context = normFile.Substring(lookbackStart, matches[i] - lookbackStart).ToLowerInvariant();
+                        var score = keywords.Count(k => context.Contains(k));
+
+                        if (score > bestContextScore)
+                        {
+                            bestContextScore = score;
+                            chosenIdx = i;
+                        }
+                    }
+                }
+            }
+
+            if (chosenIdx >= 0)
+            {
+                var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+                return (true, normFile[..matches[chosenIdx]] + normNew + normFile[(matches[chosenIdx] + normOld.Length)..], null, null);
+            }
+
+            var firstLine = normOld.Split('\n')[0].Trim();
+            return (false, fileContent, $"oldString found {matches.Count} times in file — include more surrounding lines as anchor context.", firstLine);
+        }
+
+        // 2. Fuzzy match (prefix/suffix)
+        var firstRealLine = normOld.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (firstRealLine != null)
+        {
+            var fuzzyIdx = normFile.IndexOf(firstRealLine, StringComparison.Ordinal);
+            if (fuzzyIdx >= 0)
+            {
+                var lineStart = normFile.LastIndexOf('\n', fuzzyIdx) + 1;
+                var fileSegment = normFile[lineStart..];
+                if (fileSegment.StartsWith(normOld.TrimStart()))
+                {
+                    var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+                    return (true, normFile[..lineStart] + normNew + normFile[(lineStart + normOld.Length)..], null, null);
+                }
             }
         }
 
-        var hint = BuildExactMatchHint(content, oldString);
-        return (false, content, "oldString not found verbatim in file", hint);
+        return (false, fileContent, "oldString not found verbatim in file", null);
     }
-
+ 
     private static string StripFullFileFence(string value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
@@ -12415,50 +12339,110 @@ Respond with JSON only:
         return string.Join("; ", diffs);
     }
 
-    private static string? BuildExactMatchBlock(string content, string oldString)
+    private static string? BuildExactMatchBlock(string fileContent, string oldStr, int targetLine = 0, string? changeDesc = null)
     {
-        var fileLines = content.Split('\n');
-        var oldLines = oldString.Split('\n');
-        if (oldLines.Length < 2 || fileLines.Length < oldLines.Length) return null;
+        if (string.IsNullOrWhiteSpace(oldStr)) return null;
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
 
-        var collapsedFile = fileLines.Select(CollapseWhitespace).ToArray();
-        var collapsedOld = oldLines.Select(CollapseWhitespace).ToArray();
+        // Strategy 1: Extract full HTML block if oldStr starts with an HTML tag
+        var htmlBlock = AgentUtilities.ExtractFullHtmlBlock(normFile, oldStr);
+        if (htmlBlock != null) return htmlBlock;
 
-        // Try with decreasing line count — often the LLM's last line is truncated/mismatched
-        for (var trialLen = oldLines.Length; trialLen >= Math.Max(2, oldLines.Length - 1); trialLen--)
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+        var oldLines = normOld.Split('\n').Select(l => l.Trim()).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (oldLines.Count == 0) return null;
+
+        var fileLines = normFile.Split('\n');
+        var candidates = new List<(int startIdx, int score)>();
+
+        for (var i = 0; i < fileLines.Length; i++)
         {
-            var trialOld = collapsedOld.Take(trialLen).ToArray();
-            var bestScore = 0.0; var bestIdx = -1;
-            var bestLineScores = Array.Empty<double>();
+            var score = 0;
+            var fIdx = i;
+            var oIdx = 0;
 
-            for (var fi = 0; fi <= collapsedFile.Length - trialLen; fi++)
+            while (fIdx < fileLines.Length && oIdx < oldLines.Count)
             {
-                var lineScores = new double[trialLen];
-                var totalSim = 0.0;
-                for (var li = 0; li < trialLen; li++)
+                var fileTrim = fileLines[fIdx].Trim();
+                var oldTrim = oldLines[oIdx].Trim();
+
+                if (fileTrim == oldTrim || fileTrim.StartsWith(oldTrim) || oldTrim.StartsWith(fileTrim))
                 {
-                    var sim = ComputeLineSimilarity(collapsedFile[fi + li], trialOld[li]);
-                    lineScores[li] = sim;
-                    totalSim += sim;
+                    score++;
+                    fIdx++;
+                    oIdx++;
                 }
-                // Reject early if any single line is wildly dissimilar (boundary mismatch)
-                if (lineScores.Any(s => s < 0.3)) continue;
-                var avg = totalSim / trialLen;
-                if (avg > bestScore) { bestScore = avg; bestIdx = fi; bestLineScores = lineScores; }
+                else if (string.IsNullOrEmpty(fileTrim) || string.IsNullOrEmpty(oldTrim))
+                {
+                    if (string.IsNullOrEmpty(fileTrim)) fIdx++;
+                    if (string.IsNullOrEmpty(oldTrim)) oIdx++;
+                }
+                else
+                {
+                    break;
+                }
             }
 
-            if (bestIdx < 0 || bestScore < 0.85) continue;
+            if (score >= Math.Max(1, oldLines.Count / 2))
+            {
+                candidates.Add((i, score));
+            }
+        }
 
-            // Boundary integrity check: first 2 and last 2 lines must match reasonably
-            var headOk = trialLen >= 2
-                ? (bestLineScores[0] + bestLineScores[1]) / 2.0 >= 0.7
-                : bestLineScores[0] >= 0.7;
-            var tailOk = trialLen >= 2
-                ? (bestLineScores[trialLen - 2] + bestLineScores[trialLen - 1]) / 2.0 >= 0.7
-                : bestLineScores[trialLen - 1] >= 0.7;
-            if (!headOk || !tailOk) continue;
+        if (candidates.Count == 0) return null;
 
-            return string.Join("\n", fileLines.Skip(bestIdx).Take(trialLen));
+        int chosenCandidate = -1;
+
+        if (candidates.Count == 1)
+        {
+            chosenCandidate = 0;
+        }
+        else
+        {
+            if (targetLine > 0)
+            {
+                int bestDist = int.MaxValue;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    var dist = Math.Abs(candidates[i].startIdx + 1 - targetLine);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        chosenCandidate = i;
+                    }
+                }
+                if (bestDist > 50) chosenCandidate = -1;
+            }
+
+            if (chosenCandidate == -1)
+            {
+                var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+                if (keywords.Count > 0)
+                {
+                    int bestContextScore = -1;
+                    for (int i = 0; i < candidates.Count; i++)
+                    {
+                        var startIdx = candidates[i].startIdx;
+                        var lookbackStart = Math.Max(0, startIdx - 50);
+                        var context = string.Join("\n", fileLines.Skip(lookbackStart).Take(startIdx - lookbackStart)).ToLowerInvariant();
+
+                        var score = keywords.Count(k => context.Contains(k));
+                        if (score > bestContextScore)
+                        {
+                            bestContextScore = score;
+                            chosenCandidate = i;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (chosenCandidate >= 0)
+        {
+            var bestStart = candidates[chosenCandidate].startIdx;
+            // Do NOT add + 5. Return exactly oldLines.Count lines to prevent spillover.
+            var endIdx = Math.Min(fileLines.Length, bestStart + oldLines.Count);
+            return string.Join("\n", fileLines.Skip(bestStart).Take(endIdx - bestStart));
         }
 
         return null;

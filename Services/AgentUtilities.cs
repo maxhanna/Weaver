@@ -2984,6 +2984,68 @@ public static class AgentUtilities
                lower.Contains("delete ") || lower.Contains("from ") || lower.Contains("where ") ||
                lower.Contains("interval ") || lower.Contains("date_add") || lower.Contains("where ");
     }
+    public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
+    {
+        if (string.IsNullOrWhiteSpace(changeDesc)) return new List<string>();
+        var stopWords = new HashSet<string> {
+        "from", "column", "tags", "section", "remove", "priority", "card", "edit", "add", "delete", "update",
+        "method", "function", "class", "property", "field", "variable", "code", "block", "line", "target",
+        "change", "modify", "replace", "insert", "create", "implement", "ensure", "make", "file"
+    };
+
+        return Regex.Matches(changeDesc.ToLowerInvariant(), @"\b[a-z]{4,}\b")
+            .Select(m => m.Value)
+            .Where(w => !stopWords.Contains(w))
+            .Distinct()
+            .ToList();
+    }
+    public static string? ExtractFullHtmlBlock(string fileContent, string oldStr)
+    {
+        var firstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.TrimStart();
+        if (string.IsNullOrEmpty(firstLine) || !firstLine.StartsWith("<")) return null;
+
+        var tagMatch = Regex.Match(firstLine, @"^<([a-zA-Z0-9]+)");
+        if (!tagMatch.Success) return null;
+        var tagName = tagMatch.Groups[1].Value;
+
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+        var startIdx = normFile.IndexOf(firstLine, StringComparison.Ordinal);
+        if (startIdx < 0) return null;
+
+        var depth = 0;
+        var pos = startIdx;
+        while (pos < normFile.Length)
+        {
+            var nextOpen = normFile.IndexOf($"<{tagName}", pos, StringComparison.OrdinalIgnoreCase);
+            var nextClose = normFile.IndexOf($"</{tagName}>", pos, StringComparison.OrdinalIgnoreCase);
+
+            if (nextClose < 0) return null;
+
+            if (nextOpen >= 0 && nextOpen < nextClose)
+            {
+                // Verify it's a real tag, not just a substring
+                var charAfter = nextOpen + tagName.Length + 1 < normFile.Length
+                    ? normFile[nextOpen + tagName.Length + 1]
+                    : '\0';
+                if (charAfter == ' ' || charAfter == '>' || charAfter == '\t' || charAfter == '\n' || charAfter == '\r')
+                {
+                    depth++;
+                }
+                pos = nextOpen + tagName.Length + 1;
+            }
+            else
+            {
+                if (depth <= 0)
+                {
+                    var endIdx = nextClose + tagName.Length + 3;
+                    return normFile.Substring(startIdx, endIdx - startIdx);
+                }
+                depth--;
+                pos = nextClose + tagName.Length + 3;
+            }
+        }
+        return null;
+    }
     public static int ComputeLevenshteinDistance(string a, string b)
     {
         var m = a.Length; var n = b.Length;
@@ -3002,6 +3064,80 @@ public static class AgentUtilities
             }
         }
         return d[n];
+    }
+    public static string ReconstructFromVerbatimDiff(string verbatimBlock, string llmNewStr)
+    {
+        if (string.IsNullOrEmpty(verbatimBlock) || string.IsNullOrEmpty(llmNewStr))
+            return llmNewStr ?? "";
+
+        var verbatimLines = verbatimBlock.Split('\n');
+        var newLines = llmNewStr.Split('\n');
+
+        var newToVerbatim = LcsAlign(verbatimLines, newLines);
+
+        var result = new List<string>(newLines.Length);
+        for (var j = 0; j < newLines.Length; j++)
+        {
+            if (newToVerbatim[j] >= 0)
+                result.Add(verbatimLines[newToVerbatim[j]]);
+            else
+                result.Add(newLines[j]);
+        }
+
+        var reconstructed = string.Join("\n", result);
+        if (reconstructed.Split('\n').Length < newLines.Length)
+            return llmNewStr;
+
+        return reconstructed;
+    }
+
+    private static int[] LcsAlign(string[] a, string[] b)
+    {
+        var n = a.Length;
+        var m = b.Length;
+        var dp = new int[n + 1, m + 1];
+
+        for (var i = 1; i <= n; i++)
+        {
+            for (var j = 1; j <= m; j++)
+            {
+                if (LinesMatchPrefixTolerant(a[i - 1], b[j - 1]))
+                    dp[i, j] = dp[i - 1, j - 1] + 1;
+                else
+                    dp[i, j] = Math.Max(dp[i - 1, j], dp[i, j - 1]);
+            }
+        }
+
+        var newToVerbatim = new int[m];
+        for (var j = 0; j < m; j++) newToVerbatim[j] = -1;
+
+        var ii = n;
+        var jj = m;
+        while (ii > 0 && jj > 0)
+        {
+            if (LinesMatchPrefixTolerant(a[ii - 1], b[jj - 1]))
+            {
+                newToVerbatim[jj - 1] = ii - 1;
+                ii--; jj--;
+            }
+            else if (dp[ii - 1, jj] >= dp[ii, jj - 1])
+                ii--;
+            else
+                jj--;
+        }
+
+        return newToVerbatim;
+    }
+
+    private static bool LinesMatchPrefixTolerant(string x, string y)
+    {
+        var xt = x.Trim();
+        var yt = y.Trim();
+        if (xt.Length == 0 || yt.Length == 0)
+            return xt.Length == 0 && yt.Length == 0;
+        return xt == yt
+            || (xt.Length >= yt.Length && xt.StartsWith(yt, StringComparison.Ordinal))
+            || (yt.Length >= xt.Length && yt.StartsWith(xt, StringComparison.Ordinal));
     }
     public static AgentPlan DeduplicatePlan(AgentPlan? plan)
     {
