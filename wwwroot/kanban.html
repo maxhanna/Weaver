@@ -99,7 +99,7 @@
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
-            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
