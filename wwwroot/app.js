@@ -2286,6 +2286,7 @@
                                   file: item.File || item.file || '?',
                                   change: item.Change || item.change || '',
                                   priority: item.Priority || item.priority || i + 1,
+                                  line: item.Line || item.line || 0,
                                   done: isDone,
                                   oldString: item.OldString || item.oldString || '',
                                   newString: item.NewString || item.newString || ''

@@ -47,8 +47,10 @@ public class AgentController : ControllerBase
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
     private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
-    private const int PlanScoreThreshold = 65;
-    private const int MaxPlanningIterations = 3;
+    private const int PLAN_SCORE_THRESHOLD = 65;
+    private const int MAX_PLANNING_ITERATIONS = 3;
+    private const int MAX_LINES_PER_DISCOVERY_FILE = 10000;
+    private const int MAX_DISCOVERY_FILES = 20;
     private static readonly string[] UnsafeEditMarkers =
     {
         "…(truncated)", "â€¦(truncated)", "...(truncated)"
@@ -824,6 +826,8 @@ public class AgentController : ControllerBase
 
         sb.AppendLine($"FILE: {relPath}");
         sb.AppendLine($"CHANGE REQUIRED: {step.Change}");
+        if (step.LineNumber > 0)
+            sb.AppendLine($"TARGET LINE: {step.LineNumber}");
         if (!string.IsNullOrWhiteSpace(preservationDirective))
         {
             sb.AppendLine();
@@ -2075,7 +2079,8 @@ public class AgentController : ControllerBase
                                 File = dcFile,
                                 Change = dcChange,
                                 Priority = plan.Plan[idx].Priority,
-                                ReferenceFiles = plan.Plan[idx].ReferenceFiles
+                                ReferenceFiles = plan.Plan[idx].ReferenceFiles,
+                                LineNumber = plan.Plan[idx].LineNumber
                             });
                         }
                     }
@@ -3612,7 +3617,7 @@ emitSse, ct);
             }
             else
             {
-                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty);
+                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber);
                 replaced = r; newContent = nc; matchError = me; snippet = sn;
             }
 
@@ -4169,8 +4174,7 @@ emitSse, ct);
 
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
-                  or ".css" or ".scss" or ".less" or ".html" or ".json"
-                  or ".vue" or ".svelte"))
+                  or ".css" or ".scss" or ".less" or ".json"))
             {
                 var beforeAutoFmt = newContent;
                 newContent = AutoFormatEditedRegion(newContent, newStr);
@@ -4704,9 +4708,13 @@ emitSse, ct);
                 var newStr = fix.TryGetProperty("newString", out var nEl) ? nEl.GetString() : null;
                 if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr) || oldStr == newStr)
                     continue;
-                if (!fixedContent.Contains(oldStr, StringComparison.Ordinal))
-                    continue;
-                fixedContent = fixedContent.Replace(oldStr, newStr);
+                // Replace only the FIRST occurrence to avoid corrupting unrelated regions
+                var idx = fixedContent.IndexOf(oldStr, StringComparison.Ordinal);
+                if (idx < 0) continue;
+                // Skip if oldStr appears more than once (ambiguous)
+                var secIdx = fixedContent.IndexOf(oldStr, idx + oldStr.Length, StringComparison.Ordinal);
+                if (secIdx >= 0) continue;
+                fixedContent = fixedContent[..idx] + newStr + fixedContent[(idx + oldStr.Length)..];
                 fixCount++;
             }
 
@@ -6164,12 +6172,14 @@ emitSse, ct);
                     var file = el.TryGetProperty("file", out var f) ? f.GetString() : null;
                     var change = el.TryGetProperty("change", out var c) ? c.GetString() : null;
                     if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change)) continue;
+                    var orig = plan.Plan.FirstOrDefault(p =>
+                        string.Equals(p.File, file, StringComparison.OrdinalIgnoreCase));
                     corrected.Add(new PlanStep
                     {
                         File = file,
                         Change = change,
-                        Priority = plan.Plan.FirstOrDefault(p =>
-                            string.Equals(p.File, file, StringComparison.OrdinalIgnoreCase))?.Priority ?? 1
+                        Priority = orig?.Priority ?? 1,
+                        LineNumber = orig?.LineNumber ?? 0
                     });
                 }
 
@@ -6561,6 +6571,7 @@ emitSse, ct);
                             ["file"] = s.File,
                             ["change"] = s.Change,
                             ["priority"] = s.Priority,
+                            ["line"] = s.LineNumber,
                             ["done"] = false
                         });
                     }
@@ -6852,7 +6863,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             Change = si["change"]?.GetValue<string>() ?? "",
                             Priority = si["priority"]?.GetValue<int>() ?? 1,
                             OldString = si["oldString"]?.GetValue<string>() ?? "",
-                            NewString = si["newString"]?.GetValue<string>() ?? ""
+                            NewString = si["newString"]?.GetValue<string>() ?? "",
+                            LineNumber = si["line"]?.GetValue<int>() ?? 0
                         };
 
                         var idx = si["index"]?.GetValue<int>() ?? i;
@@ -6960,10 +6972,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
         "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
+        "      \"line\": 42,\n" +
         "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
         "    }\n" +
         "  ]\n" +
         "}" +
+        "22. LINE NUMBERS (CRITICAL): Every line of file content above is PREFIXED with its line number " +
+        "(e.g. \"104: <div class=\\\"card-tags\\\">\"). Use those EXACT numbers in the \"line\" field — do NOT guess or " +
+        "estimate. The line prefix IS the correct line number in the file. If the change targets the section " +
+        "at line 96, set \"line\": 96. These numbers are used during execution to find the right code location " +
+        "in files with repeated sections.\n" +
         "18. DATA FLOW TRACING: Before planning an edit that modifies how data is displayed or accessed, " +
         "trace WHERE the data comes from. Read type definitions to understand the full data structure. " +
         "Example: if the task is about 'image preview navigation', don't assume images come from filtering " +
@@ -7022,13 +7040,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (Regex.IsMatch(p, @"\bmove\b.{0,60}\b(inside|into|to|under|below|above|after|before)\b"))
             return false;
 
-        return p.Contains("position") || p.Contains("layout") || p.Contains("align") ||
-               p.Contains("margin") || p.Contains("padding") || p.Contains("spacing") ||
-               p.Contains("move ") || p.Contains("overlap") || p.Contains("z-index") ||
-               p.Contains("zindex") || p.Contains("float") || p.Contains("sticky") ||
-               p.Contains("fixed ") || p.Contains("absolute") || p.Contains("relative") ||
-               p.Contains("grid") || p.Contains("flex") || p.Contains("width") ||
-               p.Contains("height") || p.Contains("size") || p.Contains("overflow");
+        return Regex.IsMatch(p, @"\b(position|layout|align(?:ed|ment)?|margin|padding|spacing)\b") ||
+               Regex.IsMatch(p, @"\b(overlap|z[- ]?index|float|sticky|fixed|absolute|relative)\b") ||
+               Regex.IsMatch(p, @"\b(grid|flex|width|height|overflow)\b") ||
+               p.Contains("move ");
     }
 
     private static bool IsStylesheetPath(string file)
@@ -7086,6 +7101,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (plan?.Plan != null && IsVisualLayoutTask(userPrompt))
         {
+            // If the plan is about removing/deleting content, it's not a positioning task
+            var allChanges = string.Join(" ", plan.Plan.Select(s => s.Change ?? ""));
+            if (Regex.IsMatch(allChanges, @"\b(remove|delete|hide)\b", RegexOptions.IgnoreCase))
+                goto SkipLayoutCheck;
+
             var editFiles = plan.Plan
                 .Select(s => (s.File ?? "").Replace('\\', '/'))
                 .Where(AgentUtilities.IsRelativePath)
@@ -7110,6 +7130,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return "Template event wiring is planned without the component script/context. Replan to inspect or edit the .ts/.js component before changing handlers, so method names are verified instead of invented.";
             }
         }
+        SkipLayoutCheck:;
 
         var sb = new StringBuilder();
         sb.AppendLine("You are validating a code-change plan. Determine if the plan makes sense and is complete given the user's request.");
@@ -7305,8 +7326,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static string BuildPlannerDiscoveryContext(string fullDiscovery)
     {
         if (string.IsNullOrWhiteSpace(fullDiscovery)) return fullDiscovery;
-        const int MaxLinesPerFile = 200;
-        const int MaxFiles = 20;
         var result = new StringBuilder();
         var sections = Regex.Split(fullDiscovery, @"(?=### \S)");
         var fileCount = 0;
@@ -7319,7 +7338,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 result.AppendLine(section.TrimEnd());
                 continue;
             }
-            if (fileCount >= MaxFiles)
+            if (fileCount >= MAX_DISCOVERY_FILES)
             {
                 result.AppendLine("...(additional files omitted from planner context)");
                 break;
@@ -7327,11 +7346,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var lines = section.Split('\n');
             result.AppendLine(lines[0]);
             var body = lines.Skip(1).ToArray();
-            if (body.Length <= MaxLinesPerFile)
-                result.AppendLine(string.Join('\n', body));
+            var numbered = body.Select((line, idx) => $"{idx + 1}: {line}").ToArray();
+            if (numbered.Length <= MAX_LINES_PER_DISCOVERY_FILE)
+            {
+                result.AppendLine(string.Join('\n', numbered));
+            }
             else
             {
-                result.AppendLine(string.Join('\n', body.Take(MaxLinesPerFile)));
+                var head = numbered.Take(MAX_LINES_PER_DISCOVERY_FILE / 2).ToArray();
+                var tail = numbered.Skip(numbered.Length - MAX_LINES_PER_DISCOVERY_FILE / 2).ToArray();
+                result.AppendLine(string.Join('\n', head));
+                result.AppendLine($"...({numbered.Length - MAX_LINES_PER_DISCOVERY_FILE} lines omitted — head and tail shown)...");
+                result.AppendLine(string.Join('\n', tail));
                 result.AppendLine($"...(truncated — full content used during execution)");
             }
             result.AppendLine();
@@ -8293,8 +8319,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var file = item.TryGetProperty("file", out var f) ? f.GetString() : null;
                 var change = item.TryGetProperty("change", out var c) ? c.GetString() : null;
                 var priority = item.TryGetProperty("priority", out var p) ? p.GetInt32() : 1;
+                var line = item.TryGetProperty("line", out var l) ? l.GetInt32() : 0;
                 if (!string.IsNullOrWhiteSpace(file) && !string.IsNullOrWhiteSpace(change))
-                    steps.Add(new PlanStep { File = file, Change = change, Priority = priority });
+                    steps.Add(new PlanStep { File = file, Change = change, Priority = priority, LineNumber = line });
             }
             return steps.Count > 0 ? steps : null;
         }
@@ -8329,7 +8356,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var steering = steeringContext;
         var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        for (var iter = 1; iter <= MaxPlanningIterations; iter++)
+        for (var iter = 1; iter <= MAX_PLANNING_ITERATIONS; iter++)
         {
             var plan = await AnalyzePromptAndPlanCodeChanges(
                 prompt, discoveryContext, projectRoot, emitSse, ct, steering);
@@ -8374,9 +8401,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (newExploreSteps.Count > 0)
             {
                 await EmitLog(emitSse, "info",
-                    $"Planning {iter}/{MaxPlanningIterations}: planner requested {newExploreSteps.Count} new exploration target(s) — gathering context…", ct: ct);
+                    $"Planning {iter}/{MAX_PLANNING_ITERATIONS}: planner requested {newExploreSteps.Count} new exploration target(s) — gathering context…", ct: ct);
                 discoveryContext = await ExplorationPipeline(newExploreSteps, discoveryContext, projectRoot, emitSse, ct);
-                if (iter == MaxPlanningIterations)
+                if (iter == MAX_PLANNING_ITERATIONS)
                     steering = AppendExploreSteering(steeringContext); // last shot: force a real plan
                 continue;
             }
@@ -8384,21 +8411,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (best == null || plan.Score > best.Score) best = plan;
 
             await EmitLog(emitSse, "info",
-                $"Planning {iter}/{MaxPlanningIterations} — score {plan.Score}/100 ({plan.Plan.Count} step(s))",
+                $"Planning {iter}/{MAX_PLANNING_ITERATIONS} — score {plan.Score}/100 ({plan.Plan.Count} step(s))",
                 new { plan.Score }, ct: ct);
 
-            if (plan.Score >= PlanScoreThreshold)
+            if (plan.Score >= PLAN_SCORE_THRESHOLD)
             {
                 await EmitLog(emitSse, "success",
-                    $"Plan converged: score {plan.Score} ≥ {PlanScoreThreshold}.", ct: ct);
+                    $"Plan converged: score {plan.Score} ≥ {PLAN_SCORE_THRESHOLD}.", ct: ct);
                 best = plan;
                 break;
             }
 
-            if (iter < MaxPlanningIterations)
+            if (iter < MAX_PLANNING_ITERATIONS)
             {
                 await EmitLog(emitSse, "info",
-                    $"Plan score {plan.Score} below {PlanScoreThreshold} — refining…", ct: ct);
+                    $"Plan score {plan.Score} below {PLAN_SCORE_THRESHOLD} — refining…", ct: ct);
                 steering = BuildLowScoreSteering(plan, steeringContext);
             }
             else
@@ -8427,7 +8454,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private static string BuildLowScoreSteering(AgentPlan plan, string? prior)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PlanScoreThreshold}.");
+        sb.AppendLine($"Your previous plan scored {plan.Score}/100, below the confidence threshold of {PLAN_SCORE_THRESHOLD}.");
         sb.AppendLine("Do NOT explore more files. The discovery context already has everything you need.");
         sb.AppendLine("Raise your score by making each step's change description more precise:");
         sb.AppendLine("  • Name the exact method, property, or line range (e.g. \"In getUser() around line 42:…\")");
@@ -10318,7 +10345,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     newSteps.Add(new PlanStep
                     {
                         File = item.TryGetProperty("file", out var f) ? f.GetString() ?? "" : "",
-                        Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : ""
+                        Change = item.TryGetProperty("change", out var c) ? c.GetString() ?? "" : "",
+                        LineNumber = item.TryGetProperty("line", out var ln) ? ln.GetInt32() : 0
                     });
                 var deduped = newSteps.Where(ns =>
                     !planSteps.Any(ps =>
@@ -10341,7 +10369,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         thinking = "Planned steps",
                         summary = string.Join(" -> ", planSteps.Select(p => p.Change)),
-                        items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1 }).ToList()
+                        items = planSteps.Select(p => new { file = p.File, change = p.Change, priority = 1, line = p.LineNumber }).ToList()
                     }, ct);
                 conversation.AppendLine($"\n### PLAN UPDATED ({totalPlanSteps} total steps) ###");
                 for (var pi = 0; pi < planSteps.Count; pi++)
@@ -11936,9 +11964,11 @@ Respond with JSON only:
     }
 
 
-    private static int FindLineBlock(string[] fileLines, string[] patternLines, StringComparison cmp)
+    private static int FindLineBlock(string[] fileLines, string[] patternLines, StringComparison cmp, int preferredLine = 0)
     {
         if (patternLines.Length == 0 || fileLines.Length < patternLines.Length) return -1;
+        var bestIdx = -1;
+        var bestDist = int.MaxValue;
         for (var fi = 0; fi <= fileLines.Length - patternLines.Length; fi++)
         {
             var match = true;
@@ -11947,9 +11977,12 @@ Respond with JSON only:
                 if (!string.Equals(fileLines[fi + li], patternLines[li], cmp))
                 { match = false; break; }
             }
-            if (match) return fi;
+            if (!match) continue;
+            if (preferredLine <= 0) return fi; // first match is fine
+            var dist = Math.Abs((fi + 1) - preferredLine);
+            if (dist < bestDist) { bestDist = dist; bestIdx = fi; }
         }
-        return -1;
+        return preferredLine > 0 ? bestIdx : -1;
     }
 
     private static double ComputeLineSimilarity(string a, string b)
@@ -12029,7 +12062,7 @@ Respond with JSON only:
     }
 
     private static (bool ok, string content, string? error, string? snippet) TryReplaceSafe(
-        string content, string oldString, string newString)
+        string content, string oldString, string newString, int preferredLine = 0)
     {
         content = AgentUtilities.NormalizeLineEndings(content);
         oldString = AgentUtilities.NormalizeLineEndings(oldString);
@@ -12056,7 +12089,7 @@ Respond with JSON only:
         // ── S2: Trailing-whitespace-trimmed exact match ────────────────────
         var trimmedOld = oldLines.Select(l => l.TrimEnd()).ToArray();
         var trimmedFile = fileLines.Select(l => l.TrimEnd()).ToArray();
-        var matchLine = FindLineBlock(trimmedFile, trimmedOld, StringComparison.Ordinal);
+        var matchLine = FindLineBlock(trimmedFile, trimmedOld, StringComparison.Ordinal, preferredLine);
         if (matchLine >= 0)
             return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
 
@@ -12067,12 +12100,12 @@ Respond with JSON only:
         {
             var wsOld = oldLines.Select(l => CollapseWhitespace(l)).ToArray();
             var wsFile = fileLines.Select(l => CollapseWhitespace(l)).ToArray();
-            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal);
+            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.Ordinal, preferredLine);
             if (matchLine >= 0)
                 return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
 
             // ── S4: Whitespace-collapsed case-insensitive match ────────────────
-            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase);
+            matchLine = FindLineBlock(wsFile, wsOld, StringComparison.OrdinalIgnoreCase, preferredLine);
             if (matchLine >= 0)
                 return (true, ReplaceLineBlock(fileLines, matchLine, oldLines.Length, newString), null, null);
         }
@@ -12348,7 +12381,7 @@ Respond with JSON only:
             }
         }
 
-        if (IsHtmlLikeContent(replacement))
+        if (IsHtmlLikeContent(replacement) && replLines.Length > 5)
         {
             return AgentUtilities.AutoIndentHtml(string.Join("\n", replLines), fileIndent);
         }

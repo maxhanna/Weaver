@@ -3013,8 +3013,7 @@ public static class AgentUtilities
 
         foreach (var step in plan.Plan)
         {
-            // Only dedupe steps that contain both oldString and newString
-            var key = step.File + "\n" + step.OldString + "\n" + step.NewString;
+            var key = step.File + "\n" + step.OldString + "\n" + step.NewString + "\n" + step.Change;
 
             if (!seen.Contains(key))
             {

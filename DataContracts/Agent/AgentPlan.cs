@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Weaver;
 
 /// <summary>
@@ -43,4 +45,7 @@ public class PlanStep
     public string OldString { get; set; } = string.Empty;
     public string NewString { get; set; } = string.Empty;
     public List<string>? ReferenceFiles { get; set; }
+    /// <summary>Line number in the file where this edit targets (1-based).</summary>
+    [JsonPropertyName("line")]
+    public int LineNumber { get; set; }
 }
