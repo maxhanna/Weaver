@@ -82,7 +82,7 @@ public class AgentController : ControllerBase
 "  NEVER combine multiple lines of code into a single array element. One element = one line. If you have 2 statements, output 2 elements.\n" +
 "TRAILING WHITESPACE: You MAY omit trailing spaces at the END of a line of code (before the newline). " +
 "However, trailing spaces INSIDE string literals are sometimes INTENTIONAL and must be preserved verbatim. " +
-"Example: Python's `input(\"What is your name? \")` uses a trailing space inside the string to separate the prompt from the user's typed input — this is CORRECT Python idiom and must NOT be removed.\n\n" + 
+"Example: Python's `input(\"What is your name? \")` uses a trailing space inside the string to separate the prompt from the user's typed input — this is CORRECT Python idiom and must NOT be removed.\n\n" +
 "FORMAT B — single-line (escape newlines as \\n):\n" +
 "{\n" +
 "  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
@@ -205,7 +205,12 @@ public class AgentController : ControllerBase
                 "Place it strategically at the beginning of the new code block, before any INSERT/UPDATE that depends on it. " +
                 "NEVER emit INSERT INTO or UPDATE for a table that has not been created yet — always prepend the CREATE TABLE first. " +
                 "Example: if your new code does `INSERT INTO user_settings (user_id, setting_key, setting_value) VALUES (...)` but `user_settings` " +
-                "does not exist in the file, prepend: `CREATE TABLE IF NOT EXISTS user_settings (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, setting_key VARCHAR(255) NOT NULL, setting_value TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);` before the INSERT.";
+                "does not exist in the file, prepend: `CREATE TABLE IF NOT EXISTS user_settings (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, setting_key VARCHAR(255) NOT NULL, setting_value TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);` before the INSERT." +
+            "30. EXACT DOM MIRRORING (SKELETON COPY): When the CHANGE REQUIRED asks to 'mirror', 'wire up', or 'copy' a pattern from another file, you MUST copy the EXACT structural skeleton (tags, CSS classes, and structural directives like *ngIf). " +
+                "Do NOT invent custom Angular components (e.g., `<popup-panel>`) if the source uses standard HTML tags with classes (e.g., `<div class=\"popupPanel\">`). " +
+                "CRITICAL: Do NOT copy the specific inner content (e.g., event checkboxes, loadNews() calls, or navigateTo() links) from the source file if that content relies on properties/methods that do not exist in the destination file. " +
+                "Instead, copy ONLY the bare minimum skeleton of what was demanded (e.g., the popup panel wrapper, the header, and a close button) and omit the extra fluff contents. " +
+                "Do NOT invent new method calls inside the HTML if they are not present in the source pattern. Provide a clean, empty structural skeleton that is ready for the user to populate later.\n";
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -644,14 +649,14 @@ public class AgentController : ControllerBase
             }
 
             var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
- 
+
             if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
             {
                 reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
             }
             return reindented;
         }
- 
+
         var ext2 = Path.GetExtension(filePath ?? "").ToLowerInvariant();
         if (ext2 is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
         {
@@ -1167,7 +1172,7 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine();
-   
+
         if (history?.Count > 0)
         {
             sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
@@ -1263,14 +1268,14 @@ public class AgentController : ControllerBase
 
             // Already done 
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
-            { 
+            {
 
                 var (verdict, _) = PreEditValidation(fileContent, step);
                 if (verdict == PreEditVerdict.AlreadyDone)
                 {
                     return (null, null, false, null, true, null, false);
                 }
- 
+
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
                 var contentLower = (fileContent ?? "").ToLowerInvariant();
 
@@ -1636,7 +1641,7 @@ public class AgentController : ControllerBase
                 if (oldLines.Count > 0)
                 {
                     oldStr = string.Join("\n", oldLines);
-                    newStr = string.Join("\n", newLines);  
+                    newStr = string.Join("\n", newLines);
                     newStr = AgentUtilities.AutoFixPythonStatements(newStr, relPath);
 
                     return (oldStr, newStr ?? "", false, null, false, null, false);
@@ -2034,7 +2039,7 @@ public class AgentController : ControllerBase
 
             foreach (var stepEl in stepsArr.EnumerateArray())
             {
-                if (stepEl.ValueKind != JsonValueKind.Object) continue;  
+                if (stepEl.ValueKind != JsonValueKind.Object) continue;
 
                 var idx = stepEl.TryGetProperty("index", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number
                     ? idxEl.GetInt32() : -1;
@@ -2055,7 +2060,7 @@ public class AgentController : ControllerBase
                     decoupled = new List<PlanStep>();
                     foreach (var dc in dcArr.EnumerateArray())
                     {
-                        if (dc.ValueKind != JsonValueKind.Object) continue;  
+                        if (dc.ValueKind != JsonValueKind.Object) continue;
 
                         var dcFile = dc.TryGetProperty("file", out var fEl) && fEl.ValueKind == JsonValueKind.String
                             ? fEl.GetString() ?? plan.Plan[idx].File : plan.Plan[idx].File;
@@ -3095,7 +3100,7 @@ public class AgentController : ControllerBase
 
         return sb.ToString();
     }
-    
+
     private async Task PersistStepExplorationAsync(
         string? cardId, int planItemIndex, object explorationData,
         bool emitSse, CancellationToken ct)
@@ -3194,7 +3199,7 @@ public class AgentController : ControllerBase
             }
         }
         catch { /* non-critical */ }
-    } 
+    }
 
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
@@ -3209,10 +3214,10 @@ public class AgentController : ControllerBase
         string? cardId = null,
         List<string>? attachedFiles = null,
         int replanDepth = 0)
-    { 
+    {
         var relPath = step.File.Replace('\\', '/');
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
- 
+
         if (!System.IO.File.Exists(fullPath) && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
         {
             await EmitLog(emitSse, "info",
@@ -3224,7 +3229,7 @@ public class AgentController : ControllerBase
 
                 var fileContent = step.NewString;
                 var createExt = Path.GetExtension(relPath).ToLowerInvariant();
-                
+
                 if (createExt == ".css" || createExt == ".scss" || createExt == ".less")
                 {
                     fileContent = AgentUtilities.AutoFixCssWhitespace(fileContent);
@@ -3252,7 +3257,7 @@ public class AgentController : ControllerBase
             }
             catch (Exception ex)
             {
-                await EmitLog(emitSse, "error", $"Failed to create file {relPath}: {ex.Message}", ct: ct); 
+                await EmitLog(emitSse, "error", $"Failed to create file {relPath}: {ex.Message}", ct: ct);
             }
         }
 
@@ -3542,7 +3547,7 @@ emitSse, ct);
                         await EmitLog(emitSse, "warn",
                             $"⚠ HTML edit references methods [{string.Join(", ", missingMethods.Distinct())}] that do not exist in {tsRelPath}. " +
                             "Auto-injecting empty stubs to prevent build breakage. These should be implemented in a follow-up step.", ct: ct);
- 
+
                         var stubs = new StringBuilder();
                         foreach (var methodName in missingMethods.Distinct())
                         {
@@ -3554,7 +3559,7 @@ emitSse, ct);
                         {
                             var newTsContent = tsContent.Substring(0, lastBrace) + stubs.ToString() + "\n" + tsContent.Substring(lastBrace);
                             await System.IO.File.WriteAllTextAsync(tsFullPath, newTsContent, Encoding.UTF8, ct);
-                        } 
+                        }
                     }
                 }
             }
@@ -3626,7 +3631,7 @@ emitSse, ct);
                 continue;
             }
 
-             if (fileExt == ".ts" && !string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+            if (fileExt == ".ts" && !string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
             {
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
                 if (changeLower.Contains("method") || changeLower.Contains("handler") || changeLower.Contains("function"))
@@ -3717,10 +3722,10 @@ emitSse, ct);
                 {
                     wipeReason = DetectMissingCreateTable(oldStr!, newStr!, fileContent, relPath);
                 }
- 
+
                 // Enforce atomic steps: if the step says "Remove", the newString must NOT re-add the element elsewhere
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
-                if (wipeReason == null &&  (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete ")))
+                if (wipeReason == null && (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete ")))
                 {
                     var elementMatch = Regex.Match(step.Change ?? "", @"(?:remove|delete)\s+(?:the\s+)?([\w-]+)\s+(?:div|element|span|button|table|code|block|method)", RegexOptions.IgnoreCase);
                     if (elementMatch.Success)
@@ -3759,7 +3764,7 @@ emitSse, ct);
                     continue; // Forces retry with feedback
                 }
             }
- 
+
             if (!replaced)
             {
                 var err = matchError ?? "oldString not found verbatim";
@@ -3996,7 +4001,7 @@ emitSse, ct);
                 }
 
                 var formatted = AgentUtilities.IsWhitespaceSignificant(relPath)
-                    ? newContent            
+                    ? newContent
                     : AutoFormatEditedRegion(newContent, newStr);
 
                 if (formatted != newContent)
@@ -4053,20 +4058,20 @@ emitSse, ct);
                     : AgentUtilities.NormalizeLineEndings(oldStr ?? "");
 
                 if (string.Equals(trackBy, AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal))
-                { 
+                {
                     stuckCount++;
                 }
-                else 
-                { 
-                    stuckCount = 0; 
-                    lastOld = trackBy; 
+                else
+                {
+                    stuckCount = 0;
+                    lastOld = trackBy;
                 }
 
                 if (stuckCount >= 2) { goto RecordFailure; }
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr) 
+            if (!string.IsNullOrWhiteSpace(newStr)
                 && !newContent.Contains(AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal))
             {
                 var trimmedNew = string.Join("\n",
@@ -4111,16 +4116,12 @@ emitSse, ct);
                     newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
                 }
             }
- 
+
             var ext = Path.GetExtension(relPath).ToLowerInvariant();
             if (ext == ".css" || ext == ".scss" || ext == ".less")
             {
                 newContent = AgentUtilities.AutoFixCssWhitespace(newContent);
-            }
-            else if (ext == ".html" || ext == ".htm" || ext == ".cshtml" || ext == ".razor" || ext == ".vue" || ext == ".svelte")
-            {
-                newContent = AgentUtilities.AutoFixHtmlIndentation(newContent);
-            }
+            } 
 
             var preEditContent = fileContent;
             await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
@@ -4488,13 +4489,11 @@ emitSse, ct);
 
             if (replanSteps == null || replanSteps.Count == 0)
             {
-                await EmitLog(emitSse, "warn",
-                    $"Replan cycle {replanAttempts} returned no steps", ct: ct);
+                await EmitLog(emitSse, "warn", $"Replan cycle {replanAttempts} returned no steps", ct: ct);
                 continue;
             }
 
-            await EmitLog(emitSse, "info",
-                $"Replan cycle {replanAttempts} generated {replanSteps.Count} new step(s): " +
+            await EmitLog(emitSse, "info", $"Replan cycle {replanAttempts} generated {replanSteps.Count} new step(s): " +
                 string.Join(" | ", replanSteps.Select(s => s.Change)), ct: ct);
 
             var replanResults = new List<object>();
@@ -5697,7 +5696,7 @@ emitSse, ct);
                "(INT, VARCHAR, TEXT, TIMESTAMP, etc.). Place the CREATE TABLE strategically at the beginning of the new code block, " +
                "before any INSERT/UPDATE that depends on it. Do NOT emit INSERT/UPDATE for a table that has not been created yet.";
     }
- 
+
     private static string? DetectFunctionalityWipe(
         string oldStr, string newStr, string fileContent, string relPath, string? stepChange = null)
     {
@@ -5736,9 +5735,9 @@ emitSse, ct);
         cacheLinePatterns,
         new[]
         {
-            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),  
-            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),         
-            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),           
+            new Regex(@"if\s*\([^)]*\.length\s*[<>=!]", RegexOptions.Compiled),
+            new Regex(@"if\s*\([^)]*displayRadio", RegexOptions.Compiled),
+            new Regex(@"if\s*\(\s*!\s*\w+\s*&&", RegexOptions.Compiled),
         }
     }.SelectMany(x => x).ToArray();
 
@@ -5755,7 +5754,7 @@ emitSse, ct);
                 if (pat.IsMatch(trimmed)) { isCacheLine = true; break; }
             }
             if (!isCacheLine) continue;
- 
+
             if (newStr.Contains("// Render explosion mesh here") ||
                 newStr.Contains("// TODO: implement") ||
                 newStr.Contains("// ... existing code ..."))
@@ -5763,7 +5762,7 @@ emitSse, ct);
                 return "PLACEHOLDER DETECTED — newString replaced actual implementation logic with a placeholder comment. " +
                        "You MUST copy the exact implementation from oldString and modify it, not replace it with a stub.";
             }
- 
+
             var normalizedOld = NormalizeForComparison(trimmed);
             if (!newLinesSet.Contains(normalizedOld))
                 lostCacheLines.Add(trimmed);
@@ -5824,7 +5823,7 @@ emitSse, ct);
             return false;
         return Regex.IsMatch(line,
             @"^\s*(?:(?:public|private|protected|internal|static|async|export|function|override|sealed|virtual|abstract|readonly|partial)\s+)*"
-            + @"(?:<[^>]+>\s*)?"                  
+            + @"(?:<[^>]+>\s*)?"
             + @"~?\w+\s*\(",
             RegexOptions.Compiled);
     }
@@ -6651,12 +6650,12 @@ emitSse, ct);
         var oldMethodName = oldMatch.Groups[1].Value;
         var newMethodName = newMatch.Groups[1].Value;
         if (!string.Equals(oldMethodName, newMethodName, StringComparison.Ordinal))
-            return stepIndex; 
+            return stepIndex;
 
         var oldParams = oldMatch.Groups[2].Value;
         var newParams = newMatch.Groups[2].Value;
         if (string.Equals(oldParams, newParams, StringComparison.Ordinal))
-            return stepIndex; 
+            return stepIndex;
 
         await EmitLog(emitSse, "info",
             $"Method signature change detected: {oldMethodName}({oldParams}) → {newMethodName}({newParams}). Searching for call sites...", ct: ct);
@@ -6686,7 +6685,7 @@ emitSse, ct);
         foreach (var f in csFiles)
         {
             if (string.Equals(f, fullPath, StringComparison.OrdinalIgnoreCase))
-                continue; 
+                continue;
             try
             {
                 using var sr = new StreamReader(f, Encoding.UTF8);
@@ -7010,7 +7009,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "28. PATTERN MIRRORING (CRITICAL): When the user asks to 'mirror', 'copy', or 'wire up exactly like' a pattern from another file, your plan steps MUST explicitly name the exact methods, properties, and HTML attributes to copy. " +
         "For example, if mirroring a menu popup panel from user-events.component, the .ts step MUST explicitly say 'Add isMenuPanelOpen property, showMenuPanel() method calling parentRef.showOverlay(), and closeMenuPanel() method calling parentRef.closeOverlay()'. " +
         "The .html step MUST explicitly say 'Add (menuClicked)=\"showMenuPanel()\" to app-title-bar and copy the popupPanel div structure'. " +
-        "Do NOT invent new method names like toggleMenu or navigateTo. Use the EXACT names from the source pattern.\n";
+        "Do NOT invent new method names like toggleMenu or navigateTo. Use the EXACT names from the source pattern. " +
+        "Do NOT invent custom wrapper components (e.g., `<popup-panel>`) if the source uses standard HTML elements with classes (e.g., `<div class=\"popupPanel\">`). " +
+        "Copy the EXACT DOM structure, CSS classes, and text content from the source file. Do NOT invent new method calls inside the HTML if they do not exist in the source pattern.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
@@ -7053,7 +7054,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var cmd = step.Change.ToLowerInvariant();
                     if (cmd.Contains("mkdir") || cmd.Contains("rmdir") || cmd.Contains("rm -rf") ||
                         cmd.Contains("del /") || cmd.Contains("rd /"))
-                    { 
+                    {
                         var mkdirMatch = Regex.Match(step.Change, @"(?:mkdir|md)\s+([^\s;|&]+)", RegexOptions.IgnoreCase);
                         if (mkdirMatch.Success)
                         {
@@ -7064,7 +7065,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 $"Converted directory manipulation command '{step.Change}' to a _create_directory step.", ct: ct);
                         }
                         else
-                        { 
+                        {
                             plan.Plan.RemoveAt(i);
                             i--;
                             await EmitLog(true, "warn", "Removed unparseable directory manipulation command.", ct: ct);
@@ -7473,26 +7474,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (candidatePool.Count <= 6)
         {
             toRead = candidatePool;
-            await EmitLog(emitSse, "info",
-                $"Phase 1 — {candidatePool.Count} candidate(s), reading all directly", ct: ct);
+            await EmitLog(emitSse, "info", $"Phase 1 — {candidatePool.Count} candidate(s), reading all directly", ct: ct);
         }
         else
         {
-            await EmitLog(emitSse, "info",
-                $"Phase 1 — selecting from {candidatePool.Count} candidates…", ct: ct);
+            await EmitLog(emitSse, "info",  $"Phase 1 — selecting from {candidatePool.Count} candidates…", ct: ct);
             var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
-            toRead = hintedFiles.Concat(selected)
-                .Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
+            toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
         }
 
-        toRead = toRead.Where(f =>
-        {
+        toRead = toRead.Where(f => {
             var full = Path.GetFullPath(Path.Combine(projectRoot, f.Replace('/', Path.DirectorySeparatorChar)));
             return System.IO.File.Exists(full) && AgentUtilities.IsPathUnderRoot(full, projectRoot);
         }).ToList();
 
-        await EmitLog(emitSse, "info",
-            $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
+        await EmitLog(emitSse, "info", $"Phase 1 — reading {toRead.Count} file(s): {string.Join(", ", toRead)}", ct: ct);
 
         if (toRead.Count > 0)
         {
@@ -7607,21 +7603,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var fastPlan = AgentUtilities.TryDetectSimpleIntent(prompt);
         if (fastPlan != null)
         {
-            var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct,
-                cardId: cardId);
+            var steps = await QuickPipeline(prompt, projectRoot, emitSse, fastPlan, ct, cardId: cardId);
             return (steps, fastPlan, true);
         }
 
-        // ── Fast-path: "fix the build" — skip discovery, go straight to repair ─
-        var fixBuildMatch = Regex.Match(prompt.ToLowerInvariant(),
-            @"fix\s+(all\s+)?(the\s+)?build\s+(errors?|warnings?|issues?)");
-        if (fixBuildMatch.Success && buildCommands != null && buildCommands.Trim().Length > 0)
+
+        var lower = prompt.ToLowerInvariant();
+        var mightBeBuildRepair = lower.Contains("build") || lower.Contains("compile") ||
+                                 lower.Contains("error") || lower.Contains("warning");
+
+        if (mightBeBuildRepair)
         {
-            return await RepairBuildPipeline(prompt, projectRoot, emitSse, buildCommands, ct);
-        }
-        else if (buildCommands == null || buildCommands.Trim().Length == 0)
-        {
-            await EmitLog(emitSse, "warn", "Build repair prompt detected but no build commands provided — skipping repair.", ct: ct);
+            if (buildCommands != null && buildCommands.Trim().Length > 0)
+            {
+                var isBuildRepair = await ClassifyIsBuildRepairPromptAsync(prompt, ct);
+                if (isBuildRepair) {
+                    return await RepairBuildPipeline(prompt, projectRoot, emitSse, buildCommands, ct);
+                }
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn", "Possible build repair prompt detected but no build commands provided — skipping repair.", new { prompt, buildCommands }, ct: ct);
+            }
         }
 
         if (existingPlan != null && existingPlan.Plan.Count > 0)
@@ -7637,7 +7640,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var allStepsAlreadyDone = completedStepIndices != null && completedStepIndices.Count >= existingPlan.Plan.Count;
             bool resumeComplete = !resumeHasErrors && ((resumeSteps.Count > 0) || allStepsAlreadyDone);
 
-            if (resumeHasErrors) {
+            if (resumeHasErrors)
+            {
                 await EmitLog(emitSse, "error", "Resumed plan has step errors — task NOT complete", ct: ct);
             }
 
@@ -7648,9 +7652,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info",
             $"Router → {pipelineType}",
             new { CommandScore = cmdScore, EditScore = editScore, BuildCommands = buildCommands }, ct: ct);
- 
+
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
- 
+
         bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php)\b", RegexOptions.IgnoreCase) ||
                                  prompt.Contains("component", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("service", StringComparison.OrdinalIgnoreCase) ||
@@ -7868,7 +7872,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (!ok)
                 {
                     await EmitLog(emitSse, "warn", $"Quality check: {reason}", ct: ct);
- 
+
                     var doneIndices = new HashSet<int>();
                     for (var i = 0; i < (plan?.Plan?.Count ?? 0); i++)
                     {
@@ -7886,8 +7890,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                     if (hasIncomplete)
                     {
-                         await EmitLog(emitSse, "info",
-                            $"Replan: retrying {plan!.Plan.Count - doneIndices.Count} incomplete step(s)…", ct: ct);
+                        await EmitLog(emitSse, "info",
+                           $"Replan: retrying {plan!.Plan.Count - doneIndices.Count} incomplete step(s)…", ct: ct);
                         var retryResults = new List<object>();
                         await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, retryResults,
                             steeringContext: steeringContext, attachedFiles: attachedFiles,
@@ -7897,7 +7901,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
                         complete = ok2;
                     }
- 
+
                     if (!complete && plan?.Plan?.Count > 0)
                     {
                         for (var i = 0; i < plan.Plan.Count; i++)
@@ -7913,11 +7917,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             if (result != null) doneIndices.Add(i);
                         }
                     }
- 
+
                     if (!complete && (plan?.Plan?.Count == 0 || doneIndices.Count == (plan?.Plan?.Count ?? 0)))
                     {
                         await EmitLog(emitSse, "info", "All steps done — checking for genuinely missing work…", ct: ct);
-                        
+
                         var scopedSteering = "The original plan's steps all succeeded. Only add steps for work the " +
                             "user EXPLICITLY requested that is still genuinely missing. Do NOT invent extra files, " +
                             "features, refactors, or improvements the user did not ask for. If nothing explicit is " +
@@ -7926,7 +7930,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         var newSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
                             scopedSteering, projectRoot, emitSse, ct,
                             attachedFiles: attachedFiles, qualityCheckReason: reason);
- 
+
                         if (newSteps?.Count > 0)
                         {
                             var revertKeywords = new[] { "revert", "undo", "restore", "roll back", "rollback", "replace current content with" };
@@ -7980,7 +7984,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                         if (newSteps?.Count > 0)
                         {
-                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps }); 
+                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
                             if (emitSse)
                                 await SendSse(Response, "plan",
                                     new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
@@ -8045,7 +8049,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── Build check ───────────────────────────────────────────────────
         bool buildOk = true;
         if (allSteps.Count > 0 && isEdited && buildCommands != null && !string.IsNullOrWhiteSpace(buildCommands))
-        { 
+        {
             var cmds = ParseBuildCommands(buildCommands);
             if (cmds.Count > 0)
             {
@@ -8077,7 +8081,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         return (allSteps, plan, complete);
-    } 
+    }
 
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
@@ -8260,7 +8264,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (!string.IsNullOrEmpty(warn) && emitSse)
         {
             await EmitLog(emitSse, "warn", warn, ct: ct);
-        } 
+        }
 
         var replanPrompt = BuildReplanPrompt(originalPrompt, new List<string> { failHist },
             steeringContext, existingPlan, executedSteps, qualityCheckReason,
@@ -8268,7 +8272,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var (raw, _, llmError) = await CallLlmRaw(
                 "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
-                replanPrompt, ct, TimeSpan.FromSeconds(30));
+                replanPrompt, ct, requestTimeout: _infiniteTimeout);
 
         if (string.IsNullOrWhiteSpace(raw)) return null;
 
@@ -8340,7 +8344,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             // change description (normalized). The planner often hallucinates the
             // same step repeatedly despite "AT MOST 2 steps" in the prompt.
             plan.Plan = DeduplicateSteps(plan.Plan);
- 
+
             // If the planner asked to read more files, gather that context and replan.
             // Exploration rounds never count as a converged plan, so _explore steps can
             // never leak into the executable plan.
@@ -8517,13 +8521,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // Context review (let user trim files before planning)
         if (emitSse && !skipContextReview)
+        {
+            await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
             discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
+        }
 
         // Phase 2: Plan
         await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
-        if (emitSse)
-            await SendSse(Response, "phase",
-                new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
+        if (emitSse) { 
+            await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
+        }
 
         var (plan, convergedContext) = await RunPlanningConvergenceLoop(
             prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
@@ -8578,8 +8585,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot);
-        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot); 
-        
+        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot);
+
         if (emitSse && plan?.Plan?.Count > 0)
         {
             await SendSse(Response, "plan",
@@ -8653,7 +8660,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                     summary: plan.Summary ?? "", score: plan.Score);
         }
- 
+
         // Phase 3: Execute
         await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
         if (emitSse)
@@ -8703,7 +8710,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         // ── Post-execution verification: re-check with LLM that task is 100% complete ──
         var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
         if (taskComplete)
-        { 
+        {
             allSteps.Add(new Dictionary<string, object?>
             {
                 ["type"] = "verified_complete",
@@ -9149,7 +9156,28 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         return planItems;
     }
+    private async Task<bool> ClassifyIsBuildRepairPromptAsync(string prompt, CancellationToken ct)
+    {
+        const string sys =
+            "You classify a single user request. Answer ONLY with JSON: {\"isBuildRepair\": true|false}.\n" +
+            "isBuildRepair = true ONLY if the user is asking to fix compilation/build errors or warnings " +
+            "in the existing project — i.e. the build is currently broken and they want it fixed, with " +
+            "no new feature or code-change request attached.\n" +
+            "isBuildRepair = false if the user is asking for a new feature, a UI change, a refactor, or " +
+            "any request that happens to mention words like 'build', 'error', 'warning' in an unrelated " +
+            "sense (e.g. 'build out this feature', 'wire it up like X', 'add a popup panel').";
 
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, TimeSpan.FromSeconds(10), maxTokens: 32);
+        if (string.IsNullOrWhiteSpace(raw)) return false; // fail safe — don't misroute on LLM failure
+
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            return doc.RootElement.TryGetProperty("isBuildRepair", out var v) && v.ValueKind == JsonValueKind.True;
+        }
+        catch { return false; }
+    }
     private async Task<AgentPlan?> RecoverPlanFromRamblingAsync(
         bool emitSse, CancellationToken ct, string ramblingRaw)
     {
@@ -9381,7 +9409,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 stepIndex++;
                 continue;
             }
- 
+
             if (planFile.Equals("_create_file", StringComparison.OrdinalIgnoreCase))
             {
                 await EmitLog(emitSse, "info", $"Creating file: {changeDesc}", ct: ct);
@@ -9592,7 +9620,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 if (!alreadyDecoupled.Contains(item.Change ?? ""))
                 {
-                    alreadyDecoupled.Add(item.Change ?? ""); 
+                    alreadyDecoupled.Add(item.Change ?? "");
                 }
 
                 var prevCount = allResults.Count;
@@ -10373,8 +10401,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         var vResult = new Dictionary<string, object?>
                         {
-                            ["index"] = stepIndex++, ["type"] = "command",
-                            ["command"] = cmdClean, ["status"] = isError ? "warning" : "done", ["output"] = freshOut
+                            ["index"] = stepIndex++,
+                            ["type"] = "command",
+                            ["command"] = cmdClean,
+                            ["status"] = isError ? "warning" : "done",
+                            ["output"] = freshOut
                         };
                         steps.Add(vResult);
                         if (emitSse) await SendSse(Response, "step", vResult, ct);
@@ -10395,8 +10426,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             completedPlanSteps.Add(pi);
                             var benignResult = new Dictionary<string, object?>
                             {
-                                ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
-                                ["command"] = cmdClean, ["status"] = "done", ["output"] = freshOut
+                                ["index"] = stepIndex++,
+                                ["type"] = "plan_step",
+                                ["planItemIndex"] = pi,
+                                ["command"] = cmdClean,
+                                ["status"] = "done",
+                                ["output"] = freshOut
                             };
                             steps.Add(benignResult);
                             if (emitSse) await SendSse(Response, "step", benignResult, ct);
@@ -10412,8 +10447,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             conversation.AppendLine("  The step above failed. If you know a different command or approach, output a new plan step to recover. Otherwise mark it done with {\"step\": " + (pi + 1) + "} and move on.");
                             var errResult = new Dictionary<string, object?>
                             {
-                                ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
-                                ["command"] = cmdClean, ["status"] = "error", ["output"] = freshOut
+                                ["index"] = stepIndex++,
+                                ["type"] = "plan_step",
+                                ["planItemIndex"] = pi,
+                                ["command"] = cmdClean,
+                                ["status"] = "error",
+                                ["output"] = freshOut
                             };
                             steps.Add(errResult);
                             if (emitSse) await SendSse(Response, "step", errResult, ct);
@@ -10425,8 +10464,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     completedPlanSteps.Add(pi);
                     var result = new Dictionary<string, object?>
                     {
-                        ["index"] = stepIndex++, ["type"] = "plan_step", ["planItemIndex"] = pi,
-                        ["command"] = cmdClean, ["status"] = "done", ["output"] = freshOut
+                        ["index"] = stepIndex++,
+                        ["type"] = "plan_step",
+                        ["planItemIndex"] = pi,
+                        ["command"] = cmdClean,
+                        ["status"] = "done",
+                        ["output"] = freshOut
                     };
                     steps.Add(result);
                     if (emitSse) await SendSse(Response, "step", result, ct);
@@ -12739,7 +12782,7 @@ Respond with JSON only:
         }
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
         return Task.CompletedTask;
-    } 
+    }
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> RepairBuildPipeline(string prompt, string projectRoot, bool emitSse, string buildCommands, CancellationToken ct)
     {
         await EmitLog(emitSse, "info", "Build repair prompt detected — running repair pipeline.", ct: ct);

@@ -139,8 +139,7 @@ public static class AgentUtilities
         if (cmdScore > editScore) return (PipelineType.CommandExecution, cmdScore, editScore);
 
         return (PipelineType.CodeEdit, cmdScore, editScore);
-    }
-
+    } 
 
     /// <summary>
     /// Detects simple, self-contained intents directly from the prompt string

@@ -109,7 +109,7 @@
 /* Suppress card hover effects while a drag is in progress to prevent jitter */
 body.dragging-active .card:hover {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-} 
+}
 
 .card.brand-card {
     background: linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(14, 165, 233, 0.02));
@@ -181,8 +181,10 @@ body.dragging-active .card:hover {
 .card .card-tags {
     display: flex;
     gap: 4px;
-    flex-wrap: wrap;
     margin-top: 6px;
+    align-items: center;
+    justify-content: space-evenly;
+    flex-wrap: wrap;
 }
 
 .card .card-tag {
@@ -192,7 +194,11 @@ body.dragging-active .card:hover {
     background: rgba(255, 255, 255, 0.04);
     padding: 1px 8px;
     border-radius: 4px;
-    color: #aaa;
+    color: var(--brand-accent);
+    display: flex;
+    font-weight: bold;
+    align-items: center;
+    min-height: 25px;
 }
 
 .card .card-tag.priority-high {
@@ -582,6 +588,7 @@ body.dragging-active .card:hover {
     gap: 8px;
     margin-bottom: 12px;
 }
+
 .search-container .ghost {
     border: 1px dashed rgba(255, 255, 255, 0.05);
     color: var(--muted);
@@ -596,11 +603,11 @@ body.dragging-active .card:hover {
 }
 
 .search-container .active {
-    border: 1px solid var(--accent); 
+    border: 1px solid var(--accent);
 }
 
 .search-container .active:hover {
-    border-color: var(--accent2); 
+    border-color: var(--accent2);
 }
 
 .search-input {
