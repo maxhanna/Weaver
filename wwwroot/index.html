@@ -402,7 +402,7 @@
                     '⬜'}}</span>
                   <div class="plan-item-body" style="flex:1;min-width:0;">
                     <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
-                      <span class="plan-item-file">{{item.file}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                       <span ng-if="item.oldString || item.newString"
                         ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"

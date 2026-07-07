@@ -4193,6 +4193,17 @@ emitSse, ct);
                 newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
+            // Safety net: reverse any space before '(' that any step may have introduced
+            if (!string.IsNullOrWhiteSpace(newContent))
+            {
+                var beforeFix = newContent;
+                newContent = Regex.Replace(newContent, @"\b(\w+)\s+\(", "$1(");
+                if (newContent != beforeFix)
+                {
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
                 var (llmGateDecision, llmGateReason, llmGateScore) = await LlmVerifyEditStepAsync(
@@ -4627,6 +4638,11 @@ emitSse, ct);
         string fullPath, string relPath, string content, string appliedNewStr,
         bool emitSse, CancellationToken ct)
     {
+        // Skip HTML files — spacing patterns are for code operators, not HTML attributes
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        if (ext == ".html" || ext == ".htm")
+            return content;
+
         // Check for common spacing issues in the applied edit: e.g. `-1)` or `*5` or `:5`
         // We look only in the changed region to keep the LLM call focused.
         var hasSpacingIssue = false;
@@ -4670,14 +4686,14 @@ emitSse, ct);
 
         var sysPrompt = "You are a meticulous code formatter. Fix spacing issues in the code excerpt below: " +
                         "ensure proper spacing around operators (+, -, *, /, %, =, etc.) and colons in " +
-                        "TypeScript/JavaScript/HTML/CSS. Output ONLY a JSON object with an array of fixes: " +
+                        "TypeScript/JavaScript/CSS. Output ONLY a JSON object with an array of fixes: " +
                         "{\"fixes\":[{\"oldString\":\"...\",\"newString\":\"...\"}]}. " +
                         "Each fix must be an exact substring from the excerpt. Do NOT change logic or add/remove code. " +
                         "CRITICAL RULE: NEVER add a space between a function/method name and its opening parenthesis. " +
                         "`delete(optionsFile)` is CORRECT; `delete (optionsFile)` is WRONG. " +
                         "`myFunc()` is CORRECT; `myFunc ()` is WRONG. " +
                         "DO NOT add spaces after keywords if they are immediately followed by '(' for a function call. " +
-                        "DO NOT modify text inside HTML attribute values unless explicitly necessary.";
+                        "DO NOT modify text inside HTML attribute values.";
 
         var userMsg = $"### FILE ###\n{relPath}\n\n### EXCERPT WITH SPACING ISSUES ###\n```\n{excerpt}\n```\n\n" +
                       "Fix spacing issues. Return JSON with oldString/newString pairs.";
@@ -4708,6 +4724,9 @@ emitSse, ct);
                 var newStr = fix.TryGetProperty("newString", out var nEl) ? nEl.GetString() : null;
                 if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr) || oldStr == newStr)
                     continue;
+                // Reject any fix that adds space before '('
+                if (Regex.IsMatch(newStr, @"\w\s+\("))
+                    continue;
                 // Replace only the FIRST occurrence to avoid corrupting unrelated regions
                 var idx = fixedContent.IndexOf(oldStr, StringComparison.Ordinal);
                 if (idx < 0) continue;
@@ -4720,6 +4739,8 @@ emitSse, ct);
 
             if (fixCount > 0)
             {
+                // Cleanup pass: reverse any space before '(' that the LLM may have sneaked in
+                fixedContent = Regex.Replace(fixedContent, @"\b(\w+)\s+\(", "$1(");
                 await System.IO.File.WriteAllTextAsync(fullPath, fixedContent, Encoding.UTF8, ct);
                 await EmitLog(emitSse, "info",
                     $"Style fix: applied {fixCount} spacing fix(es) in {relPath}", ct: ct);
@@ -9834,6 +9855,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         ["file"] = planItems[pi].File ?? "",
                                         ["change"] = planItems[pi].Change ?? "",
                                         ["priority"] = planItems[pi].Priority,
+                                        ["line"] = planItems[pi].LineNumber,
                                         ["done"] = allResults.Any(r => r is Dictionary<string, object?> dict && dict.TryGetValue("planItemIndex", out var pii) && pii is int piiVal2 && piiVal2 == pi && dict.TryGetValue("status", out var st2b) && st2b is string stStr2b && stStr2b == "done")
                                     });
                                 }
@@ -9894,6 +9916,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         file = p.File,
                                         change = p.Change,
                                         priority = p.Priority,
+                                        line = p.LineNumber,
                                         done = false
                                     }).ToList()
                                 }, ct);

@@ -60,7 +60,7 @@
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
                   '⬜'}}</span>
@@ -202,7 +202,7 @@
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-cancelled': item.cancelled, 'plan-pending': !item.done && !item.cancelled}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon" ng-click="vm.togglePlanItem(card, item.index); $event.stopPropagation();"
                   style="cursor:pointer;" title="{{item.done ? 'Mark not done' : 'Mark done'}}">{{item.done ? '✅' :
                   item.cancelled ? '⏭' : '⬜'}}</span>
@@ -384,10 +384,10 @@
                   <pre>{{card.agentAnalysis.thinking}}</pre>
                   <div class="plan-items-list"
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length"
-                    title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                    title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change">{{item.change}}</span>
@@ -450,7 +450,7 @@
             <div class="plan-items-list">
               <div ng-repeat="item in card._plan.items track by item.index" class="plan-item-row"
                 ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                 <span class="plan-item-icon">{{item.done ? '✅' : '⬜'}}</span>
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
@@ -583,7 +583,7 @@
                     ng-if="card.agentAnalysis.planItems && card.agentAnalysis.planItems.length">
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
-                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}: {{item.change}}">
+                      title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
                       <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
                         '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
