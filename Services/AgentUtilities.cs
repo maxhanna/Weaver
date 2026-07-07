@@ -3804,36 +3804,208 @@ public static class AgentUtilities
     /// matched a different section of the file (e.g. another popup with a similar structure).
     /// </summary>
     public static string? ExtractVerbatimTargetSection(
-        string fileContent, string changeDesc, int contextLines = 10)
+        string fileContent, string changeDesc, int contextLines = 10, int centerLine = 0)
     {
         if (string.IsNullOrWhiteSpace(fileContent) || string.IsNullOrWhiteSpace(changeDesc))
             return null;
 
-        var words = changeDesc.ToLowerInvariant()
-            .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';' },
-                   StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length >= 4)
-            .Distinct()
-            .ToList();
+        var lines = fileContent.Split('\n');
+        var anchorIdx = centerLine > 0 && centerLine <= lines.Length
+            ? centerLine - 1
+            : -1;
 
-        if (words.Count == 0) return null;
+        if (anchorIdx < 0)
+        {
+            var resolved = ResolveTargetLineNumber(fileContent, changeDesc);
+            if (resolved > 0) anchorIdx = resolved - 1;
+        }
+
+        if (anchorIdx < 0)
+        {
+            var words = changeDesc.ToLowerInvariant()
+                .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';' },
+                       StringSplitOptions.RemoveEmptyEntries)
+                .Where(w => w.Length >= 4)
+                .Distinct()
+                .ToList();
+
+            if (words.Count == 0) return null;
+
+            var bestScore = -1;
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var lineLower = lines[i].ToLowerInvariant();
+                var score = words.Sum(w => lineLower.Contains(w) ? 1 : 0);
+                if (score > bestScore) { bestScore = score; anchorIdx = i; }
+            }
+
+            if (anchorIdx < 0 || bestScore == 0) return null;
+        }
+
+        var start = Math.Max(0, anchorIdx - contextLines);
+        var end = Math.Min(lines.Length - 1, anchorIdx + contextLines);
+        return string.Join("\n", lines[start..(end + 1)]);
+    }
+
+    /// <summary>
+    /// Deterministically resolves the 1-based target line for an edit step by scanning the
+    /// actual file — never trusting planner-guessed line numbers alone.
+    /// </summary>
+    public static int ResolveTargetLineNumber(
+        string fileContent,
+        string changeDesc,
+        string? targetSymbol = null,
+        string? estimatedLineRange = null,
+        int plannerLineNumber = 0)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent) || string.IsNullOrWhiteSpace(changeDesc))
+            return plannerLineNumber > 0 ? plannerLineNumber : 0;
 
         var lines = fileContent.Split('\n');
-        var bestIdx = -1;
-        var bestScore = -1;
+        var candidates = new List<(int line, int score)>();
+        var changeLower = changeDesc.ToLowerInvariant();
+        var isInsertion = Regex.IsMatch(changeDesc,
+            @"\b(add|insert|append|expand|include|new)\b", RegexOptions.IgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(estimatedLineRange))
+        {
+            var rangeMatch = Regex.Match(estimatedLineRange, @"(\d+)\s*[-–~]\s*(\d+)");
+            if (rangeMatch.Success &&
+                int.TryParse(rangeMatch.Groups[1].Value, out var rangeStart) &&
+                int.TryParse(rangeMatch.Groups[2].Value, out var rangeEnd))
+            {
+                var mid = (rangeStart + rangeEnd) / 2;
+                if (mid >= 1 && mid <= lines.Length)
+                    candidates.Add((mid, 100));
+            }
+            else
+            {
+                var singleMatch = Regex.Match(estimatedLineRange, @"(\d+)");
+                if (singleMatch.Success &&
+                    int.TryParse(singleMatch.Groups[1].Value, out var singleLine) &&
+                    singleLine >= 1 && singleLine <= lines.Length)
+                    candidates.Add((singleLine, 95));
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(targetSymbol))
+        {
+            var symPattern = $@"\b{Regex.Escape(targetSymbol)}\s*[\(<{{]";
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!Regex.IsMatch(lines[i], symPattern, RegexOptions.IgnoreCase)) continue;
+                candidates.Add((i + 1, 92));
+                break;
+            }
+        }
+
+        if (isInsertion)
+        {
+            AddInsertionLineCandidates(lines, changeLower, candidates);
+        }
+        else
+        {
+            foreach (Match qm in Regex.Matches(changeDesc, @"['""]([^'""]{4,})['""]"))
+            {
+                var quoted = qm.Groups[1].Value;
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    if (lines[i].Contains(quoted, StringComparison.OrdinalIgnoreCase))
+                        candidates.Add((i + 1, 88));
+                }
+            }
+        }
+
+        var keywords = ExtractMeaningfulKeywords(changeLower).Where(w => w.Length >= 4).ToList();
+        if (keywords.Count > 0)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var lineLower = lines[i].ToLowerInvariant();
+                var hitCount = keywords.Count(w => lineLower.Contains(w));
+                if (hitCount >= 2)
+                    candidates.Add((i + 1, 45 + hitCount * 8));
+            }
+        }
+
+        if (plannerLineNumber > 0 && plannerLineNumber <= lines.Length)
+        {
+            var plannerLine = lines[plannerLineNumber - 1];
+            var plannerHits = keywords.Count(w => plannerLine.Contains(w, StringComparison.OrdinalIgnoreCase));
+            candidates.Add((plannerLineNumber, plannerHits >= 2 ? 55 + plannerHits * 5 : 15));
+        }
+
+        if (candidates.Count == 0)
+            return plannerLineNumber > 0 ? plannerLineNumber : 0;
+
+        var best = candidates
+            .GroupBy(c => c.line)
+            .Select(g => (line: g.Key, score: g.Max(x => x.score)))
+            .OrderByDescending(x => x.score)
+            .ThenBy(x => plannerLineNumber > 0 ? Math.Abs(x.line - plannerLineNumber) : x.line)
+            .First();
+
+        return best.line;
+    }
+
+    private static void AddInsertionLineCandidates(
+        string[] lines, string changeLower, List<(int line, int score)> candidates)
+    {
+        var containerHints = new List<(string pattern, int weight)>();
+        if (changeLower.Contains("faq-container") || changeLower.Contains("faq container"))
+            containerHints.Add(("faq-container", 80));
+        if (changeLower.Contains("discord-panel") || changeLower.Contains("discord panel"))
+            containerHints.Add(("discord-panel", 75));
+        if (changeLower.Contains("faq-content") || changeLower.Contains("faq content"))
+            containerHints.Add(("faq-content", 78));
+        if (containerHints.Count == 0 && changeLower.Contains("faq"))
+        {
+            containerHints.Add(("faq-container", 70));
+            containerHints.Add(("discord-panel", 65));
+        }
 
         for (var i = 0; i < lines.Length; i++)
         {
             var lineLower = lines[i].ToLowerInvariant();
-            var score = words.Sum(w => lineLower.Contains(w) ? 1 : 0);
-            if (score > bestScore) { bestScore = score; bestIdx = i; }
+            foreach (var (pattern, weight) in containerHints)
+            {
+                if (!lineLower.Contains(pattern, StringComparison.Ordinal)) continue;
+
+                var score = weight;
+                if (lineLower.Contains("faq", StringComparison.Ordinal)) score += 8;
+                if (lineLower.Contains("popup-panel", StringComparison.Ordinal)) score -= 40;
+                candidates.Add((i + 1, score));
+
+                for (var j = i; j < Math.Min(i + 15, lines.Length); j++)
+                {
+                    var probe = lines[j];
+                    if (probe.Contains("FAQ entries go here", StringComparison.OrdinalIgnoreCase))
+                        candidates.Add((j + 1, weight + 35));
+                    if (probe.TrimStart().StartsWith("</details>", StringComparison.OrdinalIgnoreCase))
+                        candidates.Add((j + 1, weight + 20));
+                }
+            }
+
+            if (lineLower.Contains("faq entries go here", StringComparison.Ordinal))
+                candidates.Add((i + 1, 90));
         }
+    }
 
-        if (bestIdx < 0 || bestScore == 0) return null;
+    /// <summary>
+    /// Formats a region of the file with absolute 1-based line numbers for LLM context.
+    /// </summary>
+    public static string FormatLineNumberedExcerpt(string fileContent, int centerLine, int radius = 25)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent) || centerLine <= 0) return fileContent;
+        var lines = fileContent.Split('\n');
+        if (centerLine > lines.Length) centerLine = lines.Length;
 
-        var start = Math.Max(0, bestIdx - contextLines);
-        var end = Math.Min(lines.Length - 1, bestIdx + contextLines);
-        return string.Join("\n", lines[start..(end + 1)]);
+        var start = Math.Max(0, centerLine - 1 - radius);
+        var end = Math.Min(lines.Length - 1, centerLine - 1 + radius);
+        var sb = new StringBuilder();
+        for (var i = start; i <= end; i++)
+            sb.AppendLine($"{i + 1,5}: {lines[i]}");
+        return sb.ToString().TrimEnd();
     }
 
     private static string? ExtractField(string text, string fieldName)
