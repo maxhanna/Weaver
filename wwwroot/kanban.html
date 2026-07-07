@@ -94,16 +94,16 @@
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
-            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation ()"
+            <span class="card-tag" ng-if="card.priority" ng-class="'priority-'+card.priority">{{card.priority}}</span>
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
             </label>
-            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation ()"
+            <label class="card-tag self-improving-toggle" ng-click="$event.stopPropagation()"
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
-            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation ()"
-              title="Auto-create tests for the code changes">
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create tests for the code changes">
               <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
             </label>
           </div>
