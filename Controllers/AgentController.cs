@@ -8077,7 +8077,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 answer.TryGetValue("confirm", out var val) &&
                 val?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
             if (wantsRepair)
-                await RepairPipeline(projectRoot, emitSse, ct, prompt, steeringContext);
+                await RepairPipeline(projectRoot, emitSse, ct, prompt, steeringContext, buildCommands);
         }
 
         return (allSteps, plan, complete);
@@ -13083,14 +13083,13 @@ done = build OK; command = run this to fix; ask_user = need input";
 
     private async Task RepairPipeline(
         string projectRoot, bool emitSse, CancellationToken ct,
-        string originalPrompt, string? steeringContext)
+        string originalPrompt, string? steeringContext, string? buildCommands)
     {
         var buildOutput = _terminal.ReadAll();
         var resultSteps = new List<object>();
         await RunRepairPlan(projectRoot, emitSse, ct, originalPrompt, buildOutput, resultSteps, steeringContext);
 
-        var cfg = await _configFile.LoadConfigAsync();
-        var cmds = ParseBuildCommands(cfg.buildCommands);
+        var cmds = !string.IsNullOrWhiteSpace(buildCommands) ? ParseBuildCommands(buildCommands) : new List<string>();
         bool repairOk = true;
         foreach (var cmd in cmds)
         {
