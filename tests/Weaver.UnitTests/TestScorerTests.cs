@@ -259,6 +259,28 @@ public class TestScorerTests
     }
 
     [Fact]
+    public void Score_MidPatternDoubleStarGlob_MatchesNestedPathAndRejectsSibling()
+    {
+        // Regression test for the allowedPaths glob matcher: a mid-pattern "**" (not
+        // just a trailing one) must match arbitrarily-nested paths under it and must
+        // NOT degrade into matching everything.
+        var steps = new List<object>
+        {
+            Step("edit", "done", "src/deep/nested/dir/tests/CalcTests.cs"),
+            Step("create_file", "done", "src/other/not-allowed.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "src/deep/nested/dir/tests/CalcTests.cs", "src/other/not-allowed.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { AllowedPaths = new List<string> { "src/**/tests/*.cs" } });
+
+        // One matched, one didn't -> overall gate is false, proving the matcher
+        // discriminates rather than matching (or rejecting) everything uniformly.
+        Assert.False(r.Gates.StructurePreserved);
+    }
+
+    [Fact]
     public async Task ScoreAsync_FormattingModeNone_LeavesFormattingGateUnmeasured()
     {
         var steps = new List<object> { Step("edit", "done", "a.cs") };

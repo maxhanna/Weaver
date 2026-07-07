@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 
 namespace Weaver;
 
@@ -6,9 +7,17 @@ namespace Weaver;
 /// The formattingClean gate's oracle: runs a per-extension check-mode formatter
 /// command over the files a benchmark run edited. A command that exits non-zero
 /// (or a file with no configured command) fails/skips the check for that file.
+///
+/// The command template is tokenized and executed directly (no cmd.exe/sh), so the
+/// substituted file path is passed as a single argv element rather than interpolated
+/// into a shell string — file names can legally contain shell metacharacters
+/// (&amp;, |, ^, $, `), and cards may originate from a shared BugHosted leaderboard,
+/// so the file path must never be shell-parsed.
 /// </summary>
 public static class FormattingGate
 {
+    const string FilePlaceholder = "{file}";
+
     /// <summary>
     /// Returns null when unmeasured (no formatting config, "none" mode, or none of the
     /// edited files have a configured command) — an unmeasured gate counts as not-perfect,
@@ -33,29 +42,32 @@ public static class FormattingGate
             if (!File.Exists(fullPath)) continue;
 
             checkedAny = true;
-            var command = commandTemplate.Replace("{file}", fullPath);
-            if (!await RunCheckCommandAsync(command, projectRoot))
+            if (!await RunCheckCommandAsync(commandTemplate, fullPath, projectRoot))
                 return false;
         }
 
         return checkedAny ? true : (bool?)null;
     }
 
-    static async Task<bool> RunCheckCommandAsync(string command, string workingDirectory)
+    static async Task<bool> RunCheckCommandAsync(string commandTemplate, string fullPath, string workingDirectory)
     {
         try
         {
-            var isWindows = OperatingSystem.IsWindows();
+            var tokens = Tokenize(commandTemplate);
+            if (tokens.Count == 0) return false;
+
             var psi = new ProcessStartInfo
             {
-                FileName = isWindows ? "cmd.exe" : "/bin/sh",
-                Arguments = isWindows ? $"/c {command}" : $"-c \"{command}\"",
+                FileName = tokens[0],
                 WorkingDirectory = workingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            for (var i = 1; i < tokens.Count; i++)
+                psi.ArgumentList.Add(tokens[i] == FilePlaceholder ? fullPath : tokens[i]);
+
             using var proc = Process.Start(psi);
             if (proc == null) return false;
             await proc.WaitForExitAsync();
@@ -65,5 +77,36 @@ public static class FormattingGate
         {
             return false;
         }
+    }
+
+    /// <summary>Whitespace tokenizer respecting "..." / '...' quoted segments. No shell semantics — quotes only group tokens.</summary>
+    internal static List<string> Tokenize(string command)
+    {
+        var tokens = new List<string>();
+        var current = new StringBuilder();
+        char? quote = null;
+
+        foreach (var c in command)
+        {
+            if (quote != null)
+            {
+                if (c == quote) quote = null;
+                else current.Append(c);
+            }
+            else if (c == '"' || c == '\'')
+            {
+                quote = c;
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (current.Length > 0) { tokens.Add(current.ToString()); current.Clear(); }
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+        if (current.Length > 0) tokens.Add(current.ToString());
+        return tokens;
     }
 }

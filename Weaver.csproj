@@ -17,6 +17,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Weaver.UnitTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="wwwroot\**\*.*" />
   </ItemGroup> 
 
