@@ -3289,7 +3289,8 @@ public class AgentController : ControllerBase
                 status = "running",
                 path = relPath,
                 description = step.Change,
-                planItemIndex
+                planItemIndex,
+                line = step.LineNumber
             }, ct);
 
         if (System.IO.File.Exists(fullPath))
@@ -3785,8 +3786,33 @@ emitSse, ct);
                     await EmitLog(emitSse, "info",
                         $"Self-healing: found exact block in file:\n{correctedBlock}",
                         ct: ct);
+                    // Re-indent the new string to match the file's indentation at the match position
+                    var corrIdx2 = fileContent.IndexOf(correctedBlock, StringComparison.Ordinal);
+                    var indentNewStr = newStr ?? string.Empty;
+                    if (corrIdx2 >= 0)
+                    {
+                        var allFileLines = fileContent.Split('\n');
+                        var lineIdx2 = fileContent[..corrIdx2].Count(c => c == '\n');
+                        indentNewStr = IndentReplacement(allFileLines, lineIdx2, indentNewStr);
+                        // Extend truncated newString lines to match the corrected block from the file
+                        var cbLines = correctedBlock.Split('\n');
+                        var nsLines = indentNewStr.Split('\n');
+                        var extended = false;
+                        for (var li = 0; li < nsLines.Length && li < cbLines.Length; li++)
+                        {
+                            var nsTrim = nsLines[li].TrimEnd();
+                            var cbTrim = cbLines[li].TrimEnd();
+                            if (nsTrim.Length < cbTrim.Length && cbTrim.StartsWith(nsTrim, StringComparison.Ordinal))
+                            {
+                                nsLines[li] = cbLines[li];
+                                extended = true;
+                            }
+                        }
+                        if (extended)
+                            indentNewStr = string.Join("\n", nsLines);
+                    }
                     var (replaced2, newContent2, _, _) =
-                        TryReplaceSafe(fileContent, correctedBlock, newStr ?? string.Empty);
+                        TryReplaceSafe(fileContent, correctedBlock, indentNewStr);
                     if (replaced2)
                     {
                         // Prefix leak check for self-healed block
@@ -4193,13 +4219,32 @@ emitSse, ct);
                 newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
-            // Safety net: reverse any space before '(' that any step may have introduced
-            if (!string.IsNullOrWhiteSpace(newContent))
+            // Safety net: reverse space before '(' only on lines that were actually edited
+            if (!string.IsNullOrWhiteSpace(newStr))
             {
-                var beforeFix = newContent;
-                newContent = Regex.Replace(newContent, @"\b(\w+)\s+\(", "$1(");
-                if (newContent != beforeFix)
+                var fileLines = newContent.Split('\n');
+                var changed = false;
+                foreach (var nLine in newStr.Split('\n'))
                 {
+                    var trimmed = nLine.Trim();
+                    if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                    for (var i = 0; i < fileLines.Length; i++)
+                    {
+                        if (fileLines[i].Contains(trimmed, StringComparison.Ordinal))
+                        {
+                            var fixedLine = Regex.Replace(fileLines[i], @"\b(\w+)\s+\(", "$1(");
+                            if (fixedLine != fileLines[i])
+                            {
+                                fileLines[i] = fixedLine;
+                                changed = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (changed)
+                {
+                    newContent = string.Join("\n", fileLines);
                     await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                 }
             }
@@ -4776,13 +4821,29 @@ emitSse, ct);
         var longNeedles = needleSet.Where(n => n.Length >= 12).ToList();
 
         var editedLineIndices = new HashSet<int>();
+        var firstExact = -1;
+        var lastExact = -1;
         for (var i = 0; i < fileLines.Length; i++)
         {
             var trimmed = fileLines[i].Trim();
             if (trimmed.Length < 3) continue;
-            if (needleSet.Contains(trimmed)) { editedLineIndices.Add(i); continue; }
-            if (longNeedles.Count > 0)
+            if (needleSet.Contains(trimmed))
             {
+                editedLineIndices.Add(i);
+                if (firstExact < 0) firstExact = i;
+                lastExact = i;
+                continue;
+            }
+        }
+        // Long-needle sub-string scan: only within a window around exact matches
+        if (longNeedles.Count > 0 && firstExact >= 0)
+        {
+            var windowStart = Math.Max(0, firstExact - 30);
+            var windowEnd = Math.Min(fileLines.Length, lastExact + 30);
+            for (var i = windowStart; i < windowEnd; i++)
+            {
+                var trimmed = fileLines[i].Trim();
+                if (trimmed.Length < 3) continue;
                 foreach (var needle in longNeedles)
                 {
                     if (trimmed.Contains(needle, StringComparison.Ordinal)) { editedLineIndices.Add(i); break; }
@@ -6919,7 +6980,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n" +
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
                "### STEP TYPES (the \"file\" field) ###\n" +
-        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time.\n" +
+        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. " +
+            "For every edit step, include a \"line\" field with the 1-based line number of the target location. " +
+            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"priority\": 1, \"line\": 42}\n" +
         "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.\n" +
@@ -8318,7 +8381,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             fileContents.ToString() + "\n\n## FAILED CODE SNIPPETS (do NOT reproduce)\n" + failedCodeSnippets.ToString());
 
         var (raw, _, llmError) = await CallLlmRaw(
-                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1}]}. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
+                "You are a plan-fixer. Output ONLY valid JSON with a 'plan' array. Example: {\"plan\": [{\"file\": \"path/to/file.js\", \"change\": \"describe the change\", \"priority\": 1, \"line\": 42}]}. For every edit step include the 1-based line number. Max 1-2 steps. Empty array if all done. CRITICAL: Do NOT generate steps that revert or redo completed work. If the CURRENT FILE CONTENT matches the final requested state, return an EMPTY plan.",
                 replanPrompt, ct, requestTimeout: _infiniteTimeout);
 
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -12025,7 +12088,7 @@ Respond with JSON only:
         return (double)common / maxLen;
     }
 
-    private static (int lineIdx, double score, bool hasExactLine) FindBestFuzzyBlock(string[] fileLines, string[] oldLines)
+    private static (int lineIdx, double score, bool hasExactLine) FindBestFuzzyBlock(string[] fileLines, string[] oldLines, int preferredLine = 0)
     {
         if (oldLines.Length == 0 || fileLines.Length < oldLines.Length) return (-1, 0, false);
         var collapsedFile = fileLines.Select(CollapseWhitespace).ToArray();
@@ -12041,12 +12104,17 @@ Respond with JSON only:
                 if (sim >= 0.95) anyExact = true;
             }
             var avg = totalSim / collapsedOld.Length;
+            // Proximity bonus: add up to 0.10 for matches near the target line
+            if (preferredLine > 0)
+            {
+                var dist = Math.Abs((fi + 1) - preferredLine);
+                avg += Math.Max(0, 0.10 - dist * 0.005);
+            }
             if (avg > bestScore) { bestScore = avg; bestIdx = fi; bestHasExact = anyExact; }
         }
         return (bestIdx, bestScore, bestHasExact);
     }
-
-    private static (int lineIdx, double score, int exactCount) FindBestAnchorLineBlock(string[] fileLines, string[] oldLines)
+    private static (int lineIdx, double score, int exactCount) FindBestAnchorLineBlock(string[] fileLines, string[] oldLines, int preferredLine = 0)
     {
         if (oldLines.Length == 0) return (-1, 0, 0);
 
@@ -12056,6 +12124,8 @@ Respond with JSON only:
             .Where(x => x.line.Length >= 8)
             .OrderByDescending(x => x.line.Length)
             .ToList();
+
+        var bestScore = 0.0; var bestIdx = -1; var bestExact = 0;
 
         foreach (var anchor in candidates)
         {
@@ -12078,10 +12148,21 @@ Respond with JSON only:
                 if (sim >= 0.95) exactCount++;
             }
             var avg = totalSim / oldLines.Length;
-            if (avg >= 0.80 && exactCount >= 2)
-                return (filePos, avg, exactCount);
+            // Proximity bonus: add up to 0.05 for matches near the target line
+            if (preferredLine > 0)
+            {
+                var dist = Math.Abs((filePos + 1) - preferredLine);
+                avg += Math.Max(0, 0.05 - dist * 0.005);
+            }
+            if (avg >= 0.80 && exactCount >= 2 && avg > bestScore)
+            {
+                bestScore = avg;
+                bestIdx = filePos;
+                bestExact = exactCount;
+            }
         }
-        return (-1, 0, 0);
+
+        return bestIdx >= 0 ? (bestIdx, bestScore, bestExact) : (-1, 0, 0);
     }
 
     private static (bool ok, string content, string? error, string? snippet) TryReplaceSafe(
@@ -12096,6 +12177,7 @@ Respond with JSON only:
 
         var fileLines = content.Split('\n');
         var oldLines = oldString.Split('\n');
+        var newLines = newString.Split('\n');
         if (oldLines.Length == 0) return (false, content, "oldString is empty", null);
 
         // ── S1: Exact ordinal match ─────────────────────────────────────────
@@ -12143,12 +12225,15 @@ Respond with JSON only:
         }
 
         // S5: Fuzzy Levenshtein block match (high threshold → apply)
+        // Only allowed when line count is the same — fuzzy removal of lines is too risky
+        if (oldLines.Length == newLines.Length)
         {
-            var (fl, score, hasExact) = FindBestFuzzyBlock(fileLines, oldLines);
+            var (fl, score, hasExact) = FindBestFuzzyBlock(fileLines, oldLines, preferredLine);
             if (fl >= 0 && score >= 0.95)
             {
+                var (adjustedOld, adjustedNew) = ExtendTruncatedLines(fileLines, fl, oldLines, newLines);
                 var snippet = $"fuzzy {score:P0} at line {fl + 1}";
-                return (true, ReplaceLineBlock(fileLines, fl, oldLines.Length, newString), null, snippet);
+                return (true, ReplaceLineBlock(fileLines, fl, adjustedOld.Length, string.Join("\n", adjustedNew)), null, snippet);
             }
             // Lower threshold → report location hint only (don't apply)
             if (fl >= 0 && score >= 0.88)
@@ -12159,12 +12244,15 @@ Respond with JSON only:
         }
 
         // S6: Anchor-line block match (high threshold → apply)
+        // Only allowed when line count is the same — anchor removal without exact loss is too risky
+        if (oldLines.Length == newLines.Length)
         {
-            var (al, score, exactCount) = FindBestAnchorLineBlock(fileLines, oldLines);
+            var (al, score, exactCount) = FindBestAnchorLineBlock(fileLines, oldLines, preferredLine);
             if (al >= 0 && score >= 0.90 && exactCount >= 2)
             {
+                var (adjustedOld, adjustedNew) = ExtendTruncatedLines(fileLines, al, oldLines, newLines);
                 var snippet = $"anchor {score:P0} at line {al + 1} ({exactCount} exact line(s))";
-                return (true, ReplaceLineBlock(fileLines, al, oldLines.Length, newString), null, snippet);
+                return (true, ReplaceLineBlock(fileLines, al, adjustedOld.Length, string.Join("\n", adjustedNew)), null, snippet);
             }
         }
 
@@ -12336,19 +12424,79 @@ Respond with JSON only:
         var collapsedFile = fileLines.Select(CollapseWhitespace).ToArray();
         var collapsedOld = oldLines.Select(CollapseWhitespace).ToArray();
 
-        var bestScore = 0.0; var bestIdx = -1;
-        for (var fi = 0; fi <= collapsedFile.Length - collapsedOld.Length; fi++)
+        // Try with decreasing line count — often the LLM's last line is truncated/mismatched
+        for (var trialLen = oldLines.Length; trialLen >= Math.Max(2, oldLines.Length - 1); trialLen--)
         {
-            var totalSim = 0.0;
-            for (var li = 0; li < collapsedOld.Length; li++)
-                totalSim += ComputeLineSimilarity(collapsedFile[fi + li], collapsedOld[li]);
-            var avg = totalSim / collapsedOld.Length;
-            if (avg > bestScore) { bestScore = avg; bestIdx = fi; }
+            var trialOld = collapsedOld.Take(trialLen).ToArray();
+            var bestScore = 0.0; var bestIdx = -1;
+            var bestLineScores = Array.Empty<double>();
+
+            for (var fi = 0; fi <= collapsedFile.Length - trialLen; fi++)
+            {
+                var lineScores = new double[trialLen];
+                var totalSim = 0.0;
+                for (var li = 0; li < trialLen; li++)
+                {
+                    var sim = ComputeLineSimilarity(collapsedFile[fi + li], trialOld[li]);
+                    lineScores[li] = sim;
+                    totalSim += sim;
+                }
+                // Reject early if any single line is wildly dissimilar (boundary mismatch)
+                if (lineScores.Any(s => s < 0.3)) continue;
+                var avg = totalSim / trialLen;
+                if (avg > bestScore) { bestScore = avg; bestIdx = fi; bestLineScores = lineScores; }
+            }
+
+            if (bestIdx < 0 || bestScore < 0.85) continue;
+
+            // Boundary integrity check: first 2 and last 2 lines must match reasonably
+            var headOk = trialLen >= 2
+                ? (bestLineScores[0] + bestLineScores[1]) / 2.0 >= 0.7
+                : bestLineScores[0] >= 0.7;
+            var tailOk = trialLen >= 2
+                ? (bestLineScores[trialLen - 2] + bestLineScores[trialLen - 1]) / 2.0 >= 0.7
+                : bestLineScores[trialLen - 1] >= 0.7;
+            if (!headOk || !tailOk) continue;
+
+            return string.Join("\n", fileLines.Skip(bestIdx).Take(trialLen));
         }
 
-        if (bestIdx < 0 || bestScore < 0.85) return null;
+        return null;
+    }
 
-        return string.Join("\n", fileLines.Skip(bestIdx).Take(oldLines.Length));
+    /// <summary>
+    /// Quick pre-flight check: detect truncated lines in oldString/newString before attempting edit.
+    /// A line is truncated if it has unbalanced double-quotes (odd count), or if the last line
+    /// is a prefix of any line in the file that's at least 50% longer.
+    /// </summary>
+    /// <summary>
+    /// Extend truncated lines in oldLines and newLines to match the full file content at the match position.
+    /// If a line of oldLines is a prefix of the file line (file line is longer), extend oldLines to match.
+    /// If a line of newLines is a prefix of the file line, extend newLines to match.
+    /// This prevents truncation from deleting parts of a line during replacement.
+    /// </summary>
+    private static (string[] oldLines, string[] newLines) ExtendTruncatedLines(
+        string[] fileLines, int matchLine, string[] oldLines, string[] newLines)
+    {
+        var adjOld = (string[])oldLines.Clone();
+        var adjNew = (string[])newLines.Clone();
+
+        for (var i = 0; i < adjOld.Length && (matchLine + i) < fileLines.Length; i++)
+        {
+            var oldTrim = adjOld[i].TrimEnd();
+            var fileTrim = fileLines[matchLine + i].TrimEnd();
+            if (oldTrim.Length < fileTrim.Length && fileTrim.StartsWith(oldTrim, StringComparison.Ordinal))
+                adjOld[i] = fileLines[matchLine + i];
+        }
+        for (var i = 0; i < adjNew.Length && (matchLine + i) < fileLines.Length; i++)
+        {
+            var newTrim = adjNew[i].TrimEnd();
+            var fileTrim = fileLines[matchLine + i].TrimEnd();
+            if (newTrim.Length < fileTrim.Length && fileTrim.StartsWith(newTrim, StringComparison.Ordinal))
+                adjNew[i] = fileLines[matchLine + i];
+        }
+
+        return (adjOld, adjNew);
     }
 
     private static string? GetUnsafeEditPayloadReason(string oldString, string newString)
