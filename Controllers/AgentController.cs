@@ -8559,6 +8559,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             var resultSteps = new List<object>();
             await RunRepairPlan(projectRoot, emitSse, ct, prompt, buildOutput ?? "", resultSteps);
+            TagStepOrigin(resultSteps, 0, "repair");
             return (resultSteps, null, true);
         }
 
@@ -8802,6 +8803,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, retryResults,
                             steeringContext: steeringContext, attachedFiles: attachedFiles,
                             completedStepIndices: doneIndices, cardId: cardId);
+                        TagStepOrigin(retryResults, 0, "replan");
                         allSteps.AddRange(retryResults);
 
                         var (ok2, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
@@ -8868,6 +8870,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, newResults,
                                 steeringContext: steeringContext, attachedFiles: attachedFiles,
                                 completedStepIndices: mergedDone, cardId: cardId);
+                            TagStepOrigin(newResults, 0, "replan");
                             allSteps.AddRange(newResults);
 
                             var (ok3, _) = await AssessCompletion(prompt, allSteps, projectRoot, ct, plan, attachedFiles: attachedFiles);
@@ -9745,9 +9748,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 for (var i = 0; i < originalStepCount && i < plan.Plan.Count; i++)
                     mergedDone.Add(i);
 
+                var beforeReplanCount = allSteps.Count;
                 await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                     steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                     completedStepIndices: mergedDone, cardId: cardId);
+                TagStepOrigin(allSteps, beforeReplanCount, "replan");
             }
             else
             {
@@ -9782,6 +9787,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             steeringContext: lastResortSteering, attachedFiles: attachedFiles,
                             completedStepIndices: new HashSet<int>(Enumerable.Range(0, plan.Plan.Count - lastResortSteps.Count)),
                             cardId: cardId);
+                        TagStepOrigin(lastResortResults, 0, "replan");
                         allSteps.AddRange(lastResortResults);
                     }
                     else
@@ -11687,7 +11693,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     .Distinct()
                     .ToList();
 
-                var testResult = TestScorer.Score(
+                var testResult = await TestScorer.ScoreAsync(
                     testName: !string.IsNullOrWhiteSpace(req.TestName) ? req.TestName!
                               : (!string.IsNullOrWhiteSpace(req.CardId) ? req.CardId! : req.Prompt),
                     cardId: req.CardId,
@@ -11696,7 +11702,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     complete: complete,
                     filesEdited: editedPaths,
                     machine: EnvironmentMetadata.Collect(),
-                    weaverVersion: WeaverVersion.Read(projectRoot, Directory.GetCurrentDirectory()));
+                    weaverVersion: WeaverVersion.Read(projectRoot, Directory.GetCurrentDirectory()),
+                    projectRoot: projectRoot,
+                    benchmark: req.Benchmark,
+                    model: new ModelInfo { Name = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b" });
 
                 await SendSse(Response, "test_result", testResult);
                 await EmitLog(true, "info",
@@ -12023,6 +12032,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             catch { }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Benchmark telemetry: tags step-result dicts with where they came from, so
+    /// TestScorer's noReplan gate can tell "the original plan succeeded first try"
+    /// apart from "the orchestrator had to retry/replan/repair to get there". Steps
+    /// with no "origin" key default to "plan" (the original, untagged path).
+    /// Call with the step count captured *before* the mutating call when steps are
+    /// appended directly into a shared list; call with a dedicated list directly
+    /// when the results were accumulated separately before being merged in.
+    /// </summary>
+    private static void TagStepOrigin(List<object> steps, int fromIndex, string origin)
+    {
+        for (var i = fromIndex; i < steps.Count; i++)
+        {
+            if (steps[i] is Dictionary<string, object?> d && !d.ContainsKey("origin"))
+                d["origin"] = origin;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

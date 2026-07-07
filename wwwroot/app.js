@@ -1969,6 +1969,7 @@
             createTests: card.createTests || false,
             isTest: card.isTest || false,
             testName: card.testName || card.text,
+            benchmark: card.benchmark || null,
             cardId: card.id
           };
 

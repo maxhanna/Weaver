@@ -32,4 +32,16 @@ public class TestRunResult
     public string WeaverVersion { get; set; } = "";
 
     public DateTimeOffset RunAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>From the card's BenchmarkManifest, if any. Null if the card doesn't pin it.</summary>
+    public int? ExpectedSteps { get; set; }
+    /// <summary>How many steps the model's plan actually contained (after any replanning).</summary>
+    public int? PlannedSteps { get; set; }
+
+    /// <summary>The five perfect-pass gates (decided 2026-07-06). See TestGateResults.</summary>
+    public TestGateResults Gates { get; set; } = new();
+    /// <summary>True only when Passed and every gate is explicitly true.</summary>
+    public bool PerfectPass { get; set; }
+
+    public ModelInfo? Model { get; set; }
 }

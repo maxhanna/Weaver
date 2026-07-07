@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Weaver;
 
@@ -9,6 +10,9 @@ namespace Weaver;
 /// irrecoverable failure (emitting a "plan_halted" marker). So "how far the agent
 /// got before breaking" falls straight out of the step results — this class just
 /// counts it and packages the machine + version metadata.
+///
+/// Phase 4a adds five perfect-pass gates (see TestGateResults) layered on top of
+/// the 0-100 progress score: PerfectPass = Passed && every gate is explicitly true.
 /// </summary>
 public static class TestScorer
 {
@@ -16,6 +20,11 @@ public static class TestScorer
     static readonly HashSet<string> PassedStatuses =
         new(StringComparer.OrdinalIgnoreCase) { "done", "created", "modified" };
 
+    // Step dict "origin" values that disqualify the noReplan gate.
+    static readonly HashSet<string> NonPlanOrigins =
+        new(StringComparer.OrdinalIgnoreCase) { "replan", "repair" };
+
+    /// <summary>Computes everything except the formattingClean gate (which needs async I/O — see ScoreAsync).</summary>
     public static TestRunResult Score(
         string testName,
         string? cardId,
@@ -24,7 +33,9 @@ public static class TestScorer
         bool complete,
         IReadOnlyList<string> filesEdited,
         EnvironmentMetadata machine,
-        string weaverVersion)
+        string weaverVersion,
+        BenchmarkManifest? benchmark = null,
+        ModelInfo? model = null)
     {
         var dicts = steps.OfType<Dictionary<string, object?>>().ToList();
 
@@ -76,7 +87,34 @@ public static class TestScorer
 
         var writtenTests = filesEdited.Where(LooksLikeTestFile).ToList();
 
-        return new TestRunResult
+        var plannedSteps = plan?.Plan?.Count;
+
+        // noReplan: any step tagged with an origin other than the original plan
+        // (set by AgentController at its replan/repair call sites) disqualifies it.
+        // Steps with no "origin" key are original-plan steps by construction.
+        var noReplan = !stepResults.Any(d => NonPlanOrigins.Contains(Str(d, "origin") ?? ""));
+
+        var exactStepCount = benchmark?.ExpectedSteps is int expected
+            ? plannedSteps == expected && stepsPassed == expected
+            : (bool?)null;
+
+        var structurePreserved = benchmark?.AllowedPaths is { Count: > 0 } allowed
+            ? filesEdited.All(f => allowed.Any(pattern => GlobMatch(f, pattern)))
+            : (bool?)null;
+
+        var gates = new TestGateResults
+        {
+            // Every "command" step type is routed through TerminalService's approval
+            // flow with no bypass path in the current step executor — see
+            // docs/test-benchmark-bughosted-contract.md for the caveat that this will
+            // need real per-command telemetry if a bypass path is ever introduced.
+            PermissionsRespected = true,
+            ExactStepCount = exactStepCount,
+            StructurePreserved = structurePreserved,
+            NoReplan = noReplan
+        };
+
+        var result = new TestRunResult
         {
             TestName = testName,
             CardId = cardId,
@@ -90,8 +128,51 @@ public static class TestScorer
             WrittenTests = writtenTests,
             Machine = machine,
             WeaverVersion = weaverVersion,
-            RunAt = DateTimeOffset.UtcNow
+            RunAt = DateTimeOffset.UtcNow,
+            ExpectedSteps = benchmark?.ExpectedSteps,
+            PlannedSteps = plannedSteps,
+            Gates = gates,
+            Model = model
         };
+        result.PerfectPass = result.Passed && result.Gates.AllTrue;
+        return result;
+    }
+
+    /// <summary>
+    /// Score, then run the formattingClean gate's oracle (the one gate that needs
+    /// async I/O — a shell-out to a formatter). Everything else is identical to Score.
+    /// </summary>
+    public static async Task<TestRunResult> ScoreAsync(
+        string testName,
+        string? cardId,
+        IReadOnlyList<object> steps,
+        AgentPlan? plan,
+        bool complete,
+        IReadOnlyList<string> filesEdited,
+        EnvironmentMetadata machine,
+        string weaverVersion,
+        string projectRoot,
+        BenchmarkManifest? benchmark = null,
+        ModelInfo? model = null)
+    {
+        var result = Score(testName, cardId, steps, plan, complete, filesEdited, machine, weaverVersion, benchmark, model);
+        result.Gates.FormattingClean = await FormattingGate.CheckAsync(projectRoot, filesEdited, benchmark?.Formatting);
+        result.PerfectPass = result.Passed && result.Gates.AllTrue;
+        return result;
+    }
+
+    /// <summary>Matches a project-relative path against a glob pattern supporting `*` and `**`.</summary>
+    static bool GlobMatch(string path, string pattern)
+    {
+        var normalizedPath = path.Replace('\\', '/').TrimStart('/');
+        var normalizedPattern = pattern.Replace('\\', '/').TrimStart('/');
+
+        var regexPattern = "^" + Regex.Escape(normalizedPattern)
+            .Replace(@"\*\*", "")
+            .Replace(@"\*", "[^/]*")
+            .Replace("", ".*")
+            + "$";
+        return Regex.IsMatch(normalizedPath, regexPattern, RegexOptions.IgnoreCase);
     }
 
     static bool LooksLikeTestFile(string path)

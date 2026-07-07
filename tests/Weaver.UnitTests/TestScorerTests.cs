@@ -13,6 +13,13 @@ public class TestScorerTests
         return d;
     }
 
+    static Dictionary<string, object?> StepWithOrigin(string type, string status, string origin, string? path = null)
+    {
+        var d = Step(type, status, path);
+        d["origin"] = origin;
+        return d;
+    }
+
     static AgentPlan PlanOf(int stepCount)
     {
         var p = new AgentPlan();
@@ -125,6 +132,150 @@ public class TestScorerTests
         Assert.Equal("src/calc.cs", r.CodeFile);
         Assert.Contains("tests/CalcTests.cs", r.WrittenTests);
         Assert.DoesNotContain("src/calc.cs", r.WrittenTests);
+    }
+
+    [Fact]
+    public void Score_NoBenchmarkManifest_GatesThatNeedItAreUnmeasuredAndNotPerfect()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "a.cs"),
+            Step("edit", "done", "b.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "a.cs", "b.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6");
+
+        Assert.Null(r.Gates.ExactStepCount);
+        Assert.Null(r.Gates.StructurePreserved);
+        Assert.True(r.Gates.PermissionsRespected);
+        Assert.True(r.Gates.NoReplan);
+        // Unmeasured gates count as not-perfect even though the run itself passed.
+        Assert.True(r.Passed);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public void Score_OriginalPlanOnly_MatchingManifest_IsPerfectPass()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "src/a.cs"),
+            Step("edit", "done", "src/b.cs"),
+        };
+
+        var benchmark = new BenchmarkManifest
+        {
+            ExpectedSteps = 2,
+            AllowedPaths = new List<string> { "src/**" }
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "src/a.cs", "src/b.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6", benchmark: benchmark);
+
+        Assert.True(r.Gates.ExactStepCount);
+        Assert.True(r.Gates.StructurePreserved);
+        Assert.True(r.Gates.NoReplan);
+        Assert.Equal(2, r.PlannedSteps);
+        Assert.Equal(2, r.ExpectedSteps);
+        // FormattingClean is untouched by the sync Score() overload — still null (unmeasured).
+        Assert.Null(r.Gates.FormattingClean);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public void Score_ReplanOriginStep_FailsNoReplanGateEvenIfComplete()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "src/a.cs"),
+            StepWithOrigin("edit", "done", "replan", "src/b.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "src/a.cs", "src/b.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { ExpectedSteps = 2, AllowedPaths = new List<string> { "src/**" } });
+
+        Assert.False(r.Gates.NoReplan);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public void Score_RepairOriginStep_FailsNoReplanGate()
+    {
+        var steps = new List<object>
+        {
+            StepWithOrigin("edit", "done", "repair", "src/a.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(1), complete: true,
+            filesEdited: new[] { "src/a.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { ExpectedSteps = 1, AllowedPaths = new List<string> { "src/**" } });
+
+        Assert.False(r.Gates.NoReplan);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public void Score_PlanExceedsExpectedSteps_FailsExactStepCountGate()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "a.cs"),
+            Step("edit", "done", "b.cs"),
+            Step("edit", "done", "c.cs"),
+            Step("edit", "done", "d.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(4), complete: true,
+            filesEdited: new[] { "a.cs", "b.cs", "c.cs", "d.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { ExpectedSteps = 3 });
+
+        Assert.False(r.Gates.ExactStepCount);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public void Score_FileOutsideAllowedPaths_FailsStructurePreservedGate()
+    {
+        var steps = new List<object>
+        {
+            Step("edit", "done", "src/a.cs"),
+            Step("create_file", "done", "../outside/escape.cs"),
+        };
+
+        var r = TestScorer.Score("t", null, steps, PlanOf(2), complete: true,
+            filesEdited: new[] { "src/a.cs", "../outside/escape.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            benchmark: new BenchmarkManifest { AllowedPaths = new List<string> { "src/**" } });
+
+        Assert.False(r.Gates.StructurePreserved);
+        Assert.False(r.PerfectPass);
+    }
+
+    [Fact]
+    public async Task ScoreAsync_FormattingModeNone_LeavesFormattingGateUnmeasured()
+    {
+        var steps = new List<object> { Step("edit", "done", "a.cs") };
+        var benchmark = new BenchmarkManifest
+        {
+            ExpectedSteps = 1,
+            AllowedPaths = new List<string> { "*.cs" },
+            Formatting = new BenchmarkFormatting { Mode = "none" }
+        };
+
+        var r = await TestScorer.ScoreAsync("t", null, steps, PlanOf(1), complete: true,
+            filesEdited: new[] { "a.cs" },
+            machine: new EnvironmentMetadata(), weaverVersion: "6",
+            projectRoot: Path.GetTempPath(), benchmark: benchmark);
+
+        Assert.Null(r.Gates.FormattingClean);
+        Assert.False(r.PerfectPass);
     }
 }
 

@@ -20,6 +20,8 @@ public class AgentRequest
     public bool IsTest { get; set; }
     /// <summary>Display name for the benchmark; falls back to the card id / prompt.</summary>
     public string? TestName { get; set; }
+    /// <summary>Card-authored benchmark expectations (expected step count, allowed paths, formatting oracle). Null when the card doesn't opt in.</summary>
+    public BenchmarkManifest? Benchmark { get; set; }
 
     /// <summary>Indices of plan steps already completed (0-based).</summary>
     public List<int>? CompletedStepIndices { get; set; }
