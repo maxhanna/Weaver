@@ -1971,6 +1971,14 @@ public class AgentController : ControllerBase
         sb.AppendLine("      modifying EXISTING elements (like a title bar) to emit events, AND adding the new UI structure.");
         sb.AppendLine("      This MUST be split into separate steps for each location (e.g., 1. Modify title bar, 2. Add panel).");
         sb.AppendLine("   e) WRAPPING: \"Wrap X in a container\" → 2 steps (open tag + close tag)");
+        sb.AppendLine("   f) INSERT + WIRE: If a step says to insert/mirror/copy a UI component AND also");
+        sb.AppendLine("      mentions wiring it up (event binding, click handler, attribute on a DIFFERENT");
+        sb.AppendLine("      existing element), that is TWO steps: one to add the new structure, one to");
+        sb.AppendLine("      modify the existing element to wire it up. Example:");
+        sb.AppendLine("      \"Insert popup panel AND add menuClicked event binding to title bar\"");
+        sb.AppendLine("      → 2 steps: 1. Add popup panel HTML, 2. Add menuClicked binding to title bar");
+        sb.AppendLine("      Look for phrases like 'including event binding', 'with wiring', 'wire up',");
+        sb.AppendLine("      'add X and connect Y', 'matching event syntax', 'including click handler'.");
         sb.AppendLine();
         sb.AppendLine("   Example: \"Add _fifteenMinuteTimer field and initialize it in the constructor,");
         sb.AppendLine("   then add a RunFifteenMinuteTasks method\"");
@@ -1990,6 +1998,8 @@ public class AgentController : ControllerBase
         sb.AppendLine("   CRITICAL: Even within the SAME FILE, if a step requires changes at DIFFERENT");
         sb.AppendLine("   LOCATIONS (e.g., modify a title bar AND add a popup panel at the bottom), that is MULTIPLE distinct edits.");
         sb.AppendLine("   Combining them forces the editor into massive block replacements that fail. Each location needs its own step.");
+        sb.AppendLine("   When a step says it will 'insert X and wire it up' or 'add Y including event binding on Z',");
+        sb.AppendLine("   the wiring/event-binding is a SEPARATE location from the new structure — split it off.");
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
         sb.AppendLine();
@@ -3832,11 +3842,15 @@ emitSse, ct);
                     bool match = true;
                     for (int j = 0; j < oldLinesArr.Count; j++)
                     {
-                        if (fileLinesArr[i + j].Trim() != oldLinesArr[j].Trim())
-                        {
-                            match = false;
-                            break;
-                        }
+                        var fileLine = fileLinesArr[i + j].Trim();
+                        var oldLine = oldLinesArr[j].Trim();
+                        if (fileLine == oldLine) continue;
+                        // Whitespace-insensitive fallback: strip all whitespace — handles
+                        // the common LLM bug of omitting spaces around operators (= vs = ).
+                        if (Regex.Replace(fileLine, @"\s+", "") == Regex.Replace(oldLine, @"\s+", ""))
+                            continue;
+                        match = false;
+                        break;
                     }
                     if (match) allMatches.Add(i);
                 }
@@ -7698,66 +7712,122 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     /// <summary>
-    /// After plan audit &amp; decoupling, correct each step's LineNumber by searching the
-    /// target file for the step's change keywords. This fixes the common failure mode
-    /// where the LLM hallucinates a line number and all decoupled sub-steps inherit it.
+    /// After plan audit &amp; decoupling, correct each step's LineNumber by asking the LLM
+    /// to examine the actual file content and determine the correct line for each step.
+    /// Keyword matching is too brittle — only the LLM understands semantic placement like
+    /// "add method near selectArticle" vs "add property after totalResults".
     /// </summary>
-    private async Task ValidatePlanLineNumbersAsync(AgentPlan plan, string projectRoot)
+    private async Task ValidatePlanLineNumbersAsync(AgentPlan plan, string projectRoot, CancellationToken ct = default)
     {
         if (plan?.Plan == null) return;
 
-        foreach (var step in plan.Plan)
-        {
-            if (string.IsNullOrWhiteSpace(step.File) ||
-                !AgentUtilities.IsRelativePath(step.File))
-                continue;
+        // Group steps by file to batch LLM calls
+        var fileGroups = plan.Plan
+            .Select((step, idx) => (step, idx))
+            .Where(x => !string.IsNullOrWhiteSpace(x.step.File) &&
+                        AgentUtilities.IsRelativePath(x.step.File))
+            .GroupBy(x => x.step.File, StringComparer.OrdinalIgnoreCase);
 
+        foreach (var group in fileGroups)
+        {
+            var filePath = group.Key.Replace('\\', '/');
             var fullPath = Path.GetFullPath(
-                Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
-            if (!System.IO.File.Exists(fullPath))
-                continue;
+                Path.Combine(projectRoot, filePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath)) continue;
 
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
             var lines = content.Split('\n');
 
-            // Step 1: Extract quoted substrings (most precise — e.g. 'Where to Start')
-            var quotedTerms = new List<string>();
-            foreach (Match m in Regex.Matches(step.Change ?? "", @"['""]([^'""]+)['""]"))
+            // Build prompt with line-numbered file content and step descriptions
+            var sb = new StringBuilder();
+            sb.AppendLine("Find the exact 1-based line number where each edit should be applied in this file.");
+            sb.AppendLine();
+            sb.AppendLine("File content (line numbers shown):");
+            sb.AppendLine("```");
+            // Truncate to first 500 lines if file is very large
+            var displayLines = lines.Take(500).ToList();
+            for (var i = 0; i < displayLines.Count; i++)
+                sb.AppendLine($"{i + 1}: {displayLines[i]}");
+            if (lines.Length > 500)
+                sb.AppendLine($"... ({lines.Length - 500} more lines)");
+            sb.AppendLine("```");
+            sb.AppendLine();
+
+            var stepList = group.ToList();
+            for (var si = 0; si < stepList.Count; si++)
             {
-                if (m.Groups[1].Value.Length >= 3)
-                    quotedTerms.Add(m.Groups[1].Value);
+                var (step, _) = stepList[si];
+                sb.AppendLine($"Edit {si}: \"{step.Change}\"");
+                sb.AppendLine($"  Current line: {step.LineNumber}");
+                sb.AppendLine();
             }
 
-            int? bestLine = null;
-            var bestScore = 0;
+            sb.AppendLine("For each Edit, output the correct 1-based line number where the change should be applied.");
+            sb.AppendLine("Consider: property declarations go with properties, methods go with methods, etc.");
+            sb.AppendLine("If the current line is already correct, keep it unchanged.");
+            sb.AppendLine();
+            sb.AppendLine("Respond with ONLY a valid JSON object (no markdown, no extra text):");
+            sb.AppendLine("{\"lines\":[{\"index\":0,\"line\":42},{\"index\":1,\"line\":78}]}");
 
-            if (quotedTerms.Count > 0)
+            var prompt = sb.ToString();
+            const int MaxRetries = 2;
+            for (var attempt = 1; attempt <= MaxRetries; attempt++)
             {
-                for (var i = 0; i < lines.Length; i++)
+                var llmResult = await CallLlmRaw(
+                    "You are a code analyst. Output ONLY the JSON object described below.",
+                    prompt, ct, requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 1024);
+                var raw = llmResult.raw;
+                var error = llmResult.error;
+
+                if (!string.IsNullOrWhiteSpace(error) || string.IsNullOrWhiteSpace(raw))
                 {
-                    var score = quotedTerms.Count(
-                        q => lines[i].Contains(q, StringComparison.OrdinalIgnoreCase));
-                    if (score > bestScore) { bestScore = score; bestLine = i + 1; }
+                    if (attempt < MaxRetries)
+                        await Task.Delay(500, ct);
+                    continue;
                 }
-            }
-            else
-            {
-                // Step 2: Fall back to keyword search
-                var keywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
-                if (keywords.Count == 0) continue;
 
-                for (var i = 0; i < lines.Length; i++)
+                // Parse JSON response
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
                 {
-                    var lineLower = lines[i].ToLowerInvariant();
-                    var score = keywords.Count(k => lineLower.Contains(k));
-                    if (score > bestScore) { bestScore = score; bestLine = i + 1; }
+                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
                 }
-            }
+                var fb = cleaned.IndexOf('{');
+                var lb = cleaned.LastIndexOf('}');
+                if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
 
-            // Only correct if >20 lines off to avoid minor jitter
-            if (bestLine.HasValue && Math.Abs(bestLine.Value - step.LineNumber) > 20)
-            {
-                step.LineNumber = bestLine.Value;
+                try
+                {
+                    using var jDoc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    var root = jDoc.RootElement;
+                    if (!root.TryGetProperty("lines", out var linesEl) || linesEl.ValueKind != JsonValueKind.Array)
+                    {
+                        if (attempt < MaxRetries) continue;
+                        break;
+                    }
+
+                    foreach (var lineEl in linesEl.EnumerateArray())
+                    {
+                        if (!lineEl.TryGetProperty("index", out var idxEl) || idxEl.ValueKind != JsonValueKind.Number)
+                            continue;
+                        if (!lineEl.TryGetProperty("line", out var lnEl) || lnEl.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        var idx = idxEl.GetInt32();
+                        var ln = lnEl.GetInt32();
+                        if (idx >= 0 && idx < stepList.Count && ln >= 1 && ln <= lines.Length)
+                        {
+                            var (step, _) = stepList[idx];
+                            step.LineNumber = ln;
+                        }
+                    }
+                    break; // success
+                }
+                catch (JsonException)
+                {
+                    if (attempt < MaxRetries) continue;
+                }
             }
         }
     }
@@ -9128,7 +9198,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // Phase 2.9: Validate and correct line numbers by searching actual file content
         if (plan != null)
-            await ValidatePlanLineNumbersAsync(plan, projectRoot);
+            await ValidatePlanLineNumbersAsync(plan, projectRoot, ct);
 
         // Phase 2.95: Plan Coherence Check — verify steps form a coherent chain
         // (each step's references must be satisfied by existing code or a prior step)
