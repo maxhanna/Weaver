@@ -21,7 +21,7 @@
       ✅ ({{vm.cardsForProject('done').length}})
     </button>
     <button class="close-button" ng-click="vm.showKanban = false; vm.saveSettings()" style="margin-left:4px;">✕</button>
-    </div>
+  </div>
   <!-- KANBAN BOARD -->
   <div id="board" class="board">
     <!-- TODO column -->
@@ -50,6 +50,39 @@
               ng-show="vm.voiceSupported">🎤</button>
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
+
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
+              <span class="text-xs"
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
               <span class="text-xs"
@@ -67,7 +100,8 @@
                 <div class="plan-item-body" style="flex:1;min-width:0;">
                   <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
                     <div class="plan-item-text">
-                      <span ng-if="item.metaGroup" class="plan-item-metagroup" title="Sub-plan group">{{item.metaGroup}}</span>
+                      <span ng-if="item.metaGroup" class="plan-item-metagroup"
+                        title="Sub-plan group">{{item.metaGroup}}</span>
                       <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                     </div>
@@ -93,8 +127,8 @@
             </div>
           </div>
           <div class="card-tags">
-          <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
-          <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
+            <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
+            <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
             <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
               title="Auto-create A Branch then PR on completion">
               <input type="checkbox" ng-model="card.autoPr" ng-change="vm.saveCardText(card)" /> BRANCH
@@ -103,7 +137,8 @@
               title="Self-improving card — queued when agent is idle">
               <input type="checkbox" ng-model="card.selfImproving" ng-change="vm.onSelfImprovingToggle(card)" /> IMPROVE
             </label>
-            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()" title="Auto-create tests for the code changes">
+            <label class="card-tag pr-toggle" ng-click="$event.stopPropagation()"
+              title="Auto-create tests for the code changes">
               <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
             </label>
           </div>
@@ -191,6 +226,38 @@
             {{card.text}}
           </div>
           <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
+              <span class="text-xs"
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
             <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
@@ -387,7 +454,8 @@
                     <div ng-repeat="item in card.agentAnalysis.planItems track by item.index" class="plan-item-row"
                       ng-class="{'plan-done': item.done, 'plan-pending': !item.done}"
                       title="{{item.done ? '✅' : '⬜'}} {{item.file}}:{{item.line}} {{item.change}}">
-                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' : '⬜'}}</span>
+                      <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                        '⬜'}}</span>
                       <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change">{{item.change}}</span>
                     </div>
@@ -397,22 +465,19 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-if="!card._benchmark"
-              ng-click="vm.moveCard(card.id,'doing','done')"
+            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'doing','done')"
               class="{{vm.streamingActive && vm.activeCardId === card.id ? 'ghost' : 'success'}} small"
               title="{{vm.streamingActive && vm.activeCardId === card.id ? 'Disabled While Active' : 'Mark as Done'}}"
               ng-disabled="vm.streamingActive && vm.activeCardId === card.id">✔ Done</button>
-            <button ng-if="card._benchmark"
-              ng-click="vm.deleteCard(card.id, 'doing')"
-              class="small" style="color:#e5c07b;"
-              ng-disabled="vm.streamingActive && vm.activeCardId === card.id">🗑 Done & Delete</button>
+            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'doing')" class="small"
+              style="color:#e5c07b;" ng-disabled="vm.streamingActive && vm.activeCardId === card.id">🗑 Done &
+              Delete</button>
             <button ng-click="vm.stopAgent(card)" class="small"
               ng-if="vm.streamingActive && vm.activeCardId === card.id">⏹ Stop</button>
             <button ng-click="vm.moveCard(card.id,'doing','todo')" class="small">← Back</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'doing')" class="small ghost"
               title="Delete card {{vm.activeCardId === card.id ? ' (Disabled while card is Active)' : ''}}"
-              ng-disabled="vm.activeCardId === card.id"
-              ng-if="!card._benchmark || vm.activeCardId === card.id">✕
+              ng-disabled="vm.activeCardId === card.id" ng-if="!card._benchmark || vm.activeCardId === card.id">✕
               Delete</button>
           </div>
         </div>
@@ -439,6 +504,38 @@
           <div class="card-text">
             {{card.text}}
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
+          </div>
+
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🧠
+                Meta-Plan:
+                {{card._metaPlan.summary}}</span>
+              <span class="text-xs"
+                style="margin: 0 4px; opacity:0.6; flex-shrink: 0;">({{card._metaPlan.complexity}}/10)</span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2; flex-shrink: 0; background: none; border: none; color: var(--accent); cursor: pointer;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
@@ -593,8 +690,10 @@
             </details>
           </div>
           <div class="card-actions">
-            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">← Reopen</button>
-            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small" style="color:#e5c07b;">🗑 Delete</button>
+            <button ng-if="!card._benchmark" ng-click="vm.moveCard(card.id,'done','todo')" class="small">←
+              Reopen</button>
+            <button ng-if="card._benchmark" ng-click="vm.deleteCard(card.id, 'done')" class="small"
+              style="color:#e5c07b;">🗑 Delete</button>
             <button ng-click="vm.archiveCard(card.id, 'done')" class="small">🗄 Archive</button>
             <button ng-click="vm.openDeleteCardConfirm(card.id, 'done')" class="small ghost" title="Delete card"
               ng-if="!card._benchmark || vm.activeCardId === card.id">✕

@@ -606,6 +606,51 @@ public static class AgentUtilities
     }
 
     /// <summary>
+    /// LLMs often put literal escape sequences like \r\n or \t inside C# verbatim strings (@"...").
+    /// In a verbatim string, these are treated as literal characters, not newlines/tabs.
+    /// This method detects verbatim strings that look like SQL and converts the literal
+    /// escape sequences to actual characters to fix the formatting.
+    /// </summary>
+    public static string CleanVerbatimStringEscapes(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return content;
+
+        // Match verbatim strings: @"(?:[^"]|"")*"
+        // Regex pattern: @"(?:""|[^"])*"
+        // In C# verbatim string syntax, this is written as: @"@""(?:""|[^""])*"""
+        var regex = new Regex(@"@""(?:""|[^""])*""", RegexOptions.Compiled);
+        bool changed = false;
+
+        var result = regex.Replace(content, match =>
+        {
+            var val = match.Value;
+            // val starts with @" and ends with "
+            // Substring(2, val.Length - 3) extracts the inner content
+            var inside = val.Substring(2, val.Length - 3);
+
+            bool hasEscapeSeq = inside.Contains(@"\r\n") || inside.Contains(@"\r") || inside.Contains(@"\n") || inside.Contains(@"\t");
+            bool looksLikeSql = Regex.IsMatch(inside, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|FROM|WHERE|JOIN|VALUES|SET)\b", RegexOptions.IgnoreCase);
+
+            // Only replace if it has escape sequences AND looks like SQL to avoid breaking file paths (e.g. C:\newfolder)
+            if (hasEscapeSeq && looksLikeSql)
+            {
+                changed = true;
+                var fixedInside = inside
+                    .Replace(@"\r\n", "\r\n")
+                    .Replace(@"\r", "\r")
+                    .Replace(@"\n", "\n")
+                    .Replace(@"\t", "\t");
+
+                // Reconstruct the verbatim string: @" + content + "
+                return "@\"" + fixedInside + "\"";
+            }
+            return val;
+        });
+
+        return changed ? result : content;
+    }
+    
+    /// <summary>
     /// Deterministically ensures that plans creating new Angular components 
     /// use the CLI scaffolding command and update app.module.ts.
     /// </summary>

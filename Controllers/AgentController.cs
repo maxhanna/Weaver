@@ -203,11 +203,7 @@ public class AgentController : ControllerBase
                     "Do NOT invent new helper methods (e.g., `renderMesh`, `setUniforms`), new variables (e.g., `this.explosions` if the file uses `explosions`), or new matrix functions (e.g., `mat4.mul` if the file uses `mat4.multiply`). " +
                     "If the existing code uses `this.drawMesh(this.getExplosionMesh(), ...)`, your newString MUST use that exact same pattern.\n" +
             "29. DUPLICATE BLOCKS (CRITICAL): If the file contains multiple identical sections (e.g., <div class=\"card-tags\"> appears 3 times), you MUST output ONLY the 1-10 lines you want to change. DO NOT include the entire <div> block. The system uses the TARGET LINE to find the correct instance. NEVER output more than 10 lines.\n" +
-                "you MUST include a CREATE TABLE IF NOT EXISTS statement for that table in your newString, placed BEFORE the INSERT/UPDATE statements. " +
-                "The CREATE TABLE must define ALL columns that the INSERT/UPDATE references, with appropriate MySQL data types. " +
-                "CRITICAL: The CREATE TABLE MUST be placed INSIDE the SAME METHOD as the INSERT/UPDATE that uses it — right before the INSERT statement. " +
-                "Do NOT place the CREATE TABLE inside a different method, inside a comment block, or at the bottom of the file. " +
-                "Place it immediately before the first INSERT/UPDATE that depends on it, within the same method body. " +
+                "you MUST include a CREATE TABLE IF NOT EXISTS statement for a new table introduced by your newString, placed BEFORE the INSERT/UPDATE statements. " +
                 "NEVER emit INSERT INTO or UPDATE for a table that has not been created yet — always prepend the CREATE TABLE first. " +
                 "Example: if your new code does `INSERT INTO user_settings (user_id, setting_key, setting_value) VALUES (...)` but `user_settings` " +
                 "does not exist in the file, right before that INSERT write: `CREATE TABLE IF NOT EXISTS user_settings (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, setting_key VARCHAR(255) NOT NULL, setting_value TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`" +
@@ -1304,26 +1300,8 @@ public class AgentController : ControllerBase
 
             using var jDoc = JsonDocument.Parse(cleaned);
             var jRoot = jDoc.RootElement;
-
-            // C# new method enforcement: FORMAT C is REQUIRED for adding new methods in .cs.
-            // Must run BEFORE fullFile/FORMAT C/oldString handling to intercept the LLM's first bad attempt.
-            if (ext == ".cs" &&
-                !jRoot.TryGetProperty("targetType", out _) &&
-                !jRoot.TryGetProperty("fullFile", out _) &&
-                !string.IsNullOrWhiteSpace(step.Change) &&
-                Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase))
-            {
-                return (null, null, false, null, false,
-                    "C# NEW METHOD ENFORCEMENT: You MUST use FORMAT C (targetType/targetName/insertAfter) " +
-                    "to add a new method in a .cs file. oldString/newString is NOT allowed for C# method insertion. " +
-                    "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
-                    "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body.", false);
-            }
-
-            // Already done 
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
             {
-
                 var (verdict, _) = PreEditValidation(fileContent, step);
                 if (verdict == PreEditVerdict.AlreadyDone)
                 {
@@ -1361,6 +1339,21 @@ public class AgentController : ControllerBase
                 return (null, null, false, null, true, null, false);
             }
 
+            // C# new method enforcement: FORMAT C is REQUIRED for adding new methods in .cs.
+            // Runs AFTER alreadyDone check to avoid false positives.
+            if (ext == ".cs" &&
+                !jRoot.TryGetProperty("targetType", out _) &&
+                !jRoot.TryGetProperty("fullFile", out _) &&
+                !string.IsNullOrWhiteSpace(step.Change) &&
+                Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase))
+            {
+                return (null, null, false, null, false,
+                    "C# NEW METHOD ENFORCEMENT: You MUST use FORMAT C (targetType/targetName/insertAfter) " +
+                    "to add a new method in a .cs file. oldString/newString is NOT allowed for C# method insertion. " +
+                    "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
+                    "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body.", false);
+            }
+
             if (jRoot.TryGetProperty("fullFile", out var ff))
             {
                 string? body = null;
@@ -1380,6 +1373,8 @@ public class AgentController : ControllerBase
                 {
                     body = StripFullFileFence(body);
                     body = AgentUtilities.AutoFixPythonStatements(body, relPath);
+                    body = AgentUtilities.CleanVerbatimStringEscapes(body);
+
                     return (null, null, true, body, false, null, false);
                 }
             }
@@ -1399,6 +1394,8 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(targetType) && !string.IsNullOrWhiteSpace(targetName) && newCodeStr != null)
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
+                    newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
+
                     var insertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl) && iaEl.GetBoolean();
 
                     if (insertAfter)
@@ -1665,6 +1662,14 @@ public class AgentController : ControllerBase
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
 
+                if (!string.IsNullOrWhiteSpace(newStr))
+                {
+                    var cleanedNewStr = AgentUtilities.CleanVerbatimStringEscapes(newStr);
+                    if (cleanedNewStr != newStr)
+                    {
+                        newStr = cleanedNewStr;
+                    }
+                }
                 // Reject truncation markers in oldString (e.g., "... [6 lines omitted]" or "{ ... }")
                 if (!string.IsNullOrWhiteSpace(oldStr) &&
                     (Regex.IsMatch(oldStr, @"\.\.\.\s*\[?\s*\d*\s*lines?\s*omitted\]?", RegexOptions.IgnoreCase) ||
@@ -2142,8 +2147,7 @@ public class AgentController : ControllerBase
         sb.AppendLine("      system already handles SQL table schema detection; table creation SQL belongs");
         sb.AppendLine("      INSIDE the method that uses the table, not as a standalone comment.");
         sb.AppendLine("      Example: 'Create BenchmarksTableCreation SQL comment block before GetVersion'");
-        sb.AppendLine("      → alreadyDone = true. The actual CREATE TABLE should be in the PostBenchmarks");
-        sb.AppendLine("      method body, not in GetVersion.");
+        sb.AppendLine("      → alreadyDone = true.");
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
         sb.AppendLine("   i) CREATE TABLE IS NOT A SEPARATE STEP: If a step mentions adding a method/endpoint that");
@@ -2151,12 +2155,6 @@ public class AgentController : ControllerBase
         sb.AppendLine("      The CREATE TABLE IF NOT EXISTS statement MUST be inline inside the method body,");
         sb.AppendLine("      BEFORE the INSERT/UPDATE/SELECT. Do NOT split the table creation into its own");
         sb.AppendLine("      step — they belong at the same location (inside the method body).");
-        sb.AppendLine("      RATIONALE: CREATE TABLE IF NOT EXISTS is an inline guard clause that runs at the");
-        sb.AppendLine("      START of the method body. It is NOT a separate schema definition. Splitting it");
-        sb.AppendLine("      forces the editor to place the CREATE TABLE at a random location (e.g., before");
-        sb.AppendLine("      the class closing brace) instead of inside the method where it belongs.");
-        sb.AppendLine("      Example: \"Add PostBenchmark method with CREATE TABLE and INSERT\"");
-        sb.AppendLine("      → needsDecoupling = false. The method body contains both the CREATE and the INSERT.");
         sb.AppendLine("      BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"");
         sb.AppendLine("      GOOD: \"Add PostBenchmarks method with inline CREATE TABLE IF NOT EXISTS and INSERT\"");
         sb.AppendLine();
@@ -5480,16 +5478,23 @@ emitSse, ct);
             return content;
         }
     }
-    /// <summary>
-    /// Normalizes a change description for deduplication by lowercasing 
-    /// and collapsing whitespace.
-    /// </summary>
     private static string NormalizeChangeForDedup(string? change)
     {
         if (string.IsNullOrWhiteSpace(change)) return "";
         var norm = change.Trim().ToLowerInvariant();
+        norm = Regex.Replace(norm, @"[^\w\s]", ""); // Strip punctuation
         norm = string.Join(" ", norm.Split(default(char[]), StringSplitOptions.RemoveEmptyEntries));
         return norm;
+    }
+
+    private static double CalculateChangeSimilarity(string s1, string s2)
+    {
+        if (string.IsNullOrWhiteSpace(s1) || string.IsNullOrWhiteSpace(s2)) return 0.0;
+        var words1 = new HashSet<string>(s1.Split(' '));
+        var words2 = new HashSet<string>(s2.Split(' '));
+        var intersection = words1.Intersect(words2).Count();
+        var union = words1.Union(words2).Count();
+        return union == 0 ? 0.0 : (double)intersection / union;
     }
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
     {
@@ -7703,6 +7708,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         public string Title { get; set; } = "";
         public string Description { get; set; } = "";
         public string ContextNote { get; set; } = "";
+        public List<string> Files { get; set; } = new(); 
     }
 
     private class MetaPlanResult
@@ -7714,42 +7720,80 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
 
     private static string BuildMetaPlanPrompt() =>
-        "You are a senior software architect. Determine if this task is complex enough to require a " +
-        "META-PLAN (multiple sub-plans executed sequentially).\n\n" +
-        "A task needs a META-PLAN ONLY when it adds 3+ NEW methods/endpoints across 2+ source files " +
-        "(e.g. full CRUD + data model + UI + routing), or when it requires 7+ plan steps.\n\n" +
-        "COMMON NON-EXAMPLES that do NOT need a meta-plan:\n" +
-        "  - Adding ONE new endpoint + its supporting database table\n" +
-        "  - Modifying a single method or adding one handler\n" +
-        "  - Creating a DTO/model class + its table + one endpoint (this is 1 concern: data persistence)\n" +
-        "  - Adding a simple property or field to an existing class\n" +
-        "  - Any change touching only 1-2 files\n\n" +
-        "Rate complexity 1-10:\n" +
-        "  1-3: Trivial (single file, one method/property change)\n" +
-        "  4-6: Moderate (2-4 steps, 1-2 files, one endpoint + table, straightforward)\n" +
-        "  7-10: Complex (7+ steps, 3+ new methods/endpoints, 2+ files, cross-cutting architecture)\n\n" +
-        "If complexity >= 7, generate a META-PLAN \u2014 a list of detailed sub-plans. " +
-        "Each sub-plan will be independently planned and executed SEQUENTIALLY, with context passed between them. " +
-        "Break the task so that each sub-plan produces a concrete, testable deliverable.\n\n" +
-        "Output ONLY valid JSON \u2014 no markdown fences, no extra text:\n" +
-        "{\n" +
-        "  \"metaThinking\": \"1-2 lines: why this task does or doesn't need a meta-plan\",\n" +
-        "  \"metaSummary\": \"one-sentence overall plan\",\n" +
-        "  \"complexity\": 7,\n" +
-        "  \"subPlans\": [\n" +
-        "    {\n" +
-        "      \"id\": \"sp-1\",\n" +
-        "      \"title\": \"Data model and service layer\",\n" +
-        "      \"description\": \"Describe precisely what files to create/modify and what the sub-plan achieves\",\n" +
-        "      \"contextNote\": \"What the next sub-plan needs to know about this sub-plan's output\"\n" +
-        "    }\n" +
-        "  ]\n" +
-        "}\n\n" +
-        "If complexity < 7, set subPlans to an empty array [].\n" +
-        "If you do output subPlans, include at least 2 and at most 6 sub-plans.";
+     "You are a senior software architect. Determine if this task is complex enough to require a " +
+     "META-PLAN (multiple sub-plans executed sequentially).\n\n" +
+     "A task needs a META-PLAN ONLY when it adds 3+ NEW methods/endpoints across 2+ source files " +
+     "(e.g. full CRUD + data model + UI + routing), or when it requires 7+ plan steps.\n\n" +
+     "COMMON NON-EXAMPLES that do NOT need a meta-plan:\n" +
+     "  - Adding ONE new endpoint + its supporting database table\n" +
+     "  - Modifying a single method or adding one handler\n" +
+     "  - Creating a DTO/model class + its table + one endpoint (this is 1 concern: data persistence)\n" +
+     "  - Adding a simple property or field to an existing class\n" +
+     "  - Any change touching only 1-2 files\n" +
+     "  - Any task that only requires modifying 1 file, even if it involves multiple steps (e.g., adding properties AND a method to the same file). Normal planning handles multi-step single-file edits natively.\n\n" +
+     "Rate complexity 1-10:\n" +
+     "  1-3: Trivial (single file, one method/property change)\n" +
+     "  4-6: Moderate (2-4 steps, 1-2 files, one endpoint + table, straightforward)\n" +
+     "  7-10: Complex (7+ steps, 3+ new methods/endpoints, 2+ files, cross-cutting architecture)\n\n" +
+     "If complexity >= 7, generate a META-PLAN — a list of detailed sub-plans. " +
+     "Each sub-plan will be independently planned and executed SEQUENTIALLY, with context passed between them.\n\n" +
+     "### META-PLAN RULES (CRITICAL) ###\n" +
+     "1. PRECISION: Each sub-plan MUST specify:\n" +
+     "   - The EXACT file path(s) it will modify (e.g. 'maxhanna.Server/Controllers/WeaverController.cs')\n" +
+     "   - The EXACT changes it will make (e.g. 'Add GPU string property to BenchmarkDataDTO class')\n" +
+     "   - NOT abstract concepts like 'Database Schema Creation' — instead be very precise about what the change is.'\n" +
+     "\n" +
+     "2. ATOMICITY (CRITICAL): Do NOT split things that belong together:\n" +
+     "   - CREATE TABLE + INSERT/UPDATE = ONE sub-plan (the CREATE TABLE is an inline guard clause inside the method body, NOT a separate schema definition step)\n" +
+     "   - Method signature + method body = ONE sub-plan\n" +
+     "   - DTO class + its properties = ONE sub-plan\n" +
+     "   BAD: Sub-plan 1='Create database schema for benchmarks table', Sub-plan 2='Add endpoint method with INSERT'\n" +
+     "   GOOD: Sub-plan 1='Add OS/CPU/RAM/GPU properties to BenchmarkDataDTO', Sub-plan 2='Add AddBenchmark POST endpoint with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT'\n" +
+     "\n" +
+     "3. COHERENT CHAIN: Each sub-plan MUST build on the previous one:\n" +
+     "   - Sub-plan 2 must reference symbols/files created or modified in sub-plan 1\n" +
+     "   - The contextNote must contain CONCRETE details: exact symbol names, property names, SQL table schemas, method signatures\n" +
+     "   - NOT prose like 'The next sub-plan needs this database schema information'\n" +
+     "   - INSTEAD: 'Sub-plan 1 added properties OS, CPU, RAM, GPU (all string?) to BenchmarkDataDTO in WeaverController.cs. The AddBenchmark method in sub-plan 2 must reference these properties in its INSERT statement as @OS, @CPU, @RAM, @GPU parameters.'\n" +
+     "\n" +
+     "4. NO REDUNDANCY: Each sub-plan must produce UNIQUE value. If two sub-plans modify the same file at the same location, merge them.\n" +
+     "\n" +
+     "5. DELIVERABLE ORIENTATION: Each sub-plan title must describe the CONCRETE DELIVERABLE with file path, not the abstract concern:\n" +
+     "   BAD: 'Database Schema Creation for Benchmarks Table'\n" +
+     "   GOOD: 'Add OS, CPU, RAM, GPU string properties to BenchmarkDataDTO in WeaverController.cs'\n" +
+     "   BAD: 'Service Layer Implementation with Database Access Logic'\n" +
+     "   GOOD: 'Add AddBenchmark POST endpoint with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT in WeaverController.cs'\n" +
+     "   BAD: 'Update Data Model Class Definition'\n" +
+     "   GOOD: 'Add 4 nullable string properties (OS, CPU, RAM, GPU) to BenchmarkDataDTO class after existing Model property'\n" +
+     "\n" +
+     "6. ORDERING: Sub-plans must be ordered so that dependencies come first:\n" +
+     "   - Data models/DTOs before endpoints that use them\n" +
+     "   - Service methods before UI components that call them\n" +
+     "   - Backend endpoints before frontend service methods that call them\n" +
+     "\n" +
+     "7. FILE SCOPE (CRITICAL): If a task only modifies ONE file (even with multiple steps like adding properties AND a method to the same file), complexity MUST be <= 6. Meta-plans are ONLY for cross-file architecture.\n" +
+     "\n" +
+     "Output ONLY valid JSON — no markdown fences, no extra text:\n" +
+     "{\n" +
+     "  \"metaThinking\": \"1-2 lines: why this task does or doesn't need a meta-plan\",\n" +
+     "  \"metaSummary\": \"one-sentence overall plan\",\n" +
+     "  \"complexity\": 7,\n" +
+     "  \"subPlans\": [\n" +
+     "    {\n" +
+     "      \"id\": \"sp-1\",\n" +
+     "      \"title\": \"Concrete deliverable: exact file + exact modification\",\n" +
+     "      \"description\": \"EXACT file path(s) and EXACT modifications. Name specific methods, properties, classes, SQL table/column names. This description will be fed directly to the planner.\",\n" +
+     "      \"files\": [\"path/to/file.ext\"],\n" +
+     "      \"contextNote\": \"Concrete details for next sub-plan: exact symbol names, property names, table schemas, method signatures that were created/modified in THIS sub-plan\"\n" +
+     "    }\n" +
+     "  ]\n" +
+     "}\n\n" +
+     "If complexity < 7, set subPlans to an empty array [].\n" +
+     "If you do output subPlans, include at least 2 and at most 6 sub-plans.";
 
     private async Task<MetaPlanResult?> GenerateMetaPlanAsync(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct)
+    string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct,
+    string? cardId = null) // <-- Added cardId
     {
         var metaPrompt = BuildMetaPlanPrompt();
         var userPrompt = new StringBuilder();
@@ -7780,13 +7824,72 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     PropertyNameCaseInsensitive = true
                 });
+
                 if (result != null && result.Complexity >= 7 && result.SubPlans?.Count > 0)
                 {
                     await EmitLog(emitSse, "info",
                         $"Meta-plan: complexity {result.Complexity}/10, {result.SubPlans.Count} sub-plan(s): " +
-                        string.Join(" \u2192 ", result.SubPlans.Select(s => s.Title)), ct: ct);
+                        string.Join(" → ", result.SubPlans.Select(s => s.Title)), ct: ct);
+
+                    // Deterministic guard against over-planning single-file tasks
+                    var allTargetFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var sp in result.SubPlans)
+                    {
+                        if (sp.Files != null)
+                        {
+                            foreach (var f in sp.Files)
+                            {
+                                if (!string.IsNullOrWhiteSpace(f))
+                                    allTargetFiles.Add(f.Replace('\\', '/').Trim());
+                            }
+                        }
+                        var textToScan = (sp.Title ?? "") + " " + (sp.Description ?? "");
+                        var matches = Regex.Matches(textToScan, @"[\w\-/\\]+\.(?:cs|ts|tsx|js|jsx|html|css|scss|go|py|java|kt|php|rb)");
+                        foreach (Match m in matches)
+                        {
+                            allTargetFiles.Add(m.Value.Replace('\\', '/').Trim());
+                        }
+                    }
+
+                    if (allTargetFiles.Count <= 1 && result.SubPlans.Count <= 3)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Meta-plan skipped deterministically: {result.SubPlans.Count} sub-plan(s) target only {allTargetFiles.Count} file(s) " +
+                            "— normal planning is sufficient for single-file multi-step tasks.", ct: ct);
+                        return null;
+                    }
+
+                    result = await ValidateMetaPlanCoherenceAsync(
+                        result, prompt, discoveryContext, projectRoot, emitSse, ct);
+
+                    // ── NEW: Emit SSE event for frontend ──
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "meta-plan", new
+                        {
+                            summary = result.MetaSummary,
+                            complexity = result.Complexity,
+                            subPlans = result.SubPlans.Select(sp => new
+                            {
+                                id = sp.Id,
+                                title = sp.Title,
+                                description = sp.Description,
+                                files = sp.Files,
+                                contextNote = sp.ContextNote,
+                                done = false
+                            })
+                        }, ct);
+                    }
+
+                    // ── NEW: Persist to card ──
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                    {
+                        await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
+                    }
+
                     return result;
                 }
+
                 if (result != null && result.Complexity < 7)
                 {
                     await EmitLog(emitSse, "info",
@@ -7802,22 +7905,49 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return null;
     }
 
-    private static string BuildSubPlanPrompt(string originalPrompt, MetaPlanSubPlan subPlan, int index, int total)
+    private static string BuildSubPlanPrompt(
+  string originalPrompt,
+  MetaPlanSubPlan subPlan,
+  int index, int total,
+  string? accumulatedResults = null)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"### ORIGINAL TASK ###");
+        sb.AppendLine($"### ORIGINAL TASK (FOR CONTEXT ONLY - DO NOT PLAN THIS) ###");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
         sb.AppendLine($"### SUB-PLAN {index}/{total}: {subPlan.Title} ###");
+        sb.AppendLine("⚠ CRITICAL: You MUST plan ONLY the changes described in this specific sub-plan. Do NOT plan the entire original task. Do NOT plan steps for other sub-plans.");
         sb.AppendLine(subPlan.Description);
+
         if (!string.IsNullOrWhiteSpace(subPlan.ContextNote))
         {
             sb.AppendLine();
-            sb.AppendLine("### CONTEXT FROM PRIOR SUB-PLANS ###");
+            sb.AppendLine("### CONTEXT FROM PRIOR SUB-PLANS (planned) ###");
             sb.AppendLine(subPlan.ContextNote);
         }
+
+        if (!string.IsNullOrWhiteSpace(accumulatedResults))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### ACTUAL RESULTS FROM PRIOR SUB-PLANS (executed) ###");
+            sb.AppendLine("The following changes were ACTUALLY applied to files in prior sub-plans.");
+            sb.AppendLine("You MUST use these exact symbol names and file paths in your plan:");
+            sb.AppendLine(accumulatedResults);
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("### CONSTRAINTS ###");
+        sb.AppendLine("1. Plan ONLY the changes described in this sub-plan — do NOT add steps for other sub-plans' work");
+        sb.AppendLine("2. Use the EXACT symbol names, property names, and file paths from the context above");
+        sb.AppendLine("3. If context says a prior sub-plan added 'OS, CPU, RAM, GPU properties to BenchmarkDataDTO',");
+        sb.AppendLine("   your INSERT statement MUST reference those exact property names (benchmark.OS, benchmark.CPU, etc.)");
+        sb.AppendLine("4. CREATE TABLE IF NOT EXISTS goes INSIDE the method body, before the INSERT — NOT as a separate step");
+        sb.AppendLine("5. Do NOT re-describe or re-implement work from prior sub-plans");
+        sb.AppendLine("6. Each step must be atomic: one coherent edit at one location in one file");
+
         return sb.ToString();
     }
+
 
     private static string BuildPlanningPrompt() =>
         "You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n" +
@@ -8208,6 +8338,40 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var webViolation = DetectMissingWebSearch(prompt, plan);
             if (webViolation != null)
                 await EmitLog(emitSse, "warn", $"Plan may need web search: {webViolation}", ct: ct);
+
+            // ── NEW: Deterministic deduplication of plan steps ──
+            if (plan.Plan != null && plan.Plan.Count > 1)
+            {
+                var uniqueSteps = new List<PlanStep>();
+                for (var i = 0; i < plan.Plan.Count; i++)
+                {
+                    var step = plan.Plan[i];
+                    var normChange = NormalizeChangeForDedup(step.Change);
+                    var isDuplicate = false;
+
+                    foreach (var existing in uniqueSteps)
+                    {
+                        if (!string.Equals(step.File, existing.File, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var existingNorm = NormalizeChangeForDedup(existing.Change);
+                        var similarity = CalculateChangeSimilarity(normChange, existingNorm);
+
+                        if (similarity >= 0.8) // 80% word overlap threshold
+                        {
+                            isDuplicate = true;
+                            await EmitLog(emitSse, "warn", $"Removed duplicate plan step (similarity {similarity:P0}): [{step.File}] {step.Change}", ct: ct);
+                            break;
+                        }
+                    }
+
+                    if (!isDuplicate)
+                    {
+                        uniqueSteps.Add(step);
+                    }
+                }
+                plan.Plan = uniqueSteps;
+            }
 
             await EmitLog(emitSse, "info",
                 $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
@@ -9639,24 +9803,43 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await SendSse(Response, "phase", new { phase = "metaplan", message = $"Meta-plan: {metaPlan.SubPlans.Count} sub-plans", subPlans = metaPlan.SubPlans }, ct);
 
             var combinedSteps = new List<PlanStep>();
-            var accumulatedContext = discoveryContext;
+            var accumulatedContext = new StringBuilder();
+            await PersistMetaPlanToCardAsync(cardId, metaPlan, emitSse, ct);
 
             for (var i = 0; i < metaPlan.SubPlans.Count; i++)
             {
-                var sp = metaPlan.SubPlans[i];
-                await EmitLog(emitSse, "info", $"  Sub-plan {i + 1}/{metaPlan.SubPlans.Count}: {sp.Title}", ct: ct);
+                var subPlan = metaPlan.SubPlans[i];
 
-                var subPrompt = BuildSubPlanPrompt(prompt, sp, i + 1, metaPlan.SubPlans.Count);
-                var (subPlan, updatedContext) = await RunPlanningConvergenceLoop(
-                    subPrompt, accumulatedContext, projectRoot, emitSse, ct, steeringContext);
+                var subPrompt = BuildSubPlanPrompt(
+                    prompt, subPlan, i + 1, metaPlan.SubPlans.Count,
+                    accumulatedContext.Length > 0 ? accumulatedContext.ToString() : null);
 
-                foreach (var step in subPlan.Plan)
-                    step.MetaGroup = sp.Title;
+                var subPlanResult = await AnalyzePromptAndPlanCodeChanges(
+                    subPrompt, discoveryContext, projectRoot, emitSse, ct);
 
-                combinedSteps.AddRange(subPlan.Plan);
-                accumulatedContext = updatedContext;
-                if (!string.IsNullOrWhiteSpace(sp.ContextNote))
-                    accumulatedContext += "\n\n### Context Note ###\n" + sp.ContextNote;
+                if (subPlanResult?.Plan != null)
+                {
+                    // Execute the sub-plan...
+                    var subResults = new List<object>();
+                    await ExecutePlan(prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
+                        steeringContext: subPlan.ContextNote, attachedFiles: attachedFiles, cardId: cardId);
+
+                    await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
+
+                    // ── NEW: Accumulate actual results for the next sub-plan ──
+                    accumulatedContext.AppendLine($"## Sub-plan {i + 1} ({subPlan.Title}) — COMPLETED ##");
+                    foreach (var r in subResults.OfType<Dictionary<string, object?>>())
+                    {
+                        var status = r.GetValueOrDefault("status")?.ToString();
+                        var path = r.GetValueOrDefault("path")?.ToString();
+                        var desc = r.GetValueOrDefault("description")?.ToString();
+                        if (!string.IsNullOrWhiteSpace(path) && status is "done" or "modified" or "created")
+                        {
+                            accumulatedContext.AppendLine($"  ✓ [{path}] {desc}");
+                        }
+                    }
+                    accumulatedContext.AppendLine();
+                }
             }
 
             plan = new AgentPlan
@@ -9666,7 +9849,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 Score = 85,
                 Plan = combinedSteps
             };
-            discoveryContext = accumulatedContext;
+            discoveryContext = accumulatedContext.ToString();
         }
         else
         {
@@ -9730,8 +9913,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
         }
 
-        plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot);
-        plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot);
+        if (plan != null && !string.IsNullOrEmpty(projectRoot))
+        { 
+            plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot) ?? plan;
+            plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot) ?? plan;
+        }
 
         if (emitSse && plan?.Plan?.Count > 0)
         {
@@ -11984,48 +12170,158 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             : null;
         return (steps, agentPlan);
     }
-    private async Task<(List<object> results, int stepsCount)> HandleCreateFile(
-        string changeDesc, string projectRoot, string originalPrompt, string discoveryContext,
-        int idx, bool emitSse, CancellationToken ct,
-        string? explicitRelPath = null, List<string>? attachedFiles = null)
+    private async Task<MetaPlanResult?> ValidateMetaPlanCoherenceAsync(
+     MetaPlanResult metaPlan, string originalPrompt, string discoveryContext,
+     string projectRoot, bool emitSse, CancellationToken ct)
     {
-        var results = new List<object>();
-        var targetRelPath = explicitRelPath;
-        if (string.IsNullOrWhiteSpace(targetRelPath))
+        var sb = new StringBuilder();
+        sb.AppendLine("You are validating a META-PLAN before it gets executed. Your job is to ensure the sub-plans form a precise, coherent, atomic chain.");
+        sb.AppendLine();
+        sb.AppendLine("### ORIGINAL TASK ###");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### DISCOVERY CONTEXT ###");
+        sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
+        sb.AppendLine();
+        sb.AppendLine("### META-PLAN TO VALIDATE ###");
+        sb.AppendLine($"Summary: {metaPlan.MetaSummary}");
+        sb.AppendLine($"Complexity: {metaPlan.Complexity}/10");
+        sb.AppendLine();
+        for (var i = 0; i < metaPlan.SubPlans.Count; i++)
         {
-            var namedMatch = Regex.Match(changeDesc, @"(?:new\s+)?file\s+(?:called|named)?\s*['""`]?([\w./\\-]+\.[\w.-]+)['""`]?", RegexOptions.IgnoreCase);
-            if (namedMatch.Success) targetRelPath = namedMatch.Groups[1].Value.Replace('\\', '/');
+            var sp = metaPlan.SubPlans[i];
+            sb.AppendLine($"Sub-plan {i + 1}: {sp.Title}");
+            sb.AppendLine($"  Description: {sp.Description}");
+            if (sp.Files != null && sp.Files.Count > 0)
+                sb.AppendLine($"  Files: {string.Join(", ", sp.Files)}");
+            sb.AppendLine($"  Context Note: {sp.ContextNote}");
+            sb.AppendLine();
         }
-        if (string.IsNullOrWhiteSpace(targetRelPath)) { var pm = Regex.Match(changeDesc, @"[\w/\\]+\.[\w]+"); if (pm.Success) targetRelPath = pm.Value.Replace('\\', '/'); }
-        if (string.IsNullOrWhiteSpace(targetRelPath)) { var dm = Regex.Match(changeDesc, @"\.[\w-]+(?:\.[\w-]+)*"); if (dm.Success) targetRelPath = dm.Value; }
-        if (string.IsNullOrWhiteSpace(targetRelPath)) targetRelPath = "newfile.txt";
-        targetRelPath = targetRelPath.Replace('\\', '/');
-        if (!targetRelPath.Contains('/'))
-        { var folder = AgentUtilities.InferTargetFolder(targetRelPath, projectRoot); if (!string.IsNullOrWhiteSpace(folder)) targetRelPath = folder + targetRelPath; }
+        sb.AppendLine();
+        sb.AppendLine("### VALIDATION CHECKS ###");
+        sb.AppendLine("1. PRECISION: Does each sub-plan title and description specify:");
+        sb.AppendLine("   - EXACT file path(s)? (not just 'the controller' but 'maxhanna.Server/Controllers/WeaverController.cs')");
+        sb.AppendLine("   - EXACT modifications? (not just 'update data model' but 'add OS, CPU, RAM, GPU string properties to BenchmarkDataDTO')");
+        sb.AppendLine("   Flag any sub-plan with abstract titles like 'Database Schema Creation' or 'Service Layer Implementation'.");
+        sb.AppendLine();
+        sb.AppendLine("2. ATOMICITY: Are there sub-plans that split things that should be TOGETHER?");
+        sb.AppendLine("   - CREATE TABLE + INSERT/UPDATE must be in the SAME sub-plan (CREATE TABLE is an inline guard inside the method)");
+        sb.AppendLine("   - Method signature + body must be in the SAME sub-plan");
+        sb.AppendLine("   - DTO class + its properties must be in the SAME sub-plan");
+        sb.AppendLine("   If you find such splits, MERGE them in correctedSubPlans.");
+        sb.AppendLine();
+        sb.AppendLine("3. COHERENT CHAIN: Does each sub-plan build on the previous?");
+        sb.AppendLine("   - Does sub-plan N+1 reference exact symbols from sub-plan N's output?");
+        sb.AppendLine("   - Are contextNotes CONCRETE (contain exact symbol names, property names, table schemas)?");
+        sb.AppendLine("   - If a contextNote is vague prose, replace it with concrete details.");
+        sb.AppendLine();
+        sb.AppendLine("4. ORDERING: Are sub-plans in dependency order?");
+        sb.AppendLine("   - DTOs/models before endpoints that use them");
+        sb.AppendLine("   - Backend before frontend");
+        sb.AppendLine();
+        sb.AppendLine("5. NO REDUNDANCY: Are any two sub-plans doing the same thing?");
+        sb.AppendLine();
+        sb.AppendLine("### OUTPUT FORMAT ###");
+        sb.AppendLine("If the meta-plan passes ALL checks:");
+        sb.AppendLine("{\"valid\": true, \"correctedSubPlans\": null, \"issues\": []}");
+        sb.AppendLine();
+        sb.AppendLine("If ANY check fails, output corrected sub-plans that fix ALL issues:");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"valid\": false,");
+        sb.AppendLine("  \"issues\": [\"short description of each issue found\"],");
+        sb.AppendLine("  \"correctedSubPlans\": [");
+        sb.AppendLine("    {\"id\":\"sp-1\",\"title\":\"Concrete deliverable with file path\",\"description\":\"Exact files and modifications\",\"contextNote\":\"Concrete symbols/schemas for next sub-plan\"}");
+        sb.AppendLine("  ]");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY JSON — no markdown, no explanation.");
 
-        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, targetRelPath.Replace('/', Path.DirectorySeparatorChar)));
-        if (!AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
-        { await EmitLog(emitSse, "error", $"Create target {targetRelPath} is outside project root", ct: ct); return (results, 0); }
+        var (raw, _, err) = await CallLlmRaw(
+            "You validate meta-plans for precision, atomicity, and coherence. Output ONLY JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(45), maxTokens: 2048);
 
-        await EmitLog(emitSse, "info", $"Generating content for: {targetRelPath}", ct: ct);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Meta-plan validation skipped: {err ?? "empty response"}", ct: ct);
+            return metaPlan;
+        }
 
-        var contentPrompt = $"Generate COMPLETE content for: {targetRelPath}\nTask: {originalPrompt}\nDescription: {changeDesc}\nContext:\n{discoveryContext}\n\nOutput ONLY the raw file content — no markdown, no fences, no explanation.";
-        var (content, _, _) = await CallLlmRaw(
-            "Output ONLY raw file content — no markdown, no code fences, no explanation.",
-            contentPrompt, ct, _infiniteTimeout);
+        try
+        {
+            var cleaned = raw.Trim();
+            if (cleaned.StartsWith("```"))
+            {
+                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+            }
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
 
-        var cleaned = StripFullFileFence(content ?? "");
-        if (string.IsNullOrWhiteSpace(cleaned)) { await EmitLog(emitSse, "warn", $"Empty content for {targetRelPath}", ct: ct); return (results, 0); }
+            using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
 
-        var parentDir = Path.GetDirectoryName(fullPath);
-        if (!string.IsNullOrEmpty(parentDir) && !Directory.Exists(parentDir)) Directory.CreateDirectory(parentDir);
-        await System.IO.File.WriteAllTextAsync(fullPath, cleaned, Encoding.UTF8);
-        await EmitLog(emitSse, "success", $"Created {targetRelPath} ({cleaned.Length} chars)", ct: ct);
-        attachedFiles?.Add(fullPath);
+            var valid = root.TryGetProperty("valid", out var vEl) && vEl.GetBoolean();
 
-        if (emitSse) await SendSse(Response, "result", new { type = "create", path = targetRelPath, chars = cleaned.Length }, ct);
-        results.Add(new Dictionary<string, object?> { ["status"] = "done", ["path"] = targetRelPath, ["output"] = cleaned, ["type"] = "create" });
-        return (results, 1);
+            // Log issues if present
+            if (root.TryGetProperty("issues", out var issuesEl) && issuesEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var issue in issuesEl.EnumerateArray())
+                {
+                    var issueStr = issue.ValueKind == JsonValueKind.String ? issue.GetString() : issue.ToString();
+                    await EmitLog(emitSse, "warn", $"Meta-plan issue: {issueStr}", ct: ct);
+                }
+            }
+
+            if (valid)
+            {
+                await EmitLog(emitSse, "info", "Meta-plan validation: ✓ sub-plans form a coherent, precise chain", ct: ct);
+                return metaPlan;
+            }
+
+            await EmitLog(emitSse, "warn", "Meta-plan validation: ✗ issues found — applying corrections", ct: ct);
+
+            if (root.TryGetProperty("correctedSubPlans", out var cspArr) && cspArr.ValueKind == JsonValueKind.Array)
+            {
+                var corrected = new List<MetaPlanSubPlan>();
+                foreach (var el in cspArr.EnumerateArray())
+                {
+                    corrected.Add(new MetaPlanSubPlan
+                    {
+                        Id = el.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : $"sp-{corrected.Count + 1}",
+                        Title = el.TryGetProperty("title", out var tEl) ? tEl.GetString() ?? "" : "",
+                        Description = el.TryGetProperty("description", out var dEl) ? dEl.GetString() ?? "" : "",
+                        ContextNote = el.TryGetProperty("contextNote", out var cnEl) ? cnEl.GetString() ?? "" : ""
+                    });
+                }
+
+                if (corrected.Count > 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Meta-plan corrected: {corrected.Count} sub-plan(s): " +
+                        string.Join(" → ", corrected.Select(s => s.Title)), ct: ct);
+
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "meta-plan-corrected", new
+                        {
+                            originalCount = metaPlan.SubPlans.Count,
+                            correctedCount = corrected.Count,
+                            subPlans = corrected.Select(s => new { s.Id, s.Title, s.Description })
+                        }, ct);
+                    }
+
+                    metaPlan.SubPlans = corrected;
+                    return metaPlan;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(emitSse, "warn", $"Meta-plan validation parse error: {ex.Message}", ct: ct);
+        }
+
+        return metaPlan;
     }
 
     [HttpPost("execute")]
@@ -14967,5 +15263,108 @@ done = build OK; command = run this to fix; ask_user = need input";
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
         await System.IO.File.WriteAllTextAsync(filePath, json);
         await EmitLog(true, "info", $"Self-improving data written for: {prompt}");
+    }
+    private async Task PersistMetaPlanToCardAsync(string? cardId, MetaPlanResult metaPlan, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || metaPlan == null) return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    cardObj["_metaPlan"] = new JsonObject
+                    {
+                        ["summary"] = metaPlan.MetaSummary,
+                        ["complexity"] = metaPlan.Complexity,
+                        ["thinking"] = metaPlan.MetaThinking,
+                        ["subPlans"] = new JsonArray(
+                            metaPlan.SubPlans.Select(sp => new JsonObject
+                            {
+                                ["id"] = sp.Id,
+                                ["title"] = sp.Title,
+                                ["description"] = sp.Description,
+                                ["files"] = JsonNode.Parse(JsonSerializer.Serialize(sp.Files ?? new List<string>())),
+                                ["contextNote"] = sp.ContextNote,
+                                ["done"] = false
+                            }).ToArray()
+                        )
+                    };
+
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "refresh", new { target = "boarddata", reason = "meta-plan-updated", cardId }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist meta-plan to boarddata", new { cardId, error = ex.Message });
+        }
+    }
+
+    private async Task UpdateMetaPlanSubPlanStatusAsync(string? cardId, string subPlanId, bool isDone, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || string.IsNullOrWhiteSpace(subPlanId)) return;
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    if (cardObj["_metaPlan"] is JsonObject metaPlanObj &&
+                        metaPlanObj["subPlans"] is JsonArray subPlansArr)
+                    {
+                        foreach (var sp in subPlansArr)
+                        {
+                            if (sp is JsonObject spObj && spObj["id"]?.GetValue<string>() == subPlanId)
+                            {
+                                spObj["done"] = isDone;
+                                break;
+                            }
+                        }
+                    }
+
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "refresh", new { target = "boarddata", reason = "meta-plan-step-updated", cardId }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch { /* non-critical */ }
     }
 }

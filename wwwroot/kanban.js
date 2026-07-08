@@ -57,6 +57,17 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       }
 
       loadBoardData();
+      
+      vm.clearMetaPlan = function (card) {
+        if (!card) return;
+        if (!$window.confirm('Clear meta-plan for this card? This will remove the sub-plan tracking and allow a clean restart.')) return;
+        delete card._metaPlan;
+        // Also clear the regular plan if it exists
+        delete card._plan;
+        vm.planItems = [];
+        vm.saveCards();
+      };
+
       vm.refreshBoardData = function (detail) {
         loadBoardData();
         if (detail && detail.target === 'boarddata') {

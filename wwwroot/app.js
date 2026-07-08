@@ -334,7 +334,7 @@
         }
       });
     };
-    
+
     vm.getProjectBuildCommands = function (projectIndex) {
       console.log(vm.projects, projectIndex);
       if (!vm.projects || !vm.projects[projectIndex]) return '';
@@ -2124,6 +2124,7 @@
           _lastLogKey = '';
           vm.resolveStreams = [];
           vm.streamingActive = true;
+          vm.streamingMetaPlan = null
           pauseTerminalPolling();
 
           pushAgentLog('info', 'Agent started', { project: proj, task: card.text });
@@ -2268,6 +2269,33 @@
                             if (parsed && parsed.text) {
                               vm.streamingSummary = parsed.text;
                               pushAgentLog('summary', parsed.text);
+                            }
+                            break;
+                          case 'meta-plan':
+                            if (parsed) {
+                              vm.streamingMetaPlan = {
+                                summary: parsed.summary,
+                                complexity: parsed.complexity,
+                                subPlans: parsed.subPlans.map(function (sp) {
+                                  return {
+                                    id: sp.id,
+                                    title: sp.title,
+                                    description: sp.description,
+                                    files: sp.files || [],
+                                    contextNote: sp.contextNote,
+                                    done: sp.done || false
+                                  };
+                                })
+                              };
+                              pushAgentLog('info', '🧠 Meta-Plan: ' + parsed.summary + ' (Complexity: ' + parsed.complexity + '/10)');
+                            }
+                            break;
+                          case 'meta-plan-step-updated':
+                            if (parsed && vm.streamingMetaPlan && vm.streamingMetaPlan.subPlans) {
+                              var sp = vm.streamingMetaPlan.subPlans.find(function (s) { return s.id === parsed.subPlanId; });
+                              if (sp) {
+                                sp.done = parsed.done;
+                              }
                             }
                             break;
                           case 'plan':
