@@ -256,10 +256,10 @@ public class AgentController : ControllerBase
             await response.WriteAsync($"event: {eventName}\ndata: {json}\n\n", ct);
             await response.Body.FlushAsync(ct);
         }
-        catch (OperationCanceledException) { Console.WriteLine("ERROR, OperationCanceledException"); }
-        catch (ObjectDisposedException) { Console.WriteLine("ERROR, ObjectDisposedException"); }
-        catch (IOException) { Console.WriteLine("ERROR, IOException"); }
-        catch (Exception) { Console.WriteLine("ERROR, Exception"); }
+        catch (OperationCanceledException e) { Console.WriteLine($"ERROR, OperationCanceledException. Message: {e.Message}"); }
+        catch (ObjectDisposedException e) { Console.WriteLine($"ERROR, ObjectDisposedException. Message: {e.Message}"); }
+        catch (IOException e) { Console.WriteLine($"ERROR, IOException. Message: {e.Message}"); }
+        catch (Exception e) { Console.WriteLine($"ERROR, Exception. Message: {e.Message}"); }
     }
 
     private (string? oldStr, string? error) AstResolveEdit(string fullPath, string targetType, string targetName, bool returnTail = false)
@@ -7943,7 +7943,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates…", ct: ct);
+            var candidatesText = string.Join(", ", candidatePool);
+            if (candidatesText.Length > 75) { candidatesText = candidatesText[..75] + "..."; }
+                
+            await EmitLog(emitSse, "info", $"Phase 1 — selecting from {candidatePool.Count} candidates…", new { Candidates = candidatesText }, ct: ct);
             var selected = await SelectRelevantFilesWithLlm(prompt, candidatePool, emitSse, ct);
             toRead = hintedFiles.Concat(selected).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList();
         }
