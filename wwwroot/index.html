@@ -374,7 +374,7 @@
             </details>
           </div>
 
-          <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer && vm.streamingPhase === 'Planning...'">
+          <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer">
             <details open>
               <summary>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : '' }}
               </summary>
@@ -403,6 +403,7 @@
                     '⬜'}}</span>
                   <div class="plan-item-body" style="flex:1;min-width:0;">
                     <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <span ng-if="item.metaGroup" class="plan-item-metagroup" title="Sub-plan group">{{item.metaGroup}}</span>
                       <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
                       <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
                       <span ng-if="item.oldString || item.newString"

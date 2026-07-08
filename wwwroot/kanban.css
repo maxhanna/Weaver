@@ -698,3 +698,16 @@ body.dragging-active .card:hover {
     flex-direction: column;
     max-width: calc(100% - 10px);
 }
+
+.plan-item-metagroup {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--accent, #888);
+    background: var(--bg2, #f0f0f0);
+    padding: 0 5px;
+    border-radius: 3px;
+    margin-bottom: 1px;
+}

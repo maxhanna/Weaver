@@ -48,4 +48,8 @@ public class PlanStep
     /// <summary>Line number in the file where this edit targets (1-based).</summary>
     [JsonPropertyName("line")]
     public int LineNumber { get; set; }
+
+    /// <summary>Meta-plan group label (sub-plan title) this step belongs to, if any.</summary>
+    [JsonPropertyName("metaGroup")]
+    public string? MetaGroup { get; set; }
 }

@@ -1248,6 +1248,16 @@ public class AgentController : ControllerBase
         {
             sb.AppendLine("⚠ CRITICAL DELETION INSTRUCTION: You are deleting code. Your oldString MUST be EXACTLY the 1-5 lines of code being deleted. Set newString to an empty array []. Do NOT include the parent <div> or any surrounding lines in oldString. Output ONLY the exact lines to delete.");
         }
+        else if (ext == ".cs" && Regex.IsMatch(changeLower, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b"))
+        {
+            sb.AppendLine("⚠ CRITICAL — .cs NEW METHOD CREATION: You MUST use FORMAT C with insertAfter:true.");
+            sb.AppendLine("  Set targetType=\"method\", targetName to an EXISTING method name that already exists");
+            sb.AppendLine("  in the file (e.g. the LAST method in the class, like \"SaveSettings\"),");
+            sb.AppendLine("  insertAfter=true, and newCode to the COMPLETE new method including [HttpPost] attribute,");
+            sb.AppendLine("  signature, and body. Do NOT use oldString/newString — it will be rejected.");
+            sb.AppendLine("  Example: {\"targetType\": \"method\", \"targetName\": \"SaveSettings\", \"insertAfter\": true, \"newCode\": [...]}");
+            sb.AppendLine();
+        }
 
         sb.AppendLine();
         sb.AppendLine("Output the edit now:");
@@ -1264,12 +1274,13 @@ public class AgentController : ControllerBase
             return (null, null, false, null, false, "LLM returned empty response", false);
 
         // ABORT EARLY: If the raw response is massive, the LLM fell into a repetition loop.
-        if (raw.Length > 3000 || raw.Split('\n').Length > 40)
+        // Threshold is generous (6000 chars / 80 lines) because C# methods with inline SQL
+        // legitimately span many lines (CREATE TABLE + INSERT with parameters).
+        if (raw.Length > 6000 || raw.Split('\n').Length > 80)
         {
             return (null, null, false, null, false,
                 "LLM response was too long (" + raw.Length + " chars) and likely truncated due to a repetition loop. " +
-                "Do NOT output massive blocks. Use a 1-3 line anchor targeting the exact line to change. " +
-                "You DO NOT need to make oldString unique — the system uses the TARGET LINE to find it.", false);
+                "Do NOT output massive blocks. Use FORMAT C with insertAfter:true and newCode as an array of lines.", false);
         }
 
 
@@ -1293,6 +1304,21 @@ public class AgentController : ControllerBase
 
             using var jDoc = JsonDocument.Parse(cleaned);
             var jRoot = jDoc.RootElement;
+
+            // C# new method enforcement: FORMAT C is REQUIRED for adding new methods in .cs.
+            // Must run BEFORE fullFile/FORMAT C/oldString handling to intercept the LLM's first bad attempt.
+            if (ext == ".cs" &&
+                !jRoot.TryGetProperty("targetType", out _) &&
+                !jRoot.TryGetProperty("fullFile", out _) &&
+                !string.IsNullOrWhiteSpace(step.Change) &&
+                Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase))
+            {
+                return (null, null, false, null, false,
+                    "C# NEW METHOD ENFORCEMENT: You MUST use FORMAT C (targetType/targetName/insertAfter) " +
+                    "to add a new method in a .cs file. oldString/newString is NOT allowed for C# method insertion. " +
+                    "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
+                    "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body.", false);
+            }
 
             // Already done 
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
@@ -1364,7 +1390,8 @@ public class AgentController : ControllerBase
             {
                 var targetType = ttEl.GetString();
                 var targetName = tnEl.GetString();
-                var newCodeStr = ncEl.ValueKind == JsonValueKind.String ? ncEl.GetString()
+                var newCodeStr = ncEl.ValueKind == JsonValueKind.String
+                        ? AgentUtilities.UnescapeString(ncEl.GetString() ?? "")
                     : ncEl.ValueKind == JsonValueKind.Array
                         ? string.Join("\n", ncEl.EnumerateArray().Select(e => AgentUtilities.UnescapeString(e.GetString() ?? "")))
                         : null;
@@ -1377,9 +1404,32 @@ public class AgentController : ControllerBase
                     if (insertAfter)
                     {
                         var (fullStr, astErr) = AstResolveEdit(fullPath, targetType, targetName, returnTail: false);
+                        if (fullStr == null &&
+                            string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) &&
+                            System.IO.File.Exists(fullPath))
+                        {
+                            // Auto-fallback: targetName doesn't exist — find the LAST method in the file
+                            var sourceText = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+                            var methodMatches = Regex.Matches(sourceText,
+                                @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|sealed|new|partial|async|unsafe)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?)\s+(\w+)\s*\(");
+                            if (methodMatches.Count > 0)
+                            {
+                                var lastMethod = methodMatches[^1];
+                                var lastMethodName = lastMethod.Groups[1].Value;
+                                (fullStr, astErr) = AstResolveEdit(fullPath, targetType, lastMethodName, returnTail: false);
+                                if (fullStr != null)
+                                {
+                                    targetName = lastMethodName;
+                                    await EmitLog(emitSse, "info",
+                                        $"  🎯 FORMAT C insertAfter: '{targetName}' not found, auto-resolved to last method '{lastMethodName}'", ct: ct);
+                                }
+                            }
+                        }
                         if (fullStr == null)
                             return (null, null, false, null, false,
-                                $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}", false);
+                                $"FORMAT C failed: targetType='{targetType}', targetName='{targetName}' — {astErr ?? "symbol not found in file"}. " +
+                                "When using insertAfter:true, targetName MUST be an EXISTING method name found in the file. " +
+                                "Do NOT use the new method's name as targetName.", false);
 
                         if (string.Equals(targetType, "class", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1631,6 +1681,53 @@ public class AgentController : ControllerBase
                             actualLines.Add($"{i + 1}: {contentLines[i]}");
                         snippet = "\n\nHere is the ACTUAL code around the target line — copy your oldString VERBATIM from here:\n```\n" +
                                   string.Join("\n", actualLines) + "\n```";
+                    }
+                    // AUTO-CONVERT: For .cs files, try to parse class name from oldString and
+                    // use FORMAT C's insertAfter logic instead of rejecting
+                    var fileExt = Path.GetExtension(relPath).ToLowerInvariant();
+                    if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
+                    {
+                        var targetClassMatch = Regex.Match(oldStr, @"class\s+(\w+)");
+                        if (targetClassMatch.Success)
+                        {
+                            var targetClassName = targetClassMatch.Groups[1].Value;
+                            var (astOldStr, astErr) = AstResolveEdit(fullPath, "class", targetClassName, returnTail: false);
+                            if (astOldStr != null)
+                            {
+                                // Strip truncation markers from newStr
+                                var cleanNewStr = Regex.Replace(newStr,
+                                    @"\.\.\.\s*\[?\s*\d*\s*lines?\s*omitted\]?[^\n]*\n?", "",
+                                    RegexOptions.IgnoreCase);
+                                cleanNewStr = Regex.Replace(cleanNewStr, @"\{\s*\.\.\.\s*\}\s*\n?", "");
+                                cleanNewStr = cleanNewStr.TrimStart('\n', '\r');
+
+                                // Find first NEW class declaration (skip target class references)
+                                var newClassRegex = new Regex(@"class\s+(\w+)");
+                                var newClassMatch = newClassRegex.Match(cleanNewStr);
+                                var insertStart = -1;
+                                while (newClassMatch.Success)
+                                {
+                                    var className = newClassMatch.Groups[1].Value;
+                                    if (!string.Equals(className, targetClassName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        insertStart = newClassMatch.Index;
+                                        break;
+                                    }
+                                    newClassMatch = newClassMatch.NextMatch();
+                                }
+
+                                if (insertStart >= 0)
+                                {
+                                    var insertBody = cleanNewStr[insertStart..];
+                                    if (!string.IsNullOrWhiteSpace(insertBody))
+                                    {
+                                        var indentedBody = AutoIndentCode(astOldStr, insertBody, relPath);
+                                        var mergedStr = astOldStr.TrimEnd('\n', '\r') + "\n\n" + indentedBody;
+                                        return (astOldStr, mergedStr, false, null, false, null, true);
+                                    }
+                                }
+                            }
+                        }
                     }
                     return (null, null, false, null, false,
                         $"oldString contains truncation markers (e.g., '... [N lines omitted]' or '{{ ... }}'). " +
@@ -2049,6 +2146,19 @@ public class AgentController : ControllerBase
         sb.AppendLine("      method body, not in GetVersion.");
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
+        sb.AppendLine("   i) CREATE TABLE IS NOT A SEPARATE STEP: If a step mentions adding a method/endpoint that");
+        sb.AppendLine("      inserts/updates data AND also mentions creating the table, that is ONE step.");
+        sb.AppendLine("      The CREATE TABLE IF NOT EXISTS statement MUST be inline inside the method body,");
+        sb.AppendLine("      BEFORE the INSERT/UPDATE/SELECT. Do NOT split the table creation into its own");
+        sb.AppendLine("      step — they belong at the same location (inside the method body).");
+        sb.AppendLine("      RATIONALE: CREATE TABLE IF NOT EXISTS is an inline guard clause that runs at the");
+        sb.AppendLine("      START of the method body. It is NOT a separate schema definition. Splitting it");
+        sb.AppendLine("      forces the editor to place the CREATE TABLE at a random location (e.g., before");
+        sb.AppendLine("      the class closing brace) instead of inside the method where it belongs.");
+        sb.AppendLine("      Example: \"Add PostBenchmark method with CREATE TABLE and INSERT\"");
+        sb.AppendLine("      → needsDecoupling = false. The method body contains both the CREATE and the INSERT.");
+        sb.AppendLine("      BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"");
+        sb.AppendLine("      GOOD: \"Add PostBenchmarks method with inline CREATE TABLE IF NOT EXISTS and INSERT\"");
         sb.AppendLine();
         sb.AppendLine("SPECIAL RULE FOR REMOVAL/DELETE STEPS:");
         sb.AppendLine("  For steps that say 'Remove X' or 'Delete X':");
@@ -2135,6 +2245,26 @@ public class AgentController : ControllerBase
                         sb.AppendLine(content);
                     }
                     sb.AppendLine("```");
+
+                    // Pre-check: if step says "add class X" or "add method X" and file already has it, flag it
+                    var addClassMatch = Regex.Match(step.Change ?? @"", @"(?:add|insert|create)\s+(?:a\s+)?(?:new\s+)?class\s+(\w+)", RegexOptions.IgnoreCase);
+                    if (addClassMatch.Success)
+                    {
+                        var className = addClassMatch.Groups[1].Value;
+                        if (Regex.IsMatch(content, $@"\bclass\s+{Regex.Escape(className)}\b"))
+                        {
+                            sb.AppendLine($"⚠ PRE-CHECK: Class '{className}' already exists in the file. Step {i + 1} may be alreadyDone.");
+                        }
+                    }
+                    var addMethodMatch2 = Regex.Match(step.Change ?? @"", @"(?:add|insert|create)\s+(?:a\s+)?(?:new\s+)?method\s+(\w+)", RegexOptions.IgnoreCase);
+                    if (addMethodMatch2.Success)
+                    {
+                        var methodName = addMethodMatch2.Groups[1].Value;
+                        if (Regex.IsMatch(content, $@"\b{Regex.Escape(methodName)}\s*\("))
+                        {
+                            sb.AppendLine($"⚠ PRE-CHECK: Method '{methodName}' already exists in the file. Step {i + 1} may be alreadyDone.");
+                        }
+                    }
                 }
                 else
                 {
@@ -2825,6 +2955,66 @@ public class AgentController : ControllerBase
         }
 
     ExplorationComplete:
+        // LLM-based filter: remove files from context that aren't actually useful for the task
+        if (ctx.Length > 0 && !string.IsNullOrWhiteSpace(step.Change))
+        {
+            var contextFiles = Regex.Matches(ctx.ToString(), @"^###\s+([^\n]+)", RegexOptions.Multiline)
+                .Select(m => m.Groups[1].Value.Trim())
+                .Where(p => !string.IsNullOrWhiteSpace(p) &&
+                    !p.StartsWith("TARGET FILE:", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(p.Split(' ')[0], relPath, StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Split(' ')[0].TrimEnd(')', '('))
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (contextFiles.Count > 2)
+            {
+                var filterPrompt = new StringBuilder();
+                filterPrompt.AppendLine("You are a file relevance filter. Given a task and a list of files, identify which files are UNNECESSARY for completing the task. Return ONLY the file paths that are NOT useful, one per line. If all files are useful, return empty.");
+                filterPrompt.AppendLine();
+                filterPrompt.AppendLine($"TASK: {step.Change}");
+                filterPrompt.AppendLine();
+                filterPrompt.AppendLine("FILES IN CONTEXT:");
+                foreach (var f in contextFiles)
+                    filterPrompt.AppendLine($"  {f}");
+                filterPrompt.AppendLine();
+                filterPrompt.AppendLine("Return the paths of files that are NOT useful, one per line. If all are useful, return nothing.");
+
+                var (filterRaw, _, _) = await CallLlmRaw(
+                    "You are a file relevance filter. Be concise and accurate.",
+                    filterPrompt.ToString(),
+                    ct, TimeSpan.FromSeconds(15), maxTokens: 512);
+
+                if (!string.IsNullOrWhiteSpace(filterRaw))
+                {
+                    var toRemove = filterRaw.Split('\n')
+                        .Select(l => l.Trim().Trim('"', '*', '`', '-', ' '))
+                        .Where(l => !string.IsNullOrWhiteSpace(l) &&
+                            contextFiles.Any(cf => l.Contains(cf, StringComparison.OrdinalIgnoreCase)))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    foreach (var removePath in toRemove)
+                    {
+                        var matchFile = contextFiles.FirstOrDefault(cf =>
+                            removePath.Contains(cf, StringComparison.OrdinalIgnoreCase));
+                        if (matchFile == null) continue;
+
+                        var sectionMatch = Regex.Match(ctx.ToString(),
+                            $@"^### {Regex.Escape(matchFile)}[^\n]*\n.*?(?=^### |\Z)",
+                            RegexOptions.Multiline | RegexOptions.Singleline);
+                        if (sectionMatch.Success)
+                        {
+                            ctx.Remove(sectionMatch.Index, sectionMatch.Length);
+                            await EmitLog(emitSse, "info",
+                                $"  🗑️ LLM filter dropped: {matchFile} (not useful for task)", ct: ct);
+                        }
+                    }
+                }
+            }
+        }
+
         string? astOldStringHint = null;
         if (!string.IsNullOrWhiteSpace(targetSymbol) &&
             System.IO.File.Exists(fullPath))
@@ -7185,6 +7375,7 @@ emitSse, ct);
                             ["change"] = s.Change,
                             ["priority"] = s.Priority,
                             ["line"] = s.LineNumber,
+                            ["metaGroup"] = s.MetaGroup,
                             ["done"] = false
                         });
                     }
@@ -7506,6 +7697,128 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (null, null, false);
     }
 
+    private class MetaPlanSubPlan
+    {
+        public string Id { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string Description { get; set; } = "";
+        public string ContextNote { get; set; } = "";
+    }
+
+    private class MetaPlanResult
+    {
+        public string MetaThinking { get; set; } = "";
+        public string MetaSummary { get; set; } = "";
+        public int Complexity { get; set; }
+        public List<MetaPlanSubPlan> SubPlans { get; set; } = new();
+    }
+
+    private static string BuildMetaPlanPrompt() =>
+        "You are a senior software architect. Determine if this task is complex enough to require a " +
+        "META-PLAN (multiple sub-plans executed sequentially).\n\n" +
+        "A task needs a META-PLAN ONLY when it adds 3+ NEW methods/endpoints across 2+ source files " +
+        "(e.g. full CRUD + data model + UI + routing), or when it requires 7+ plan steps.\n\n" +
+        "COMMON NON-EXAMPLES that do NOT need a meta-plan:\n" +
+        "  - Adding ONE new endpoint + its supporting database table\n" +
+        "  - Modifying a single method or adding one handler\n" +
+        "  - Creating a DTO/model class + its table + one endpoint (this is 1 concern: data persistence)\n" +
+        "  - Adding a simple property or field to an existing class\n" +
+        "  - Any change touching only 1-2 files\n\n" +
+        "Rate complexity 1-10:\n" +
+        "  1-3: Trivial (single file, one method/property change)\n" +
+        "  4-6: Moderate (2-4 steps, 1-2 files, one endpoint + table, straightforward)\n" +
+        "  7-10: Complex (7+ steps, 3+ new methods/endpoints, 2+ files, cross-cutting architecture)\n\n" +
+        "If complexity >= 7, generate a META-PLAN \u2014 a list of detailed sub-plans. " +
+        "Each sub-plan will be independently planned and executed SEQUENTIALLY, with context passed between them. " +
+        "Break the task so that each sub-plan produces a concrete, testable deliverable.\n\n" +
+        "Output ONLY valid JSON \u2014 no markdown fences, no extra text:\n" +
+        "{\n" +
+        "  \"metaThinking\": \"1-2 lines: why this task does or doesn't need a meta-plan\",\n" +
+        "  \"metaSummary\": \"one-sentence overall plan\",\n" +
+        "  \"complexity\": 7,\n" +
+        "  \"subPlans\": [\n" +
+        "    {\n" +
+        "      \"id\": \"sp-1\",\n" +
+        "      \"title\": \"Data model and service layer\",\n" +
+        "      \"description\": \"Describe precisely what files to create/modify and what the sub-plan achieves\",\n" +
+        "      \"contextNote\": \"What the next sub-plan needs to know about this sub-plan's output\"\n" +
+        "    }\n" +
+        "  ]\n" +
+        "}\n\n" +
+        "If complexity < 7, set subPlans to an empty array [].\n" +
+        "If you do output subPlans, include at least 2 and at most 6 sub-plans.";
+
+    private async Task<MetaPlanResult?> GenerateMetaPlanAsync(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        var metaPrompt = BuildMetaPlanPrompt();
+        var userPrompt = new StringBuilder();
+        userPrompt.AppendLine("### TASK ###");
+        userPrompt.AppendLine(prompt);
+        userPrompt.AppendLine();
+        userPrompt.AppendLine("### PROJECT ROOT ###");
+        userPrompt.AppendLine(projectRoot);
+        userPrompt.AppendLine();
+        userPrompt.AppendLine("### DISCOVERY CONTEXT ###");
+        userPrompt.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
+
+        const int MaxRetries = 2;
+        for (var attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            if (attempt > 1)
+                await EmitLog(emitSse, "warn", $"Retrying meta-plan generation (attempt {attempt}/{MaxRetries})...", ct: ct);
+
+            var (raw, _, error) = await CallLlmRawStreaming(
+                metaPrompt, userPrompt.ToString(), emitSse, ct,
+                requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 1024);
+
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+
+            try
+            {
+                var result = JsonSerializer.Deserialize<MetaPlanResult>(raw, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+                if (result != null && result.Complexity >= 7 && result.SubPlans?.Count > 0)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Meta-plan: complexity {result.Complexity}/10, {result.SubPlans.Count} sub-plan(s): " +
+                        string.Join(" \u2192 ", result.SubPlans.Select(s => s.Title)), ct: ct);
+                    return result;
+                }
+                if (result != null && result.Complexity < 7)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Meta-plan skipped: complexity {result.Complexity}/10 (below threshold)", ct: ct);
+                    return null;
+                }
+            }
+            catch (JsonException ex)
+            {
+                await EmitLog(emitSse, "error", $"Failed to parse meta-plan JSON: {ex.Message}", ct: ct);
+            }
+        }
+        return null;
+    }
+
+    private static string BuildSubPlanPrompt(string originalPrompt, MetaPlanSubPlan subPlan, int index, int total)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"### ORIGINAL TASK ###");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine($"### SUB-PLAN {index}/{total}: {subPlan.Title} ###");
+        sb.AppendLine(subPlan.Description);
+        if (!string.IsNullOrWhiteSpace(subPlan.ContextNote))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### CONTEXT FROM PRIOR SUB-PLANS ###");
+            sb.AppendLine(subPlan.ContextNote);
+        }
+        return sb.ToString();
+    }
+
     private static string BuildPlanningPrompt() =>
         "You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n" +
         "Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n" +
@@ -7646,7 +7959,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "Do NOT invent new method names. Use the EXACT names from the source. " +
         "Do NOT invent custom wrapper tags if the source uses standard elements with classes. " +
         "Copy the EXACT DOM structure, CSS classes, and text content from the source. " +
-        "Do NOT invent method calls inside the HTML that do not exist in the source pattern.\n";
+         "Do NOT invent method calls inside the HTML that do not exist in the source pattern.\n" +
+        "29. METHOD CREATION IS ONE STEP (CRITICAL): Creating a new method includes its signature, parameters, and body — " +
+        "all in ONE step. Do NOT split into \"Create method signature\" and \"Implement method body\". " +
+        "A method is ONE coherent block at ONE location. " +
+        "If the method body needs inline SQL (CREATE TABLE IF NOT EXISTS + INSERT/UPDATE/SELECT), " +
+        "that SQL belongs INSIDE the method body in the same step. " +
+        "BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"\n" +
+        "GOOD: \"Add PostBenchmarks method with CREATE TABLE IF NOT EXISTS and INSERT logic\"\n" +
+        "BAD: Step 1: \"Add Benchmarks schema\", Step 2: \"Add INSERT endpoint\"\n" +
+        "GOOD: \"Add PostBenchmarks endpoint method with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT\"\n" +
+        "RATIONALE: The CREATE TABLE IF NOT EXISTS runs at the START of the method body, " +
+        "before any INSERT/UPDATE/SELECT. It is NOT a separate schema definition — " +
+        "it is an inline guard clause that ensures the table exists. " +
+        "Treating it as a separate step forces the editor to insert the CREATE TABLE into " +
+        "a random unrelated location instead of inside the method where it belongs.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
@@ -9298,16 +9625,62 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
         }
 
-        // Phase 2: Plan
-        await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
-        if (emitSse)
-        {
-            await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
-        }
+        // Phase 1.5: Meta-Plan — decompose complex tasks into sequential sub-plans
+        MetaPlanResult? metaPlan = null;
+        await EmitLog(emitSse, "info", "Phase 1.5 — META-PLAN", ct: ct);
+        metaPlan = await GenerateMetaPlanAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
 
-        var (plan, convergedContext) = await RunPlanningConvergenceLoop(
-            prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
-        discoveryContext = convergedContext;
+        // Phase 2: Plan
+        AgentPlan plan;
+        if (metaPlan?.SubPlans?.Count > 0)
+        {
+            await EmitLog(emitSse, "info", $"Phase 2 — META-PLAN ({metaPlan.SubPlans.Count} sub-plans)", ct: ct);
+            if (emitSse)
+                await SendSse(Response, "phase", new { phase = "metaplan", message = $"Meta-plan: {metaPlan.SubPlans.Count} sub-plans", subPlans = metaPlan.SubPlans }, ct);
+
+            var combinedSteps = new List<PlanStep>();
+            var accumulatedContext = discoveryContext;
+
+            for (var i = 0; i < metaPlan.SubPlans.Count; i++)
+            {
+                var sp = metaPlan.SubPlans[i];
+                await EmitLog(emitSse, "info", $"  Sub-plan {i + 1}/{metaPlan.SubPlans.Count}: {sp.Title}", ct: ct);
+
+                var subPrompt = BuildSubPlanPrompt(prompt, sp, i + 1, metaPlan.SubPlans.Count);
+                var (subPlan, updatedContext) = await RunPlanningConvergenceLoop(
+                    subPrompt, accumulatedContext, projectRoot, emitSse, ct, steeringContext);
+
+                foreach (var step in subPlan.Plan)
+                    step.MetaGroup = sp.Title;
+
+                combinedSteps.AddRange(subPlan.Plan);
+                accumulatedContext = updatedContext;
+                if (!string.IsNullOrWhiteSpace(sp.ContextNote))
+                    accumulatedContext += "\n\n### Context Note ###\n" + sp.ContextNote;
+            }
+
+            plan = new AgentPlan
+            {
+                Thinking = metaPlan.MetaThinking,
+                Summary = metaPlan.MetaSummary,
+                Score = 85,
+                Plan = combinedSteps
+            };
+            discoveryContext = accumulatedContext;
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
+            if (emitSse)
+            {
+                await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
+            }
+
+            var (p, convergedContext) = await RunPlanningConvergenceLoop(
+                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+            plan = p;
+            discoveryContext = convergedContext;
+        }
 
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
             await SendSse(Response, "thinking", new { text = plan.Thinking }, ct);
@@ -9999,6 +10372,27 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return plan;
     }
 
+    /// <summary>Extracts a normalized signature from a step's file+change to detect duplicate/redundant steps.</summary>
+    private static string? GetStepSignature(string file, string change)
+    {
+        if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change)) return null;
+        var parts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Extract PascalCase method/endpoint names (e.g. AddBenchmark, PostBenchmarks, GetSettings)
+        var methodMatches = Regex.Matches(change,
+            @"\b(Post|Add|Get|Put|Delete|Create|Insert|Update)[A-Z][a-z]+[A-Z][A-Za-z0-9]*\b");
+        foreach (Match m in methodMatches)
+        {
+            parts.Add(m.Value);
+            // Also normalize the entity name (noun after verb prefix), stripping trailing 's'
+            var entity = Regex.Replace(m.Value, @"^(Post|Add|Get|Put|Delete|Create|Insert|Update)", "");
+            entity = entity.TrimEnd('s');
+            parts.Add("e:" + entity);
+        }
+        if (parts.Count == 0) return null;
+        var normalized = parts.OrderBy(x => x);
+        return file.Replace('\\', '/') + "::" + string.Join("|", normalized);
+    }
+
     private async Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
@@ -10013,6 +10407,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         completedStepIndices ??= new HashSet<int>();
         var replanBudget = new[] { 1 };
         var alreadyDecoupled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var completedStepSignatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var itemIdx = 0; itemIdx < planItems.Count; itemIdx++)
         {
@@ -10410,13 +10805,45 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     alreadyDecoupled.Add(item.Change ?? "");
                 }
 
+                // Relevance check: skip if a prior step already accomplished the same goal
+                var stepSig = GetStepSignature(item.File, item.Change ?? "");
+                if (stepSig != null && completedStepSignatures.Contains(stepSig))
+                {
+                    await EmitLog(emitSse, "info",
+                        $"⏭ Step skipped — already accomplished by a prior step (signature: {stepSig})", ct: ct);
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = stepIndex,
+                            type = "plan",
+                            description = item.Change,
+                            path = item.File,
+                            status = "done",
+                            skipped = true,
+                            planItemIndex = itemIdx,
+                            message = "Already accomplished by a prior step"
+                        }, ct);
+                    stepIndex++;
+                    continue;
+                }
+
                 var prevCount = allResults.Count;
                 try
                 {
+                    var prevSigCount = completedStepSignatures.Count;
                     stepIndex = await ResolveAndApplyEdit(
                         item, projectRoot, emitSse, ct, allResults, stepIndex,
                         prompt: prompt, plan: plan, planItemIndex: itemIdx,
                         cardId: cardId, attachedFiles: attachedFiles);
+                    // Track step as completed for duplicate detection
+                    if (stepSig != null &&
+                        (allResults.Count > prevCount &&
+                         allResults[^1] is Dictionary<string, object?> lastResult &&
+                         lastResult.TryGetValue("status", out var st) &&
+                         st?.ToString() == "done"))
+                    {
+                        completedStepSignatures.Add(stepSig);
+                    }
                 }
                 catch (StepFatalException ex)
                 {
