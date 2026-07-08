@@ -2000,7 +2000,7 @@ public class AgentController : ControllerBase
         sb.AppendLine("  - Do NOT reason about 'whether it would be present after other steps run'.");
         sb.AppendLine("  - Check the ACTUAL file content shown above — search for the exact code pattern.");
         sb.AppendLine("  - If the file content is truncated or shows excerpts, do NOT assume the pattern is absent — set alreadyDone = false if you can't see the whole file.");
-        sb.AppendLine(); 
+        sb.AppendLine();
         sb.AppendLine("Output ONLY valid JSON:");
         sb.AppendLine("{");
         sb.AppendLine("  \"steps\": [");
@@ -2897,7 +2897,7 @@ public class AgentController : ControllerBase
         var methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
 
         string? methodBody = null;
-        if (methodName != null)
+        if (methodName != null && methodName != "?")
         {
             var methodStartMatch = Regex.Match(targetContent,
                 $@"({Regex.Escape(methodName)}\s*\()", RegexOptions.IgnoreCase);
@@ -2968,7 +2968,7 @@ public class AgentController : ControllerBase
             "start", "stop", "commit", "rollback", "savepoint", "release",
             "lock", "unlock", "grant", "revoke", "analyze", "optimize",
             "reorganize", "repair", "check", "checksum", "backup", "restore",
-            "utf8", "utf8mb4", "ascii", "latin1", "unicode",
+            "utf8", "utf8mb4", "ascii", "latin1", "unicode", "?",
             "auto_increment", "unsigned", "signed", "zerofill",
             "current_timestamp", "current_date", "current_time", "localtime",
             "localtimestamp"
@@ -3824,37 +3824,60 @@ emitSse, ct);
 
                 int matchIdx = -1;
                 var targetLineIdx = step.LineNumber > 0 ? step.LineNumber - 1 : -1;
-                var bestDist = int.MaxValue;
 
+                // Collect all match positions first (content-based matching)
+                var allMatches = new List<int>();
                 for (int i = 0; i <= fileLinesArr.Count - oldLinesArr.Count; i++)
                 {
                     bool match = true;
                     for (int j = 0; j < oldLinesArr.Count; j++)
                     {
-                        // Ignore leading/trailing whitespace differences
                         if (fileLinesArr[i + j].Trim() != oldLinesArr[j].Trim())
                         {
                             match = false;
                             break;
                         }
                     }
-                    if (match)
+                    if (match) allMatches.Add(i);
+                }
+
+                if (allMatches.Count == 1)
+                {
+                    matchIdx = allMatches[0];
+                }
+                else if (allMatches.Count > 1)
+                {
+                    // Content-first: try keyword disambiguation from change description
+                    var keywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
+                    if (keywords.Count > 0)
                     {
-                        if (targetLineIdx >= 0)
+                        var bestKwScore = -1;
+                        foreach (var mi in allMatches)
                         {
-                            var dist = Math.Abs(i - targetLineIdx);
-                            if (dist < bestDist)
-                            {
-                                bestDist = dist;
-                                matchIdx = i;
-                            }
-                        }
-                        else
-                        {
-                            matchIdx = i;
-                            break;
+                            var ctxStart = Math.Max(0, mi - 3);
+                            var ctxLines = fileLinesArr
+                                .Skip(ctxStart)
+                                .Take(mi - ctxStart + oldLinesArr.Count)
+                                .ToList();
+                            var ctx = string.Join("\n", ctxLines).ToLowerInvariant();
+                            var score = keywords.Count(k => ctx.Contains(k));
+                            if (score > bestKwScore) { bestKwScore = score; matchIdx = mi; }
                         }
                     }
+
+                    // Fall back to line number if keywords didn't pick a winner
+                    if (matchIdx < 0 && targetLineIdx >= 0)
+                    {
+                        var bestDist = int.MaxValue;
+                        foreach (var mi in allMatches)
+                        {
+                            var dist = Math.Abs(mi - targetLineIdx);
+                            if (dist < bestDist) { bestDist = dist; matchIdx = mi; }
+                        }
+                    }
+
+                    // Last resort: first match
+                    if (matchIdx < 0) matchIdx = allMatches[0];
                 }
 
                 if (matchIdx >= 0)
@@ -3879,6 +3902,20 @@ emitSse, ct);
                                 : "";
 
                             finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
+                        }
+
+                        // Auto-indent HTML: strip all existing indentation so AutoIndentHtml
+                        // sees flat content and reconstructs from tag hierarchy (the basic
+                        // fixer above creates partially-correct indentation that confuses it).
+                        var rawNew = string.Join("\n", finalNewLines);
+                        if (IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
+                        {
+                            var stripped = finalNewLines
+                                .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
+                                .ToList();
+                            var fixedHtml = AgentUtilities.AutoIndentHtml(
+                                string.Join("\n", stripped), baseIndent);
+                            finalNewLines = fixedHtml.Split('\n').ToList();
                         }
                     }
 
@@ -4006,7 +4043,7 @@ emitSse, ct);
 
                 if (wipeReason == null)
                 {
-                    wipeReason = DetectMissingCreateTable(oldStr!, newStr!, fileContent, relPath);
+                    wipeReason = await DetectMissingCreateTableAsync(oldStr!, newStr!, fileContent, relPath, emitSse, ct);
                 }
 
                 // Enforce atomic steps: if the step says "Remove", the newString must NOT re-add the element elsewhere
@@ -5940,17 +5977,19 @@ emitSse, ct);
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
     }
-    /// <summary>
-    /// Detects when newStr contains INSERT INTO or UPDATE statements referencing
-    /// SQL tables that do NOT appear to exist in the current file (no CREATE TABLE,
-    /// FROM, JOIN, or other reference found). When triggered, instructs the LLM to
-    /// prepend a CREATE TABLE IF NOT EXISTS statement before the INSERT/UPDATE.
-    /// </summary>
-    private static string? DetectMissingCreateTable(
-        string oldStr, string newStr, string fileContent, string relPath)
+
+    private async Task<string?> DetectMissingCreateTableAsync(
+        string oldStr, string newStr, string fileContent, string relPath, bool emitSse, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(newStr) || string.IsNullOrWhiteSpace(fileContent))
             return null;
+
+        // ── Quick extension filter ──
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var sqlCapableExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt", ".php", ".rb", ".sql" };
+
+        if (!sqlCapableExtensions.Contains(ext)) return null;
 
         // ── Extract table names from INSERT INTO / UPDATE in newStr ──────────
         var insertUpdateRegex = new Regex(
@@ -5958,12 +5997,19 @@ emitSse, ct);
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         var referencedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var matchExcerpts = new List<string>();
+
         foreach (Match m in insertUpdateRegex.Matches(newStr))
         {
             var tbl = m.Groups[1].Value;
             // Filter out SQL keywords that might be captured as table names
             if (tbl.Length <= 2 || char.IsDigit(tbl[0])) continue;
             referencedTables.Add(tbl);
+
+            // Grab surrounding context for the LLM to inspect
+            var start = Math.Max(0, m.Index - 60);
+            var end = Math.Min(newStr.Length, m.Index + m.Length + 60);
+            matchExcerpts.Add(newStr.Substring(start, end - start).Replace("\n", " ").Trim());
         }
 
         if (referencedTables.Count == 0) return null;
@@ -5992,6 +6038,35 @@ emitSse, ct);
             .ToList();
 
         if (missingTables.Count == 0) return null;
+
+        // ── LLM Verification ──
+        var sysPrompt = "You are a code analysis AI. You examine code snippets to determine if they contain actual SQL statements (INSERT INTO, UPDATE) that are meant to modify a database table, or if they are just regular text/prose/comments that happen to contain those words. Output ONLY a JSON object: {\"isSql\": true|false}";
+        var userPrompt = $"File: {relPath}\n\nSnippets found:\n{string.Join("\n---\n", matchExcerpts)}\n\nDo these snippets contain actual SQL statements executing against a database table?";
+
+        try
+        {
+            var (raw, _, err) = await CallLlmRaw(sysPrompt, userPrompt, ct, TimeSpan.FromSeconds(15), maxTokens: 64);
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                    if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                }
+                var fb = cleaned.IndexOf('{');
+                var lb = cleaned.LastIndexOf('}');
+                if (fb >= 0 && lb > fb) cleaned = cleaned.Substring(fb, lb - fb + 1);
+
+                using var doc = JsonDocument.Parse(cleaned);
+                if (doc.RootElement.TryGetProperty("isSql", out var isSqlEl) && isSqlEl.ValueKind == JsonValueKind.False)
+                {
+                    await EmitLog(emitSse, "info", $"SQL Guard: LLM verified that matched 'INSERT/UPDATE' keywords in {relPath} are prose, not SQL.", ct: ct);
+                    return null; // LLM says it's not SQL, abort guard
+                }
+            }
+        }
+        catch { /* If LLM fails, fall back to the static guard behavior below */ }
 
         var preview = string.Join(", ", missingTables.Take(5));
         return $"MISSING CREATE TABLE — newString contains INSERT/UPDATE statements referencing table(s) [{preview}] " +
@@ -7622,6 +7697,71 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return $"Prompt contains \"{hit}\" but plan has no _web_search step.";
     }
 
+    /// <summary>
+    /// After plan audit &amp; decoupling, correct each step's LineNumber by searching the
+    /// target file for the step's change keywords. This fixes the common failure mode
+    /// where the LLM hallucinates a line number and all decoupled sub-steps inherit it.
+    /// </summary>
+    private async Task ValidatePlanLineNumbersAsync(AgentPlan plan, string projectRoot)
+    {
+        if (plan?.Plan == null) return;
+
+        foreach (var step in plan.Plan)
+        {
+            if (string.IsNullOrWhiteSpace(step.File) ||
+                !AgentUtilities.IsRelativePath(step.File))
+                continue;
+
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+            if (!System.IO.File.Exists(fullPath))
+                continue;
+
+            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
+            var lines = content.Split('\n');
+
+            // Step 1: Extract quoted substrings (most precise — e.g. 'Where to Start')
+            var quotedTerms = new List<string>();
+            foreach (Match m in Regex.Matches(step.Change ?? "", @"['""]([^'""]+)['""]"))
+            {
+                if (m.Groups[1].Value.Length >= 3)
+                    quotedTerms.Add(m.Groups[1].Value);
+            }
+
+            int? bestLine = null;
+            var bestScore = 0;
+
+            if (quotedTerms.Count > 0)
+            {
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    var score = quotedTerms.Count(
+                        q => lines[i].Contains(q, StringComparison.OrdinalIgnoreCase));
+                    if (score > bestScore) { bestScore = score; bestLine = i + 1; }
+                }
+            }
+            else
+            {
+                // Step 2: Fall back to keyword search
+                var keywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
+                if (keywords.Count == 0) continue;
+
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    var lineLower = lines[i].ToLowerInvariant();
+                    var score = keywords.Count(k => lineLower.Contains(k));
+                    if (score > bestScore) { bestScore = score; bestLine = i + 1; }
+                }
+            }
+
+            // Only correct if >20 lines off to avoid minor jitter
+            if (bestLine.HasValue && Math.Abs(bestLine.Value - step.LineNumber) > 20)
+            {
+                step.LineNumber = bestLine.Value;
+            }
+        }
+    }
+
     private static string BuildPlannerDiscoveryContext(string fullDiscovery)
     {
         if (string.IsNullOrWhiteSpace(fullDiscovery)) return fullDiscovery;
@@ -7982,7 +8122,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         bool hasCodeInPrompt = prompt.Contains("```") || prompt.Contains("<div") || prompt.Contains("function ") || prompt.Contains("public class") || prompt.Contains("export class") || prompt.Contains("import ");
 
-        bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php)\b", RegexOptions.IgnoreCase) ||
+        bool mentionsCodeFiles = Regex.IsMatch(prompt, @"\.(cs|ts|tsx|js|jsx|html|css|scss|java|go|py|rb|php|md|json|yaml|yml)\b", RegexOptions.IgnoreCase) ||
                                  prompt.Contains("component", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("service", StringComparison.OrdinalIgnoreCase) ||
                                  prompt.Contains("controller", StringComparison.OrdinalIgnoreCase) ||
@@ -7991,31 +8131,35 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         // Also force CodeEdit if the prompt mentions frontend UI elements or logic changes
         bool mentionsCodeLogic = prompt.Contains("upload list", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("list changes", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("pre-mark", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("button", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("click", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("event", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("function", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("method", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("variable", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("array", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("callback", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("search box", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("input field", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("map", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("globe", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("rotate", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("select", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("dropdown", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("modal", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("popup", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("ui", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("style", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("layout", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("render", StringComparison.OrdinalIgnoreCase) ||
-                                 prompt.Contains("display", StringComparison.OrdinalIgnoreCase);
+                                prompt.Contains("list changes", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("pre-mark", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("button", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("click", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("event", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("function", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("method", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("variable", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("array", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("callback", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("search box", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("input field", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("map", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("globe", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("rotate", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("select", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("dropdown", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("modal", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("popup", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("ui", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("frontend", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("style", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("layout", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("render", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("display", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("faq", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("expand on", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("readme", StringComparison.OrdinalIgnoreCase) ||
+                                prompt.Contains("section", StringComparison.OrdinalIgnoreCase);
 
         // If the user explicitly attached files, they want them edited — ALWAYS use CodeEdit.
         bool hasAttachedFiles = attachedFiles != null && attachedFiles.Count > 0;
@@ -8978,6 +9122,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
             }
         }
+
+        // Phase 2.9: Validate and correct line numbers by searching actual file content
+        if (plan != null)
+            await ValidatePlanLineNumbersAsync(plan, projectRoot);
 
         // Phase 2.95: Plan Coherence Check — verify steps form a coherent chain
         // (each step's references must be satisfied by existing code or a prior step)
@@ -12645,8 +12793,27 @@ Respond with JSON only:
         {
             int chosenIdx = -1;
 
-            // Strategy A: Try line number (if close enough to trust)
-            if (targetLine > 0)
+            // Strategy A: Content-first — contextual disambiguation using change description keywords
+            var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+            if (keywords.Count > 0)
+            {
+                int bestContextScore = -1;
+                for (int i = 0; i < matches.Count; i++)
+                {
+                    var lookbackStart = Math.Max(0, matches[i] - 2000);
+                    var context = normFile.Substring(lookbackStart, matches[i] - lookbackStart).ToLowerInvariant();
+                    var score = keywords.Count(k => context.Contains(k));
+
+                    if (score > bestContextScore)
+                    {
+                        bestContextScore = score;
+                        chosenIdx = i;
+                    }
+                }
+            }
+
+            // Strategy B: Fall back to line number if keywords didn't pick a winner
+            if (chosenIdx == -1 && targetLine > 0)
             {
                 var bestDist = int.MaxValue;
                 for (int i = 0; i < matches.Count; i++)
@@ -12661,30 +12828,7 @@ Respond with JSON only:
                 }
 
                 // If the closest match is still very far away, the LLM likely hallucinated the line number.
-                // Fall back to contextual disambiguation.
                 if (bestDist > 50) chosenIdx = -1;
-            }
-
-            // Strategy B: Contextual Disambiguation
-            if (chosenIdx == -1)
-            {
-                var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
-                if (keywords.Count > 0)
-                {
-                    int bestContextScore = -1;
-                    for (int i = 0; i < matches.Count; i++)
-                    {
-                        var lookbackStart = Math.Max(0, matches[i] - 2000);
-                        var context = normFile.Substring(lookbackStart, matches[i] - lookbackStart).ToLowerInvariant();
-                        var score = keywords.Count(k => context.Contains(k));
-
-                        if (score > bestContextScore)
-                        {
-                            bestContextScore = score;
-                            chosenIdx = i;
-                        }
-                    }
-                }
             }
 
             if (chosenIdx >= 0)
@@ -12927,7 +13071,28 @@ Respond with JSON only:
         }
         else
         {
-            if (targetLine > 0)
+            // Content-first: keywords from change description
+            var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+            if (keywords.Count > 0)
+            {
+                int bestContextScore = -1;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    var startIdx = candidates[i].startIdx;
+                    var lookbackStart = Math.Max(0, startIdx - 50);
+                    var context = string.Join("\n", fileLines.Skip(lookbackStart).Take(startIdx - lookbackStart)).ToLowerInvariant();
+
+                    var score = keywords.Count(k => context.Contains(k));
+                    if (score > bestContextScore)
+                    {
+                        bestContextScore = score;
+                        chosenCandidate = i;
+                    }
+                }
+            }
+
+            // Fall back to line number if keywords didn't pick a winner
+            if (chosenCandidate == -1 && targetLine > 0)
             {
                 int bestDist = int.MaxValue;
                 for (int i = 0; i < candidates.Count; i++)
@@ -12940,28 +13105,6 @@ Respond with JSON only:
                     }
                 }
                 if (bestDist > 50) chosenCandidate = -1;
-            }
-
-            if (chosenCandidate == -1)
-            {
-                var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
-                if (keywords.Count > 0)
-                {
-                    int bestContextScore = -1;
-                    for (int i = 0; i < candidates.Count; i++)
-                    {
-                        var startIdx = candidates[i].startIdx;
-                        var lookbackStart = Math.Max(0, startIdx - 50);
-                        var context = string.Join("\n", fileLines.Skip(lookbackStart).Take(startIdx - lookbackStart)).ToLowerInvariant();
-
-                        var score = keywords.Count(k => context.Contains(k));
-                        if (score > bestContextScore)
-                        {
-                            bestContextScore = score;
-                            chosenCandidate = i;
-                        }
-                    }
-                }
             }
         }
 

@@ -196,7 +196,8 @@
           <button class="brand-link" ng-click="vm.openEditProjectsPanel(); vm.toggleProjectOptions()">✎ Edit
             Projects</button>
           <button class="brand-link" ng-click="vm.openSettingsPanel(); vm.toggleProjectOptions()">⚙ Settings</button>
-          <button class="brand-link" ng-click="vm.openBenchmarksPanel(); vm.toggleProjectOptions()">📊 Benchmarks</button>
+          <button class="brand-link" ng-click="vm.openBenchmarksPanel(); vm.toggleProjectOptions()">📊
+            Benchmarks</button>
           <div class="form-row">
             <label>
               <input type="checkbox" ng-model="vm.showIDE" /> Show IDE
@@ -625,21 +626,21 @@
         <button ng-click="vm.closeEditProjectsPanel()">✕</button>
       </div>
       <div class="popup-body">
-          <div ng-repeat="p in vm.projects track by $index"
-            style="padding:6px 0; border-bottom:1px solid var(--border,#e0e0e0);">
-            <div style="display:flex; gap:6px; align-items:center;">
-              <input ng-model="p.Name" placeholder="Name" style="flex:2; min-width:0;" />
-              <input ng-model="p.Path" placeholder="Path" style="flex:3; min-width:0;" />
-              <input ng-model="p.Description" placeholder="Description" style="flex:3; min-width:0;" />
-              <button ng-click="vm.saveProject(p)" class="small primary" style="white-space:nowrap;">Save</button>
-              <button ng-click="vm.removeProject(p, $event)" class="small">Remove</button>
-            </div>
-            <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
-              <span class="muted" style="font-size:11px;white-space:nowrap;">Build commands:</span>
-              <input ng-model="p.BuildCommands" placeholder="e.g. dotnet clean & dotnet build"
-                style="flex:1; min-width:0; font-size:11px;" />
-            </div>
+        <div ng-repeat="p in vm.projects track by $index"
+          style="padding:6px 0; border-bottom:1px solid var(--border,#e0e0e0);">
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input ng-model="p.Name" placeholder="Name" style="flex:2; min-width:0;" />
+            <input ng-model="p.Path" placeholder="Path" style="flex:3; min-width:0;" />
+            <input ng-model="p.Description" placeholder="Description" style="flex:3; min-width:0;" />
+            <button ng-click="vm.saveProject(p)" class="small primary" style="white-space:nowrap;">Save</button>
+            <button ng-click="vm.removeProject(p, $event)" class="small">Remove</button>
           </div>
+          <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
+            <span class="muted" style="font-size:11px;white-space:nowrap;">Build commands:</span>
+            <input ng-model="p.BuildCommands" placeholder="e.g. dotnet clean & dotnet build"
+              style="flex:1; min-width:0; font-size:11px;" />
+          </div>
+        </div>
         <div style="padding:10px 0;">
           <strong>Add New Project</strong>
           <div style="display:flex; gap:6px; align-items:center; margin-top:4px;">
@@ -716,15 +717,33 @@
               create a new project or select an existing one from the project picker.</p>
           </details>
           <details>
-            <summary>What is the purpose of the agent activity log?</summary>
-            <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
-              you track what the agent is doing and why.</p>
+            <summary>What if the backend application won't close?</summary>
+            <p>If the backend application won't close, try closing the website first. Sometimes the backend process
+              remains active even after closing the browser tab, so explicitly closing the website interface can help
+              terminate the backend application properly.</p>
           </details>
           <details>
-            <summary>How do I add tasks to my project?</summary>
-            <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
-              create tasks for you.</p>
+            <summary>Force File Edits</summary>
+            <p>In cases where the edit pipeline isn't being chosen,</p>
+            <p>Employ 'Fix the' keywords to force the agent to make file edits.
+              For example, phrase your request as 'Fix the README.md file to add a new section about forced edits'
+              or 'Fix the configuration section to clarify the llamaUrl setting'.
+              This mechanism ensures that the standard edit pipeline is automatically selected.</p>
           </details>
+          <details>
+            <summary>Configuration</summary>
+            <p>`weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server
+              is at a different address</p>
+          </details>
+          <summary>What is the purpose of the agent activity log?</summary>
+          <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
+            you track what the agent is doing and why.</p>
+        </details>
+        <details>
+          <summary>How do I add tasks to my project?</summary>
+          <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
+            create tasks for you.</p>
+        </details>
         </details>
       </div>
       <div class="popup-footer">
@@ -969,7 +988,7 @@
                 Map keywords to files so the agent knows where to look.
               </span>
               <details ng-repeat="project in vm.projects track by project.Name" style="margin-bottom:8px;">
-                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary> 
+                <summary style="cursor:pointer;font-weight:600;">{{project.Name}}</summary>
                 <div ng-repeat="hint in vm.getProjectHints($index) track by $index"
                   style="border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:10px;margin-bottom:8px;">
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
@@ -1023,7 +1042,8 @@
       <div class="popup-body">
         <div style="margin-bottom:16px;">
           <div ng-if="vm.benchmarkPlans.length > 0">
-            <div ng-repeat="plan in vm.benchmarkPlans" style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
+            <div ng-repeat="plan in vm.benchmarkPlans"
+              style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:4px;">
               <div style="display:flex;justify-content:space-between;align-items:center;">
                 <div>
                   <strong>{{plan.name}}</strong>
@@ -1035,10 +1055,12 @@
               </div>
             </div>
           </div>
-          <div ng-if="!vm.benchmarkPlans || vm.benchmarkPlans.length === 0" class="text-sm muted" style="padding:8px 0;">
+          <div ng-if="!vm.benchmarkPlans || vm.benchmarkPlans.length === 0" class="text-sm muted"
+            style="padding:8px 0;">
             Loading benchmark plans...
           </div>
-          <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark {{vm.benchmarkLevel}} running...</div>
+          <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
+            {{vm.benchmarkLevel}} running...</div>
         </div>
         <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
           No benchmark scores yet. Run a benchmark above.
@@ -1057,14 +1079,16 @@
             </tr>
           </thead>
           <tbody>
-            <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;" ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
+            <tr ng-repeat="s in vm.benchmarkScores" style="border-bottom:1px solid var(--border);cursor:pointer;"
+              ng-click="vm.selectedBenchmarkScore = (vm.selectedBenchmarkScore === s ? null : s)">
               <td style="padding:4px 8px;font-size:12px;">{{s.timestamp | date:'short'}}</td>
               <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
               <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
               <td style="padding:4px 8px;">{{s.scorePercent.toFixed(1)}}%</td>
               <td style="padding:4px 8px;">{{s.status}}</td>
               <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
-              <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}</td>
+              <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}
+              </td>
               <td style="padding:4px 8px;">
                 <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
                   style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
@@ -1081,9 +1105,13 @@
           <div ng-if="!vm.showSystemInfoEditor" style="font-size:12px;">
             <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
               <span class="muted">OS:</span><span>{{vm.systemInfoCustom.os || vm.systemInfoDetected.os || '—'}}</span>
-              <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '—'}}</span>
-              <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') : (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') : '—')}}</span>
-              <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '—'}}</span>
+              <span class="muted">CPU:</span><span>{{vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu ||
+                '—'}}</span>
+              <span class="muted">RAM:</span><span>{{vm.systemInfoCustom.ramGb ? (vm.systemInfoCustom.ramGb + ' GB') :
+                (vm.systemInfoDetected.ramBytes ? ((vm.systemInfoDetected.ramBytes / 1073741824).toFixed(1) + ' GB') :
+                '—')}}</span>
+              <span class="muted">GPU:</span><span>{{vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu ||
+                '—'}}</span>
             </div>
           </div>
           <div ng-if="vm.showSystemInfoEditor" style="font-size:12px;">
@@ -1114,7 +1142,8 @@
             </div>
             <div style="margin-bottom:8px;">
               <label class="muted" style="display:block;margin-bottom:2px;">Benchmark Project Root</label>
-              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot" placeholder="{{vm.defaultBenchmarkRoot}}"
+              <input type="text" ng-model="vm.systemInfoCustom.benchmarkProjectRoot"
+                placeholder="{{vm.defaultBenchmarkRoot}}"
                 style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;font-family:monospace;" />
             </div>
             <div style="display:flex;gap:6px;">
