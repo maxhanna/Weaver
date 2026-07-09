@@ -4766,7 +4766,7 @@ emitSse, ct);
             }
 
             preEditContent = fileContent;
-            await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+            await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
 
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
             {
@@ -4775,10 +4775,24 @@ emitSse, ct);
                 {
                     newContent += "\n" + string.Join("\n\n",
                         missing.Select(t => $"public class {t}\n{{\n}}"));
-                    await System.IO.File.WriteAllTextAsync(
-                        fullPath, newContent, Encoding.UTF8, ct);
+                    await SaveEditWithUndoAsync(
+                        fullPath, newContent, relPath, projectRoot, preEditContent, ct);
                     await EmitLog(emitSse, "info",
                         $"Appended missing type(s): {string.Join(", ", missing)}", ct: ct);
+                }
+            }
+
+            // Post-edit C# fixup: clean verbatim string & flatten hallucinated DTO wrappers
+            if (fileExt == ".cs")
+            {
+                var writtenContent = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+                var fixedContent = AgentUtilities.PostEditCSharpFixup(writtenContent);
+                if (fixedContent != writtenContent)
+                {
+                    await SaveEditWithUndoAsync(fullPath, fixedContent, relPath, projectRoot, preEditContent, ct);
+                    newContent = fixedContent;
+                    await EmitLog(emitSse, "info",
+                        $"Post-edit fixup applied to {relPath} (verbatim escapes / DTO wrappers)", ct: ct);
                 }
             }
 
@@ -4955,7 +4969,7 @@ emitSse, ct);
 
                 if (llmGateDecision == "abandon")
                 {
-                    await System.IO.File.WriteAllTextAsync(fullPath, preEditContent, Encoding.UTF8, ct);
+                    await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
 
                     await EmitLog(emitSse, "warn",
                         $"⟲ LLM verify: ABANDON edit on {relPath} (score {llmGateScore}/100) — {llmGateReason}. " +
@@ -5236,6 +5250,8 @@ emitSse, ct);
 
             await EmitLog(emitSse, "info", $"Replan cycle {replanAttempts} generated {replanSteps.Count} new step(s): " +
                 string.Join(" | ", replanSteps.Select(s => s.Change)), ct: ct);
+
+            replanSteps = await PruneIrrelevantPlanStepsAsync(replanSteps, projectRoot, ct);
 
             var replanResults = new List<object>();
             foreach (var replanStep in replanSteps)
@@ -7851,25 +7867,120 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
 
-                    if (allTargetFiles.Count <= 1 && result.SubPlans.Count <= 3)
+                    if (allTargetFiles.Count <= 2 && result.SubPlans.Count <= 3)
                     {
                         await EmitLog(emitSse, "info",
                             $"Meta-plan skipped deterministically: {result.SubPlans.Count} sub-plan(s) target only {allTargetFiles.Count} file(s) " +
-                            "— normal planning is sufficient for single-file multi-step tasks.", ct: ct);
+                            "— normal planning is sufficient for tasks touching 2 or fewer files.", ct: ct);
                         return null;
                     }
 
                     result = await ValidateMetaPlanCoherenceAsync(
                         result, prompt, discoveryContext, projectRoot, emitSse, ct);
 
+                    // ── Collapse sub-plans whose target changes already exist in files ──
+                    if (result?.SubPlans?.Count > 1)
+                    {
+                        var collapsed = new List<MetaPlanSubPlan>();
+                        foreach (var sp in result.SubPlans)
+                        {
+                            var alreadyExists = false;
+                            if (sp.Files != null && sp.Files.Count == 1)
+                            {
+                                var fullPath = Path.GetFullPath(
+                                    Path.Combine(projectRoot, sp.Files[0].Replace('/', Path.DirectorySeparatorChar)));
+                                if (System.IO.File.Exists(fullPath))
+                                {
+                                    var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                                    var contentLower = content.ToLowerInvariant();
+
+                                    // Check for common known-pattern sub-plans that often target already-existing code:
+                                    //   1. Adding system-spec properties (OS, CPU, RAM, GPU) to a DTO
+                                    //   2. Adding an endpoint method that already exists
+                                    //   3. Adding a known method name that already exists
+
+                                    var sysSpecProps = new[] { "OS", "CPU", "RAM", "GPU" };
+                                    var allSysPropsExist = sysSpecProps.All(prop =>
+                                        Regex.IsMatch(content, $@"\b{Regex.Escape(prop)}\b\s*\{{"));
+                                    if (allSysPropsExist)
+                                    {
+                                        // Check if the sub-plan specifically targets these properties
+                                        var mentionsSysSpec = sysSpecProps.Any(prop =>
+                                            sp.Description?.Contains(prop, StringComparison.OrdinalIgnoreCase) == true);
+                                        if (mentionsSysSpec)
+                                        {
+                                            alreadyExists = true;
+                                            await EmitLog(emitSse, "info",
+                                                $"Meta-plan: system spec properties (OS/CPU/RAM/GPU) already exist — collapsing sub-plan", ct: ct);
+                                        }
+                                    }
+
+                                    if (!alreadyExists)
+                                    {
+                                        var knownEndpointMethods = new[] { "AddBenchmark", "PostBenchmarks", "PostBenchmarksTable", "CreateBenchmarksTable" };
+                                        foreach (var methodName in knownEndpointMethods)
+                                        {
+                                            if (sp.Description?.Contains(methodName, StringComparison.OrdinalIgnoreCase) == true &&
+                                                Regex.IsMatch(content, $@"\b{Regex.Escape(methodName)}\s*\("))
+                                            {
+                                                alreadyExists = true;
+                                                await EmitLog(emitSse, "info",
+                                                    $"Meta-plan: method '{methodName}' already exists in file — collapsing sub-plan", ct: ct);
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Check for route-based endpoint detection
+                                    if (!alreadyExists)
+                                    {
+                                        var routeMatch = Regex.Match(sp.Description ?? "",
+                                            "\"/([a-zA-Z0-9_/]+)\"", RegexOptions.IgnoreCase);
+                                        if (routeMatch.Success)
+                                        {
+                                            var route = routeMatch.Groups[1].Value.Trim('/');
+                                            if (!string.IsNullOrWhiteSpace(route) &&
+                                                content.Contains($"(\"{route}\"", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                alreadyExists = true;
+                                                await EmitLog(emitSse, "info",
+                                                    $"Meta-plan: route '/{route}' already exists in file — collapsing sub-plan", ct: ct);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (alreadyExists)
+                            {
+                                await EmitLog(emitSse, "info",
+                                    $"Meta-plan: sub-plan '{sp.Title}' collapsed — target changes already present in file", ct: ct);
+                            }
+                            else
+                            {
+                                collapsed.Add(sp);
+                            }
+                        }
+
+                        var originalSubPlanCount = result.SubPlans.Count;
+                        if (collapsed.Count < originalSubPlanCount && collapsed.Count > 0)
+                        {
+                            var removedCount = originalSubPlanCount - collapsed.Count;
+                            result.SubPlans = collapsed;
+                            result.MetaSummary = (result.MetaSummary ?? "") + " (collapsed redundant sub-plans)";
+                            await EmitLog(emitSse, "info",
+                                $"Meta-plan: collapsed {removedCount} sub-plan(s) whose changes already existed", ct: ct);
+                        }
+                    }
+
                     // ── NEW: Emit SSE event for frontend ──
                     if (emitSse)
                     {
                         await SendSse(Response, "meta-plan", new
                         {
-                            summary = result.MetaSummary,
-                            complexity = result.Complexity,
-                            subPlans = result.SubPlans.Select(sp => new
+                            summary = result?.MetaSummary ?? "",
+                            complexity = result?.Complexity ?? 1,
+                            subPlans = result?.SubPlans.Select(sp => new
                             {
                                 id = sp.Id,
                                 title = sp.Title,
@@ -8020,7 +8131,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "(the method already collects events — \"collect\" is wrong). " +
         "GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" " +
         "(describes only the missing logic). " +
-        "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n\n" +
+        "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n" +
+         "18. CREATE TABLE MUST BE INLINE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, " +
+         "the CREATE TABLE IF NOT EXISTS statement MUST be placed INSIDE the method body, BEFORE the INSERT/UPDATE statement. " +
+         "Do NOT create a separate 'table creation' method or step — the table creation is an inline guard clause, not a separate concern. " +
+         "BAD: Step 1: 'Add CreateBenchmarksTable method', Step 2: 'Add PostBenchmarks endpoint with INSERT' — WRONG, these should be ONE step. " +
+         "GOOD: 'Add PostBenchmarks endpoint with inline CREATE TABLE IF NOT EXISTS and INSERT statement inside the method body'.\n\n" +
         "### OUTPUT FORMAT ###\n" +
         "{\n" +
         "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
@@ -8103,7 +8219,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         "before any INSERT/UPDATE/SELECT. It is NOT a separate schema definition — " +
         "it is an inline guard clause that ensures the table exists. " +
         "Treating it as a separate step forces the editor to insert the CREATE TABLE into " +
-        "a random unrelated location instead of inside the method where it belongs.\n";
+        "a random unrelated location instead of inside the method where it belongs.\n" +
+        "30. DO NOT CREATE SEPARATE SETUP ENDPOINTS: When a single new endpoint needs both " +
+        "infrastructure setup (CREATE TABLE, connection check) and business logic (INSERT/UPDATE/SELECT), " +
+        "put the setup INSIDE the endpoint method as inline code at the top. " +
+        "Do NOT create a separate \"PostXxxTable\" or \"InitializeXxx\" endpoint as a separate step. " +
+        "BAD: Step 1: \"Add PostBenchmarksTable endpoint (creates table)\", Step 2: \"Add AddBenchmark endpoint (inserts data)\"\n" +
+        "GOOD: \"Add AddBenchmark endpoint with CREATE TABLE IF NOT EXISTS at the top and parameterized INSERT below\"\n" +
+        "RATIONALE: A separate setup endpoint creates unnecessary public API surface. " +
+        "Table creation is an implementation detail that belongs inside the method that needs it.\n";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
@@ -8205,6 +8329,54 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
     SkipLayoutCheck:;
+
+        // Deterministic check: detect unnecessarily split steps in the same .cs file.
+        // If two consecutive steps both add methods targeting the same file and share
+        // 3+ significant keywords, they describe the same feature and should be one step.
+        if (plan?.Plan != null && plan.Plan.Count >= 2)
+        {
+            var splitStopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "method", "endpoint", "after", "before", "using", "into", "with",
+                "this", "that", "from", "which", "their", "there", "about",
+                "would", "could", "should", "inline", "also", "will", "been",
+                "have", "does", "just", "more", "than", "then", "when", "what"
+            };
+            for (var i = 0; i < plan.Plan.Count - 1; i++)
+            {
+                var s1 = plan.Plan[i];
+                var s2 = plan.Plan[i + 1];
+                if (string.IsNullOrWhiteSpace(s1.File) || string.IsNullOrWhiteSpace(s2.File)) continue;
+                if (!string.Equals(s1.File, s2.File, StringComparison.OrdinalIgnoreCase)) continue;
+                var ext = Path.GetExtension(s1.File.Replace('\\', '/'));
+                if (!string.Equals(ext, ".cs", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var c1 = s1.Change ?? "";
+                var c2 = s2.Change ?? "";
+                // Both must be about adding/creating methods
+                if (!Regex.IsMatch(c1, @"\b(add|create|insert)\b.*\b(method|endpoint|handler)\b", RegexOptions.IgnoreCase)) continue;
+                if (!Regex.IsMatch(c2, @"\b(add|create|insert)\b.*\b(method|endpoint|handler)\b", RegexOptions.IgnoreCase)) continue;
+
+                var words1 = Regex.Matches(c1, @"\b[a-zA-Z]{4,}\b")
+                    .Select(m => m.Value.ToLowerInvariant())
+                    .Where(w => !splitStopWords.Contains(w) && !Regex.IsMatch(w, @"^(add|create|insert|post|get|put|delete)$"))
+                    .ToHashSet();
+                var words2 = Regex.Matches(c2, @"\b[a-zA-Z]{4,}\b")
+                    .Select(m => m.Value.ToLowerInvariant())
+                    .Where(w => !splitStopWords.Contains(w) && !Regex.IsMatch(w, @"^(add|create|insert|post|get|put|delete)$"))
+                    .ToHashSet();
+
+                var overlap = words1.Intersect(words2, StringComparer.OrdinalIgnoreCase).Count();
+                if (overlap >= 3)
+                {
+                    return $"Steps {i + 1} and {i + 2} both target {s1.File} and share {overlap} overlapping keywords " +
+                           $"({string.Join(", ", words1.Intersect(words2, StringComparer.OrdinalIgnoreCase).Take(5))}). " +
+                           "They describe the same endpoint/feature and should be one step. " +
+                           "If one step is a setup/prerequisite (e.g. CREATE TABLE), inline it inside the other step " +
+                           "instead of making it a separate endpoint.";
+                }
+            }
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine("You are validating a code-change plan. Determine if the plan makes sense and is complete given the user's request.");
@@ -9790,9 +9962,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         // Phase 1.5: Meta-Plan — decompose complex tasks into sequential sub-plans
+        // AFTER
         MetaPlanResult? metaPlan = null;
-        await EmitLog(emitSse, "info", "Phase 1.5 — META-PLAN", ct: ct);
-        metaPlan = await GenerateMetaPlanAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+        var (skipMetaPlan, gateScore) = DeterministicMetaPlanGate(prompt);
+        if (skipMetaPlan)
+        {
+            await EmitLog(emitSse, "info",
+                $"Phase 1.5 — META-PLAN skipped deterministically (score {gateScore} < 6) — treating as atomic task", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", $"Phase 1.5 — META-PLAN (deterministic score {gateScore})", ct: ct);
+            metaPlan = await GenerateMetaPlanAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
+        }
 
         // Phase 2: Plan
         AgentPlan plan;
@@ -9814,17 +9996,86 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     prompt, subPlan, i + 1, metaPlan.SubPlans.Count,
                     accumulatedContext.Length > 0 ? accumulatedContext.ToString() : null);
 
+                // AFTER
                 var subPlanResult = await AnalyzePromptAndPlanCodeChanges(
                     subPrompt, discoveryContext, projectRoot, emitSse, ct);
 
-                if (subPlanResult?.Plan != null)
+                if (subPlanResult?.Plan != null && subPlanResult.Plan.Count > 0)
                 {
-                    // Execute the sub-plan...
+                    // Same pruning the normal single-plan path gets — dedupe, drop steps
+                    // targeting non-existent files, drop remove-then-add loops, etc.
+                    subPlanResult.Plan = await PruneIrrelevantPlanStepsAsync(subPlanResult.Plan, projectRoot, ct);
+
+                    // Same "already done?" audit the normal path gets. Without this, sub-plans
+                    // never get checked against actual file content before execution — this
+                    // is the single biggest source of "it thinks the work is still needed"
+                    // for meta-planned tasks.
+                    if (subPlanResult.Plan.Count > 0)
+                    {
+                        var subAudit = await PlanPreAuditAsync(subPlanResult, projectRoot, emitSse, ct, prompt);
+                        if (subAudit != null && subAudit.Steps.Count > 0)
+                        {
+                            var alreadyDoneIdx = subAudit.Steps.Where(s => s.AlreadyDone).Select(s => s.Index).ToHashSet();
+                            var decoupled = subAudit.Steps.Where(s => s.NeedsDecoupling && s.DecoupledSteps?.Count > 0).ToList();
+
+                            if (alreadyDoneIdx.Count > 0 || decoupled.Count > 0)
+                            {
+                                var newSubItems = new List<PlanStep>();
+                                for (var si = 0; si < subPlanResult.Plan.Count; si++)
+                                {
+                                    if (alreadyDoneIdx.Contains(si))
+                                    {
+                                        await EmitLog(emitSse, "info",
+                                            $"Sub-plan {subPlan.Title}: step {si + 1} already done — skipping. " +
+                                            $"Reason: {subAudit.Steps.First(s => s.Index == si).Reason}", ct: ct);
+                                        continue;
+                                    }
+                                    var dec = decoupled.FirstOrDefault(d => d.Index == si);
+                                    if (dec != null)
+                                    {
+                                        foreach (var sub in dec.DecoupledSteps!)
+                                        {
+                                            sub.Priority = subPlanResult.Plan[si].Priority;
+                                            newSubItems.Add(sub);
+                                        }
+                                        continue;
+                                    }
+                                    newSubItems.Add(subPlanResult.Plan[si]);
+                                }
+                                subPlanResult.Plan = DeduplicateSimilarSteps(newSubItems);
+                            }
+                        }
+                    }
+
+                    if (subPlanResult.Plan.Count == 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Sub-plan '{subPlan.Title}' fully collapsed — all target changes already exist. Marking done.", ct: ct);
+                        await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
+                        accumulatedContext.AppendLine($"## Sub-plan {i + 1} ({subPlan.Title}) — ALREADY COMPLETE (no changes needed) ##");
+                        accumulatedContext.AppendLine();
+                        continue;
+                    }
+
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "plan", new
+                        {
+                            thinking = subPlanResult.Thinking,
+                            summary = $"Sub-plan {i + 1}/{metaPlan.SubPlans.Count}: {subPlan.Title}",
+                            items = subPlanResult.Plan
+                        }, ct);
+                    }
+
+                    await PersistBoardDataPlanAsync(cardId, subPlanResult.Plan, emitSse, ct,
+                        summary: $"Sub-plan {i + 1}/{metaPlan.SubPlans.Count}: {subPlan.Title}",
+                        score: subPlanResult.Score);
+
                     var subResults = new List<object>();
                     await ExecutePlan(prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
                         steeringContext: subPlan.ContextNote, attachedFiles: attachedFiles, cardId: cardId);
 
-                    await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
+                    await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct); 
 
                     // ── NEW: Accumulate actual results for the next sub-plan ──
                     accumulatedContext.AppendLine($"## Sub-plan {i + 1} ({subPlan.Title}) — COMPLETED ##");
@@ -9903,6 +10154,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (replan != null && replan.Plan.Count > 0)
             {
                 plan = MergePlans(plan, replan);
+                if (plan?.Plan?.Count > 0)
+                    plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
                 if (emitSse)
                     await SendSse(Response, "plan",
                         new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
@@ -9975,6 +10228,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                     plan.Plan = newPlanItems;
                     plan.Plan = DeduplicateSimilarSteps(plan.Plan);
+                    plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
                     if (emitSse)
                     {
@@ -9994,6 +10248,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             plan = await RunPlanCoherenceCheckAsync(
                 plan, projectRoot, prompt, emitSse, ct);
+            if (plan?.Plan?.Count > 0)
+                plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
             if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
                 await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                     summary: plan.Summary ?? "", score: plan.Score);
@@ -10103,6 +10359,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var originalStepCount = plan?.Plan?.Count ?? 0;
                 plan = MergePlans(plan ?? new AgentPlan(),
                     new AgentPlan { Plan = replanSteps, Summary = "Re-plan: added steps", Score = 0 });
+
+                if (plan?.Plan?.Count > 0)
+                    plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
                 if (emitSse)
                     await SendSse(Response, "plan",
@@ -11622,6 +11881,209 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return parsed?.Plan?.Count > 0 ? parsed.Plan : null;
     }
     /// <summary>
+    /// Writes file content to disk and saves a git diff backup for undo/redo support.
+    /// Before writing, captures the current git diff for the file so the edit can be
+    /// reverted later via `git checkout` or by applying the stored reverse diff.
+    /// Diff files are stored under data/undo/[relpath].diff with a timestamp prefix.
+    /// Falls back to simple write if git is unavailable or the file isn't tracked.
+    /// </summary>
+    private async Task SaveEditWithUndoAsync(
+        string fullPath, string newContent, string relPath,
+        string projectRoot, string preEditContent, CancellationToken ct)
+    {
+        try
+        {
+            var undoDir = Path.Combine(projectRoot, "data", "undo");
+            Directory.CreateDirectory(undoDir);
+            var safeName = relPath.Replace('/', '_').Replace('\\', '_');
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-ffff");
+            var diffPath = Path.Combine(undoDir, $"{safeName}.{timestamp}.diff");
+
+            // Try git-based diff for undo
+            var gitDir = Path.Combine(projectRoot, ".git");
+            if (Directory.Exists(gitDir))
+            {
+                var proc = new System.Diagnostics.Process
+                {
+                    StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "git",
+                        Arguments = $"diff --no-color \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"",
+                        WorkingDirectory = projectRoot,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                proc.Start();
+                var diffOutput = await proc.StandardOutput.ReadToEndAsync();
+                var diffError = await proc.StandardError.ReadToEndAsync();
+                proc.WaitForExit(5000);
+
+                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(diffOutput))
+                {
+                    // Prepend undo metadata header
+                    var undoHeader = $"; Undo for {relPath} @ {DateTime.UtcNow:O}\n" +
+                                     $"; Restore with: git apply --reverse \"{diffPath}\"\n" +
+                                     $"; Or use: git checkout -- \"{relPath.Replace('/', Path.DirectorySeparatorChar)}\"\n";
+                    await System.IO.File.WriteAllTextAsync(
+                        diffPath, undoHeader + diffOutput, Encoding.UTF8, ct);
+                }
+            }
+        }
+        catch
+        {
+            // Non-critical — proceed with write even if undo save fails
+        }
+
+        await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+    }
+
+    /// <summary>
+    /// Prunes plan steps that are irrelevant, impossible, or duplicate given the current
+    /// state of the target files. This prevents the planner from generating steps that
+    /// re-attempt already-succeeded edits, would edit non-existent files with wrong paths,
+    /// or are logically incoherent in sequence (e.g., remove-then-add the same thing).
+    /// Every plan modification point (audit decoupling, coherence check, replan merge)
+    /// should call this to keep the plan clean.
+    /// </summary>
+    private async Task<List<PlanStep>> PruneIrrelevantPlanStepsAsync(List<PlanStep> steps, string projectRoot, CancellationToken ct)
+    {
+        if (steps == null || steps.Count == 0) return steps ?? [];
+
+        var pruned = new List<PlanStep>();
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var removedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var step in steps)
+        {
+            if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
+                continue;
+
+            var changeLower = step.Change.ToLowerInvariant().Trim();
+
+            // Skip steps that say "already done" or similar
+            if (changeLower.StartsWith("already done") || changeLower.StartsWith("no change") ||
+                changeLower.StartsWith("skip") || changeLower.StartsWith("none") ||
+                changeLower == "done" || changeLower == "n/a")
+                continue;
+
+            // Detect remove-then-add loops for the same target in the same file
+            var removeMatch = Regex.Match(changeLower, @"remove\s+(?:the\s+)?(?:existing\s+)?(\w+)", RegexOptions.IgnoreCase);
+            if (removeMatch.Success)
+            {
+                var target = $"{step.File}|{removeMatch.Groups[1].Value.ToLowerInvariant()}";
+                removedTargets.Add(target);
+            }
+
+            var addMatch = Regex.Match(changeLower, @"(?:add|insert|create)\s+(?:a\s+)?(?:new\s+)?(\w+)", RegexOptions.IgnoreCase);
+            if (addMatch.Success)
+            {
+                var target = $"{step.File}|{addMatch.Groups[1].Value.ToLowerInvariant()}";
+                if (removedTargets.Contains(target))
+                {
+                    await EmitLog(false, "warn", $"Prune: removing add-after-remove loop for '{target}'", ct: ct);
+                    continue;
+                }
+            }
+
+            // Deduplicate by file+normalized change
+            var normChange = NormalizeChangeForDedup(step.Change);
+            var key = $"{step.File}|{normChange}";
+            if (!seenKeys.Add(key))
+            {
+                await EmitLog(false, "warn", $"Prune: duplicate step '{step.Change}'", ct: ct);
+                continue;
+            }
+
+            // Check file exists (unless it's a new file creation step)
+            var isCreation = changeLower.Contains("create file") || changeLower.Contains("new file") ||
+                            step.File.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
+                            changeLower.StartsWith("add ") || changeLower.StartsWith("create ");
+            var fullPath = Path.GetFullPath(
+                Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+            var fileExists = System.IO.File.Exists(fullPath);
+
+            // If the change says "add httpPost" or "add endpoint" and the file doesn't exist yet,
+            // that's fine — the step will create it. But if the change says "modify" and the file
+            // doesn't exist, that's a problem.
+            var isModify = changeLower.StartsWith("modify ") || changeLower.StartsWith("change ") ||
+                           changeLower.StartsWith("update ") || changeLower.StartsWith("replace ");
+
+            if (isModify && !fileExists)
+            {
+                await EmitLog(false, "warn", $"Prune: modify step targets non-existent file '{step.File}'", ct: ct);
+                continue;
+            }
+
+            // For existing files, check if the proposed change is already present
+            if (fileExists)
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                var contentLower = content.ToLowerInvariant();
+
+                // If step says "add [X endpoint]" and X endpoint attribute is already present, skip
+                var endpointMatch = Regex.Match(step.Change ?? "",
+                    @"add\s+.*(?:httppost|httpget|httpput|httpdelete)\(""(.*?)""\)",
+                    RegexOptions.IgnoreCase);
+                if (endpointMatch.Success)
+                {
+                    var route = endpointMatch.Groups[1].Value.ToLowerInvariant();
+                    if (contentLower.Contains($"httppost(\"{route}\"") ||
+                        contentLower.Contains($"httpget(\"{route}\"") ||
+                        contentLower.Contains($"httpput(\"{route}\"") ||
+                        contentLower.Contains($"httpdelete(\"{route}\""))
+                    {
+                        await EmitLog(false, "warn", $"Prune: endpoint '{route}' already exists in '{step.File}'", ct: ct);
+                        continue;
+                    }
+                }
+
+                // If step says "add method [X]" and method exists, skip
+                var methodMatch = Regex.Match(step.Change ?? @"", @"add\s+(?:method\s+)?(\w+)(?:\s*method)?\s*(?:endpoint|method|function)?", RegexOptions.IgnoreCase);
+                if (methodMatch.Success)
+                {
+                    var methodName = methodMatch.Groups[1].Value;
+                    if (Regex.IsMatch(content, $@"\b{Regex.Escape(methodName)}\s*\("))
+                    {
+                        await EmitLog(false, "warn", $"Prune: method '{methodName}' already exists in '{step.File}'", ct: ct);
+                        continue;
+                    }
+                }
+
+                // If step says "add property [X]" and property already exists, skip
+                var propMatch = Regex.Match(step.Change ?? @"", @"add\s+(?:property\s+)?(\w+)(?:\s*property)?", RegexOptions.IgnoreCase);
+                if (propMatch.Success)
+                {
+                    var propName = propMatch.Groups[1].Value;
+                    if (Regex.IsMatch(content, $@"\b{Regex.Escape(propName)}\b\s*(?::\s*\w+|;\s*$|\s*{{)"))
+                    {
+                        await EmitLog(false, "warn", $"Prune: property '{propName}' already exists in '{step.File}'", ct: ct);
+                        continue;
+                    }
+                }
+
+                // Track location-based dedup: if a step targets the same file+line as a previous step
+                if (step.LineNumber > 0)
+                {
+                    var locKey = $"{step.File}|L{step.LineNumber}";
+                    if (!seenLocations.Add(locKey))
+                    {
+                        await EmitLog(false, "warn", $"Prune: another step already targets line {step.LineNumber} in '{step.File}'", ct: ct);
+                        continue;
+                    }
+                }
+            }
+
+            pruned.Add(step);
+        }
+
+        return pruned;
+    }
+
+    /// <summary>
     /// Collapses near-duplicate plan steps that target the same file and describe the
     /// same underlying edit in different words. Exact-string dedup (DeduplicateSteps)
     /// only catches identical text; it misses cases where the planner (or the per-step
@@ -12204,11 +12666,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("   - EXACT modifications? (not just 'update data model' but 'add OS, CPU, RAM, GPU string properties to BenchmarkDataDTO')");
         sb.AppendLine("   Flag any sub-plan with abstract titles like 'Database Schema Creation' or 'Service Layer Implementation'.");
         sb.AppendLine();
-        sb.AppendLine("2. ATOMICITY: Are there sub-plans that split things that should be TOGETHER?");
-        sb.AppendLine("   - CREATE TABLE + INSERT/UPDATE must be in the SAME sub-plan (CREATE TABLE is an inline guard inside the method)");
-        sb.AppendLine("   - Method signature + body must be in the SAME sub-plan");
-        sb.AppendLine("   - DTO class + its properties must be in the SAME sub-plan");
-        sb.AppendLine("   If you find such splits, MERGE them in correctedSubPlans.");
+            sb.AppendLine("2. ATOMICITY: Are there sub-plans that split things that should be TOGETHER?");
+            sb.AppendLine("   - CREATE TABLE + INSERT/UPDATE must be in the SAME sub-plan (CREATE TABLE is an inline guard inside the method)");
+            sb.AppendLine("   - Method signature + body must be in the SAME sub-plan");
+            sb.AppendLine("   - DTO class + its properties must be in the SAME sub-plan");
+            sb.AppendLine("   - DTO/model changes and the endpoint/method that uses them must be in the SAME sub-plan (they are coupled)");
+            sb.AppendLine("   - If two sub-plans target the same file, try to MERGE them into one unless they have a clear dependency");
+            sb.AppendLine("   If you find such splits, MERGE them in correctedSubPlans.");
         sb.AppendLine();
         sb.AppendLine("3. COHERENT CHAIN: Does each sub-plan build on the previous?");
         sb.AppendLine("   - Does sub-plan N+1 reference exact symbols from sub-plan N's output?");
@@ -14924,7 +15388,46 @@ done = build OK; command = run this to fix; ask_user = need input";
         }
         return null;
     }
+    /// <summary>
+    /// Deterministic pre-check run BEFORE the LLM meta-planner is invoked at all.
+    /// A 4B-class model's self-reported "complexity 1-10" is noise for short prompts —
+    /// it pattern-matches on vocabulary ("table", "endpoint", "component") rather than
+    /// actually counting files/symbols. This catches the common false-positive pattern
+    /// ("add one method with an inline table + insert") before it ever reaches the LLM,
+    /// and gives a numeric floor for genuinely small tasks so we skip the LLM call entirely.
+    /// </summary>
+    private static (bool skipMetaPlan, int score) DeterministicMetaPlanGate(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return (true, 0);
+        var lower = prompt.ToLowerInvariant();
 
+        // Explicit atomic pattern: single new method + inline persistence.
+        // This is FORMAT C's ideal case — never decompose it.
+        if (Regex.IsMatch(lower,
+                @"\b(add|create|implement)\b.{0,50}\b(method|endpoint)\b.{0,80}\b(table|insert|create\s+table)\b") &&
+            !Regex.IsMatch(lower, @"\b(component|frontend|angular|service\s+layer|multiple\s+files)\b"))
+        {
+            return (true, 0);
+        }
+
+        var distinctFileHints = Regex.Matches(prompt, @"[\w\-/\\]+\.(cs|ts|tsx|js|jsx|html|css|scss)")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+
+        var newSymbolVerbs = Regex.Matches(lower, @"\b(add|create|implement|build)\b").Count;
+
+        var crossCuttingWords = Regex.Matches(lower,
+            @"\b(component|service|controller|endpoint|frontend|backend|scaffold|module|full\s+crud|end.to.end)\b").Count;
+
+        var score = distinctFileHints * 2 + newSymbolVerbs + crossCuttingWords;
+
+        // Below this floor, don't even ask the LLM whether it needs a meta-plan —
+        // let the normal single-pass planner (which has the stricter atomicity
+        // rules in BuildPlanningPrompt) handle it directly.
+        const int MetaPlanFloor = 6;
+        return (score < MetaPlanFloor, score);
+    }
     private async Task RepairPipeline(
         string projectRoot, bool emitSse, CancellationToken ct,
         string originalPrompt, string? steeringContext, string? buildCommands)
@@ -15359,6 +15862,7 @@ done = build OK; command = run this to fix; ask_user = need input";
                     await _boardData.SaveRawAsync(saved);
                     if (emitSse)
                     {
+                        await SendSse(Response, "meta-plan-step-updated", new { subPlanId, done = isDone, cardId }, ct);
                         await SendSse(Response, "refresh", new { target = "boarddata", reason = "meta-plan-step-updated", cardId }, ct);
                     }
                     return;

@@ -2300,35 +2300,31 @@
                             break;
                           case 'plan':
                             if (parsed && parsed.items && parsed.items.length) {
-                              var isResumed = parsed.resumed === true;
-                              var existingItems = vm.planItems || [];
                               vm.planItems = parsed.items.map(function (item, i) {
-                                // Preserve 'done' status from existing items if they are already checked off
-                                var existing = existingItems.find(function (p) { return p.index === i; });
-                                var isDone = existing ? existing.done : false;
-                                // Or use the backend's 'done' flag if provided
-                                if (item.done !== undefined) isDone = item.done;
-
                                 return {
                                   index: i,
                                   file: item.File || item.file || '?',
                                   change: item.Change || item.change || '',
                                   priority: item.Priority || item.priority || i + 1,
                                   line: item.Line || item.line || 0,
-                                  done: isDone,
+                                  done: item.done || false,
                                   oldString: item.OldString || item.oldString || '',
                                   newString: item.NewString || item.newString || ''
                                 };
                               });
-                              if (parsed.summary) {
-                                pushAgentLog('info', '📋 Plan: ' + parsed.summary + (isResumed ? ' (resumed)' : ''), { itemCount: parsed.items.length, score: parsed.score });
+                              if (parsed.thinking) {
+                                vm.streamingThinking = parsed.thinking;
                               }
+                              if (parsed.summary) {
+                                vm.streamingSummary = parsed.summary;
+                              }
+                              pushAgentLog('info', '📋 Plan: ' + parsed.summary + ' (' + parsed.items.length + ' steps)', { itemCount: parsed.items.length, score: parsed.score });
+
                               var activeCard = findCardById(vm.activeCardId);
                               if (activeCard) {
                                 activeCard._plan = { items: angular.copy(vm.planItems), summary: parsed.summary, score: parsed.score };
+                                vm.saveCards();
                               }
-                            } else if (parsed && parsed.score !== undefined) {
-                              pushAgentLog('warn', 'Plan returned score ' + parsed.score + '/100 but has no items — check logs', parsed);
                             }
                             break;
                           case 'edit-resolve':

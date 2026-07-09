@@ -649,6 +649,27 @@ public static class AgentUtilities
 
         return changed ? result : content;
     }
+
+    /// <summary>
+    /// Post-edit fixup for .cs files: cleans verbatim string escapes that survived pre-edit processing
+    /// and flattens hallucinated DTO property wrappers (e.g. dto.SystemSpecs?.OS → dto.OS).
+    /// </summary>
+    public static string PostEditCSharpFixup(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+
+        // 1. Clean any remaining verbatim string escapes (safety net after file write)
+        content = CleanVerbatimStringEscapes(content);
+
+        // 2. Flatten hallucinated DTO property wrappers.
+        //    LLM often nests flat DTO properties under an invented sub-object (SystemSpecs, Hardware, Specs).
+        //    Pattern: dtoVar.Word?.Property → dtoVar.Property
+        //    Only flatten when Word is not a recognized type or keyword.
+        var flatPattern = new Regex(@"\.(SystemSpecs|HardwareInfo|Hardware|Specs|SystemInfo|MetaInfo|Details|DataInfo)\?\.([A-Z]\w+)", RegexOptions.IgnoreCase);
+        content = flatPattern.Replace(content, m => "." + m.Groups[2].Value);
+
+        return content;
+    }
     
     /// <summary>
     /// Deterministically ensures that plans creating new Angular components 
