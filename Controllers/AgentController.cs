@@ -3825,7 +3825,14 @@ emitSse, ct);
         var lastResolveError = "";
         var lastOld = "";
         const int MaxAttempts = 8;
-
+        var forcedInsert = await TryForcedMethodInsertAsync(step, fullPath, relPath, explorationContext, emitSse, ct);
+        if (forcedInsert.HasValue && !string.IsNullOrWhiteSpace(forcedInsert.Value.newStr))
+        {
+            planOldStr = forcedInsert.Value.oldStr;
+            planNewStr = forcedInsert.Value.newStr;
+            // Let attempt 0 consume this directly — it already checks planOldStr/planNewStr first.
+        }
+        
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             string? oldStr = null, newStr = null, resolveError = null;
@@ -6924,6 +6931,22 @@ emitSse, ct);
         sb.AppendLine("- If a step is unnecessary because a prior step already achieves the same result, REMOVE it from the correctedPlan.");
         sb.AppendLine("- Do NOT keep steps that conflict with each other. Choose ONE clear approach and discard the other.");
         sb.AppendLine();
+        sb.AppendLine("CRITICAL — SELF-INCONSISTENT STEP DESCRIPTIONS:");
+        sb.AppendLine("Flag any step whose own description is internally contradictory or assumes something");
+        sb.AppendLine("that doesn't exist yet. Common patterns to catch:");
+        sb.AppendLine("  a) \"Modify the newly added X method\" — if X is NOT in the current file AND no prior step");
+        sb.AppendLine("     in this plan adds it, then the step description is self-inconsistent. The step should");
+        sb.AppendLine("     say \"Add X method with ...\" instead of assuming X already exists.");
+        sb.AppendLine("  b) \"Update the existing Y method to also ...\" but Y does NOT exist in the current file.");
+        sb.AppendLine("     This step needs to ADD Y, not modify it.");
+        sb.AppendLine("  c) A step that references a symbol (method, property, variable) that is NOT in the");
+        sb.AppendLine("     current file content AND is NOT introduced by any prior step in this plan.");
+        sb.AppendLine("  d) Steps that say \"Add X and wire it up\" but the 'wiring' references symbols that");
+        sb.AppendLine("     cannot be found in current file content or prior steps.");
+        sb.AppendLine("For EACH self-inconsistency found, output it as a gap with afterStep = the step's index,");
+        sb.AppendLine("missing = \"SELF-INCONSISTENT: [the issue]\", and include a corrected version");
+        sb.AppendLine("of that step in correctedPlan (fixing its description to ADD rather than modify, etc.).");
+        sb.AppendLine();
         sb.AppendLine("If coherent: {\"coherent\": true, \"gaps\": []}");
         sb.AppendLine("If not coherent (has gaps, redundant steps, or conflicting logic):");
         sb.AppendLine("{");
@@ -9778,7 +9801,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             plan.Plan = DeduplicateSteps(plan.Plan);
-            plan.Plan = DeduplicateSimilarSteps(plan.Plan);
+            plan.Plan = AgentUtilities.DeduplicateSimilarSteps(plan.Plan);
 
             // If the planner asked to read more files, gather that context and replan.
             // Exploration rounds never count as a converged plan, so _explore steps can
@@ -10042,7 +10065,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     }
                                     newSubItems.Add(subPlanResult.Plan[si]);
                                 }
-                                subPlanResult.Plan = DeduplicateSimilarSteps(newSubItems);
+                                subPlanResult.Plan = AgentUtilities.DeduplicateSimilarSteps(newSubItems);
                             }
                         }
                     }
@@ -10227,7 +10250,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         newPlanItems.Add(plan.Plan[i]);
                     }
                     plan.Plan = newPlanItems;
-                    plan.Plan = DeduplicateSimilarSteps(plan.Plan);
+                    plan.Plan = AgentUtilities.RemergeTableCreationSplits(plan.Plan);
+                    plan.Plan = AgentUtilities.DeduplicateSimilarSteps(plan.Plan);
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
                     if (emitSse)
@@ -10760,6 +10784,110 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 summary: $"Added {moreSteps.Count} step(s)", score: 0);
         }
         return planItems;
+    }
+    /// <summary>
+    /// Deterministic fast-path for "add a new method/endpoint" steps in languages that
+    /// support FORMAT C (AstResolveEdit's insertAfter). Bypasses the general JSON-schema
+    /// resolver entirely — the model never gets to choose oldString/newString, fullFile,
+    /// or alreadyDone for this pattern, because letting it choose is exactly what causes
+    /// the hallucination loop (small models default to text-matching strategies they're
+    /// bad at instead of the structural insert they're actually good at).
+    ///
+    /// Returns null if the step doesn't match this pattern, or if the anchor method
+    /// can't be deterministically resolved (falls through to the normal resolver).
+    /// </summary>
+    private async Task<(string? oldStr, string? newStr, bool fromFormatC)?> TryForcedMethodInsertAsync(
+        PlanStep step, string fullPath, string relPath, string explorationContext,
+        bool emitSse, CancellationToken ct)
+    {
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
+        if (!supportsFormatC) return null;
+        if (!System.IO.File.Exists(fullPath)) return null;
+
+        var change = step.Change ?? "";
+        if (!Regex.IsMatch(change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route|function)\b",
+                RegexOptions.IgnoreCase))
+            return null;
+
+        // Resolve the anchor deterministically — never ask the LLM to pick targetName.
+        // 1) explicit "after X" / "after the X method" in the step description
+        var anchorMatch = Regex.Match(change,
+            @"\bafter\s+(?:the\s+)?([A-Za-z_]\w*)\s*(?:method|endpoint|\()?", RegexOptions.IgnoreCase);
+        string? anchorName = anchorMatch.Success ? anchorMatch.Groups[1].Value : null;
+
+        string? anchorBody = null;
+        string? astErr = null;
+        var targetTypeForLang = "method";
+
+        if (!string.IsNullOrWhiteSpace(anchorName))
+            (anchorBody, astErr) = AstResolveEdit(fullPath, targetTypeForLang, anchorName, returnTail: false);
+
+        // 2) fallback: last method/function declared in the file
+        if (anchorBody == null)
+        {
+            var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var lastMethodName = ext == ".cs"
+                ? Regex.Matches(sourceText,
+                    @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|async)\s+)*\w+(?:<[^>]*>)?\s+(\w+)\s*\(")
+                    .Cast<Match>().LastOrDefault()?.Groups[1].Value
+                : Regex.Matches(sourceText, @"\b(?:function\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*\{")
+                    .Cast<Match>().LastOrDefault()?.Groups[1].Value;
+
+            if (string.IsNullOrWhiteSpace(lastMethodName)) return null; // give up, let normal resolver try
+            (anchorBody, astErr) = AstResolveEdit(fullPath, targetTypeForLang, lastMethodName, returnTail: false);
+            anchorName = lastMethodName;
+        }
+
+        if (anchorBody == null)
+        {
+            await EmitLog(emitSse, "info",
+                $"  Forced-insert fast-path: could not resolve anchor ({astErr}) — falling back to normal resolver", ct: ct);
+            return null;
+        }
+
+        // Ask the LLM for ONLY the new method body — no JSON schema decision to get wrong.
+        var sysPrompt =
+            "Output ONLY the raw source code for ONE new method/function — nothing else. " +
+            "No JSON, no markdown fences, no explanation, no surrounding class/namespace. " +
+            "Include the full signature (attributes, access modifier, return type, parameters) and complete body. " +
+            "If the method needs SQL table creation, put a CREATE TABLE IF NOT EXISTS statement as the FIRST " +
+            "statement in the body, before any INSERT/UPDATE/SELECT — never as a separate method.";
+
+        var userPrompt = new StringBuilder();
+        userPrompt.AppendLine($"FILE: {relPath}");
+        userPrompt.AppendLine($"CHANGE REQUIRED: {change}");
+        userPrompt.AppendLine();
+        userPrompt.AppendLine("EXISTING METHOD THIS WILL BE INSERTED AFTER (for style/pattern reference):");
+        userPrompt.AppendLine("```");
+        userPrompt.AppendLine(anchorBody.Length > 1500 ? anchorBody[..1500] : anchorBody);
+        userPrompt.AppendLine("```");
+        if (!string.IsNullOrWhiteSpace(explorationContext))
+        {
+            userPrompt.AppendLine();
+            userPrompt.AppendLine("RELATED CONTEXT:");
+            userPrompt.AppendLine(explorationContext.Length > 3000 ? explorationContext[..3000] : explorationContext);
+        }
+
+        var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt.ToString(), emitSse, ct,
+            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 1024);
+
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var newCode = raw.Trim();
+        if (newCode.StartsWith("```"))
+        {
+            var m = Regex.Match(newCode, @"```(?:\w+)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+            if (m.Success) newCode = m.Groups[1].Value.Trim();
+        }
+        if (string.IsNullOrWhiteSpace(newCode)) return null;
+
+        await EmitLog(emitSse, "info",
+            $"  🎯 Forced FORMAT C insert after '{anchorName}' — model only supplied the method body ({newCode.Length} chars)", ct: ct);
+
+        var indented = AutoIndentCode(anchorBody, newCode, relPath);
+        var newStr = anchorBody + "\n\n" + indented;
+        return (anchorBody, newStr, true);
     }
     private async Task<bool> ClassifyIsBuildRepairPromptAsync(string prompt, CancellationToken ct)
     {
@@ -12083,99 +12211,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return pruned;
     }
 
-    /// <summary>
-    /// Collapses near-duplicate plan steps that target the same file and describe the
-    /// same underlying edit in different words. Exact-string dedup (DeduplicateSteps)
-    /// only catches identical text; it misses cases where the planner (or the per-step
-    /// decoupling audit) independently produces multiple steps that all mean "do the
-    /// same thing" with different phrasing. Left unchecked, that duplication multiplies
-    /// during decoupling — e.g. 3 duplicate "remove priority tag from all 3 columns"
-    /// steps each get decoupled into 3 column-specific sub-steps = 9 steps for 3 real
-    /// edits, with inconsistent guessed line numbers for each duplicate set.
-    ///
-    /// This NEVER reduces distinct, intentional steps: two steps that reference
-    /// different locations (todo vs. doing vs. done) are always kept, even if their
-    /// wording is otherwise very similar.
-    /// </summary>
-    private static List<PlanStep> DeduplicateSimilarSteps(List<PlanStep> steps, double similarityThreshold = 0.72)
-    {
-        if (steps.Count <= 1) return steps;
+  
 
-        var keep = new List<PlanStep>();
-        var keptSignatures = new List<(HashSet<string> keywords, HashSet<string> quoted, string file, string? locationTag)>();
 
-        foreach (var step in steps)
-        {
-            var file = (step.File ?? "").Trim();
-            var change = step.Change ?? "";
-            var keywords = AgentUtilities.ExtractMeaningfulKeywords(change.ToLowerInvariant())
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var quoted = ExtractQuotedSnippets(change);
-            var locationTag = ExtractLocationTag(change);
-
-            var isDuplicate = false;
-            for (var i = 0; i < keep.Count; i++)
-            {
-                var (existingKeywords, existingQuoted, existingFile, existingLocationTag) = keptSignatures[i];
-                if (!string.Equals(existingFile, file, StringComparison.OrdinalIgnoreCase)) continue;
-
-                // Different explicit locations (todo vs. doing vs. done) are ALWAYS distinct —
-                // never collapse steps just because their wording overlaps if they name
-                // different targets. This is what protects the user's actual 3-column intent.
-                if (locationTag != null && existingLocationTag != null &&
-                    !string.Equals(locationTag, existingLocationTag, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var keywordSim = JaccardSimilarity(keywords, existingKeywords);
-                var quotedOverlap = quoted.Count > 0 && existingQuoted.Count > 0 && quoted.Overlaps(existingQuoted);
-
-                if (keywordSim >= similarityThreshold || quotedOverlap)
-                {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-
-            if (isDuplicate) continue;
-
-            keep.Add(step);
-            keptSignatures.Add((keywords, quoted, file, locationTag));
-        }
-
-        return keep;
-    }
-
-    private static double JaccardSimilarity(HashSet<string> a, HashSet<string> b)
-    {
-        if (a.Count == 0 && b.Count == 0) return 0;
-        var intersection = a.Intersect(b, StringComparer.OrdinalIgnoreCase).Count();
-        var union = a.Union(b, StringComparer.OrdinalIgnoreCase).Count();
-        return union == 0 ? 0 : (double)intersection / union;
-    }
-
-    /// <summary>Extracts quoted code/HTML snippets from a step's change description for
-    /// exact-target comparison — two steps quoting the same element are the same edit
-    /// even if the surrounding prose differs.</summary>
-    private static HashSet<string> ExtractQuotedSnippets(string text)
-    {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(text)) return result;
-        foreach (Match m in Regex.Matches(text, @"<[^>]+>.*?</\w+>|`[^`]+`"))
-        {
-            var norm = Regex.Replace(m.Value.ToLowerInvariant(), @"\s+", " ").Trim();
-            if (norm.Length >= 15) result.Add(norm);
-        }
-        return result;
-    }
-
-    /// <summary>Extracts an explicit location tag (todo/doing/done/selfImproving) from a
-    /// step's change description, if present, so distinct-location steps are never merged.</summary>
-    private static string? ExtractLocationTag(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-        var m = Regex.Match(text, @"\b(todo|doing|done|selfimproving|self-improving)\b", RegexOptions.IgnoreCase);
-        return m.Success ? m.Groups[1].Value.ToLowerInvariant().Replace("-", "") : null;
-    }
     private async Task<bool> VerifyCompletedFromStepTruthAsync(
         List<object> allSteps, string projectRoot, CancellationToken ct)
     {

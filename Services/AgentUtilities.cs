@@ -604,13 +604,124 @@ public static class AgentUtilities
         var normalized = Regex.Replace(combined.Trim(), @"\s+", " ");
         return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
-
+    /// <summary>Extracts quoted code/HTML snippets from a step's change description for
+    /// exact-target comparison — two steps quoting the same element are the same edit
+    /// even if the surrounding prose differs.</summary>
+    private static HashSet<string> ExtractQuotedSnippets(string text)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(text)) return result;
+        foreach (Match m in Regex.Matches(text, @"<[^>]+>.*?</\w+>|`[^`]+`"))
+        {
+            var norm = Regex.Replace(m.Value.ToLowerInvariant(), @"\s+", " ").Trim();
+            if (norm.Length >= 15) result.Add(norm);
+        }
+        return result;
+    }
     /// <summary>
-    /// LLMs often put literal escape sequences like \r\n or \t inside C# verbatim strings (@"...").
-    /// In a verbatim string, these are treated as literal characters, not newlines/tabs.
-    /// This method detects verbatim strings that look like SQL and converts the literal
-    /// escape sequences to actual characters to fix the formatting.
+    /// Collapses near-duplicate plan steps that target the same file and describe the
+    /// same underlying edit in different words. Exact-string dedup (DeduplicateSteps)
+    /// only catches identical text; it misses cases where the planner (or the per-step
+    /// decoupling audit) independently produces multiple steps that all mean "do the
+    /// same thing" with different phrasing. Left unchecked, that duplication multiplies
+    /// during decoupling — e.g. 3 duplicate "remove priority tag from all 3 columns"
+    /// steps each get decoupled into 3 column-specific sub-steps = 9 steps for 3 real
+    /// edits, with inconsistent guessed line numbers for each duplicate set.
+    ///
+    /// This NEVER reduces distinct, intentional steps: two steps that reference
+    /// different locations (todo vs. doing vs. done) are always kept, even if their
+    /// wording is otherwise very similar.
     /// </summary>
+    public static List<PlanStep> DeduplicateSimilarSteps(List<PlanStep> steps, double similarityThreshold = 0.72)
+    {
+        if (steps.Count <= 1) return steps;
+
+        var keep = new List<PlanStep>();
+        var keptSignatures = new List<(HashSet<string> keywords, HashSet<string> quoted, string file, string? locationTag)>();
+
+        foreach (var step in steps)
+        {
+            var file = (step.File ?? "").Trim();
+            var change = step.Change ?? "";
+            var keywords = AgentUtilities.ExtractMeaningfulKeywords(change.ToLowerInvariant())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var quoted = ExtractQuotedSnippets(change);
+            var locationTag = AgentUtilities.ExtractLocationTag(change);
+
+            var isDuplicate = false;
+            for (var i = 0; i < keep.Count; i++)
+            {
+                var (existingKeywords, existingQuoted, existingFile, existingLocationTag) = keptSignatures[i];
+                if (!string.Equals(existingFile, file, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Different explicit locations (todo vs. doing vs. done) are ALWAYS distinct —
+                // never collapse steps just because their wording overlaps if they name
+                // different targets. This is what protects the user's actual 3-column intent.
+                if (locationTag != null && existingLocationTag != null &&
+                    !string.Equals(locationTag, existingLocationTag, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var keywordSim = JaccardSimilarity(keywords, existingKeywords);
+                var quotedOverlap = quoted.Count > 0 && existingQuoted.Count > 0 && quoted.Overlaps(existingQuoted);
+
+                if (keywordSim >= similarityThreshold || quotedOverlap)
+                {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+
+            if (isDuplicate) continue;
+
+            keep.Add(step);
+            keptSignatures.Add((keywords, quoted, file, locationTag));
+        }
+
+        return keep;
+    }
+
+    private static double JaccardSimilarity(HashSet<string> a, HashSet<string> b)
+    {
+        if (a.Count == 0 && b.Count == 0) return 0;
+        var intersection = a.Intersect(b, StringComparer.OrdinalIgnoreCase).Count();
+        var union = a.Union(b, StringComparer.OrdinalIgnoreCase).Count();
+        return union == 0 ? 0 : (double)intersection / union;
+    }
+
+    /// <summary>Extracts an explicit location tag (todo/doing/done/selfImproving) from a
+    /// step's change description, if present, so distinct-location steps are never merged.</summary>
+    public static string? ExtractLocationTag(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var m = Regex.Match(text, @"\b(todo|doing|done|selfimproving|self-improving)\b", RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value.ToLowerInvariant().Replace("-", "") : null;
+    }
+    public static List<PlanStep> RemergeTableCreationSplits(List<PlanStep> steps)
+    {
+        var merged = new List<PlanStep>();
+        for (var i = 0; i < steps.Count; i++)
+        {
+            var cur = steps[i];
+            var curLower = (cur.Change ?? "").ToLowerInvariant();
+            var isTableCreationStep = Regex.IsMatch(curLower, @"\bcreate\s+table\b") &&
+                                       !Regex.IsMatch(curLower, @"\binsert\b|\bupdate\b");
+
+            if (isTableCreationStep && i + 1 < steps.Count &&
+                string.Equals(cur.File, steps[i + 1].File, StringComparison.OrdinalIgnoreCase))
+            {
+                var next = steps[i + 1];
+                // Fold the table-creation intent into the next step's description
+                // and drop this step entirely — it was never supposed to be separate.
+                next.Change = $"{next.Change} Include an inline CREATE TABLE IF NOT EXISTS statement " +
+                               $"at the top of the method body before any INSERT/UPDATE/SELECT.";
+                merged.Add(next);
+                i++; // skip the merged-in step
+                continue;
+            }
+            merged.Add(cur);
+        }
+        return merged;
+    }
     public static string CleanVerbatimStringEscapes(string content)
     {
         if (string.IsNullOrEmpty(content)) return content;
