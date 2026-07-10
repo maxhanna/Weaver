@@ -688,6 +688,302 @@ public static class AgentUtilities
         return union == 0 ? 0 : (double)intersection / union;
     }
 
+    /// <summary>
+    /// Detects the indentation WIDTH (number of columns per indent level) used in a source file.
+    /// Uses GCD over all observed leading-space counts so that 4/8/12 → 4 and 2/4/6 → 2.
+    /// Tab-indented files return 4 (conventional tab stop). Mixed tab/space files derive width
+    /// from the space-indented lines only. Falls back to 4 when indeterminate.
+    /// </summary>
+    public static int DetectIndentWidth(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+            return 4;
+
+        var lines = source.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+        // ── Tab-indented files: convention is tab width = 4 ──
+        var hasTabIndent = false;
+        foreach (var line in lines)
+        {
+            if (line.Length == 0) continue;
+            if (line[0] == '\t') { hasTabIndent = true; break; }
+        }
+        if (hasTabIndent)
+        {
+            // If there are also space-indented lines, derive from those; otherwise default to 4.
+            var spaceIndents = new HashSet<int>();
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (line.Length > 0 && line[0] == '\t') continue;
+                var n = 0;
+                while (n < line.Length && line[n] == ' ') n++;
+                if (n > 0) spaceIndents.Add(n);
+            }
+            if (spaceIndents.Count == 0) return 4;
+            return DetectIndentWidthFromIndents(spaceIndents);
+        }
+
+        // ── Pure space-indented: collect all distinct indent amounts ──
+        var indentSet = new HashSet<int>();
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var n = 0;
+            while (n < line.Length && line[n] == ' ') n++;
+            if (n > 0) indentSet.Add(n);
+        }
+
+        if (indentSet.Count == 0) return 4;
+        return DetectIndentWidthFromIndents(indentSet);
+    }
+    /// <summary>
+    /// Extracts the method/function name that a step intends to add/insert into a .js file.
+    /// Handles many phrasings:
+    ///   "add method fooBar", "create function baz", "insert handler onClick",
+    ///   "add fooBar() method", "add vm.doSomething", "add this.handleClick",
+    ///   "define method named processQueue", "implement onFileSelected handler"
+    /// </summary>
+    public static string? ExtractJsMethodNameFromChange(string change)
+    {
+        if (string.IsNullOrWhiteSpace(change)) return null;
+
+        // Pattern 1: "<verb> method/function/handler (named|called) X"
+        var m = Regex.Match(change,
+            @"\b(?:add|create|insert|define|implement)\s+(?:a\s+)?(?:new\s+)?(?:method|function|handler)\s+(?:named\s+|called\s+)?([A-Za-z_$][A-Za-z0-9_$]*)",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // Pattern 2: "<verb> X method/function/handler"  (name BEFORE the noun)
+        m = Regex.Match(change,
+            @"\b(?:add|create|insert|define|implement)\s+(?:a\s+)?(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+(?:method|function|handler)\b",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // Pattern 3: "<verb> X() method"  (name with empty parens)
+        m = Regex.Match(change,
+            @"\b(?:add|create|insert|define|implement)\s+(?:the\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*\)",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // Pattern 4: "<verb> vm.X" / "<verb> this.X" / "<verb> self.X"
+        m = Regex.Match(change,
+            @"\b(?:add|create|insert|define|implement)\s+(?:the\s+)?(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // Pattern 5: bare "<verb> X" (last resort — only if X looks like a method name)
+        m = Regex.Match(change,
+            @"\b(?:add|create|insert)\s+(?:a\s+)?(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\b");
+        if (m.Success)
+        {
+            var candidate = m.Groups[1].Value;
+            // Reject common English words that aren't method names
+            var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "the", "a", "an", "new", "code", "logic", "feature", "support",
+            "validation", "test", "tests", "file", "block", "section", "comment"
+        };
+            if (!stopwords.Contains(candidate) && candidate.Length >= 3) return candidate;
+        }
+
+        return null;
+    }
+    /// <summary>
+    /// Checks whether a method/function name is already DEFINED in JavaScript source content.
+    /// Matches declarations only — not call sites like obj.foo() or property reads like this.foo = bar.
+    /// Covers: function decls, function expressions, arrow functions, object method shorthand,
+    /// class methods, vm/this/self assignments, prototype assignments, export declarations,
+    /// and Object.defineProperty.
+    /// </summary>
+    public static bool JsMethodExistsInContent(string content, string methodName)
+    {
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(methodName))
+            return false;
+        if (methodName.Length < 2) return false;
+
+        var name = Regex.Escape(methodName);
+
+        // 1. function declaration:  function foo(
+        if (Regex.IsMatch(content, $@"\bfunction\s+{name}\s*\(", RegexOptions.IgnoreCase))
+            return true;
+
+        // 2. function expression:  const/let/var foo = function(   |   const foo = async function(
+        if (Regex.IsMatch(content,
+            $@"\b(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 3. arrow function:  const foo = (...) =>   |   const foo = async (...) =>
+        if (Regex.IsMatch(content,
+            $@"\b(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 4. object property function:  foo: function(   |   foo: async function(
+        if (Regex.IsMatch(content,
+            $@"\b{name}\s*:\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 5. object property arrow:  foo: () =>   |   foo: async () =>
+        if (Regex.IsMatch(content,
+            $@"\b{name}\s*:\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 6. object method shorthand (line-anchored to avoid matching call sites):
+        //    foo(  |  async foo(  |  static foo(
+        if (Regex.IsMatch(content,
+            $@"(?m)^\s*(?:static\s+|async\s+|get\s+|set\s+)?{name}\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 7. vm.foo = function(   |   this.foo = function(   |   self.foo = function(
+        if (Regex.IsMatch(content,
+            $@"\b(?:vm|this|self|that)\.{name}\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 8. vm.foo = (...) =>   |   this.foo = (...) =>
+        if (Regex.IsMatch(content,
+            $@"\b(?:vm|this|self|that)\.{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 9. Class.prototype.foo = function(
+        if (Regex.IsMatch(content,
+            $@"\.prototype\.{name}\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 10. export function foo(   |   export const foo =
+        if (Regex.IsMatch(content,
+            $@"\bexport\s+(?:async\s+)?function\s+{name}\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+        if (Regex.IsMatch(content,
+            $@"\bexport\s+(?:const|let|var)\s+{name}\s*=",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 11. Object.defineProperty(obj, 'foo', ...)
+        if (Regex.IsMatch(content,
+            $@"Object\.defineProperty\s*\([^,]+,\s*['""]{name}['""]",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        // 12. class method declaration inside a class body (line-anchored):
+        //     public/private/protected/static/async/get/set + foo(
+        if (Regex.IsMatch(content,
+            $@"(?m)^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+|get\s+|set\s+|readonly\s+)*{name}\s*\(",
+            RegexOptions.IgnoreCase))
+            return true;
+
+        return false;
+    }
+    /// <summary>
+    /// Extracts the method name defined by a piece of JavaScript source code.
+    /// Recognizes declarations only (not call sites).
+    /// </summary>
+    public static string? ExtractJsMethodNameFromCode(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return null;
+
+        // function foo(
+        var m = Regex.Match(code, @"\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // const/let/var foo = function(   |   const foo = async function(
+        m = Regex.Match(code,
+            @"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // const foo = (...) =>   |   const foo = async (...) =>
+        m = Regex.Match(code,
+            @"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // vm.foo = function(   |   this.foo = function(   |   self.foo = function(
+        m = Regex.Match(code,
+            @"\b(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // vm.foo = (...) =>   |   this.foo = (...) =>
+        m = Regex.Match(code,
+            @"\b(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // foo: function(   |   foo: async function(
+        m = Regex.Match(code,
+            @"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // foo: () =>   |   foo: async () =>
+        m = Regex.Match(code,
+            @"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?\([^)]*\)\s*=>",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // Object method shorthand at start of line:  foo(  or  async foo(  or  static foo(
+        m = Regex.Match(code,
+            @"(?m)^\s*(?:static\s+|async\s+|get\s+|set\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(");
+        if (m.Success) return m.Groups[1].Value;
+
+        // Class.prototype.foo = function(
+        m = Regex.Match(code,
+            @"\.prototype\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // export function foo(   |   export const foo =
+        m = Regex.Match(code,
+            @"\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        m = Regex.Match(code,
+            @"\bexport\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=",
+            RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        return null;
+    }
+    private static int DetectIndentWidthFromIndents(HashSet<int> indents)
+    {
+        var list = indents.ToList();
+        var gcd = list[0];
+        for (var i = 1; i < list.Count; i++)
+        {
+            gcd = Gcd(gcd, list[i]);
+            if (gcd == 1) break;
+        }
+
+        // Sanity band — common indent widths are 1..8.
+        if (gcd is >= 1 and <= 8) return gcd;
+
+        // Pathological GCD (e.g. 16 because everything was a single 16-space indent).
+        // Fall back to the smallest observed indent, clamped.
+        var min = list.Min();
+        return (min > 0 && min <= 8) ? min : 4;
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b > 0)
+        {
+            var t = b;
+            b = a % b;
+            a = t;
+        }
+        return a;
+    }
+
     /// <summary>Extracts an explicit location tag (todo/doing/done/selfImproving) from a
     /// step's change description, if present, so distinct-location steps are never merged.</summary>
     public static string? ExtractLocationTag(string text)

@@ -507,18 +507,15 @@ public class AgentController : ControllerBase
 
     private static string DetectIndentUnit(string source)
     {
+        if (string.IsNullOrWhiteSpace(source)) { return "    "; }
+
         var lines = source.Split('\n');
         foreach (var line in lines)
-            if (line.Length > 0 && line[0] == '\t') return "\t";
-        var min = int.MaxValue;
-        foreach (var line in lines)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            var n = 0;
-            while (n < line.Length && line[n] == ' ') n++;
-            if (n > 0 && n < min) min = n;
+            if (line.Length > 0 && line[0] == '\t') { return "\t"; } 
         }
-        return new string(' ', min is > 0 and < int.MaxValue ? min : 4);
+
+        return new string(' ', AgentUtilities.DetectIndentWidth(source));
     }
     private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
     {
@@ -1948,6 +1945,37 @@ public class AgentController : ControllerBase
                 }
             }
         }
+        // ── JS-specific pre-edit check: detect if a method to be inserted already exists ──
+        var stepExt = Path.GetExtension(step.File ?? "").ToLowerInvariant();
+        if (stepExt is ".js" or ".jsx" or ".mjs" or ".cjs")
+        {
+            var jsMethodName = AgentUtilities.ExtractJsMethodNameFromChange(step.Change ?? "");
+            if (!string.IsNullOrWhiteSpace(jsMethodName) &&
+                jsMethodName.Length >= 2 &&
+                !jsMethodName.Equals("function", StringComparison.OrdinalIgnoreCase) &&
+                !jsMethodName.Equals("method", StringComparison.OrdinalIgnoreCase) &&
+                !jsMethodName.Equals("handler", StringComparison.OrdinalIgnoreCase))
+            {
+                if (AgentUtilities.JsMethodExistsInContent(content, jsMethodName))
+                {
+                    return (PreEditVerdict.AlreadyDone,
+                        $"JavaScript method '{jsMethodName}' already exists in {step.File}");
+                }
+
+                // Also check if newString itself defines a name already present in the file
+                if (!string.IsNullOrWhiteSpace(step.NewString))
+                {
+                    var newName = AgentUtilities.ExtractJsMethodNameFromCode(step.NewString);
+                    if (!string.IsNullOrWhiteSpace(newName) &&
+                        !string.Equals(newName, jsMethodName, StringComparison.Ordinal) &&
+                        AgentUtilities.JsMethodExistsInContent(content, newName))
+                    {
+                        return (PreEditVerdict.AlreadyDone,
+                            $"JavaScript method '{newName}' (from newString) already exists in {step.File}");
+                    }
+                }
+            }
+        }
 
         if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
         {
@@ -1960,6 +1988,29 @@ public class AgentController : ControllerBase
                 if (Regex.IsMatch(content, $@"\b(void|Task|async\s+Task|public|private|protected|internal)\s+.*\b{Regex.Escape(methodName)}\s*\(", RegexOptions.IgnoreCase))
                 {
                     return (PreEditVerdict.AlreadyDone, $"Method '{methodName}' already exists in the file");
+                }
+            }
+        }
+
+        // Broader check: if the change text mentions a function name (vm.X or function X or X = function),
+        // scan the file for any existing definition of that function name.
+        var fnNameRegex = Regex.Match(step.Change ?? "", @"(?:vm\.)?(\w+)\s*=\s*function", RegexOptions.IgnoreCase);
+        if (!fnNameRegex.Success)
+            fnNameRegex = Regex.Match(step.Change ?? "", @"function\s+(\w+)\s*\(", RegexOptions.IgnoreCase);
+        if (!fnNameRegex.Success)
+            fnNameRegex = Regex.Match(step.Change ?? "", @"ensure\s+(?:vm\.)?(\w+)\s+method", RegexOptions.IgnoreCase);
+        if (!fnNameRegex.Success)
+            fnNameRegex = Regex.Match(step.Change ?? "", @"implement\s+(\w+)\s+function", RegexOptions.IgnoreCase);
+        if (fnNameRegex.Success)
+        {
+            var fnName = fnNameRegex.Groups[1].Value;
+            if (fnName.Length > 2 && !fnName.Equals("function", StringComparison.OrdinalIgnoreCase))
+            {
+                // Check for vm.fnName = function(, function fnName(, fnName = function(, fnName: function(
+                var fnPattern = $@"(?:vm\.)?{Regex.Escape(fnName)}\s*(?:[:=])\s*function\s*\(";
+                if (Regex.IsMatch(content, fnPattern, RegexOptions.IgnoreCase))
+                {
+                    return (PreEditVerdict.AlreadyDone, $"Function '{fnName}' already exists in the file");
                 }
             }
         }
@@ -4410,6 +4461,31 @@ emitSse, ct);
 
                 if (wipeReason != null)
                 {
+                    // Check if this is a "trying to add a method that already exists" scenario:
+                    // signature change where the NEW method name is already defined in the file.
+                    if (wipeReason.StartsWith("SIGNATURE CHANGE", StringComparison.Ordinal))
+                    {
+                        var existingFn = CheckMethodExistsInFile(fileContent, newStr!);
+                        if (existingFn != null)
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"✓ Already done: {relPath} — Function '{existingFn}' already exists in the file (guard detected attempted re-insertion)", ct: ct);
+                            var r = new Dictionary<string, object?>
+                            {
+                                ["index"] = stepIndex,
+                                ["type"] = "edit",
+                                ["status"] = "skipped",
+                                ["path"] = relPath,
+                                ["reason"] = $"Function '{existingFn}' already exists in the file",
+                                ["planItemIndex"] = planItemIndex
+                            };
+                            if (emitSse) await SendSse(Response, "step", r, ct);
+                            allResults.Add(r);
+                            await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
+                            return stepIndex + 1;
+                        }
+                    }
+
                     await EmitLog(emitSse, "warn",
                         $"Guard triggered for {relPath}: {wipeReason}",
                         new
@@ -6706,6 +6782,32 @@ emitSse, ct);
                 }
             }
         }
+
+        return null;
+    }
+
+    /// <summary>Checks if a newString contains a function/method name that already exists in the file content.</summary>
+    private static string? CheckMethodExistsInFile(string fileContent, string newStr)
+    {
+        // Extract function name from newString: patterns like vm.sendBenchmarkToServer = function( or function sendBenchmarkToServer(
+        var fnMatch = Regex.Match(newStr, @"(?:vm\.)?(\w+)\s*(?:[:=])\s*function\s*\(", RegexOptions.IgnoreCase);
+        if (!fnMatch.Success)
+            fnMatch = Regex.Match(newStr, @"function\s+(\w+)\s*\(", RegexOptions.IgnoreCase);
+        if (!fnMatch.Success)
+            return null;
+
+        var fnName = fnMatch.Groups[1].Value;
+        if (fnName.Length <= 2) return null;
+
+        // Check if this function name already has a definition in the file
+        var existingPattern = $@"(?:vm\.)?{Regex.Escape(fnName)}\s*(?:[:=])\s*function\s*\(";
+        if (Regex.IsMatch(fileContent, existingPattern, RegexOptions.IgnoreCase))
+            return fnName;
+
+        // Also check traditional function declaration: function fnName(
+        var existingPattern2 = $@"function\s+{Regex.Escape(fnName)}\s*\(";
+        if (Regex.IsMatch(fileContent, existingPattern2, RegexOptions.IgnoreCase))
+            return fnName;
 
         return null;
     }
@@ -13825,6 +13927,64 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var codeExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".cs", ".ts", ".js", ".tsx", ".jsx", ".html", ".css", ".scss", ".json" };
         if (!codeExts.Contains(ext)) return new List<string>();
+
+        // Static analysis: check for function-inside-function nesting in JS/TS files
+        var staticIssues = new List<string>();
+        if (ext is ".ts" or ".tsx" or ".js" or ".jsx")
+        {
+            var lines = fileContent.Split('\n');
+            var topLevelFns = new List<(int line, string name, int indent)>();
+            var indentWidth = AgentUtilities.DetectIndentWidth(fileContent);
+            if (indentWidth <= 0) indentWidth = 2;
+
+            // Find top-level function declarations by their minimal indentation
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var trimmed = line.TrimStart();
+                // Match vm.X = function(, function X(, X: function(
+                if (Regex.IsMatch(trimmed, @"^(?:vm\.)?\w+\s*(?:[:=])\s*function\s*\(") ||
+                    Regex.IsMatch(trimmed, @"^function\s+\w+\s*\("))
+                {
+                    var indent = line.Length - trimmed.Length;
+                    topLevelFns.Add((i, trimmed, indent));
+                }
+            }
+
+            // Group functions by indent level; the smallest indent group is top-level
+            var indentGroups = topLevelFns.GroupBy(f => f.indent).OrderBy(g => g.Key).ToList();
+            if (indentGroups.Count > 1)
+            {
+                var topLevelIndent = indentGroups[0].Key;
+                // Functions with indent > topLevelIndent + indentWidth are nested inside another function
+                foreach (var group in indentGroups.Skip(1))
+                {
+                    if (group.Key > topLevelIndent + indentWidth)
+                    {
+                        foreach (var fn in group)
+                        {
+                            // Extract the function name for the message
+                            var namePart = fn.name.Split('=').Last().Split(':').Last().Trim();
+                            namePart = Regex.Replace(namePart, @"\s*function\s*\(.*", "").Trim();
+                            var fullName = fn.name.Contains('=') || fn.name.Contains(':')
+                                ? (Regex.Match(fn.name, @"^(?:vm\.)?(\w+)").Groups[1].Value)
+                                : Regex.Match(fn.name, @"function\s+(\w+)").Groups[1].Value;
+                            var lineNum = fn.line + 1;
+                            staticIssues.Add($"Function '{fullName}' at line {lineNum} appears to be nested inside another function body (indent level {fn.indent}, expected ~{topLevelIndent}). Move it to the top-level scope.");
+                        }
+                    }
+                }
+            }
+
+            // Also check for duplicate function definitions
+            var fnNames = topLevelFns.Select(f => Regex.Match(f.name, @"(?:vm\.)?(\w+)\s*(?:[:=])\s*function|function\s+(\w+)").Groups.Values
+                .Select(g => g.Value).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v) && v != "function")).ToList();
+            var dupes = fnNames.GroupBy(n => n).Where(g => g.Count() > 1);
+            foreach (var dupe in dupes)
+            {
+                staticIssues.Add($"Duplicate definition of '{dupe.Key}' found at multiple locations. Remove the duplicate.");
+            }
+        }
 
         var contentPreview = fileContent.Length > 6000
             ? fileContent[..6000] + "\n// ... (truncated)"

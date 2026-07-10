@@ -341,7 +341,7 @@
           console.error('Error parsing file hints:', e);
           vm.fileHintsData = [];
         }
-      }, function () {
+      }, function() {
         console.error('HTTP error loading file hints');
         if (vm.projects && vm.projects.length > 0) {
           vm.fileHintsData = vm.projects.map(function (p) { return { projectPath: p.Path, hints: [] }; });
@@ -607,7 +607,7 @@
         } catch (e) {
           console.log("Loading config error", e);
         }
-      }, function () {
+      }, function() {
         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
         vm.selectedProject = '..';
         vm.defaultProject = '..';
@@ -868,15 +868,46 @@
       if (_lastSyncedEditorState === curStateStr) return;
       _lastSyncedEditorState = curStateStr;
       var data = buildHeartbeatPayload();
-      $http.post('/api/bughosted/heartbeat', data).then(function () {
+      $http.post('/api/bughosted/heartbeat', data).then(function() {
         _bhHeartbeatFailCount = 0;
         vm.bughostedStatus = 'connected';
         _isSyncingData = false;
       }, function () {
         _bhHeartbeatFailCount++;
-        if (_bhHeartbeatFailCount >= 3) {
+        if(_bhHeartbeatFailCount >= 3) {
           vm.bughostedStatus = 'error';
           _isSyncingData = false;
+        }
+      });
+    };
+
+    vm.sendBenchmarkToServer = function(benchmarkData) {
+      var benchmarkDto = {
+        Token: vm.bughostedClientId,
+        Date: benchmarkData.date,
+        Benchmark: benchmarkData.name,
+        Steps: benchmarkData.steps.length.toString(),
+        Score: benchmarkData.score ? benchmarkData.score.toFixed(2).toString() : '0',
+        Status: benchmarkData.status || '',
+        Duration: benchmarkData.duration?.toFixed(1)?.toString() || '0',
+        Model: benchmarkData.model || '',
+        OS: benchmarkData.os || '',
+        CPU: benchmarkData.cpu || '',
+        RAM: benchmarkData.ram || '',
+        GPU: benchmarkData.gpu || ''
+      };
+
+      $http.post('/bughostedcontroller/addbenchmark', benchmarkDto)
+      .then(function(response) {
+        console.log('Successfully sent benchmark to server:', response.data);
+        alert('Benchmark successfully sent to BugHosted!');
+      })
+      .catch(function(error) {
+        console.error('Error sending benchmark to server:', error);
+        if (error && error.message) {
+          alert('Failed to send benchmark. Error details:\n' + error.message);
+        } else {
+          alert('Failed to send benchmark due to an unknown error.');
         }
       });
     };
