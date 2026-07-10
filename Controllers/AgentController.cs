@@ -11804,9 +11804,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 }
 
-                planItems = await TryReplanAfterStep(prompt, allResults, plan,
-                    steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
-                    stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
+                // Don't replan AlreadyDone steps — would regenerate the same step and cause an infinite loop
+                if (status != "skipped")
+                {
+                    planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                        steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
+                        stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
+                }
                 continue;
             }
 
