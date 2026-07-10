@@ -8704,7 +8704,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             (raw, _, llmError) = await CallLlmRawStreaming(
                 planningPrompt, userPrompt.ToString(), emitSse, ct,
-                requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 2048);
+                requestTimeout: _infiniteTimeout, maxTokens: 2048);
 
             if (string.IsNullOrWhiteSpace(raw))
             {
