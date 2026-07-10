@@ -773,11 +773,32 @@ public static class AgentUtilities
         content = CleanVerbatimStringEscapes(content);
 
         // 2. Flatten hallucinated DTO property wrappers.
-        //    LLM often nests flat DTO properties under an invented sub-object (SystemSpecs, Hardware, Specs).
+        //    LLM often nests flat DTO properties under an invented sub-object (SystemSpecs, System, Hardware, Specs).
         //    Pattern: dtoVar.Word?.Property → dtoVar.Property
         //    Only flatten when Word is not a recognized type or keyword.
-        var flatPattern = new Regex(@"\.(SystemSpecs|HardwareInfo|Hardware|Specs|SystemInfo|MetaInfo|Details|DataInfo)\?\.([A-Z]\w+)", RegexOptions.IgnoreCase);
+        var flatPattern = new Regex(@"\.(SystemSpecs|System|HardwareInfo|Hardware|Specs|SystemInfo|MetaInfo|Details|DataInfo|BenchmarkInfo|BenchData)\??\.([A-Z]\w+)", RegexOptions.IgnoreCase);
         content = flatPattern.Replace(content, m => "." + m.Groups[2].Value);
+
+        // 3. Fix doubled braces in interpolated strings: $"text {{variable}} text" → $"text {variable} text"
+        //    LLM sometimes writes {{ex.Message}} when it means {ex.Message} in $"" strings.
+        content = Regex.Replace(content, @"(\$""[^""]*)\{\{(\w+(?:\.\w+)+)\}\}([^""]*"")", "$1{$2}$3");
+
+        // 4. Fix malformed Score?.Replace or TryParse on Score (Score is string?, not numeric).
+        //    Pattern: .Score?.Replace "%", string.Empty  → replace entire TryParse+Replace with direct Score assignment
+        content = Regex.Replace(content,
+            @"decimal\.TryParse\s*\(\s*\w+\.Score\??(?:\.Replace\s*""[^""]*""(?:\s*,\s*""[^""]*"")?)?\s*,(\s*out\s+\w+(?:\.\w+)*\s*)\)",
+            m =>
+            {
+                var outVar = m.Groups[1].Value.Trim();
+                // Replace with direct assignment: decimal.TryParse(benchmark.Score, out score) — clean
+                return $"decimal.TryParse(benchmark.Score, {outVar})";
+            });
+
+        // 5. Merge stray semicolon after string closing: ..."\n\t\t; → ...";
+        //    LLM/formatter sometimes puts the ; on its own line after the closing " of a string literal
+        content = Regex.Replace(content,
+            @"(?<=[^ \t\r\n@])""\s*\r?\n[ \t]*;",
+            @""";");
 
         return content;
     }

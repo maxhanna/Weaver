@@ -1711,6 +1711,9 @@ h3 .small.ghost:hover {
 	cursor: pointer;
 	color: var(--muted);
 	font-size: 12px;
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .agent-streaming-thinking pre {
@@ -1751,6 +1754,15 @@ h3 .small.ghost:hover {
 	font-size: 11px;
 	color: #80cbc4;
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.agent-streaming-tokens summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .resolve-stream-section {

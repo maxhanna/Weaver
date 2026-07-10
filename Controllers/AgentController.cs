@@ -66,152 +66,76 @@ public class AgentController : ControllerBase
     private const string D_FULL_END = "<<<END_FULL_FILE>>>";
     private const string D_DONE = "<<<ALREADY_DONE>>>";
 
-    private const string EditResolveSystemPrompt =
-"You are a surgical code editor. Output ONLY a JSON object.\n\n" +
-"FORMAT A — multi-line (output VERBATIM lines, one per array element — no escaping needed):\n" +
-"{\n" +
-"  \"oldString\": [\n" +
-"    \"  first line EXACTLY as it appears in the file\",\n" +
-"    \"  second line\",\n" +
-"    \"  third line\"\n" +
-"  ],\n" +
-"  \"newString\": [\n" +
-"    \"  first line\",\n" +
-"    \"  replacement second line\"\n" +
-"  ]\n" +
-"}\n" +
-"  CRITICAL: Each array element is ONE line of code. If a line contains a newline character inside a string literal (e.g. `parts.join('\\n')`), you MUST output the `\\n` escaped inside that single array element. NEVER split a line of code across multiple array elements.\n" +
-"  NEVER combine multiple lines of code into a single array element. One element = one line. If you have 2 statements, output 2 elements.\n" +
-"TRAILING WHITESPACE: You MAY omit trailing spaces at the END of a line of code (before the newline). " +
-"However, trailing spaces INSIDE string literals are sometimes INTENTIONAL and must be preserved verbatim. " +
-"Example: Python's `input(\"What is your name? \")` uses a trailing space inside the string to separate the prompt from the user's typed input — this is CORRECT Python idiom and must NOT be removed.\n\n" +
-"FORMAT B — single-line (escape newlines as \\n):\n" +
-"{\n" +
-"  \"oldString\": \"line 1\\nline 2\\nline 3\",\n" +
-"  \"newString\": \"replacement line 1\\nreplacement line 2\"\n" +
-"}\n\n" +
-"FORMAT C — AST-based (for any file — safest, system auto-extracts oldString from file):\n" +
-"{\n" +
-"  \"targetType\": \"method\",\n" +
-"  \"targetName\": \"CalculateTotal\",\n" +
-"  \"newCode\": \"    public int CalculateTotal() { return 42; }\"\n" +
-"}\n" +
-"  Supported targetType values: method, class, property, interface, struct, record, enum, constructor\n" +
-"  newCode can be a string or array of lines (like FORMAT A).\n" +
-"  The tool will parse the file's AST, find the named node, and replace its body.\n" +
-"  CRITICAL: If you are modifying an existing method (e.g., adding a catch block, changing a return value, or adding a line of code), `newCode` MUST contain the ENTIRE method body from signature to closing brace, including your changes.\n" +
-"  NEVER put just an attribute or a single line in `newCode` when replacing a method.\n\n" +
-"  INDENTATION in newCode: the first line (method signature) must start with the SAME indentation as the original method in the file.\n" +
-"  Subsequent lines (method body) must be progressively indented: class indent + method indent + block indent.\n" +
-"  Example — if the method is inside a class at 8 spaces, output newCode with 8 spaces before the signature\n" +
-"  and each nested block adds 4 more spaces.\n\n" +
-"INSERT-AFTER (add a new method without replacing existing ones):\n" +
-"{\n" +
-"  \"targetType\": \"method\",\n" +
-"  \"targetName\": \"ExistingMethodName\",\n" +
-"  \"insertAfter\": true,\n" +
-"  \"newCode\": \"    public async Task<IActionResult> NewMethod() { ... }\"\n" +
-"}\n" +
-"  CRITICAL: If the CHANGE REQUIRED asks to ADD a new method, you MUST use `insertAfter: true`.\n" +
-"  The `newCode` field MUST contain ONLY the new method being added. DO NOT include the existing method in `newCode`.\n" +
-"  The target method is NOT replaced — the new code is added after its closing brace.\n" +
-"  This is the SAFEST way to add a new method: no existing code is touched.\n" +
-"  DO NOT use targetType=\"class\" to add methods — use insertAfter with targetType=\"method\" instead.\n\n" +
-"FULL FILE:\n" +
-        "{\n" +
-        "  \"fullFile\": \"Complete file content (use array format for multi-line)\",\n" +
-        "  \"fullFile\": [\"line1\", \"line2\"]\n" +
-        "}\n\n" +
-        "NO CHANGE:\n" +
-        "{\n" +
-        "  \"alreadyDone\": true\n" +
-        "}\n\n" +
-        "CRITICAL RULES:\n" +
-            "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation). Do NOT strip or reduce indentation.\n" +
-            "2. oldString MUST be 1-5 lines. You DO NOT need to make it unique. If you are deleting an element, output ONLY the element being deleted (1-5 lines). NEVER include surrounding containers (like <div class=\"card-tags\">) in oldString.\n" +
-            "3. NEVER put ... or […] or /* ... */ or any placeholder in oldString or newString\n" +
-            "4. TRAILING WHITESPACE: you MAY omit trailing spaces at the end of each line in oldString. But LEADING whitespace (indentation) is REQUIRED — never remove it.\n" +
-            "5. oldString must NOT have blank first/last lines — trim any empty lines\n" +
-            "6. For insertions: include the line BEFORE as part of oldString, repeat it unchanged at the start of newString, then add the new lines after it\n" +
-            "7. Each line's meaningful content (not counting leading whitespace) should be ≥ 8 characters — lines like `}`, `);`, `{` are too short and match everywhere. Always include enough context.\n" +
-            "8. NEVER use targetType='class' to add PROPERTIES or FIELDS. targetType='class' is for REPLACING an entire class or for adding entire METHODS via insertAfter. For adding a single property/field, use oldString/newString with a small anchor.\n" +
-            "8b. oldString must be ≥ 20 characters total — short strings cause false matches\n" +
-            "9. Use FORMAT A (array) whenever the content has multiple lines — it is more reliable and needs no escaping\n" +
-            "10. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
-            "10b. NO-OP PREVENTION (CRITICAL): oldString and newString MUST be DIFFERENT. If the step asks you to ADD or INSERT code, the new code MUST appear in newString but MUST NOT appear in oldString. Do not copy the same block of code into both fields. If you are adding a line, oldString should be the 1-2 anchor lines BEFORE the insertion point, and newString should be those anchor lines PLUS the new line.\n" +
-            "11. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line. Open-brace ({) increases indent for following lines. Close-brace (}) decreases indent. Copy the leading whitespace character-for-character from oldString into newString.\n" +
-            "12. FORMAT C supported extensions:\n" +
-                "REQUIRED (.cs): Roslyn AST — oldString/newString WILL fail for C#\n" +
-                "SUPPORTED (regex): .ts .tsx .js .jsx .java .kt .scala .go .rs .swift .php .rb .dart .groovy\n" +
-                "→ targetType: 'method'/'function'/'class'/'interface'/'property'\n" +
-                "NOT SUPPORTED (use oldString/newString): .html .css .json .yaml .toml .xml .svg .md .sql .sh .py .lua .ex\n" +
-            "12b. targetType='class': ONLY to REPLACE the ENTIRE class body. " +
-                "To add a single property/field, use oldString/newString instead.\n" +
-            "13. oldString LIMIT: MAXIMUM 10 lines for the oldString field. " +
-                "CRITICAL: Do NOT use FORMAT C just because a method is longer than 10 lines. " +
-                "If the CHANGE REQUIRED is small (e.g., 1-5 lines changing in a 200-line method), " +
-                "you MUST use oldString/newString targeting JUST the specific lines that need to change. " +
-                "Use FORMAT C ONLY if the majority of the method body is being rewritten. " +
-                "NEVER rewrite a super long method with lots of logic if you only need to change a couple of lines — " +
-                "target the exact lines with oldString/newString instead to avoid reinventing the method and breaking existing logic." +
-            "14. To APPEND to the end of any file: oldString = last 2-3 closing braces only. Repeat them at the start of newString before your new code.\n" +
-            "15. fullFile is ONLY for NEW files (files that don't exist yet). NEVER use fullFile for existing files.\n" +
-            "16. REPLACE vs ADD: When the CHANGE REQUIRED description says \"instead of X, use Y\" or \"change X to use Y\" or \"display X in a popupPanel instead of inline\", you must REPLACE the existing X with Y — do NOT keep X and also add Y alongside it. You MUST modify the EXISTING section, not duplicate it.\n" +
-            "17. BEFORE adding a new block/section, ALWAYS check whether an EXISTING section in the file already does what the change needs. If it does, MODIFY that section — don't add a new one.\n" +
-            "18. If the change asks you to move something \"into a popupPanel\" or \"into a dialog\", find the EXISTING code that displays that thing inline, and make oldString span from its opening tag to its closing tag. Replace the ENTIRE block with the new popup/dialog version — do NOT keep the old block and also add a new one." +
-            "18b. INSERTIONS INTO STRUCTURED CONTAINERS: When inserting an element into a container that uses a specific wrapper class for its children (e.g., `optionsStatsDiv`), " +
-                "you MUST wrap the inserted element in that same class structure. Do NOT insert raw elements if the siblings use wrappers. " +
-                "Example: If inserting 'Lunar Phase' into a div where siblings are `<div class=\"optionsStatsDiv\"><div class=\"optionsStatsHeader\">...</div><div class=\"optionsStatsDescription\">...</div></div>`, " +
-                "your newString MUST wrap the lunar phase content in that exact `optionsStatsDiv` structure." +
-            "18c. NO-OP PREVENTION (CRITICAL): When asked to ADD or INSERT code, the new code MUST appear in newString but MUST NOT appear in oldString. " +
-                "Do not copy the same block of code into both fields. If you are adding a line, oldString should be the 1-2 anchor lines BEFORE the insertion point, " +
-                "and newString should be those anchor lines PLUS the new line(s)." +
-            "19. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString (both old inline code AND new popup/dialog code), REMOVE the old inline part from newString.\n" +
-            "20. NEVER INVENT type names. Every type (class/record/struct/interface) you reference in newString MUST already exist in the project. " +
-                "The RELATED FILE CONTEXT / AUTO-ENRICHED CONTEXT sections show type definitions found across the project. " +
-                "Use those existing types — do NOT rename them or create similar ones. " +
-                "If you need a type not present in the context, define it fully (not as a stub) in the same edit. " +
-            "21. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. BEFORE outputting oldString/newString, read through EVERY line character-by-character and verify that every token boundary has the correct whitespace. Common errors to watch for: 'INTERVAL15 MINUTE' (should be 'INTERVAL 15 MINUTE'); 'font-size:12px' is OK but '12pximportant' should be '12px important'; 'pitch: number =0' should be 'pitch: number = 0' (space on BOTH sides of '=' in assignments and default parameters); 'useTextureLoc,1)' should be 'useTextureLoc, 1)' (space after every comma, even when followed by ')'); '[0, -2,0]' should be '[0, -2, 0]' (space after comma inside arrays/tuples); 'Apply180°' in a comment should be 'Apply 180°' (space between a word and a number). NEVER collapse '==', '===', '!=', '<=', '>=', '=>', '+=', '-=', '*=', '/=' into spaced forms — those are compound operators and stay together. HTML/JSX attributes like class=\"foo\" stay glued to their value. FUNCTION CALLS: NEVER add a space between a method/function name and its opening parenthesis. `join(',')` is CORRECT; `join (',')` is WRONG. If you see two tokens running together without a space, fix it. After writing your output, re-read it and mentally say each space. " +
-                "Before you write newString, first check the exploration context/file content for the actual property names, method names, and patterns used in THAT file. " +
-                "For example, if you are converting an inline detail section to a popupPanel in an Angular component, look at EXISTING popupPanel instances in that same .html file — " +
-                "use their exact class names (like `popupPanelTitle`, not `popupPanel-header`), and reference only existing properties/methods " +
-                "(like `selectedCommand.command`, not `selectedCommand.title`; `cancelCommand()`, not `executeCommand()`). " +
-                "Do NOT add new @Input/@Output bindings, new component properties, or new method calls unless they are EXPLICITLY required by the change description and you also add their definitions in the same edit." +
-            "22. FORMAT C + INLINE SQL: When using FORMAT C to replace a C# method that contains" +
-                "inline SQL (verbatim @\"...\" strings), you MUST copy the SQL verbatim from the file" +
-                "into newCode.Do NOT reformat, re-indent, or \"clean up\" SQL inside @\"...\" strings —" +
-                "every space inside the string literal is significant.The system will NOT normalize" +
-                "whitespace inside verbatim strings." +
-            "23. OBJECT LITERAL PROPERTIES: NEVER add a property to an object that already has that property. " +
-                "If the change requires updating an existing property (like a template literal or backtick string), " +
-                "you MUST include the entire existing property in oldString and output the MODIFIED version in newString. " +
-                "Do NOT output a second property with the same name — that creates invalid code and will be rejected. " +
-            "24. HALLUCINATED PROPERTIES: NEVER invent a property by pluralizing or modifying the name of an existing property (e.g., using `this.imageUrls` when `this.imageUrl` exists). " +
-                "If you need to iterate over multiple items but only a single property exists, adapt your logic to use the existing property, or explicitly declare the new property in the same edit. " +
-                "Every `.propertyName` you access MUST exactly match a property defined in the file content or declared in your newString." +
-            "25. PRIOR STEP REUSE: If the PRIOR STEPS CONTEXT section indicates that a method, property, or variable was added in a previous step, you MUST use that exact symbol in your current edit. " +
-                "Do NOT reinvent the logic inline. Do NOT hallucinate alternative property names. " +
-                "For example, if a prior step added `isFileLimitReached()`, you MUST use `isFileLimitReached()` in your HTML/TS code, not `uploadFileList.length >= maxFileAttachments`." +
-            "26. STRUCTURAL MOVES: When moving an element into a new container, adapt its structure/styling to match the existing children of the target container. " +
-                "For example, if moving a standalone div into a container where all children are wrapped in a specific class (like `optionsStatsDiv`), " +
-                "wrap the moved element in that same class rather than inserting it raw. " +
-            "27. ATOMIC STEPS (CRITICAL): The plan is split into atomic steps. You MUST execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
-                "  - If the step says 'Remove [X]', your oldString MUST be [X] (1-5 lines max). Set newString to an empty array []. Do NOT include surrounding context unless absolutely necessary.\n" +
-                "  - HTML ELEMENT REMOVAL: If the step asks to remove an HTML element (e.g., a <span>), your oldString MUST be EXACTLY that element (usually 1 line). Set newString to []. DO NOT include the parent container.\n" +
-                "  - DISAMBIGUATION: If the element appears multiple times, output ONLY the element. The system uses the TARGET LINE to find the correct instance.\n" +
-            "28. EXACT CONTEXT (CRITICAL): When modifying an existing loop or block, you MUST copy the EXACT variables, function names, and structure from the file content shown above. " +
-                    "Do NOT invent new helper methods (e.g., `renderMesh`, `setUniforms`), new variables (e.g., `this.explosions` if the file uses `explosions`), or new matrix functions (e.g., `mat4.mul` if the file uses `mat4.multiply`). " +
-                    "If the existing code uses `this.drawMesh(this.getExplosionMesh(), ...)`, your newString MUST use that exact same pattern.\n" +
-            "29. DUPLICATE BLOCKS (CRITICAL): If the file contains multiple identical sections (e.g., <div class=\"card-tags\"> appears 3 times), you MUST output ONLY the 1-10 lines you want to change. DO NOT include the entire <div> block. The system uses the TARGET LINE to find the correct instance. NEVER output more than 10 lines.\n" +
-                "you MUST include a CREATE TABLE IF NOT EXISTS statement for a new table introduced by your newString, placed BEFORE the INSERT/UPDATE statements. " +
-                "NEVER emit INSERT INTO or UPDATE for a table that has not been created yet — always prepend the CREATE TABLE first. " +
-                "Example: if your new code does `INSERT INTO user_settings (user_id, setting_key, setting_value) VALUES (...)` but `user_settings` " +
-                "does not exist in the file, right before that INSERT write: `CREATE TABLE IF NOT EXISTS user_settings (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, setting_key VARCHAR(255) NOT NULL, setting_value TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`" +
-            "30. EXACT DOM MIRRORING (SKELETON COPY): When the CHANGE REQUIRED asks to 'mirror', 'wire up', or 'copy' a pattern from another file, you MUST copy the EXACT structural skeleton (tags, CSS classes, and structural directives like *ngIf). " +
-                "Do NOT invent custom Angular components (e.g., `<popup-panel>`) if the source uses standard HTML tags with classes (e.g., `<div class=\"popupPanel\">`). " +
-                "CRITICAL: Do NOT copy the specific inner content (e.g., event checkboxes, loadNews() calls, or navigateTo() links) from the source file if that content relies on properties/methods that do not exist in the destination file. " +
-                "Instead, copy ONLY the bare minimum skeleton of what was demanded (e.g., the popup panel wrapper, the header, and a close button) and omit the extra fluff contents. " +
-                "Do NOT invent new method calls inside the HTML if they are not present in the source pattern. Provide a clean, empty structural skeleton that is ready for the user to populate later.\n";
+    private static string BuildEditSystemPrompt(string editFormat)
+    {
+        var intro = "You are a surgical code editor. Output ONLY a JSON object.\n\n";
+
+        var formatSection = editFormat switch
+        {
+            "format_c_insert" =>
+                "You MUST use FORMAT C to add a new method (insertAfter with an existing method as anchor):\n" +
+                "{\n" +
+                "  \"targetType\": \"method\",\n" +
+                "  \"targetName\": \"ExistingMethodName\",\n" +
+                "  \"insertAfter\": true,\n" +
+                "  \"newCode\": [\"    [HttpPost(\\\"route\\\")]\", \"    public async Task<IActionResult> NewMethod() {\", \"        ...\", \"    }\"]\n" +
+                "}\n" +
+                "  - targetType MUST be \"method\".\n" +
+                "  - targetName MUST be an EXISTING method name in the file (copy it VERBATIM from the file content).\n" +
+                "  - insertAfter MUST be true.\n" +
+                "  - newCode is the COMPLETE new method including attributes, signature, and body. Can be a string or array of lines.\n" +
+                "  - Do NOT use any other format. Do NOT return alreadyDone. Do NOT use fullFile.\n\n",
+
+            "delete" =>
+                "You are DELETING code. Use this format:\n" +
+                "{\n" +
+                "  \"oldString\": [\"  line to delete\", \"  another line\"],\n" +
+                "  \"newString\": []\n" +
+                "}\n" +
+                "  - oldString = EXACT lines to remove (1-5 lines max). Copy verbatim from the file.\n" +
+                "  - newString = empty array [].\n" +
+                "  - NEVER include surrounding container lines — delete ONLY what's asked.\n\n",
+
+            "full_file" =>
+                "This is a NEW FILE (does not exist yet). Use full-file replacement:\n" +
+                "{\n" +
+                "  \"fullFile\": [\"...entire file content...\"]\n" +
+                "}\n" +
+                "  - fullFile MUST contain EVERY line of the new file.\n" +
+                "  - Use array format for multi-line content.\n\n",
+
+            _ =>
+                "Use oldString/newString targeted edit format:\n" +
+                "{\n" +
+                "  \"oldString\": [\"  line1 EXACTLY as in file\", \"  line2\"],\n" +
+                "  \"newString\": [\"  line1\", \"  replacement line2\"]\n" +
+                "}\n" +
+                "  CRITICAL: Each array element is ONE line of code. NEVER split a line across multiple elements.\n" +
+                "  TRAILING WHITESPACE: You MAY omit trailing spaces at the END of a line of code (before the newline). " +
+                "But LEADING whitespace (indentation) is REQUIRED.\n" +
+                "  For single-line: {\"oldString\": \"line1\\nline2\", \"newString\": \"replacement line 1\\nreplacement line 2\"}\n\n"
+        };
+
+        var commonRules =
+            "CRITICAL RULES:\n" +
+            "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation).\n" +
+            "2. oldString MUST be 1-5 lines. NEVER include surrounding containers.\n" +
+            "3. NEVER use placeholders (... or […] or /* ... */) in oldString or newString\n" +
+            "4. oldString must NOT have blank first/last lines — trim any empty lines\n" +
+            "5. Each line's meaningful content should be ≥ 8 characters — lines like `}`, `);`, `{` are too short.\n" +
+            "6. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
+            "7. NO-OP PREVENTION (CRITICAL): oldString and newString MUST be DIFFERENT. " +
+                "If the step asks you to ADD or INSERT code, the new code MUST appear in newString but MUST NOT appear in oldString.\n" +
+            "8. INDENTATION: newString MUST use the EXACT SAME leading whitespace as oldString for every line.\n" +
+            "9. MODIFY the existing, don't ADD new alongside the existing. If you see duplicate functionality in newString, REMOVE the old duplicate part.\n" +
+            "10. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
+            "11. SPACING — tokens concatenated without spaces are the #1 cause of bad edits. Verify EVERY token boundary.\n" +
+            "12. ATOMIC STEPS: Execute EXACTLY what the CHANGE REQUIRED asks for — no more, no less.\n" +
+            "13. If your change introduces a new SQL table, include a CREATE TABLE IF NOT EXISTS statement BEFORE any INSERT/UPDATE.\n" +
+            "14. NEVER write `{{ex.Message}}` inside an interpolated string — use `{ex.Message}` with single braces.\n";
+
+        return intro + formatSection + commonRules;
+    }
 
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
@@ -971,6 +895,33 @@ public class AgentController : ControllerBase
                 sb.AppendLine(distilled);
                 sb.AppendLine();
             }
+
+            // Extract and prominently display property definitions for [FromBody] parameter types
+            // mentioned in the step change, so the LLM uses exact property names.
+            var typeNameMatch = Regex.Match(step.Change ?? "", @"\b([A-Z]\w*(?:Dto|DTO|Request|Response|Model|Data))\b");
+            if (typeNameMatch.Success)
+            {
+                var paramType = typeNameMatch.Groups[1].Value;
+                var typeSection = Regex.Match(explorationContext,
+                    $@"(?:class|record|struct)\s+{Regex.Escape(paramType)}\b[^;{{]*(?:{{[^}}]*}})?",
+                    RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                if (typeSection.Success)
+                {
+                    var props = Regex.Matches(typeSection.Value,
+                        @"(?:public|private|protected|internal|readonly|static)?\s*(?:\w+(?:\[\])?(?:<[^>]*>)?)\s+(\w+)\s*\{\s*get;\s*set;\s*\}",
+                        RegexOptions.Multiline)
+                        .Select(m => m.Groups[1].Value)
+                        .ToList();
+                    if (props.Count > 0)
+                    {
+                        sb.AppendLine("⚠ TYPE EVIDENCE — Parameter type `" + paramType + "` has these EXACT properties.");
+                        sb.AppendLine("  You MUST use these property names DIRECTLY on the parameter variable.");
+                        sb.AppendLine("  Do NOT nest them under an invented wrapper (e.g. do NOT write `param.System?.OS` — write `param.OS`).");
+                        sb.AppendLine("  Properties: " + string.Join(", ", props));
+                        sb.AppendLine();
+                    }
+                }
+            }
         }
 
         if (!fileExists)
@@ -1112,6 +1063,16 @@ public class AgentController : ControllerBase
                         sb.AppendLine("  Reuse this EXACT body. Change ONLY the method signature (first line) to match the original return type.");
                     }
                 }
+                else if (h.error.Contains("alreadyDone", StringComparison.OrdinalIgnoreCase) &&
+                         h.error.Contains("missing keywords", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("  ⚠ CRITICAL: You returned {\"alreadyDone\": true} but the file does NOT contain the requested code.");
+                    sb.AppendLine("  The CHANGE REQUIRED asks you to ADD new code that is not present in the file.");
+                    sb.AppendLine("  Do NOT return alreadyDone — it will always be rejected because the method/endpoint does not exist yet.");
+                    sb.AppendLine("  Do NOT return fullFile — it will also be rejected because it dumps the entire file.");
+                    sb.AppendLine("  You MUST output the actual edit using FORMAT C with insertAfter:true — this is the ONLY accepted format.");
+                    sb.AppendLine("  Set targetType=\"method\", targetName to an EXISTING method name, insertAfter=true, and newCode to your new method.");
+                }
                 else if (!string.IsNullOrWhiteSpace(h.old))
                 {
                     sb.AppendLine($"  Your oldString was:");
@@ -1151,16 +1112,18 @@ public class AgentController : ControllerBase
                 {
                     sb.AppendLine("  You used FORMAT C but the symbol was not found. " +
                                   "This file has no named methods/classes for FORMAT C to target. " +
-                                  "Switch to oldString/newString: copy the EXACT lines from the file content, " +
-                                  "verbatim including indentation, and set them as oldString.");
+                                  "If this is NOT a .cs file, switch to oldString/newString: copy the EXACT lines from the file content, " +
+                                  "verbatim including indentation, and set them as oldString. " +
+                                  "If this IS a .cs file, the file may be empty or have no methods — use FORMAT C with a different targetName.");
                 }
             }
             sb.AppendLine();
             if (hadTruncation)
             {
-                sb.AppendLine("Previous FULL_FILE response was too long and got truncated.");
-                sb.AppendLine("Use <<<OLD>>> / <<<NEW>>> targeted edits instead — they are smaller and always fit.");
-                sb.AppendLine("If multiple changes are needed, make one small edit at a time.");
+                sb.AppendLine("Previous response was too long and got truncated.");
+                sb.AppendLine("If the file is .cs and you are adding a new method, use FORMAT C with insertAfter:true — it's compact.");
+                sb.AppendLine("Otherwise, use <<<OLD>>> / <<<NEW>>> targeted edits — they are smaller and always fit.");
+                sb.AppendLine("Do NOT use fullFile — it dumps the entire file which is too long.");
             }
             else
             {
@@ -1223,16 +1186,34 @@ public class AgentController : ControllerBase
                 }
                 else
                 {
-                    sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
-                    sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
-                    sb.AppendLine("  • Look at the FILE CONTENT block. Identify the line numbers of the region to replace.");
-                    sb.AppendLine("  • Output a JSON object with this exact shape:");
-                    sb.AppendLine("    {");
-                    sb.AppendLine("      \"fullFile\": [\"...entire file content with your changes applied...\"]");
-                    sb.AppendLine("    }");
-                    sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
-                    sb.AppendLine("    Do NOT omit any lines — this is a full-file replacement.");
-                    sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                    var ch = (step.Change ?? "").ToLowerInvariant();
+                    var isNewCsMethod = ext == ".cs" &&
+                        (ch.Contains("add") || ch.Contains("create") || ch.Contains("insert") || ch.Contains("new") || ch.Contains("define") || ch.Contains("implement")) &&
+                        (ch.Contains("method") || ch.Contains("endpoint") || ch.Contains("action") || ch.Contains("route") ||
+                         (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+
+                    if (isNewCsMethod)
+                    {
+                        sb.AppendLine("  STRATEGY: FORMAT_C_INSERTION.");
+                        sb.AppendLine("  • You MUST use FORMAT C with insertAfter:true.");
+                        sb.AppendLine("  • Set targetType=\"method\", targetName to an EXISTING method name");
+                        sb.AppendLine("    (e.g. the LAST method in the class), insertAfter=true, and newCode");
+                        sb.AppendLine("    to the COMPLETE new method including [HttpPost] attribute, signature, and body.");
+                        sb.AppendLine("  • Do NOT use fullFile and do NOT return alreadyDone — both will be rejected.");
+                    }
+                    else
+                    {
+                        sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
+                        sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
+                        sb.AppendLine("  • Look at the FILE CONTENT block. Identify the line numbers of the region to replace.");
+                        sb.AppendLine("  • Output a JSON object with this exact shape:");
+                        sb.AppendLine("    {");
+                        sb.AppendLine("      \"fullFile\": [\"...entire file content with your changes applied...\"]");
+                        sb.AppendLine("    }");
+                        sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
+                        sb.AppendLine("    Do NOT omit any lines — this is a full-file replacement.");
+                        sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                    }
                 }
             }
             sb.AppendLine();
@@ -1244,13 +1225,19 @@ public class AgentController : ControllerBase
         {
             sb.AppendLine("⚠ CRITICAL DELETION INSTRUCTION: You are deleting code. Your oldString MUST be EXACTLY the 1-5 lines of code being deleted. Set newString to an empty array []. Do NOT include the parent <div> or any surrounding lines in oldString. Output ONLY the exact lines to delete.");
         }
-        else if (ext == ".cs" && Regex.IsMatch(changeLower, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b"))
+        else if (ext == ".cs" && (
+            Regex.IsMatch(changeLower, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b") ||
+            Regex.IsMatch(step.Change ?? "", @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
+            Regex.IsMatch(step.Change ?? "", @"\b[A-Z]\w+\s+method\b")))
         {
             sb.AppendLine("⚠ CRITICAL — .cs NEW METHOD CREATION: You MUST use FORMAT C with insertAfter:true.");
             sb.AppendLine("  Set targetType=\"method\", targetName to an EXISTING method name that already exists");
             sb.AppendLine("  in the file (e.g. the LAST method in the class, like \"SaveSettings\"),");
             sb.AppendLine("  insertAfter=true, and newCode to the COMPLETE new method including [HttpPost] attribute,");
             sb.AppendLine("  signature, and body. Do NOT use oldString/newString — it will be rejected.");
+            sb.AppendLine("  Do NOT use fullFile — it will also be rejected because it dumps the entire file.");
+            sb.AppendLine("  Do NOT return alreadyDone — the method does not exist yet.");
+            sb.AppendLine("  ONLY FORMAT C with insertAfter:true will be accepted.");
             sb.AppendLine("  Example: {\"targetType\": \"method\", \"targetName\": \"SaveSettings\", \"insertAfter\": true, \"newCode\": [...]}");
             sb.AppendLine();
         }
@@ -1259,7 +1246,25 @@ public class AgentController : ControllerBase
         sb.AppendLine("Output the edit now:");
         if (emitSse)
             await SendSse(Response, "edit-resolve", new { }, ct);
-        var (raw, _, resolveError2) = await CallLlmRawStreaming(EditResolveSystemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
+
+        // ── Classify edit format ─────────────────────────────────────────
+        var classIsNewCsMethod = ext == ".cs" && fileExists &&
+            (changeLower.Contains("add") || changeLower.Contains("create") || changeLower.Contains("insert") || changeLower.Contains("new") || changeLower.Contains("define") || changeLower.Contains("implement")) &&
+            (changeLower.Contains("method") || changeLower.Contains("endpoint") || changeLower.Contains("action") || changeLower.Contains("route") ||
+             (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+
+        string editFormat;
+        if (!fileExists)
+            editFormat = "full_file";
+        else if (classIsNewCsMethod)
+            editFormat = "format_c_insert";
+        else if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+            editFormat = "delete";
+        else
+            editFormat = "old_new";
+
+        var systemPrompt = BuildEditSystemPrompt(editFormat);
+        var (raw, _, resolveError2) = await CallLlmRawStreaming(systemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
 
         if (!string.IsNullOrWhiteSpace(resolveError2) && resolveError2.Contains("Repetition loop detected", StringComparison.OrdinalIgnoreCase))
         {
@@ -1276,7 +1281,8 @@ public class AgentController : ControllerBase
         {
             return (null, null, false, null, false,
                 "LLM response was too long (" + raw.Length + " chars) and likely truncated due to a repetition loop. " +
-                "Do NOT output massive blocks. Use FORMAT C with insertAfter:true and newCode as an array of lines.", false);
+                "Do NOT output massive blocks, do NOT use fullFile, and do NOT return alreadyDone. " +
+                "Use FORMAT C with insertAfter:true and newCode as an array of lines — this is the ONLY accepted format.", false);
         }
 
 
@@ -1343,26 +1349,49 @@ public class AgentController : ControllerBase
             // Runs AFTER alreadyDone check to avoid false positives.
             if (ext == ".cs" &&
                 !jRoot.TryGetProperty("targetType", out _) &&
-                !jRoot.TryGetProperty("fullFile", out _) &&
                 !string.IsNullOrWhiteSpace(step.Change) &&
-                Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase))
+                (Regex.IsMatch(step.Change, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase) ||
+                 Regex.IsMatch(step.Change, @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
+                 Regex.IsMatch(step.Change, @"\b[A-Z]\w+\s+method\b")))
             {
+                var hasFullFile = jRoot.TryGetProperty("fullFile", out _);
                 return (null, null, false, null, false,
                     "C# NEW METHOD ENFORCEMENT: You MUST use FORMAT C (targetType/targetName/insertAfter) " +
-                    "to add a new method in a .cs file. oldString/newString is NOT allowed for C# method insertion. " +
+                    "to add a new method in a .cs file. " +
+                    (hasFullFile
+                        ? "fullFile is also NOT allowed — it dumps the entire file which is too long and bypasses AST insertion."
+                        : "oldString/newString is NOT allowed for C# method insertion. ") +
                     "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
-                    "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body.", false);
+                    "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body. " +
+                    "Do NOT return alreadyDone or fullFile — ONLY FORMAT C with insertAfter:true will be accepted.", false);
             }
 
-            if (jRoot.TryGetProperty("fullFile", out var ff))
+            // fullFile handling: reject if adding new .cs method, otherwise process normally
+            if (jRoot.TryGetProperty("fullFile", out var ffVal))
             {
+                var isNewCsMethod = ext == ".cs" &&
+                    !string.IsNullOrWhiteSpace(step.Change) &&
+                    (Regex.IsMatch(step.Change, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase) ||
+                     Regex.IsMatch(step.Change, @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
+                     Regex.IsMatch(step.Change, @"\b[A-Z]\w+\s+method\b"));
+
+                if (isNewCsMethod)
+                {
+                    return (null, null, false, null, false,
+                        "C# NEW METHOD ENFORCEMENT: fullFile is NOT allowed for adding methods in .cs. " +
+                        "You MUST use FORMAT C with insertAfter:true. " +
+                        "Set targetType=\"method\", targetName to an EXISTING method name (e.g. the last method in the class), " +
+                        "insertAfter=true, and newCode to the COMPLETE new method including attributes, signature, and body. " +
+                        "Do NOT return alreadyDone either — ONLY FORMAT C with insertAfter:true will be accepted.", false);
+                }
+
                 string? body = null;
-                if (ff.ValueKind == JsonValueKind.String)
-                    body = ff.GetString();
-                else if (ff.ValueKind == JsonValueKind.Array)
+                if (ffVal.ValueKind == JsonValueKind.String)
+                    body = ffVal.GetString();
+                else if (ffVal.ValueKind == JsonValueKind.Array)
                 {
                     var lines = new List<string>();
-                    foreach (var item in ff.EnumerateArray())
+                    foreach (var item in ffVal.EnumerateArray())
                     {
                         if (item.ValueKind == JsonValueKind.String)
                             lines.Add(AgentUtilities.UnescapeString(item.GetString() ?? ""));
@@ -1465,20 +1494,10 @@ public class AgentController : ControllerBase
                                 return (fullStr, newStr, false, null, false, null, true);
                             }
                         }
-                        var fmtNewCode = newCodeStr;
-                        if (string.Equals(Path.GetExtension(relPath), ".cs", StringComparison.OrdinalIgnoreCase)
-                            && !fmtNewCode.Contains("@\"", StringComparison.Ordinal)
-                            && !fmtNewCode.Contains("/*", StringComparison.Ordinal)
-                            && !fmtNewCode.Contains("///", StringComparison.Ordinal))
-                        {
-                            try
-                            {
-                                var fmtTree = CSharpSyntaxTree.ParseText(fmtNewCode);
-                                fmtNewCode = fmtTree.GetRoot().NormalizeWhitespace().ToFullString();
-                            }
-                            catch { }
-                        }
-                        var indented = AutoIndentCode(fullStr, fmtNewCode, relPath);
+                        // Skip Roslyn NormalizeWhitespace for method insertion — it rewrites
+                        // internal spacing (braces, operators, SQL) in ways that don't match
+                        // the project style. AutoIndentCode below handles indentation level only.
+                        var indented = AutoIndentCode(fullStr, newCodeStr, relPath);
                         newStr = fullStr + "\n" + indented;
                         return (fullStr, newStr, false, null, false, null, true);
                     }
@@ -1933,6 +1952,8 @@ public class AgentController : ControllerBase
         if (changeLower.StartsWith("add ") && changeLower.Contains(" method"))
         {
             var methodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create)\s+(?:the\s+)?(\w+)\s+method", RegexOptions.IgnoreCase);
+            if (!methodMatch.Success)
+                methodMatch = Regex.Match(step.Change ?? "", @"method\s+named\s+(\w+)", RegexOptions.IgnoreCase);
             if (methodMatch.Success)
             {
                 var methodName = methodMatch.Groups[1].Value;
@@ -2150,6 +2171,10 @@ public class AgentController : ControllerBase
         sb.AppendLine("      → alreadyDone = true.");
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
+        sb.AppendLine("   DO NOT decouple method route attributes from the method itself. In C#/Java/Python, route attributes");
+        sb.AppendLine("   ([HttpGet], @app.get, @RequestMapping, etc.) ARE part of the method declaration at the same");
+        sb.AppendLine("   location — they are NOT a separate 'endpoint registration'. 'Add GetBenchmarks method with [HttpGet]'");
+        sb.AppendLine("   is ONE step, not two.");
         sb.AppendLine("   i) CREATE TABLE IS NOT A SEPARATE STEP: If a step mentions adding a method/endpoint that");
         sb.AppendLine("      inserts/updates data AND also mentions creating the table, that is ONE step.");
         sb.AppendLine("      The CREATE TABLE IF NOT EXISTS statement MUST be inline inside the method body,");
@@ -2536,6 +2561,16 @@ public class AgentController : ControllerBase
         var result = new List<string>();
         foreach (var c in candidates)
         {
+            // Skip method calls — 'BadRequest(...)' is not a type (but keep 'new Request(...)')
+            var isMethodCall = Regex.IsMatch(newCode, @"\b" + Regex.Escape(c) + @"\s*\(");
+            var isConstructor = Regex.IsMatch(newCode, @"new\s+" + Regex.Escape(c) + @"\s*\(");
+            if (isMethodCall && !isConstructor)
+                continue;
+
+            // Skip property accesses — 'request.Model' is not a type
+            if (Regex.IsMatch(newCode, @"\." + Regex.Escape(c) + @"\b"))
+                continue;
+
             var fbPattern = @"\[FromBody\]\s+\b" + Regex.Escape(c) + @"\b";
             if (Regex.IsMatch(newCode, fbPattern))
             { result.Add(c); continue; }
@@ -3389,10 +3424,13 @@ public class AgentController : ControllerBase
                         RegexOptions.IgnoreCase))
                     {
                         var rel = Path.GetRelativePath(projectRoot, pf).Replace('\\', '/');
-                        if (alreadyRead.Contains(rel) || alreadyRead.Contains(pf)) continue;
-                        alreadyRead.Add(rel);
+                        // Only skip if this exact same file was already added as a type excerpt
+                        // (do NOT skip based on exploration — model definitions are critical context)
+                        if (alreadyRead.Contains("_type:" + rel) || alreadyRead.Contains("_type:" + pf))
+                            continue;
+                        alreadyRead.Add("_type:" + rel);
 
-                        var excerpt = AgentUtilities.ExtractRelevantExcerpt(content, typeName, null, 600);
+                        var excerpt = AgentUtilities.ExtractRelevantExcerpt(content, typeName, null, 800);
                         buf.AppendLine($"### {rel}  (model: {typeName})");
                         buf.AppendLine("```csharp");
                         buf.AppendLine(excerpt);
@@ -4799,7 +4837,34 @@ emitSse, ct);
                     await SaveEditWithUndoAsync(fullPath, fixedContent, relPath, projectRoot, preEditContent, ct);
                     newContent = fixedContent;
                     await EmitLog(emitSse, "info",
-                        $"Post-edit fixup applied to {relPath} (verbatim escapes / DTO wrappers)", ct: ct);
+                        $"Post-edit fixup applied to {relPath} (verbatim escapes / DTO wrappers / doubled braces)", ct: ct);
+                }
+            }
+
+            // Roslyn syntax check: parse the .cs file and report syntax errors
+            if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newContent))
+            {
+                try
+                {
+                    var syntaxTree = CSharpSyntaxTree.ParseText(newContent);
+                    var diagnostics = syntaxTree.GetDiagnostics()
+                        .Where(d => d.Severity == DiagnosticSeverity.Error)
+                        .Take(10)
+                        .ToList();
+                    if (diagnostics.Count > 0)
+                    {
+                        var errorLines = diagnostics
+                            .Select(d => $"  L{d.Location.GetLineSpan().StartLinePosition.Line + 1}: {d.GetMessage()}")
+                            .ToList();
+                        await EmitLog(emitSse, "warn",
+                            $"Roslyn syntax errors in {relPath} after edit ({diagnostics.Count} found):" +
+                            Environment.NewLine + string.Join(Environment.NewLine, errorLines), ct: ct);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Roslyn parse failed for {relPath}: {ex.Message}", ct: ct);
                 }
             }
 
@@ -7449,6 +7514,57 @@ emitSse, ct);
         catch (Exception ex)
         {
             await EmitLog(true, "warn", "Failed to persist full plan to boarddata", new { cardId, error = ex.Message });
+        }
+    }
+
+    private async Task PersistCohesionToCardAsync(string? cardId, string relPath, List<string> issues, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(cardId) || issues == null)
+            return;
+
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (string.IsNullOrWhiteSpace(raw)) return;
+
+            using var jsonDoc = JsonDocument.Parse(raw);
+            var root = JsonNode.Parse(jsonDoc.RootElement.GetRawText())?.AsObject();
+            if (root == null) return;
+
+            var columns = new[] { "todo", "doing", "done", "selfImproving" };
+            foreach (var column in columns)
+            {
+                if (!root.TryGetPropertyValue(column, out var columnNode) || columnNode is not JsonArray columnItems)
+                    continue;
+
+                foreach (var item in columnItems)
+                {
+                    if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
+                        continue;
+
+                    cardObj["_cohesion"] = new JsonObject
+                    {
+                        ["file"] = relPath,
+                        ["issues"] = new JsonArray(issues.Select(i => JsonValue.Create(i)).ToArray())
+                    };
+
+                    var saved = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                    await _boardData.SaveRawAsync(saved);
+                    if (emitSse)
+                    {
+                        await SendSse(Response, "cohesion", new
+                        {
+                            file = relPath,
+                            issues
+                        }, ct);
+                    }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            await EmitLog(true, "warn", "Failed to persist cohesion check to boarddata", new { cardId, error = ex.Message });
         }
     }
 
@@ -10952,7 +11068,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var parts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // Extract PascalCase method/endpoint names (e.g. AddBenchmark, PostBenchmarks, GetSettings)
         var methodMatches = Regex.Matches(change,
-            @"\b(Post|Add|Get|Put|Delete|Create|Insert|Update)[A-Z][a-z]+[A-Z][A-Za-z0-9]*\b");
+            @"\b(Post|Add|Get|Put|Delete|Create|Insert|Update)[A-Z][A-Za-z0-9]*\b");
         foreach (Match m in methodMatches)
         {
             parts.Add(m.Value);
@@ -11635,30 +11751,55 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                         if (reflectedSteps.Count > 0)
                         {
-                            await EmitLog(emitSse, "info",
-                                $"  ➕ Reflection added {reflectedSteps.Count} step(s): " +
-                                string.Join(" | ", reflectedSteps.Select(s => s.Change)), ct: ct);
+                            // Deduplicate: skip reflected steps whose signature matches the step we just completed
+                            var completedSig = GetStepSignature(planFile, item.Change ?? "");
+                            if (completedSig != null)
+                            {
+                                var before = reflectedSteps.Count;
+                                reflectedSteps = reflectedSteps
+                                    .Where(rs => GetStepSignature(rs.File ?? "", rs.Change ?? "") != completedSig)
+                                    .ToList();
+                                if (reflectedSteps.Count < before)
+                                    await EmitLog(emitSse, "info",
+                                        $"  ↪ Skipped {before - reflectedSteps.Count} reflected step(s) with same signature as completed step", ct: ct);
+                            }
 
-                            planItems.InsertRange(itemIdx + 1, reflectedSteps);
-                            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
-                                summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
-                                append: false);
+                            if (reflectedSteps.Count > 0)
+                            {
+                                await EmitLog(emitSse, "info",
+                                    $"  ➕ Reflection added {reflectedSteps.Count} step(s): " +
+                                    string.Join(" | ", reflectedSteps.Select(s => s.Change)), ct: ct);
 
-                            if (emitSse)
-                                await SendSse(Response, "plan", new
-                                {
-                                    thinking = $"Reflection after editing {planFile}",
-                                    summary = $"Added {reflectedSteps.Count} follow-up step(s)",
-                                    items = planItems.Select((p, i) => new
+                                planItems.InsertRange(itemIdx + 1, reflectedSteps);
+                                await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
+                                    summary: $"Reflection: +{reflectedSteps.Count} step(s)", score: 0,
+                                    append: false);
+
+                                if (emitSse)
+                                    await SendSse(Response, "plan", new
                                     {
-                                        index = i,
-                                        file = p.File,
-                                        change = p.Change,
-                                        priority = p.Priority,
-                                        line = p.LineNumber,
-                                        done = false
-                                    }).ToList()
-                                }, ct);
+                                        thinking = $"Reflection after editing {planFile}",
+                                        summary = $"Added {reflectedSteps.Count} follow-up step(s)",
+                                        items = planItems.Select((p, i) => new
+                                        {
+                                            index = i,
+                                            file = p.File,
+                                            change = p.Change,
+                                            priority = p.Priority,
+                                            line = p.LineNumber,
+                                            done = false
+                                        }).ToList()
+                                    }, ct);
+                            }
+                        }
+
+                        // Cohesion check after successful edit
+                        if (AgentUtilities.IsRelativePath(planFile))
+                        {
+                            var cohesionIssues = await RunCohesionCheckAsync(
+                                planFile, currentContent, projectRoot, emitSse, ct);
+                            await PersistCohesionToCardAsync(
+                                cardId, planFile, cohesionIssues, emitSse, ct);
                         }
                     }
                 }
@@ -13668,6 +13809,84 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             .Where(s => s.Length >= 3 && !builtins.Contains(s) && !char.IsUpper(s[0]))
             .Distinct()
             .ToList();
+    }
+
+    private async Task<List<string>> RunCohesionCheckAsync(
+        string relPath, string fileContent, string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(fileContent) || string.IsNullOrWhiteSpace(relPath))
+            return new List<string>();
+
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var codeExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".cs", ".ts", ".js", ".tsx", ".jsx", ".html", ".css", ".scss", ".json" };
+        if (!codeExts.Contains(ext)) return new List<string>();
+
+        var contentPreview = fileContent.Length > 6000
+            ? fileContent[..6000] + "\n// ... (truncated)"
+            : fileContent;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"FILE: {relPath}");
+        sb.AppendLine();
+        sb.AppendLine("Scan the file and list any cohesion issues with the recently added code.");
+        sb.AppendLine("Cohesion issues include:");
+        sb.AppendLine("  - New method placed at wrong location (not grouped with similar methods)");
+        sb.AppendLine("  - Naming or style inconsistent with the rest of the file");
+        sb.AppendLine("  - Missing blank lines between methods");
+        sb.AppendLine("  - Inconsistent error handling, logging, or return patterns");
+        sb.AppendLine("  - Inconsistent attribute/annotation usage");
+        sb.AppendLine("  - Inconsistent SQL or query patterns compared to similar existing methods");
+        sb.AppendLine("  - Code that looks out of place or doesn't follow the file's conventions");
+        sb.AppendLine();
+        sb.AppendLine("Do NOT fix anything. Do NOT rewrite anything.");
+        sb.AppendLine("If no issues found, output: {\"issues\": []}");
+        sb.AppendLine("Otherwise output: {\"issues\": [\"Issue 1\", \"Issue 2\", ...]}");
+        sb.AppendLine();
+        sb.AppendLine("FILE CONTENT:");
+        sb.AppendLine("```");
+        sb.AppendLine(contentPreview);
+        sb.AppendLine("```");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY valid JSON. No markdown. No explanations.");
+
+        var (raw, _, _) = await CallLlmRaw(
+            "You detect code cohesion issues after an edit. Output ONLY JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(20), maxTokens: 512);
+
+        var issues = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                var cleaned = raw.Trim();
+                if (cleaned.StartsWith("```"))
+                {
+                    var start = cleaned.IndexOf('\n');
+                    if (start > 0) cleaned = cleaned.Substring(start).Trim();
+                    if (cleaned.EndsWith("```")) cleaned = cleaned[..^3].Trim();
+                }
+                var result = JsonSerializer.Deserialize<CohesionCheckResult>(cleaned);
+                if (result?.Issues != null)
+                    issues = result.Issues;
+            }
+            catch { /* parsing failed — silently ignore */ }
+        }
+
+        if (issues.Count > 0)
+        {
+            await EmitLog(emitSse, "info",
+                $"  🔍 Cohesion check: {issues.Count} issue(s) found in {relPath}", ct: ct);
+            foreach (var issue in issues)
+                await EmitLog(emitSse, "info", $"    - {issue}", ct: ct);
+        }
+        else
+        {
+            await EmitLog(emitSse, "info", $"  🔍 Cohesion check: no issues in {relPath}", ct: ct);
+        }
+
+        return issues;
     }
 
     /// <summary>

@@ -376,9 +376,17 @@
 
           <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer">
             <details open>
-              <summary>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : '' }}
+              <summary>
+                <span>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : '' }}</span>
+                <span class="log-font-controls">
+                  <button class="log-font-btn" ng-click="vm.decreaseLlmFont(); $event.stopPropagation()"
+                    title="Decrease font size">−</button>
+                  <span class="log-font-size-label">{{vm.llmFontSize}}px</span>
+                  <button class="log-font-btn" ng-click="vm.increaseLlmFont(); $event.stopPropagation()"
+                    title="Increase font size">+</button>
+                </span>
               </summary>
-              <pre class="streaming-text streaming-tokens">{{vm.streamingTokenBuffer}}</pre>
+              <pre class="streaming-text streaming-tokens" ng-style="{'font-size': vm.llmFontSize + 'px'}">{{vm.streamingTokenBuffer}}</pre>
             </details>
           </div>
 
@@ -386,7 +394,7 @@
             <div ng-repeat="rs in vm.resolveStreams track by $index" class="resolve-stream-section">
               <details>
                 <summary>💬 Resolve {{$index + 1}}</summary>
-                <pre class="streaming-text">{{rs.content}}</pre>
+                <pre class="streaming-text" ng-style="{'font-size': vm.llmFontSize + 'px'}">{{rs.content}}</pre>
               </details>
               <div ng-if="!$last" class="resolve-stream-delimiter">━━━━━━━━━━━━━━━━━━━━</div>
             </div>
@@ -420,9 +428,18 @@
                   
                             <div class="agent-streaming-thinking" ng-if="vm.streamingThinking || vm.planItems.length">
                               <details>
-                                <summary>🧠 Plan</summary>
-                                <pre class="streaming-text" ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
-                                <div ng-if="vm.planItems.length" class="plan-items-list" style="margin-top: 8px;">
+                                <summary>
+                                  <span>🧠 Plan</span>
+                                  <span class="log-font-controls">
+                                    <button class="log-font-btn" ng-click="vm.decreasePlanFont(); $event.stopPropagation()"
+                                      title="Decrease font size">−</button>
+                                    <span class="log-font-size-label">{{vm.planFontSize}}px</span>
+                                    <button class="log-font-btn" ng-click="vm.increasePlanFont(); $event.stopPropagation()"
+                                      title="Increase font size">+</button>
+                                  </span>
+                                </summary>
+                                <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}" ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
+                                <div ng-if="vm.planItems.length" class="plan-items-list" ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
                                   <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
                                     ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
                                     <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
@@ -446,6 +463,20 @@
                                           item.newString.slice(0,200) + '…' : item.newString}}</div>
                                       </div>
                                     </div>
+                                  </div>
+                                </div>
+                              </details>
+                            </div>
+
+                            <div class="agent-streaming-thinking" ng-if="vm.cohesionIssues && vm.cohesionIssues.length">
+                              <details>
+                                <summary>
+                                  <span>🔍 Cohesion Issues{{vm.cohesionFile ? ' (' + vm.cohesionFile + ')' : ''}}</span>
+                                </summary>
+                                <div class="cohesion-issues-list" style="margin-top: 4px;">
+                                  <div ng-repeat="issue in vm.cohesionIssues track by $index"
+                                    style="padding: 2px 6px; margin-bottom: 2px; background: rgba(255, 100, 50, 0.08); border-left: 2px solid #ff6432; border-radius: 2px; font-size: 12px;">
+                                    ⚠ {{issue}}
                                   </div>
                                 </div>
                               </details>

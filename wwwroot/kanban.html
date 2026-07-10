@@ -126,6 +126,17 @@
               </div>
             </div>
           </div>
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
+              </div>
+            </div>
+          </div>
           <div class="card-tags">
             <span class="card-tag tag-ready" ng-if="card.ready">READY</span>
             <span class="card-tag tag-bench" ng-if="card._benchmark" style="color:#e5c07b;font-weight:700;">BENCH</span>
@@ -300,6 +311,18 @@
                       item.newString.slice(0,200) + '…' : item.newString}}</div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
               </div>
             </div>
           </div>
@@ -568,6 +591,18 @@
                       item.newString.slice(0,200) + '…' : item.newString}}</div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-plan" ng-if="card._cohesion && card._cohesion.issues && card._cohesion.issues.length"
+            style="border-left-color: #ff6432;">
+            <div class="plan-header" style="color:#ff6432;">🔍 Cohesion{{card._cohesion.file ? ' (' + card._cohesion.file + ')' : ''}}</div>
+            <div class="plan-items-list">
+              <div ng-repeat="issue in card._cohesion.issues track by $index" class="plan-item-row"
+                style="background: rgba(255, 100, 50, 0.06); border-left: 2px solid #ff6432; border-radius: 2px; padding: 2px 6px; margin-bottom: 2px;">
+                <span style="color:#ff6432;flex-shrink:0;">⚠</span>
+                <span class="plan-item-change">{{issue}}</span>
               </div>
             </div>
           </div>

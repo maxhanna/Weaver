@@ -129,6 +129,8 @@
     vm.agentActivityLog = [];
     vm.agentActivityLogLength = 0;
     vm.logFontSize = 18;
+    vm.llmFontSize = 14;
+    vm.planFontSize = 14;
     vm.pendingContextReview = null;
     vm.contextReviewCountdown = 0;
     vm.contextReviewTimer = null;
@@ -147,6 +149,8 @@
     vm.resolveStreams = [];
     vm.lastStreamingStepsUpdate = 0;
     vm.planItems = [];
+    vm.cohesionIssues = [];
+    vm.cohesionFile = '';
 
     // Pre-load file hints on init (results used when settings panel opens)
     $http.get('/api/filehints').then(function (resp) {
@@ -199,6 +203,18 @@
     };
     vm.decreaseLogFont = function () {
       vm.logFontSize = Math.max(vm.logFontSize - 2, 6);
+    };
+    vm.increaseLlmFont = function () {
+      vm.llmFontSize = Math.min(vm.llmFontSize + 2, 32);
+    };
+    vm.decreaseLlmFont = function () {
+      vm.llmFontSize = Math.max(vm.llmFontSize - 2, 6);
+    };
+    vm.increasePlanFont = function () {
+      vm.planFontSize = Math.min(vm.planFontSize + 2, 32);
+    };
+    vm.decreasePlanFont = function () {
+      vm.planFontSize = Math.max(vm.planFontSize - 2, 6);
     };
 
     // Auto-scroll agent log when new content is added.
@@ -2117,6 +2133,8 @@
           vm.streamingSteps = [];
           vm.streamingFilesEdited = [];
           vm.planItems = [];
+          vm.cohesionIssues = [];
+          vm.cohesionFile = '';
           vm.agentActivityLog = [];
           vm._lastStreamMs = Date.now();
           vm.activeStepIndex = null;
@@ -2410,6 +2428,24 @@
                               }
                             } catch (e) {
                               pushAgentLog('error', 'Question error: ' + (e.message || e));
+                            }
+                            break;
+                          case 'cohesion':
+                            if (parsed && parsed.issues && parsed.issues.length) {
+                              vm.cohesionIssues = parsed.issues;
+                              vm.cohesionFile = parsed.file || '';
+                              var fileLabel = vm.cohesionFile ? ' in ' + vm.cohesionFile : '';
+                              pushAgentLog('info', '🔍 Cohesion: ' + parsed.issues.length + ' issue(s) found' + fileLabel);
+                              angular.forEach(parsed.issues, function (issue) {
+                                pushAgentLog('info', '  ⚠ ' + issue);
+                              });
+                              var activeCard = findCardById(vm.activeCardId);
+                              if (activeCard) {
+                                activeCard._cohesion = { file: vm.cohesionFile, issues: angular.copy(vm.cohesionIssues) };
+                                vm.saveCards();
+                              }
+                            } else {
+                              pushAgentLog('info', '🔍 Cohesion: no issues found');
                             }
                             break;
                           case 'done':
