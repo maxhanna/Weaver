@@ -881,20 +881,20 @@
       });
     };
 
-    vm.sendBenchmarkToServer = function(benchmarkData) {
+    vm.sendBenchmarkToServer = function(benchmarkData) { 
       var benchmarkDto = {
         Token: vm.bughostedClientId,
         Date: benchmarkData.date,
-        Benchmark: benchmarkData.name,
-        Steps: benchmarkData.steps.length.toString(),
-        Score: benchmarkData.score ? benchmarkData.score.toFixed(2).toString() : '0',
-        Status: benchmarkData.status || '',
-        Duration: benchmarkData.duration?.toFixed(1)?.toString() || '0',
-        Model: benchmarkData.model || '',
-        OS: benchmarkData.os || '',
-        CPU: benchmarkData.cpu || '',
-        RAM: benchmarkData.ram || '',
-        GPU: benchmarkData.gpu || ''
+        Benchmark: s.level,
+        Steps: s.stepsCompleted + "/" + s.totalSteps,
+        Score: s.scorePercent || '0',
+        Status: s.status || '',
+        Duration: s.durationMs.toString() || '0',
+        Model: s.modelUsed || '',
+        OS: vm.systemInfoCustom.os || '',
+        CPU: vm.systemInfoCustom.cpu || '',
+        RAM: vm.systemInfoCustom.ramGb || '',
+        GPU: vm.systemInfoCustom.gpu || ''
       };
 
       $http.post('/bughostedcontroller/addbenchmark', benchmarkDto)

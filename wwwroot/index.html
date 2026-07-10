@@ -232,8 +232,6 @@
     <div class="wireframe-bg"></div>
     <div ng-include="'kanban.html'" ng-if="vm.showKanban"></div>
 
-
-    <!-- RIGHT PANEL: Agent + Terminal -->
     <div class="right-panel" ng-class="{'full-width': !vm.showKanban && !vm.showCalendar}">
       <!-- Ask AI Chat Panel -->
       <div class="panel ai-panel" ng-if="vm.showAI" data-panel-type="ask-ai" data-panel-id="ask-ai-panel">
@@ -345,7 +343,7 @@
                   <span class="log-ts">{{e.ts}}</span>
                   <span class="log-msg">{{e.message}}</span>
                   <details ng-if="e.detail" class="log-detail" ng-style="{'font-size': vm.logFontSize + 'px'}">
-                    <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'||e.level==='error'"
+                    <summary>detail <span class="log-detail-badge" ng-if="e.level==='warn'|| e.level==='error'"
                         style="font-weight:600;color:var(--error);">!</span></summary>
                     <pre class="log-detail-raw"
                       ng-style="{'font-size': vm.logFontSize + 'px'}">{{vm.formatLogDetail(e.detail)}}</pre>
@@ -1150,6 +1148,7 @@
               <td style="padding:4px 8px;">
                 <button ng-click="vm.deleteBenchmarkScore(s, $event)" class="small"
                   style="color:var(--danger);font-size:11px;" title="Delete">✕</button>
+                <button class="btn btn-small" ng-click="vm.sendBenchmarkToServer(s)">Send</button>
               </td>
             </tr>
           </tbody>
