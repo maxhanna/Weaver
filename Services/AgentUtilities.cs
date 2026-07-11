@@ -5,22 +5,17 @@ using System.Text.RegularExpressions;
 namespace Weaver.Services;
 
 public static class AgentUtilities
-{ 
-    private const int CompactThreshold90 = 2520; 
+{
+    private const int CompactThreshold90 = 2520;
 
     public static (PipelineType Type, double CommandScore, double EditScore) ClassifyTask(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return (PipelineType.CommandExecution, 100, 0);
         var lower = prompt.ToLowerInvariant();
 
-        // ── Score-based routing ──────────────────────────────────────────────
-        // Both pipelines get weighted scores. The highest-confidence pipeline
-        // wins. This is more robust than the old first-match-wins chain for
-        // ambiguous prompts like "augment the email settings in the UI panel".
         double cmdScore = 0;
         double editScore = 0;
 
-        // ── CommandExecution signals (high-weight, unambiguous) ──────────────
         if (TryDetectSimpleIntent(prompt) != null) cmdScore += 100;
 
         if (Regex.IsMatch(lower, @"\b(ping|health?|status|check\s+connect|is\s+\S+\s+(up|alive|reachable))\b"))
@@ -34,9 +29,9 @@ public static class AgentUtilities
 
         if (Regex.IsMatch(lower, @"\b(what.*in|contents?\s+of|find\s+files?\s+in|directory\s+contents|structure\s+of|tree|logs?|journal|stdout|stderr|console|output|terminal|logs|process|service)\b"))
             cmdScore += 65;
-        // "list" alone is ambiguous (data list vs file listing) — use lower weight
+
         if (Regex.IsMatch(lower, @"\b(list)\b") &&
-            !Regex.IsMatch(lower, @"\b(list\s+of\s+\w+)\b")) // "list of plants" is data, not filesystem
+            !Regex.IsMatch(lower, @"\b(list\s+of\s+\w+)\b"))
             cmdScore += 20;
 
         if (Regex.IsMatch(lower, @"\b(inbox|unread|read\s+(my\s+)?email|check\s+(my\s+)?email|fetch\s+email|read\s+mail|check\s+mail)\b"))
@@ -57,7 +52,6 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(copy|duplicate|backup)\s+\S+"))
             cmdScore += 60;
 
-        // Writing files outside the project (desktop, external paths) = terminal operation
         if (Regex.IsMatch(lower, @"\b(desktop|downloads?|documents?)\b"))
             cmdScore += 55;
 
@@ -70,8 +64,6 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(get|find|search|look\s+up|what\s+is|tell\s+me\s+(about|the)|fetch)\b.{0,60}\b(latest|list|numbers?|info|information|data)\b"))
             cmdScore += 50;
 
-        // ── CodeEdit signals ─────────────────────────────────────────────────
-        // Strong edit verbs — word-boundary to avoid "add" inside "address"
         if (Regex.IsMatch(lower, @"\b(augment|implement|refactor|rewrite|redesign)\b"))
             editScore += 65;
 
@@ -84,66 +76,56 @@ public static class AgentUtilities
         if (Regex.IsMatch(lower, @"\b(toggle|enable|disable|configure|wire|connect|hook|expose)\b"))
             editScore += 40;
 
-        // UI/component keywords — user wants to modify a UI element
+
         if (Regex.IsMatch(lower, @"\b(div|button|input|form|dropdown|checkbox|radio|modal|popup|panel|section|tab|sidebar|navbar|header|footer)\b"))
             editScore += 35;
 
         if (Regex.IsMatch(lower, @"\b(component|template|view|page|layout|widget|element|calendar)\b"))
             editScore += 30;
 
-        // Programmatic assignment — "set X to Y" is a code-edit pattern
-        // Suppress when prompt is about reading/processing data from a file (false positive:
-        // "set of skills, and write it down next to the pokemon's name" should not trigger)
+
         var isDataProcessing = Regex.IsMatch(lower, @"\b(row|column|csv|tsv|json|each\s+(row|line)|file.*data|read.*file|fetch.*(from|data|api|endpoint))\b");
         if (!isDataProcessing && Regex.IsMatch(lower, @"\bset\b.{0,40}\bto\b"))
             editScore += 40;
 
-        // Style/design keywords
+
         if (Regex.IsMatch(lower, @"\b(style|css|class|theme|color|font|margin|padding|border|shadow|layout|spacing)\b"))
             editScore += 30;
 
-        // File path mentioned — likely editing a specific file
-        // Suppress for data-processing contexts (reading CSV/TSV/JSON, not editing code)
+
+
         if (!isDataProcessing && Regex.IsMatch(lower, @"\b[\w./\\-]+\.\w{2,4}\b"))
             editScore += 20;
 
-        // Display/show/preview — likely a UI code change, not a terminal command
+
         if (Regex.IsMatch(lower, @"\b(show|display|render|preview|view)\b"))
             editScore += 15;
 
-        // Visual media — images, photos, thumbnails in UI context
+
         if (Regex.IsMatch(lower, @"\b(picture|image|photo|thumbnail)\b"))
             editScore += 12;
 
-        // ── Hybrid signal: "email" in editing context vs reading context ─────
+
         bool emailForReading = Regex.IsMatch(lower,
             @"\b(read|check|fetch|inbox|unread|send|compose)\b.{0,40}\b(email|mail)\b");
         bool emailForConfig = Regex.IsMatch(lower, @"\bemail\b") && !emailForReading;
 
         if (emailForReading) cmdScore += 80;
-        if (emailForConfig) editScore += 25; // configuring email settings = edit
+        if (emailForConfig) editScore += 25;
 
-        // ── Penalties for conflicting signals ────────────────────────────────
-        // If prompt is clearly about editing (strong edit verbs + UI keywords),
-        // suppress command signals from generic keywords
         if (editScore >= 80) cmdScore -= 30;
 
-        // If prompt is purely a read/query with no edit intent, suppress edit
+
         if (cmdScore >= 50 && editScore == 0) editScore -= 40;
 
-        // ── Decision ─────────────────────────────────────────────────────────
+
         if (editScore > cmdScore) return (PipelineType.CodeEdit, cmdScore, editScore);
         if (cmdScore > editScore) return (PipelineType.CommandExecution, cmdScore, editScore);
 
         return (PipelineType.CodeEdit, cmdScore, editScore);
-    } 
+    }
 
-    /// <summary>
-    /// Detects simple, self-contained intents directly from the prompt string
-    /// without any LLM call or file discovery.
-    /// Returns a ready-to-execute AgentPlan, or null if the prompt needs full
-    /// pipeline analysis.
-    /// </summary>
+
     public static AgentPlan? TryDetectSimpleIntent(string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt)) return null;
@@ -151,9 +133,9 @@ public static class AgentUtilities
         var p = prompt.Trim();
         var lower = p.ToLowerInvariant();
 
-        // ── Rename / Move file ────────────────────────────────────────────────
-        // Matches: "rename X to Y", "rename X → Y", "move X to Y", etc.
-        // Handles quoted paths and unquoted paths.
+
+
+
         var renameMatch = Regex.Match(p,
             @"\b(?:rename|move)\s+(?:""([^""]+)""|'([^']+)'|([^\s]+))\s+(?:to|→|-?>)\s+(?:""([^""]+)""|'([^']+)'|([^\s]+))",
             RegexOptions.IgnoreCase);
@@ -162,7 +144,7 @@ public static class AgentUtilities
         {
             var src = (renameMatch.Groups[1].Value + renameMatch.Groups[2].Value + renameMatch.Groups[3].Value).Replace('\\', '/').Trim('/', ' ', '"', '\'');
             var dst = (renameMatch.Groups[4].Value + renameMatch.Groups[5].Value + renameMatch.Groups[6].Value).Replace('\\', '/').Trim('/', ' ', '"', '\'');
-            // If dst is a bare name (no dir), inherit the source's directory
+
             if (!dst.Contains('/') && src.Contains('/'))
             {
                 var srcDir = src.Substring(0, src.LastIndexOf('/') + 1);
@@ -179,7 +161,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Delete file ───────────────────────────────────────────────────────
+
         var deleteMatch = Regex.Match(p,
             @"\b(?:delete|remove)\s+(?:the\s+)?file\s+['""]?([\w./\\-]+(?:\.[\w.-]+)?)['""]?",
             RegexOptions.IgnoreCase);
@@ -197,7 +179,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Git pull ──────────────────────────────────────────────────────────
+
         if (Regex.IsMatch(lower, @"\b(git\s+pull|pull\s+(all\s+)?change|pull\s+from\s+git|pull\s+latest)\b")
             || (lower.Contains("pull") && lower.Contains("git") && !lower.Contains("request")))
         {
@@ -213,7 +195,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Git commit ────────────────────────────────────────────────────────
+
         if (Regex.IsMatch(lower, @"\b(git\s+commit|commit\s+all|commit\s+change|commit\s+everything)\b"))
         {
             var msgMatch = Regex.Match(p, "\"([^\"]+)\"");
@@ -229,7 +211,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Git push / sync ───────────────────────────────────────────────────
+
         if (Regex.IsMatch(lower, @"\b(git\s+(push|sync)|push\s+(to\s+)?(remote|origin|git)|sync\s+(with\s+)?remote)\b"))
         {
             return new AgentPlan
@@ -243,7 +225,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Git revert / discard ──────────────────────────────────────────────
+
         if (Regex.IsMatch(lower, @"\b(git\s+revert|revert\s+all|discard\s+all|undo\s+all\s+change)\b"))
         {
             return new AgentPlan
@@ -257,7 +239,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Ping / connectivity ─────────────────────────────────────────────── 
+
         if (Regex.IsMatch(lower, @"\b(ping\s+\S|check\s+(connect|reach|host)|test\s+connect|is\s+(it|this|that|the\s+(server|host|site|website|service|database|connection|network))\s+(up|alive|reachable|down|online|offline))\b"))
         {
             return new AgentPlan
@@ -271,7 +253,7 @@ public static class AgentUtilities
             };
         }
 
-        // ── Package install ───────────────────────────────────────────────────
+
         if (Regex.IsMatch(lower, @"\b(install\s+package|npm\s+install|dotnet\s+add\s+package|pip\s+install)\b"))
         {
             return new AgentPlan
@@ -285,30 +267,27 @@ public static class AgentUtilities
             };
         }
 
-        return null; // needs full pipeline
+        return null;
     }
-    /// <summary>
-    /// Deterministically ensures that plans creating new C# controllers 
-    /// also update the Angular proxy.conf.js file with the new API route.
-    /// </summary>
+
     public static AgentPlan? EnforceProxyConfigForControllers(AgentPlan? plan, string projectRoot)
     {
         if (plan?.Plan == null || plan.Plan.Count == 0) return plan;
 
-        // 1. Check if proxy.conf.js exists in the project
+
         var proxyFiles = Directory.GetFiles(projectRoot, "proxy.conf.js", SearchOption.AllDirectories);
         if (proxyFiles.Length == 0) return plan;
 
         var proxyRelPath = Path.GetRelativePath(projectRoot, proxyFiles[0]).Replace('\\', '/');
 
-        // 2. Check if proxy.conf.js is already being updated in the plan
+
         bool hasProxyUpdate = plan.Plan.Any(p =>
             p.File != null &&
             p.File.EndsWith("proxy.conf.js", StringComparison.OrdinalIgnoreCase));
 
         if (hasProxyUpdate) return plan;
 
-        // 3. Check if the plan creates a new Controller.cs file
+
         var controllerStep = plan.Plan.FirstOrDefault(p =>
             p.File != null &&
             p.File.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase) &&
@@ -318,31 +297,31 @@ public static class AgentUtilities
 
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, controllerStep.File.Replace('/', Path.DirectorySeparatorChar)));
 
-        // If the controller file already exists, it's an edit, not a creation. Skip.
+
         if (System.IO.File.Exists(fullPath)) return plan;
 
-        // 4. Extract controller name to generate the route (e.g., HealthTrackerController -> /healthtracker)
+
         var controllerName = Path.GetFileNameWithoutExtension(controllerStep.File);
         var baseName = controllerName.EndsWith("Controller", StringComparison.OrdinalIgnoreCase)
             ? controllerName.Substring(0, controllerName.Length - "Controller".Length)
             : controllerName;
 
         var route = "/" + baseName.ToLowerInvariant();
-        
+
         try
         {
             var proxyContent = System.IO.File.ReadAllText(proxyFiles[0]);
-            // Check for "/route" or "/route,"
+
             if (proxyContent.Contains($"\"{route}\"", StringComparison.OrdinalIgnoreCase) ||
                 proxyContent.Contains($"\"{route},", StringComparison.OrdinalIgnoreCase))
             {
-                // Route already exists, don't inject the step!
+
                 return plan;
             }
         }
-        catch { /* if read fails, proceed with injection */ }
+        catch { }
 
-        // 5. Inject the proxy.conf.js update step at the end of the plan
+
         plan.Plan.Add(new PlanStep
         {
             File = proxyRelPath,
@@ -370,7 +349,7 @@ public static class AgentUtilities
 
         var normalizedTarget = targetRelPath.Replace('\\', '/');
 
-        // Split on section headers ("### ") — each file read in the loop produces one section
+
         var sections = Regex.Split(explorationContext.Trim(), @"(?=^### )", RegexOptions.Multiline);
         var result = new StringBuilder();
 
@@ -378,7 +357,7 @@ public static class AgentUtilities
         {
             if (string.IsNullOrWhiteSpace(rawSection)) continue;
 
-            // Skip the target file — already shown verbatim in the main prompt
+
             var firstLine = rawSection.Split('\n')[0];
             if (firstLine.Contains("TARGET FILE:", StringComparison.OrdinalIgnoreCase)) continue;
             var sectionPath = Regex.Match(firstLine, @"###\s+([^\s(]+)").Groups[1].Value
@@ -422,7 +401,7 @@ public static class AgentUtilities
                 else if (inFence)
                 {
                     inFence = false;
-                    break; // stop after the first code block
+                    break;
                 }
                 continue;
             }
@@ -433,16 +412,16 @@ public static class AgentUtilities
         }
 
         if (codeLines.Count == 0)
-            return string.Join("\n", headerLines); // prose-only section, keep as-is
+            return string.Join("\n", headerLines);
 
-        // ── Determine which code lines to include ────────────────────────────
+
         var included = new SortedSet<int>();
 
-        // Always include the first 20 lines — imports and type declarations live here
+
         for (var i = 0; i < Math.Min(20, codeLines.Count); i++)
             included.Add(i);
 
-        // Include ±3 lines around any keyword match throughout the rest of the file
+
         for (var i = 20; i < codeLines.Count; i++)
         {
             if (keywords.Count == 0) break;
@@ -451,16 +430,16 @@ public static class AgentUtilities
                 for (var w = Math.Max(0, i - 3); w <= Math.Min(codeLines.Count - 1, i + 3); w++)
                     included.Add(w);
             }
-            // Matches: `async methodName(...)`, `public methodName(...): Type`, `methodName(...) {`
+
             if (Regex.IsMatch(codeLines[i], @"^\s*((public|private|protected|static|async|export|function|get|set)\s+)*\w+\s*(<[^>]+>)?\s*\([^)]*\)\s*(:\s*[^{;]+)?\s*[{;]", RegexOptions.IgnoreCase))
             {
-                // Keep the signature and the next 5 lines (body/return type)
+
                 for (var w = Math.Max(0, i - 1); w <= Math.Min(codeLines.Count - 1, i + 5); w++)
                     included.Add(w);
             }
         }
 
-        // ── Build output, inserting gap markers between non-contiguous ranges ─
+
         var result = new List<string>(headerLines) { openingFence };
         var prevIdx = -2;
 
@@ -482,7 +461,7 @@ public static class AgentUtilities
             ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
             : output;
     }
-    
+
     public static string FixMultilineParenIndentation(string code)
     {
         var lines = code.Split('\n');
@@ -598,9 +577,9 @@ public static class AgentUtilities
         var normalized = Regex.Replace(combined.Trim(), @"\s+", " ");
         return normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
-    /// <summary>Extracts quoted code/HTML snippets from a step's change description for
-    /// exact-target comparison — two steps quoting the same element are the same edit
-    /// even if the surrounding prose differs.</summary>
+
+
+
     private static HashSet<string> ExtractQuotedSnippets(string text)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -612,20 +591,20 @@ public static class AgentUtilities
         }
         return result;
     }
-    /// <summary>
-    /// Collapses near-duplicate plan steps that target the same file and describe the
-    /// same underlying edit in different words. Exact-string dedup (DeduplicateSteps)
-    /// only catches identical text; it misses cases where the planner (or the per-step
-    /// decoupling audit) independently produces multiple steps that all mean "do the
-    /// same thing" with different phrasing. Left unchecked, that duplication multiplies
-    /// during decoupling — e.g. 3 duplicate "remove priority tag from all 3 columns"
-    /// steps each get decoupled into 3 column-specific sub-steps = 9 steps for 3 real
-    /// edits, with inconsistent guessed line numbers for each duplicate set.
-    ///
-    /// This NEVER reduces distinct, intentional steps: two steps that reference
-    /// different locations (todo vs. doing vs. done) are always kept, even if their
-    /// wording is otherwise very similar.
-    /// </summary>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     public static List<PlanStep> DeduplicateSimilarSteps(List<PlanStep> steps, double similarityThreshold = 0.72)
     {
         if (steps.Count <= 1) return steps;
@@ -648,9 +627,9 @@ public static class AgentUtilities
                 var (existingKeywords, existingQuoted, existingFile, existingLocationTag) = keptSignatures[i];
                 if (!string.Equals(existingFile, file, StringComparison.OrdinalIgnoreCase)) continue;
 
-                // Different explicit locations (todo vs. doing vs. done) are ALWAYS distinct —
-                // never collapse steps just because their wording overlaps if they name
-                // different targets. This is what protects the user's actual 3-column intent.
+
+
+
                 if (locationTag != null && existingLocationTag != null &&
                     !string.Equals(locationTag, existingLocationTag, StringComparison.OrdinalIgnoreCase))
                     continue;
@@ -682,12 +661,12 @@ public static class AgentUtilities
         return union == 0 ? 0 : (double)intersection / union;
     }
 
-    /// <summary>
-    /// Detects the indentation WIDTH (number of columns per indent level) used in a source file.
-    /// Uses GCD over all observed leading-space counts so that 4/8/12 → 4 and 2/4/6 → 2.
-    /// Tab-indented files return 4 (conventional tab stop). Mixed tab/space files derive width
-    /// from the space-indented lines only. Falls back to 4 when indeterminate.
-    /// </summary>
+
+
+
+
+
+
     public static int DetectIndentWidth(string source)
     {
         if (string.IsNullOrWhiteSpace(source))
@@ -695,7 +674,7 @@ public static class AgentUtilities
 
         var lines = source.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
 
-        // ── Tab-indented files: convention is tab width = 4 ──
+
         var hasTabIndent = false;
         foreach (var line in lines)
         {
@@ -704,7 +683,7 @@ public static class AgentUtilities
         }
         if (hasTabIndent)
         {
-            // If there are also space-indented lines, derive from those; otherwise default to 4.
+
             var spaceIndents = new HashSet<int>();
             foreach (var line in lines)
             {
@@ -718,7 +697,7 @@ public static class AgentUtilities
             return DetectIndentWidthFromIndents(spaceIndents);
         }
 
-        // ── Pure space-indented: collect all distinct indent amounts ──
+
         var indentSet = new HashSet<int>();
         foreach (var line in lines)
         {
@@ -731,48 +710,48 @@ public static class AgentUtilities
         if (indentSet.Count == 0) return 4;
         return DetectIndentWidthFromIndents(indentSet);
     }
-    /// <summary>
-    /// Extracts the method/function name that a step intends to add/insert into a .js file.
-    /// Handles many phrasings:
-    ///   "add method fooBar", "create function baz", "insert handler onClick",
-    ///   "add fooBar() method", "add vm.doSomething", "add this.handleClick",
-    ///   "define method named processQueue", "implement onFileSelected handler"
-    /// </summary>
+
+
+
+
+
+
+
     public static string? ExtractJsMethodNameFromChange(string change)
     {
         if (string.IsNullOrWhiteSpace(change)) return null;
 
-        // Pattern 1: "<verb> method/function/handler (named|called) X"
+
         var m = Regex.Match(change,
             @"\b(?:add|create|insert|define|implement)\s+(?:a\s+)?(?:new\s+)?(?:method|function|handler)\s+(?:named\s+|called\s+)?([A-Za-z_$][A-Za-z0-9_$]*)",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // Pattern 2: "<verb> X method/function/handler"  (name BEFORE the noun)
+
         m = Regex.Match(change,
             @"\b(?:add|create|insert|define|implement)\s+(?:a\s+)?(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s+(?:method|function|handler)\b",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // Pattern 3: "<verb> X() method"  (name with empty parens)
+
         m = Regex.Match(change,
             @"\b(?:add|create|insert|define|implement)\s+(?:the\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*\)",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // Pattern 4: "<verb> vm.X" / "<verb> this.X" / "<verb> self.X"
+
         m = Regex.Match(change,
             @"\b(?:add|create|insert|define|implement)\s+(?:the\s+)?(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // Pattern 5: bare "<verb> X" (last resort — only if X looks like a method name)
+
         m = Regex.Match(change,
             @"\b(?:add|create|insert)\s+(?:a\s+)?(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\b");
         if (m.Success)
         {
             var candidate = m.Groups[1].Value;
-            // Reject common English words that aren't method names
+
             var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "the", "a", "an", "new", "code", "logic", "feature", "support",
@@ -790,7 +769,7 @@ public static class AgentUtilities
         var keywords = ExtractMeaningfulKeywords(stepChange.ToLowerInvariant())
             .Where(k => k.Length >= 4).ToList();
 
-        // Find the first line that actually mentions one of the step's keywords/symbols
+
         var lines = discoveryContext.Split('\n');
         var hitLine = -1;
         for (var i = 0; i < lines.Length; i++)
@@ -801,7 +780,7 @@ public static class AgentUtilities
         if (hitLine < 0)
             return discoveryContext[..maxChars] + "\n...(truncated)";
 
-        // Center a window on the hit so the validator actually sees the referenced code
+
         var charOffset = lines.Take(hitLine).Sum(l => l.Length + 1);
         var halfWindow = maxChars / 2;
         var start = Math.Max(0, charOffset - halfWindow);
@@ -809,7 +788,7 @@ public static class AgentUtilities
         var prefix = start > 0 ? "...(truncated head)...\n" : "";
         var suffix = end < discoveryContext.Length ? "\n...(truncated tail)..." : "";
         return prefix + discoveryContext[start..end] + suffix;
-    } 
+    }
     public static bool JsMethodExistsInContent(string content, string methodName)
     {
         if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(methodName))
@@ -818,60 +797,60 @@ public static class AgentUtilities
 
         var name = Regex.Escape(methodName);
 
-        // 1. function declaration:  function foo(
+
         if (Regex.IsMatch(content, $@"\bfunction\s+{name}\s*\(", RegexOptions.IgnoreCase))
             return true;
 
-        // 2. function expression:  const/let/var foo = function(   |   const foo = async function(
+
         if (Regex.IsMatch(content,
             $@"\b(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 3. arrow function:  const foo = (...) =>   |   const foo = async (...) =>
+
         if (Regex.IsMatch(content,
             $@"\b(?:const|let|var)\s+{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 4. object property function:  foo: function(   |   foo: async function(
+
         if (Regex.IsMatch(content,
             $@"\b{name}\s*:\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 5. object property arrow:  foo: () =>   |   foo: async () =>
+
         if (Regex.IsMatch(content,
             $@"\b{name}\s*:\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 6. object method shorthand (line-anchored to avoid matching call sites):
-        //    foo(  |  async foo(  |  static foo(
+
+
         if (Regex.IsMatch(content,
             $@"(?m)^\s*(?:static\s+|async\s+|get\s+|set\s+)?{name}\s*\(",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 7. vm.foo = function(   |   this.foo = function(   |   self.foo = function(
+
         if (Regex.IsMatch(content,
             $@"\b(?:vm|this|self|that)\.{name}\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 8. vm.foo = (...) =>   |   this.foo = (...) =>
+
         if (Regex.IsMatch(content,
             $@"\b(?:vm|this|self|that)\.{name}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 9. Class.prototype.foo = function(
+
         if (Regex.IsMatch(content,
             $@"\.prototype\.{name}\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 10. export function foo(   |   export const foo =
+
         if (Regex.IsMatch(content,
             $@"\bexport\s+(?:async\s+)?function\s+{name}\s*\(",
             RegexOptions.IgnoreCase))
@@ -881,14 +860,14 @@ public static class AgentUtilities
             RegexOptions.IgnoreCase))
             return true;
 
-        // 11. Object.defineProperty(obj, 'foo', ...)
+
         if (Regex.IsMatch(content,
             $@"Object\.defineProperty\s*\([^,]+,\s*['""]{name}['""]",
             RegexOptions.IgnoreCase))
             return true;
 
-        // 12. class method declaration inside a class body (line-anchored):
-        //     public/private/protected/static/async/get/set + foo(
+
+
         if (Regex.IsMatch(content,
             $@"(?m)^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+|get\s+|set\s+|readonly\s+)*{name}\s*\(",
             RegexOptions.IgnoreCase))
@@ -896,66 +875,66 @@ public static class AgentUtilities
 
         return false;
     }
-    /// <summary>
-    /// Extracts the method name defined by a piece of JavaScript source code.
-    /// Recognizes declarations only (not call sites).
-    /// </summary>
+
+
+
+
     public static string? ExtractJsMethodNameFromCode(string code)
     {
         if (string.IsNullOrWhiteSpace(code)) return null;
 
-        // function foo(
+
         var m = Regex.Match(code, @"\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // const/let/var foo = function(   |   const foo = async function(
+
         m = Regex.Match(code,
             @"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // const foo = (...) =>   |   const foo = async (...) =>
+
         m = Regex.Match(code,
             @"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // vm.foo = function(   |   this.foo = function(   |   self.foo = function(
+
         m = Regex.Match(code,
             @"\b(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // vm.foo = (...) =>   |   this.foo = (...) =>
+
         m = Regex.Match(code,
             @"\b(?:vm|this|self|that)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // foo: function(   |   foo: async function(
+
         m = Regex.Match(code,
             @"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // foo: () =>   |   foo: async () =>
+
         m = Regex.Match(code,
             @"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:async\s+)?\([^)]*\)\s*=>",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // Object method shorthand at start of line:  foo(  or  async foo(  or  static foo(
+
         m = Regex.Match(code,
             @"(?m)^\s*(?:static\s+|async\s+|get\s+|set\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(");
         if (m.Success) return m.Groups[1].Value;
 
-        // Class.prototype.foo = function(
+
         m = Regex.Match(code,
             @"\.prototype\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?function\s*\(",
             RegexOptions.IgnoreCase);
         if (m.Success) return m.Groups[1].Value;
 
-        // export function foo(   |   export const foo =
+
         m = Regex.Match(code,
             @"\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
             RegexOptions.IgnoreCase);
@@ -978,11 +957,11 @@ public static class AgentUtilities
             if (gcd == 1) break;
         }
 
-        // Sanity band — common indent widths are 1..8.
+
         if (gcd is >= 1 and <= 8) return gcd;
 
-        // Pathological GCD (e.g. 16 because everything was a single 16-space indent).
-        // Fall back to the smallest observed indent, clamped.
+
+
         var min = list.Min();
         return (min > 0 && min <= 8) ? min : 4;
     }
@@ -998,8 +977,8 @@ public static class AgentUtilities
         return a;
     }
 
-    /// <summary>Extracts an explicit location tag (todo/doing/done/selfImproving) from a
-    /// step's change description, if present, so distinct-location steps are never merged.</summary>
+
+
     public static string? ExtractLocationTag(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return null;
@@ -1020,12 +999,12 @@ public static class AgentUtilities
                 string.Equals(cur.File, steps[i + 1].File, StringComparison.OrdinalIgnoreCase))
             {
                 var next = steps[i + 1];
-                // Fold the table-creation intent into the next step's description
-                // and drop this step entirely — it was never supposed to be separate.
+
+
                 next.Change = $"{next.Change} Include an inline CREATE TABLE IF NOT EXISTS statement " +
                                $"at the top of the method body before any INSERT/UPDATE/SELECT.";
                 merged.Add(next);
-                i++; // skip the merged-in step
+                i++;
                 continue;
             }
             merged.Add(cur);
@@ -1036,23 +1015,23 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(content)) return content;
 
-        // Match verbatim strings: @"(?:[^"]|"")*"
-        // Regex pattern: @"(?:""|[^"])*"
-        // In C# verbatim string syntax, this is written as: @"@""(?:""|[^""])*"""
+
+
+
         var regex = new Regex(@"@""(?:""|[^""])*""", RegexOptions.Compiled);
         bool changed = false;
 
         var result = regex.Replace(content, match =>
         {
             var val = match.Value;
-            // val starts with @" and ends with "
-            // Substring(2, val.Length - 3) extracts the inner content
+
+
             var inside = val.Substring(2, val.Length - 3);
 
             bool hasEscapeSeq = inside.Contains(@"\r\n") || inside.Contains(@"\r") || inside.Contains(@"\n") || inside.Contains(@"\t");
             bool looksLikeSql = Regex.IsMatch(inside, @"\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|FROM|WHERE|JOIN|VALUES|SET)\b", RegexOptions.IgnoreCase);
 
-            // Only replace if it has escape sequences AND looks like SQL to avoid breaking file paths (e.g. C:\newfolder)
+
             if (hasEscapeSeq && looksLikeSql)
             {
                 changed = true;
@@ -1062,7 +1041,7 @@ public static class AgentUtilities
                     .Replace(@"\n", "\n")
                     .Replace(@"\t", "\t");
 
-                // Reconstruct the verbatim string: @" + content + "
+
                 return "@\"" + fixedInside + "\"";
             }
             return val;
@@ -1071,57 +1050,42 @@ public static class AgentUtilities
         return changed ? result : content;
     }
 
-    /// <summary>
-    /// Post-edit fixup for .cs files: cleans verbatim string escapes that survived pre-edit processing
-    /// and flattens hallucinated DTO property wrappers (e.g. dto.SystemSpecs?.OS → dto.OS).
-    /// </summary>
+
+
+
+
     public static string PostEditCSharpFixup(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return content;
 
-        // 1. Clean any remaining verbatim string escapes (safety net after file write)
         content = CleanVerbatimStringEscapes(content);
 
-        // 2. Flatten hallucinated DTO property wrappers.
-        //    LLM often nests flat DTO properties under an invented sub-object (SystemSpecs, System, Hardware, Specs).
-        //    Pattern: dtoVar.Word?.Property → dtoVar.Property
-        //    Only flatten when Word is not a recognized type or keyword.
         var flatPattern = new Regex(@"\.(SystemSpecs|System|HardwareInfo|Hardware|Specs|SystemInfo|MetaInfo|Details|DataInfo|BenchmarkInfo|BenchData)\??\.([A-Z]\w+)", RegexOptions.IgnoreCase);
         content = flatPattern.Replace(content, m => "." + m.Groups[2].Value);
 
-        // 3. Fix doubled braces in interpolated strings: $"text {{variable}} text" → $"text {variable} text"
-        //    LLM sometimes writes {{ex.Message}} when it means {ex.Message} in $"" strings.
         content = Regex.Replace(content, @"(\$""[^""]*)\{\{(\w+(?:\.\w+)+)\}\}([^""]*"")", "$1{$2}$3");
 
-        // 4. Fix malformed Score?.Replace or TryParse on Score (Score is string?, not numeric).
-        //    Pattern: .Score?.Replace "%", string.Empty  → replace entire TryParse+Replace with direct Score assignment
         content = Regex.Replace(content,
             @"decimal\.TryParse\s*\(\s*\w+\.Score\??(?:\.Replace\s*""[^""]*""(?:\s*,\s*""[^""]*"")?)?\s*,(\s*out\s+\w+(?:\.\w+)*\s*)\)",
             m =>
             {
                 var outVar = m.Groups[1].Value.Trim();
-                // Replace with direct assignment: decimal.TryParse(benchmark.Score, out score) — clean
+
                 return $"decimal.TryParse(benchmark.Score, {outVar})";
             });
 
-        // 5. Merge stray semicolon after string closing: ..."\n\t\t; → ...";
-        //    LLM/formatter sometimes puts the ; on its own line after the closing " of a string literal
         content = Regex.Replace(content,
             @"(?<=[^ \t\r\n@])""\s*\r?\n[ \t]*;",
             @""";");
 
         return content;
     }
-    
-    /// <summary>
-    /// Deterministically ensures that plans creating new Angular components 
-    /// use the CLI scaffolding command and update app.module.ts.
-    /// </summary>
+
     public static AgentPlan? EnforceAngularScaffolding(AgentPlan plan, string projectRoot)
     {
         if (plan?.Plan == null || plan.Plan.Count == 0) return plan;
 
-        // 1. Check if the plan creates a new .component.ts file that doesn't exist yet
+
         var compStep = plan.Plan.FirstOrDefault(p =>
             p.File != null &&
             p.File.EndsWith(".component.ts", StringComparison.OrdinalIgnoreCase) &&
@@ -1131,10 +1095,10 @@ public static class AgentUtilities
 
         var fullPath = Path.GetFullPath(Path.Combine(projectRoot, compStep.File.Replace('/', Path.DirectorySeparatorChar)));
 
-        // If the file already exists, it's an edit, not a creation. Skip injection.
+
         if (File.Exists(fullPath)) return plan;
 
-        // 2. Check if a scaffolding command already exists
+
         bool hasScaffoldCommand = plan.Plan.Any(p =>
             p.File == "_command" &&
             p.Change != null &&
@@ -1142,15 +1106,15 @@ public static class AgentUtilities
 
         if (!hasScaffoldCommand)
         {
-            // Extract project root folder (e.g., "maxhanna.client")
+
             var rootFolder = compStep.File.Split('/')[0];
             var dir = Path.GetDirectoryName(compStep.File)?.Replace('\\', '/');
             var name = Path.GetFileNameWithoutExtension(compStep.File).Replace(".component", "");
 
-            // Generate the CLI command
+
             var cmd = $"{(rootFolder.Contains(".") ? $"cd {rootFolder}; " : "")}npx ng g c {dir}/{name} --skip-tests";
 
-            // Insert the scaffolding command at the very beginning
+
             plan.Plan.Insert(0, new PlanStep
             {
                 File = "_command",
@@ -1159,7 +1123,7 @@ public static class AgentUtilities
             });
         }
 
-        // 3. Check if app.module.ts is being updated
+
         bool hasModuleUpdate = plan.Plan.Any(p =>
             p.File != null &&
             p.File.EndsWith("app.module.ts", StringComparison.OrdinalIgnoreCase));
@@ -1170,7 +1134,7 @@ public static class AgentUtilities
             var modulePath = $"{rootFolder}/src/app/app.module.ts";
             var componentName = Path.GetFileNameWithoutExtension(compStep.File).Replace(".component", "");
 
-            // Insert the module update step at index 1 (after scaffolding, before edits)
+
             plan.Plan.Insert(1, new PlanStep
             {
                 File = modulePath,
@@ -1180,7 +1144,7 @@ public static class AgentUtilities
         }
 
         return plan;
-    } 
+    }
     public static HashSet<string> ExtractSqlTableNames(string source)
     {
         var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
@@ -1261,15 +1225,12 @@ public static class AgentUtilities
         if (string.IsNullOrWhiteSpace(content)) return content;
         if (!Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase)) return content;
 
-        // ✅ DETERMINISTIC FIX: Remove trailing spaces inside string literals.
-        // This enforces the rule "NEVER add trailing spaces inside string literals" 
-        // which the LLM frequently ignores for Python input() prompts.
         content = Regex.Replace(content, @"(?<!\\)([""'])([^\r\n]*?)(?<!\\)\1", m =>
         {
             var quote = m.Groups[1].Value;
             var strContent = m.Groups[2].Value;
 
-            // Skip if it's a triple-quoted string
+
             if (strContent.StartsWith(quote)) return m.Value;
 
             if (strContent.EndsWith(" ") || strContent.EndsWith("\t"))
@@ -1280,18 +1241,18 @@ public static class AgentUtilities
             return m.Value;
         });
 
-        // Remove trailing whitespace from lines (LLMs often add spaces before newlines in JSON arrays)
+
         content = Regex.Replace(content, @"[ \t]+\r?\n", "\n");
 
         var pyKeywords = "print|return|if|for|while|def|class|import|from|with|try|except|finally|raise|yield|assert|del|global|nonlocal|pass|break|continue";
 
-        // Fix `) print(` -> `)\nprint(` (with or without spaces)
+
         content = Regex.Replace(content, $@"\)\s*({pyKeywords})\b", ")\n$1");
-        // Fix `; print(` -> `;\nprint(`
+
         content = Regex.Replace(content, $@";\s*({pyKeywords})\b", ";\n$1");
-        // Fix `] print(` -> `]\nprint(`
+
         content = Regex.Replace(content, $@"\]\s*({pyKeywords})\b", "]\n$1");
-        // Fix `} print(` -> `}\nprint(`
+
         content = Regex.Replace(content, $@"\}}\s*({pyKeywords})\b", "}\n$1");
 
         return content;
@@ -1321,10 +1282,10 @@ public static class AgentUtilities
                 continue;
             }
 
-            // Preserve and re-align formatting inside script/style/pre blocks
+
             if (inCodeBlock)
             {
-                // Handle the closing tag of the code block
+
                 if (trimmed.Contains("</script>", StringComparison.OrdinalIgnoreCase) ||
                     trimmed.Contains("</style>", StringComparison.OrdinalIgnoreCase) ||
                     trimmed.Contains("</pre>", StringComparison.OrdinalIgnoreCase))
@@ -1344,7 +1305,7 @@ public static class AgentUtilities
 
                 int currentJsIndent = codeBlockBaseIndent + (jsBraceDepth * 2);
 
-                // Dedent lines that start with closing braces/parens
+
                 if (trimmed.StartsWith("}") || trimmed.StartsWith(")") || trimmed.StartsWith("]"))
                 {
                     currentJsIndent = Math.Max(0, currentJsIndent - 2);
@@ -1352,7 +1313,7 @@ public static class AgentUtilities
 
                 result.Add(new string(' ', currentJsIndent) + trimmed);
 
-                // Update brace depth for subsequent lines
+
                 int opens = trimmed.Count(c => c == '{');
                 int closes = trimmed.Count(c => c == '}');
                 jsBraceDepth = Math.Max(0, jsBraceDepth + opens - closes);
@@ -1415,7 +1376,7 @@ public static class AgentUtilities
                 continue;
             }
 
-            // Find the first colon that is not inside parentheses
+
             int colonIdx = -1;
             int parenDepth = 0;
             for (int j = 0; j < trimmed.Length; j++)
@@ -1445,19 +1406,19 @@ public static class AgentUtilities
             var value = valueWithSemi.Trim();
             if (value.Length == 0) continue;
 
-            // 1. Space after comma: `0,0` -> `0, 0`
+
             value = Regex.Replace(value, @",(?!\s)", ", ");
 
-            // 2. Space between unit and number: `10px20px` -> `10px 20px`
+
             value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=\d)", "$1 ");
 
-            // 3. Space between unit and word: `10pxauto` -> `10px auto`
+
             value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=[a-z])", "$1 ");
 
-            // 4. Space between word and number: `bold12px` -> `bold 12px` (but avoid breaking hex colors like #fff0)
+
             value = Regex.Replace(value, @"(?<!#)([a-z])(\d)", "$1 $2");
 
-            // 5. Clean up double spaces just in case
+
             value = Regex.Replace(value, @"\s+", " ").Trim();
 
             var leadingWhitespace = line.Substring(0, line.Length - trimmed.Length);
@@ -1539,7 +1500,7 @@ public static class AgentUtilities
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_explore", StringComparison.OrdinalIgnoreCase);
-   
+
     public static bool IsPathUnderRoot(string fullPath, string root)
     {
         root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -1577,9 +1538,9 @@ public static class AgentUtilities
             "build","install","configure","hook","wire","connect","show","hide","display",
             "save","persist","store","expose","include"
         };
-        // Word-boundary match to avoid "add" matching inside "address"
+
         return verbs.Any(v => Regex.IsMatch(lower, $@"\b{Regex.Escape(v)}\b"));
-    } 
+    }
 
     public static List<string> FindSimilarFiles(string missingPath, string projectRoot)
     {
@@ -1620,7 +1581,7 @@ public static class AgentUtilities
 
         return string.IsNullOrWhiteSpace(target) || target.IndexOfAny(Path.GetInvalidPathChars()) >= 0 ? null : target;
     }
- 
+
 
     public static string BuildDiscoveryTextFromSteps(List<object> steps)
     {
@@ -1780,7 +1741,7 @@ public static class AgentUtilities
         }
         return changed ? sb.ToString() : null;
     }
-    
+
     public static bool HasSuccessfulEdits(IEnumerable<object> steps) =>
         steps.OfType<Dictionary<string, object?>>().Any(s =>
             s.TryGetValue("type", out var t) &&
@@ -1788,7 +1749,7 @@ public static class AgentUtilities
              string.Equals(t?.ToString(), "rename", StringComparison.OrdinalIgnoreCase)) &&
             s.TryGetValue("status", out var st) && st?.ToString() == "done");
 
-  
+
     public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
@@ -1857,7 +1818,7 @@ public static class AgentUtilities
 
         var start = pos;
 
-        // Find the next JSON key or structure end as an anchor boundary
+
         var afterKeyStart = keyEndPos + 5;
         var nextKeyPos = int.MaxValue;
         foreach (var key in new[] { "\"oldString\"", "\"newString\"", "\"path\"", "\"toPath\"", "\"description\"", "\"edits\"" })
@@ -1878,11 +1839,11 @@ public static class AgentUtilities
                 var afterPos = pos + 1;
                 while (afterPos < text.Length && char.IsWhiteSpace(text[afterPos])) afterPos++;
 
-                // Valid JSON structural transitions: , } ] end-of-text
+
                 if (afterPos >= text.Length || text[afterPos] == ',' || text[afterPos] == '}' || text[afterPos] == ']')
                     return (UnescapeJsonString(text.Substring(start, pos - start)), pos + 1);
 
-                // If followed by "key": pattern, this is the closing delimiter
+
                 if (text[afterPos] == '"' && afterPos + 3 < text.Length)
                 {
                     var keyEnd = text.IndexOf('"', afterPos + 1);
@@ -1898,7 +1859,7 @@ public static class AgentUtilities
             pos++;
         }
 
-        // Fallback: walk backward from nextKeyPos to find the last quote
+
         if (nextKeyPos > start + 1 && nextKeyPos < int.MaxValue)
         {
             var end = nextKeyPos - 1;
@@ -1909,27 +1870,27 @@ public static class AgentUtilities
 
         return null;
     }
-  
 
-    /// <summary>
-    /// Strips stopwords and generic action verbs from a prompt, returning
-    /// the domain-meaningful terms that are actually useful for file matching.
-    /// Replaces the old ExtractSearchKeywords which included words like "Make", "more",
-    /// "sensitive" that produce grep noise across every file in the codebase.
-    /// </summary>
+
+
+
+
+
+
+
     public static List<string> ExtractMeaningfulKeywords(string lower)
     {
         var stopwords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            // Articles, prepositions, conjunctions
+
             "the","a","an","and","or","but","in","on","at","to","for","of","with","from",
             "into","onto","upon","after","before","about","above","below","between",
-            // Pronouns
+
             "this","that","it","its","their","our","my","your","his","her","we","they","i",
-            // Auxiliary verbs
+
             "is","are","was","were","be","been","being","have","has","had",
             "do","does","did","will","would","should","could","may","might","shall",
-            // Generic action verbs (too broad — match everything)
+
             "make","making","makes","made",
             "fix","fixing","fixes","fixed",
             "add","adding","adds","added",
@@ -1942,12 +1903,12 @@ public static class AgentUtilities
             "remove","removing","removes","removed",
             "set","get","put","use","using","used",
             "show","hide","display",
-            // Vague adjectives / adverbs
+
             "more","less","some","any","all","no","not","also","very","just",
             "nice","nicely","good","better","best","new","old","right","left",
             "please","sure","now","then","when","where","how","why","what","which","who",
             "out","up","down","so","if","else","really","quite","bit","little","lot",
-            // Common filler
+
             "need","want","should","must","can","let","help","try","look","see"
         };
 
@@ -1959,16 +1920,16 @@ public static class AgentUtilities
             .ToList();
     }
 
-    /// <summary>
-    /// Scores project files using task-type heuristics — no LLM required.
-    /// Detects intent (styling, HTML, JS, backend, config) from prompt keywords,
-    /// then assigns extension + filename scores. Returns ordered candidate list.
-    /// </summary>
+
+
+
+
+
     public static List<string> ApplyTaskTypeHeuristics(string prompt, List<string> allFiles)
     {
         var lower = prompt.ToLowerInvariant();
 
-        // Detect what kind of task this is (multiple can be true)
+
         var isStyleTask = Regex.IsMatch(lower, @"\b(style|css|color|theme|layout|spacing|font|design|ui|ux|look|appear|brand|visual|margin|padding|border|shadow|panel|card)\b");
         var isHtmlTask = Regex.IsMatch(lower, @"\b(html|template|page|view|markup|modal|popup|section|div)\b");
         var isJsTask = Regex.IsMatch(lower, @"\b(javascript|script|function|event|click|toggle|show|hide|angular|react|vue|component|state|behavior)\b");
@@ -1984,7 +1945,7 @@ public static class AgentUtilities
             var pathLow = f.ToLowerInvariant();
             var score = 0;
 
-            // ── Extension scoring by task type ──────────────────────────────
+
             if (isStyleTask)
             {
                 if (ext is ".css" or ".scss" or ".sass" or ".less") score += 120;
@@ -2012,23 +1973,23 @@ public static class AgentUtilities
                 if (ext is ".json" or ".yaml" or ".yml") score += 120;
             }
 
-            // ── Boost if the filename contains a meaningful prompt keyword ──
+
             foreach (var kw in meaningfulKeywords)
                 if (nameLow.Contains(kw))
                     score += 50;
 
-            // ── Frontend folder boost for frontend tasks ───────────────────
+
             if ((isStyleTask || isHtmlTask || isJsTask) && pathLow.StartsWith("wwwroot/"))
                 score += 25;
 
-            // ── Penalize known-large / known-noisy files ───────────────────
-            // These are almost never the target of a specific edit request
+
+
             if (nameLow.Contains("agentcontroller")) score -= 200;
             if (nameLow == "filehints") score -= 200;
             if (pathLow.EndsWith(".min.js")) score -= 300;
             if (pathLow.EndsWith(".min.css")) score -= 300;
 
-            // ── Penalize non-text / generated artifacts ────────────────────
+
             if (ext is ".dll" or ".exe" or ".pdb" or ".nupkg" or ".lock" or ".sum")
                 score -= 1000;
 
@@ -2040,8 +2001,8 @@ public static class AgentUtilities
         .Select(x => x.file)
         .ToList();
 
-        // Fallback: if no file scored positively (e.g. novel task type), include
-        // common entry-point files so the LLM always has something to work with
+
+
         if (scored.Count == 0)
         {
             scored = allFiles
@@ -2092,17 +2053,17 @@ public static class AgentUtilities
         return sb.ToString();
     }
 
-    /// <summary>
-    /// For large files, returns a "skeleton" of the file, keeping the structural header
-    /// and the excerpt most likely to contain the relevant edit target, while replacing
-    /// other large blocks with method/class signatures.
-    /// </summary>
+
+
+
+
+
     public static string ExtractRelevantExcerpt(string fileContent, string changeDesc, string? planOldString, int fileBodyTruncation = 8000)
     {
         const int RadiusLines = 60;
         var lines = fileContent.Split('\n');
 
-        // ── Step 1: Always include structural header (imports + declaration) ──
+
         var structEnd = 0;
         var foundClassLine = -1;
         for (var i = 0; i < Math.Min(lines.Length, 100); i++)
@@ -2114,14 +2075,14 @@ public static class AgentUtilities
                 continue;
             }
 
-            // Header lines (using, import, etc.)
+
             if (Regex.IsMatch(trimmed, @"^(using|import|namespace|package|from|export|#include|@|\[)", RegexOptions.IgnoreCase))
             {
                 structEnd = i + 1;
                 continue;
             }
 
-            // Declaration lines (class, interface, etc.)
+
             if (Regex.IsMatch(trimmed, @"\b(class|interface|struct|record|enum|function|void)\b", RegexOptions.IgnoreCase))
             {
                 foundClassLine = i;
@@ -2134,7 +2095,7 @@ public static class AgentUtilities
         }
         if (foundClassLine >= 0) structEnd = Math.Max(structEnd, foundClassLine + 1);
 
-        // ── Step 2: Find the target region ──
+
         var targetStart = -1;
         var targetEnd = -1;
 
@@ -2168,12 +2129,12 @@ public static class AgentUtilities
             }
         }
 
-        // ── Step 3: Assemble with Skeleton ──
+
         var header = string.Join('\n', lines.Take(structEnd));
 
         if (targetStart < 0)
         {
-            // No target found: provide skeleton of the entire body
+
             var bodySkeleton = GetSkeletonForRange(lines, structEnd, lines.Length);
             return header + "\n" + bodySkeleton;
         }
@@ -2191,13 +2152,13 @@ public static class AgentUtilities
         return result.ToString();
     }
 
-    // Normalize a single line into a compact skeleton signature when possible.
+
     private static bool TryNormalizeSkeletonSignature(string line, out string signature)
     {
         signature = null!;
         if (string.IsNullOrWhiteSpace(line)) return false;
         var l = line.Trim();
-        // Preserve attributes like [HttpGet], [Route(...)] as lightweight skeleton markers
+
         if (l.StartsWith("["))
         {
             var am = Regex.Match(l, @"^\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.IgnoreCase);
@@ -2223,7 +2184,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // C# method (includes async, modifiers and generic return types)
+
         var csMethod = Regex.Match(l, @"^\s*(?!(?:func\b|pub\s+fn\b))(public|private|protected|internal)?\s*(?:static|async|virtual|override|extern|unsafe|sealed|partial)?\s*([\w<>,\s\[\]]+?)\s+([A-Za-z_][\w]*)\s*\([^\)]*\)\s*(?:\{|$)", RegexOptions.IgnoreCase);
         if (csMethod.Success)
         {
@@ -2241,7 +2202,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // TypeScript / JS: export interface/class
+
         var tsDecl = Regex.Match(l, @"^\s*(export\s+)?(interface|class)\s+([A-Za-z_][\w]*)", RegexOptions.IgnoreCase);
         if (tsDecl.Success)
         {
@@ -2252,7 +2213,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // TypeScript / JS method (async optional)
+
         var tsMethod = Regex.Match(l, @"^\s*(async\s+)?([A-Za-z_][\w]*)\s*\([^\)]*\)\s*(:\s*[\w<>,\s\[\]]+)?\s*\{?", RegexOptions.IgnoreCase);
         if (tsMethod.Success)
         {
@@ -2262,7 +2223,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // Python def/class
+
         var pyDef = Regex.Match(l, @"^\s*def\s+([A-Za-z_][\w]*)\s*\([^\)]*\)\s*:\s*$", RegexOptions.IgnoreCase);
         if (pyDef.Success)
         {
@@ -2276,7 +2237,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // Go: func (receiver) Name(...)
+
         var goFunc = Regex.Match(l, @"^\s*func\s*(?:\(([^\)]*)\)\s*)?([A-Za-z_][\w]*)\s*\(", RegexOptions.IgnoreCase);
         if (goFunc.Success)
         {
@@ -2286,7 +2247,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // Rust: pub fn / fn
+
         var rustFn = Regex.Match(l, @"^\s*(pub\s+)?fn\s+([A-Za-z_][\w]*)\s*\(", RegexOptions.IgnoreCase);
         if (rustFn.Success)
         {
@@ -2296,7 +2257,7 @@ public static class AgentUtilities
             return true;
         }
 
-        // Fallback: detect function-like lines with parentheses but avoid single-word lines
+
         var funcLike = Regex.Match(l, @"^\s*([A-Za-z_][\w]*)\s*\([^\)]*\)\s*\{?\s*$");
         if (funcLike.Success)
         {
@@ -2310,16 +2271,16 @@ public static class AgentUtilities
         return false;
     }
 
-    /// <summary>
-    /// Test helper: exposes the internal TryNormalizeSkeletonSignature for unit tests.
-    /// Returns true when the line can be normalized into a compact skeleton signature.
-    /// </summary>
+
+
+
+
     public static bool NormalizeSkeletonSignatureForTest(string line, out string signature) => TryNormalizeSkeletonSignature(line, out signature);
 
-    /// <summary>
-    /// Scans a range of lines for class, method, and property signatures, 
-    /// returning a condensed "skeleton" view for the LLM.
-    /// </summary>
+
+
+
+
     public static string GetSkeletonForRange(string[] allLines, int start, int end)
     {
         if (start >= end) return "";
@@ -2349,20 +2310,20 @@ public static class AgentUtilities
     }
     public static IEnumerable<string> GeneratePlanJsonCandidates(string json)
     {
-        // Candidate 1 — as-is
+
         yield return json;
 
-        // Candidate 2 — quote unquoted keys
+
         var quoted = Regex.Replace(json,
             @"(?<=[{,])\s*([a-zA-Z_$][\w$]*)\s*(?=:)",
             m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
         if (quoted != json) yield return quoted;
 
-        // Candidate 3 — escape bare newlines inside string values
+
         var repaired = RepairJsonStringValues(json);
         if (repaired != null && repaired != json) yield return repaired;
 
-        // Candidate 4 — both repairs combined
+
         if (repaired != null && repaired != json)
         {
             var both = Regex.Replace(repaired,
@@ -2371,11 +2332,11 @@ public static class AgentUtilities
             if (both != repaired) yield return both;
         }
 
-        // ── NEW: Candidate 5 — full repair (handles raw newlines AND unescaped quotes)
+
         var fullyRepaired = RepairJsonString(json);
         if (fullyRepaired != null) yield return fullyRepaired;
 
-        // ── NEW: Candidate 6 — full repair + quote unquoted keys
+
         if (fullyRepaired != null)
         {
             var quotedFull = Regex.Replace(fullyRepaired,
@@ -2383,11 +2344,11 @@ public static class AgentUtilities
                 m => m.Value.Replace(m.Groups[1].Value, $"\"{m.Groups[1].Value}\""));
             if (quotedFull != fullyRepaired) yield return quotedFull;
         }
-        // Candidate 7 — truncation repair (closes missing brackets/strings)
+
         var truncFixed = TryRepairTruncatedPlanJson(json);
         if (truncFixed != null && truncFixed != json) yield return truncFixed;
 
-        // Candidate 8 — truncation repair + full string repair combined
+
         if (truncFixed != null)
         {
             var truncAndRepaired = RepairJsonString(truncFixed);
@@ -2397,7 +2358,7 @@ public static class AgentUtilities
     }
 
     public static int EstimateTokens(string text) =>
-        string.IsNullOrEmpty(text) ? 0 : text.Length / 4; 
+        string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
 
     public static void CompactConversation(StringBuilder conversation, int keepLastTurns = 3)
     {
@@ -2428,7 +2389,7 @@ public static class AgentUtilities
         }
         sb.AppendLine();
 
-        // Keep initial system prompt + task (turns[0]) + last N turns in full
+
         sb.Append(turns[0]);
         for (var i = Math.Max(1, turns.Length - keepLastTurns); i < turns.Length; i++)
             sb.Append("Command [").Append(turns[i]);
@@ -2436,26 +2397,22 @@ public static class AgentUtilities
         conversation.Clear();
         conversation.Append(sb.ToString());
     }
-    /// <summary>
-    /// Repairs JSON that was cut off mid-stream by closing unclosed strings and brackets.
-    /// Strategy A: close from current position and re-parse.
-    /// Strategy B: cut back to the last complete plan step and close with ]}.
-    /// Returns the repaired string if it parses as a plan, null if unrecoverable.
-    /// </summary>
+
+
     public static string? TryRepairTruncatedPlanJson(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
 
         var stack = new Stack<char>();
         var inString = false;
-        var lastPlanItemEnd = -1; // char index after the last complete plan-step closing }
+        var lastPlanItemEnd = -1;
 
         for (var i = 0; i < raw.Length; i++)
         {
             var c = raw[i];
             if (inString)
             {
-                if (c == '\\') { i++; continue; } // skip escaped char
+                if (c == '\\') { i++; continue; }
                 if (c == '"') inString = false;
                 continue;
             }
@@ -2464,14 +2421,14 @@ public static class AgentUtilities
             if (c == '}' && stack.Count > 0 && stack.Peek() == '{')
             {
                 stack.Pop();
-                // depth 2 = inside outer-object → plan-array → just closed a step object
+
                 if (stack.Count == 2) lastPlanItemEnd = i + 1;
                 continue;
             }
             if (c == ']' && stack.Count > 0 && stack.Peek() == '[') stack.Pop();
         }
 
-        // Already balanced
+
         if (stack.Count == 0 && !inString) return null;
 
         var parseOpts = new JsonDocumentOptions { AllowTrailingCommas = true };
@@ -2488,28 +2445,28 @@ public static class AgentUtilities
             catch { return false; }
         }
 
-        // ── Strategy A: close from current position ──────────────────────────────
+
         {
             var sb = new StringBuilder(raw.TrimEnd());
-            if (inString) sb.Append('"');                          // close open string
-            while (sb.Length > 0 && sb[^1] is ',' or ':')         // trim trailing noise
+            if (inString) sb.Append('"');
+            while (sb.Length > 0 && sb[^1] is ',' or ':')
                 sb.Remove(sb.Length - 1, 1);
-            foreach (var ch in stack)                              // close brackets
+            foreach (var ch in stack)
                 sb.Append(ch == '{' ? '}' : ']');
 
             var candidate = sb.ToString();
             if (IsPlan(candidate)) return candidate;
 
-            // Also try with string-value escaping on top
+
             var escaped = RepairJsonStringValues(candidate);
             if (escaped != null && IsPlan(escaped)) return escaped;
 
-            // And full repair (handles unescaped inner quotes from C# code)
+
             var fullyRepaired = RepairJsonString(candidate);
             if (fullyRepaired != null && IsPlan(fullyRepaired)) return fullyRepaired;
         }
 
-        // ── Strategy B: cut to last complete plan item, close with ]} ────────────
+
         if (lastPlanItemEnd > 0)
         {
             var cut = raw[..lastPlanItemEnd].TrimEnd(',', ' ', '\t', '\r', '\n') + "]}";
@@ -2531,16 +2488,16 @@ public static class AgentUtilities
         ".fs", ".fsx", ".fsi",
         ".nim",
         ".sass",
-        ".hs", ".lhs",          // Haskell
-        ".elm",                 // Elm
-        ".ml", ".mli",          // OCaml (off-side rule)
+        ".hs", ".lhs",
+        ".elm",
+        ".ml", ".mli",
     };
     private static readonly HashSet<string> _endKeywordLanguages = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".rb",                              // Ruby:   def/end
-        ".lua",                             // Lua:    function/end
-        ".ex", ".exs",                      // Elixir: do/end
-        ".sh", ".bash", ".zsh", ".fish",    // Shell:  if/fi, for/done, case/esac
+        ".rb",
+        ".lua",
+        ".ex", ".exs",
+        ".sh", ".bash", ".zsh", ".fish",
     };
 
     private static string ResolveWorkspaceRoot(IConfiguration _config, IWebHostEnvironment _env)
@@ -2562,7 +2519,7 @@ public static class AgentUtilities
     }
 
     public static async Task<(StringBuilder fileContents, string warn)> GetReplanFileContents(List<object> executedSteps, string projectRoot, List<string>? attachedFiles, CancellationToken ct)
-    { 
+    {
         var fileContents = new StringBuilder();
         var pathsToRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string warn = "";
@@ -2583,7 +2540,7 @@ public static class AgentUtilities
                     Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
             }
             catch
-            { 
+            {
                 continue;
             }
             if (!System.IO.File.Exists(fullPath)) continue;
@@ -2592,7 +2549,7 @@ public static class AgentUtilities
             try
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
- 
+
                 const int MaxCharsPerFile = 8000;
                 if (content.Length > MaxCharsPerFile)
                     content = content[..MaxCharsPerFile]
@@ -2605,7 +2562,7 @@ public static class AgentUtilities
                 fileContents.AppendLine();
             }
             catch (Exception ex)
-            { 
+            {
                 warn = $"Replan: could not read {relPath} for context: {ex.Message}";
             }
         }
@@ -2613,12 +2570,6 @@ public static class AgentUtilities
         return (fileContents, warn);
     }
 
-    /// <summary>
-    /// Returns a platform-agnostic sandbox directory for benchmark tasks.
-    /// Windows: %USERPROFILE%\Desktop\benchmark_sandbox
-    /// Linux:   ~/Desktop/benchmark_sandbox  (or ~/benchmark_sandbox if no Desktop)
-    /// macOS:   ~/Desktop/benchmark_sandbox
-    /// </summary>
     public static string GetBenchmarkSandboxPath()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -2718,7 +2669,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(name)) return true;
 
-        // Lowercase keywords / control flow.
+
         var keywords = new HashSet<string>(StringComparer.Ordinal)
         {
             "if","for","while","switch","return","using","lock","catch","throw",
@@ -2741,7 +2692,7 @@ public static class AgentUtilities
             "Exception","InvalidOperationException","ArgumentException","Guid",
             "DateTime","TimeSpan","StringBuilder","Regex","Encoding","JsonSerializer",
             "Path","File","Directory","Environment","Math","Random","CancellationToken",
-            "length", // Added to prevent false positives in the hallucinated property guard
+            "length",
         };
         if (builtins.Contains(name)) return true;
 
@@ -2879,7 +2830,7 @@ public static class AgentUtilities
         if (ext is not (".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")) return null;
 
         var newProps = new HashSet<string>(StringComparer.Ordinal);
-        // Match .X in this.X or obj.X
+
         foreach (Match m in Regex.Matches(newStr, @"\.([A-Za-z_]\w*)", RegexOptions.Compiled))
         {
             var name = m.Groups[1].Value;
@@ -2944,7 +2895,7 @@ public static class AgentUtilities
     {
         return ext.ToLowerInvariant() switch
         {
-            // ── C# (Roslyn AST) ────────────────────────────────────────────────────
+
             ".cs" => ("brace", true,
                 "⚠ C# FILE: " +
                 "USE FORMAT C (targetType/targetName/newCode) for FULL METHOD replacements or to ADD a new method (via insertAfter:true). " +
@@ -2953,7 +2904,7 @@ public static class AgentUtilities
                 "Do NOT use targetType='class' to add properties/fields. " +
                 "INDENTATION: method signature at class-member level, body indented 4 spaces more."),
 
-            // ── TypeScript / JavaScript ────────────────────────────────────────────
+
             ".ts" or ".tsx" => ("brace", true,
                 "⚠ TS FILE: preserve ALL indentation exactly. Methods inside a class MUST be indented. " +
                 "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
@@ -2970,7 +2921,7 @@ public static class AgentUtilities
                 "FORMAT C supported (targetType='function'/'method', targetName='name'). " +
                 "For small edits prefer oldString/newString."),
 
-            // ── JVM / CLR family (brace-based, regex-targeted) ────────────────────
+
             ".java" => ("brace", true,
                 "⚠ JAVA FILE: brace-based, similar to C#. " +
                 "FORMAT C supported: targetType='method'/'class'/'interface'. " +
@@ -2983,13 +2934,13 @@ public static class AgentUtilities
                 "⚠ SCALA FILE: brace-based. FORMAT C supported: targetType='method'/'class'/'object'. " +
                 "Preserve implicits, case class syntax, and for-comprehension indentation exactly."),
 
-            // ── Go ─────────────────────────────────────────────────────────────────
+
             ".go" => ("brace", true,
                 "⚠ GO FILE: brace-based, uses TABS (not spaces) for indentation — never convert tabs to spaces. " +
                 "FORMAT C supported: targetType='function', targetName='FunctionName'. " +
                 "Preserve ALL error-handling idioms (if err != nil), defer statements, and goroutine patterns."),
 
-            // ── Systems languages ──────────────────────────────────────────────────
+
             ".rs" => ("brace", true,
                 "⚠ RUST FILE: brace-based. FORMAT C supported: targetType='function'/'impl'. " +
                 "Preserve ALL lifetime annotations ('a), borrow markers (&, &mut), " +
@@ -3003,7 +2954,7 @@ public static class AgentUtilities
                 "Preserve access modifiers (open/public/internal/fileprivate/private), " +
                 "property wrappers (@State, @Binding), and optional chaining exactly."),
 
-            // ── Scripting / dynamic ────────────────────────────────────────────────
+
             ".php" => ("brace", true,
                 "⚠ PHP FILE: brace-based. FORMAT C supported: targetType='function'/'method'/'class'. " +
                 "Preserve $ sigils on all variables, type hints, and nullable ? modifiers exactly."),
@@ -3014,7 +2965,7 @@ public static class AgentUtilities
                 "⚠ GROOVY FILE: brace-based (Gradle/Groovy DSL). FORMAT C supported: targetType='method'. " +
                 "Preserve closure syntax { ... }, GString interpolation, and Gradle DSL patterns."),
 
-            // ── End-keyword languages (def/end, if/fi, function/end) ──────────────
+
             ".rb" => ("end-keyword", true,
                 "⚠ RUBY FILE: uses def/end, do/end, class/end block terminators — NOT braces. " +
                 "FORMAT C supported: targetType='method', targetName='method_name' (snake_case). " +
@@ -3037,7 +2988,7 @@ public static class AgentUtilities
                 "Use oldString/newString. Preserve $_ pipeline variable, " +
                 "cmdlet verb-noun naming, and parameter attribute syntax."),
 
-            // ── Whitespace-significant / indent-based ─────────────────────────────
+
             ".py" or ".pyi" => ("indent", false,
                 "⚠ PYTHON FILE: indentation IS the syntax — do NOT alter indent levels. " +
                 "Use oldString/newString only. FORMAT C is NOT supported. " +
@@ -3056,7 +3007,7 @@ public static class AgentUtilities
             ".coffee" => ("indent", false,
                 "⚠ COFFEESCRIPT FILE: whitespace-significant, no braces. Use oldString/newString only."),
 
-            // ── Tag / markup ───────────────────────────────────────────────────────
+
             ".html" or ".htm" => ("tag", false,
                 "⚠ HTML FILE: tag-based indentation — child elements MUST be indented more than parent. " +
                 "Use oldString/newString. Preserve attribute quoting, void element self-closing, " +
@@ -3078,7 +3029,7 @@ public static class AgentUtilities
                 "⚠ SVG FILE: XML tag-based. Use oldString/newString. " +
                 "Preserve viewBox, transform attributes, and path d= values exactly."),
 
-            // ── Stylesheets ────────────────────────────────────────────────────────
+
             ".css" or ".scss" or ".less" => ("brace", false,
                 "⚠ CSS/SCSS/LESS FILE: brace-based selectors. Use oldString/newString. " +
                 "CRITICAL: oldString MUST be at most 4 lines — never replace an entire CSS block. " +
@@ -3089,7 +3040,7 @@ public static class AgentUtilities
                 "Preserve ALL whitespace in property values (e.g. '0 1px 2px rgba(0,0,0,0.5)' — " +
                 "every space and comma is significant). Preserve SCSS variables ($var), mixins, and nesting."),
 
-            // ── Config / data ──────────────────────────────────────────────────────
+
             ".json" => ("config", false,
                 "⚠ JSON FILE: strict syntax — use oldString/newString only. " +
                 "NO trailing commas, NO comments. Preserve ALL nested object structure exactly. " +
@@ -3104,16 +3055,16 @@ public static class AgentUtilities
                 "⚠ PROTOBUF FILE: brace-based. Use oldString/newString. " +
                 "Preserve field numbers, oneof blocks, and option statements exactly."),
 
-            // ── Query / data ───────────────────────────────────────────────────────
+
             ".sql" => ("plain", false,
                 "⚠ SQL FILE: use oldString/newString. Preserve ALL whitespace in multi-line queries. " +
                 "Match exact keyword casing (uppercase SQL keywords are conventional). " +
-                "Preserve semicolons and comment styles (-- vs /* */)."),
+                "Preserve semicolons and comment styles (-- vs)."),
             ".graphql" or ".gql" => ("plain", false,
                 "⚠ GRAPHQL FILE: use oldString/newString. Preserve type definitions, " +
                 "field arguments, and directive (@deprecated, @skip) syntax exactly."),
 
-            // ── Documentation ──────────────────────────────────────────────────────
+
             ".md" or ".mdx" => ("plain", false,
                 "⚠ MARKDOWN FILE: use oldString/newString. " +
                 "Preserve heading levels (# vs ##), list markers (-, *, 1.), " +
@@ -3122,7 +3073,7 @@ public static class AgentUtilities
                 "⚠ RST FILE: indentation-significant section underlines. Use oldString/newString. " +
                 "Preserve directive syntax (.. directive::) and role syntax (:role:`text`)."),
 
-            // ── Default ────────────────────────────────────────────────────────────
+
             _ => ("plain", false,
                 "⚠ Preserve ALL indentation and whitespace exactly as shown in the file. " +
                 "Use oldString/newString. Copy every leading space/tab character-for-character.")
@@ -3144,7 +3095,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrWhiteSpace(code)) return code;
         var lines = code.Split('\n').ToList();
-        // Remove leading "export class X {" or "class X {" lines
+
         while (lines.Count > 0)
         {
             var trimmed = lines[0].Trim();
@@ -3170,7 +3121,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(s)) return s ?? "";
         return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
-    } 
+    }
     public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return new List<string>();
@@ -3200,7 +3151,7 @@ public static class AgentUtilities
         foreach (var line in oldLines)
         {
             var trimmed = line.Trim();
-            if (trimmed.Length < 15) continue; // skip short lines like </div>
+            if (trimmed.Length < 15) continue;
             var count = normFile.Split(new[] { trimmed }, StringSplitOptions.None).Length - 1;
             if (count < bestCount)
             {
@@ -3234,7 +3185,7 @@ public static class AgentUtilities
 
             if (nextOpen >= 0 && nextOpen < nextClose)
             {
-                // Verify it's a real tag, not just a substring
+
                 var charAfter = nextOpen + tagName.Length + 1 < normFile.Length
                     ? normFile[nextOpen + tagName.Length + 1]
                     : '\0';
@@ -3433,10 +3384,10 @@ public static class AgentUtilities
 
     public static string AutoIndentHtml(string html, string baseIndent)
     {
-        const string IndentStep = "  "; // 2 spaces per nesting level
+        const string IndentStep = "  ";
         var lines = html.Split('\n');
 
-        // If the content already has relative structure, preserve it exactly
+
         var distinctDepths = lines
             .Where(l => l.Trim().Length > 0)
             .Select(l => AgentUtilities.GetLeadingWhitespace(l).Length)
@@ -3449,13 +3400,13 @@ public static class AgentUtilities
             var trimmed = lines[i].Trim();
             if (trimmed.Length == 0) continue;
 
-            // Closing tag → dedent BEFORE placing this line
+
             if (Regex.IsMatch(trimmed, @"^</[\w-]"))
                 depth = Math.Max(0, depth - 1);
 
             lines[i] = baseIndent + new string(' ', depth * IndentStep.Length) + trimmed;
 
-            // Opening tag: indent the NEXT line if this tag doesn't close on the same line
+
             var tagMatch = Regex.Match(trimmed, @"^<([\w-]+)[\s>]");
             if (tagMatch.Success)
             {
@@ -3471,13 +3422,13 @@ public static class AgentUtilities
 
         return string.Join("\n", lines);
     }
-    /// <summary>Auto-indent replacement lines based on brace depth, using the file's indent style.</summary>
+
     public static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
     {
         if (!replacement.Contains('{') && !replacement.Contains('}'))
             return replacement;
 
-        // Infer indent size from the file (difference between parent and child indent levels)
+
         var indentSize = AgentUtilities.InferIndentSize(fileLines, start);
         if (indentSize <= 0) return replacement;
 
@@ -3488,7 +3439,7 @@ public static class AgentUtilities
             if (lines[i].Trim().Length == 0) continue;
 
             var trimmed = lines[i].TrimStart();
-            // Compute indent depth for THIS line only (don't mutate depth yet)
+
             var lineDepth = depth;
             if (trimmed.StartsWith("}"))
                 lineDepth = Math.Max(0, lineDepth - 1);
@@ -3498,7 +3449,7 @@ public static class AgentUtilities
             if (lineIndent != expectedIndent)
                 lines[i] = expectedIndent + trimmed;
 
-            // Update depth for the NEXT line by counting braces in this line
+
             foreach (var c in trimmed)
             {
                 if (c == '{') depth++;
@@ -3507,7 +3458,7 @@ public static class AgentUtilities
         }
         return string.Join("\n", lines);
     }
-    /// <summary>Infer the file's indent size (e.g. 2 or 4) by sampling indentation deltas.</summary>
+
     public static int InferIndentSize(string[] fileLines, int start)
     {
         var sampleStart = Math.Max(0, start - 5);
@@ -3521,8 +3472,8 @@ public static class AgentUtilities
             if (delta > 0 && delta <= 8)
                 deltas.Add(delta);
         }
-        if (deltas.Count == 0) return 2; // default
-        // Use mode (most common delta) — more reliable than average for mixed indentation
+        if (deltas.Count == 0) return 2;
+
         var mode = deltas.GroupBy(d => d).OrderByDescending(g => g.Count()).ThenByDescending(g => g.Key).First().Key;
         return mode < 2 ? 2 : mode > 4 ? 4 : mode;
     }
@@ -3557,7 +3508,7 @@ public static class AgentUtilities
         return string.Join("\n", lines);
     }
 
-    /// <summary>Find the last position where braces are balanced in partial content.</summary>
+
     public static string FindLastBalancedPrefix(string content)
     {
         var depth = 0;
@@ -3658,27 +3609,7 @@ public static class AgentUtilities
         return null;
     }
 
-    /// <summary>
-    /// Parse a plan in delimiter format (replaces JSON for output robustness).
-    /// Format:
-    ///   <<<THINKING>>>
-    ///   analysis text
-    ///   <<<SUMMARY>>>
-    ///   one line summary
-    ///   <<<SCORE>>> 85
-    ///   <<<STEP 1>>>
-    ///   FILE: relative/path.cs
-    ///   CHANGE: description
-    ///   <<<OLD>>>
-    ///   old code
-    ///   <<<NEW>>>
-    ///   new code
-    ///   <<<STEP END>>>
-    ///   <<<STEP 2>>>
-    ///   FILE: _command
-    ///   CHANGE: cmd
-    ///   <<<STEP END>>>
-    /// </summary>
+
     public static AgentPlan? ParseDelimitedPlan(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -3689,9 +3620,9 @@ public static class AgentUtilities
             if (m.Success) trimmed = m.Groups[1].Value.Trim();
         }
 
-        // Normalize ### STEP N ### to <<<STEP N>>> so both formats use the same downstream regex
+
         trimmed = Regex.Replace(trimmed, @"###\s*STEP\s*(\d+)\s*###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
-        // Also normalize ###STEPN### (no spaces)
+
         trimmed = Regex.Replace(trimmed, @"###STEP(\d+)###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
 
         var thinking = ExtractDelimitedSection(trimmed, "THINKING");
@@ -3704,11 +3635,11 @@ public static class AgentUtilities
         var steps = new List<PlanStep>();
         var stepPattern = new Regex(@"<<<STEP\s*\d+>>>\s*(.*?)(?=<<<STEP\s*\d+>>>|<<<DONE>>>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
         var stepMatches = stepPattern.Matches(trimmed);
-        // Also match steps terminated by <<<STEP END>>>
+
         var stepEndPattern = new Regex(@"<<<STEP\s*\d+>>>\s*(.*?)<<<STEP END>>>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
         var stepEndMatches = stepEndPattern.Matches(trimmed);
 
-        // Use step-end matches if available (more reliable), otherwise fall back to step-start matches
+
         var preferredMatches = stepEndMatches.Count > 0 ? stepEndMatches : stepMatches;
 
         foreach (Match m in preferredMatches)
@@ -3742,17 +3673,14 @@ public static class AgentUtilities
             Score = score,
             Plan = steps
         };
-    } 
+    }
     private static string? ExtractDelimitedSection(string text, string sectionName)
     {
         var pattern = $@"<<<{sectionName}>>>\s*(.*?)(?=<<<|$)";
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
-    /// <summary>
-    /// Collects lines until the opening '(' of a method/constructor signature
-    /// is matched by its closing ')', handling multi-line parameter lists.
-    /// </summary>
+
     public static string CollectCompleteSignatureLine(string[] lines)
     {
         var sb = new StringBuilder();
@@ -3774,24 +3702,8 @@ public static class AgentUtilities
         }
         return sb.ToString().Trim();
     }
-    /// <summary>
-    /// For HTML/Angular/Razor templates, deterministically verifies that the
-    /// oldString being replaced is located within the correct *ngIf section.
-    ///
-    /// This catches the #1 HTML editing failure: the LLM edits a section that
-    /// looks similar to the target (e.g., editing the 'users' tab when the step
-    /// asks for the 'general' tab). The LLM verify gate frequently misses this
-    /// because the sections have similar structure (both have search inputs,
-    /// coordinate lists, etc.).
-    ///
-    /// Algorithm:
-    ///   1. Scan the file for all *ngIf="someVar === 'sectionName'" directives
-    ///   2. Find the div boundaries for each section
-    ///   3. Determine which section the oldString falls in
-    ///   4. Determine which section the step description references
-    ///   5. If they don't match, reject with a directive error that includes
-    ///      the CORRECT section's content so the LLM can copy from it
-    /// </summary>
+
+
     public static string? DetectWrongSectionEdit(
         string oldStr, string fileContent, string stepChange, string relPath)
     {
@@ -3802,8 +3714,8 @@ public static class AgentUtilities
         if (ext is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"))
             return null;
 
-        // ── 1. Find all named conditional sections in the file ──────────────
-        // Matches: *ngIf="activeDataTab === 'general'" or *ngIf="activeTab == 'users'"
+
+
         var sectionRegex = new Regex(
             @"\*ngIf\s*=\s*""(\w+)\s*={2,3}\s*'([^']+)'""",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -3819,14 +3731,14 @@ public static class AgentUtilities
             sections.Add((name, divStart, divEnd));
         }
 
-        // Need at least 2 sections for wrong-section to be possible
+
         if (sections.Count < 2) return null;
 
-        // ── 2. Find which section the oldStr is in ──────────────────────────
+
         var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
         var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
         var oldStrIdx = normFile.IndexOf(normOld, StringComparison.Ordinal);
-        if (oldStrIdx < 0) return null; // Let other guards handle "not found"
+        if (oldStrIdx < 0) return null;
 
         string? actualSection = null;
         foreach (var (name, divStart, divEnd) in sections)
@@ -3838,17 +3750,17 @@ public static class AgentUtilities
             }
         }
 
-        // If oldStr is not inside any named section (e.g. it's in the <head> or
-        // common area), don't trigger — other guards will catch real issues.
+
+
         if (actualSection == null) return null;
 
-        // ── 3. Determine target section from step description ───────────────
+
         var stepLower = stepChange.ToLowerInvariant();
         string? targetSection = null;
         foreach (var (name, _, _) in sections)
         {
-            // Match the section name as a standalone word in the step description
-            // e.g., step contains "general data tab" → matches section "general"
+
+
             if (Regex.IsMatch(stepLower, $@"\b{Regex.Escape(name.ToLowerInvariant())}\b"))
             {
                 targetSection = name;
@@ -3856,14 +3768,14 @@ public static class AgentUtilities
             }
         }
 
-        // Step doesn't reference any named section — can't verify
+
         if (targetSection == null) return null;
 
-        // ── 4. Correct section — no problem ─────────────────────────────────
+
         if (string.Equals(actualSection, targetSection, StringComparison.OrdinalIgnoreCase))
             return null;
 
-        // ── 5. Wrong section! Build a helpful error with the correct content ─
+
         var targetSectionEntry = sections.FirstOrDefault(s =>
             string.Equals(s.name, targetSection, StringComparison.OrdinalIgnoreCase));
 
@@ -3875,14 +3787,14 @@ public static class AgentUtilities
                          $"and use lines from THAT section as your oldString.");
         error.AppendLine($"Do NOT edit the '{actualSection}' section.");
 
-        // Include the CORRECT section's content so the LLM can copy from it
+
         if (targetSectionEntry.divEnd > targetSectionEntry.divStart)
         {
             var sectionContent = normFile.Substring(
                 targetSectionEntry.divStart,
                 Math.Min(targetSectionEntry.divEnd - targetSectionEntry.divStart + 6, 3000));
 
-            // Trim to a reasonable size — show first ~40 lines
+
             var sectionLines = sectionContent.Split('\n');
             if (sectionLines.Length > 45)
             {
@@ -3901,12 +3813,7 @@ public static class AgentUtilities
 
         return error.ToString();
     }
-    /// <summary>
-    /// Finds the matching closing </div> tag for the <div at the given index,
-    /// tracking div nesting depth. Handles comments and attribute strings
-    /// naively (sufficient for well-formed Angular templates).
-    /// Returns the index of the closing </div> tag, or -1 if not found.
-    /// </summary>
+
     private static int FindMatchingCloseDiv(string content, int openDivIdx)
     {
         if (openDivIdx < 0 || openDivIdx >= content.Length) return -1;
@@ -3919,11 +3826,11 @@ public static class AgentUtilities
             var nextOpen = content.IndexOf("<div", pos, StringComparison.OrdinalIgnoreCase);
             var nextClose = content.IndexOf("</div>", pos, StringComparison.OrdinalIgnoreCase);
 
-            if (nextClose < 0) return -1; // unmatched — malformed HTML
+            if (nextClose < 0) return -1;
 
             if (nextOpen >= 0 && nextOpen < nextClose)
             {
-                // Verify it's actually a <div tag (not <divider, <divide, etc.)
+
                 var charAfter = nextOpen + 4 < content.Length
                     ? content[nextOpen + 4]
                     : '\0';
@@ -3944,11 +3851,6 @@ public static class AgentUtilities
 
         return -1;
     }
-    /// <summary>
-    /// Extracts the verbatim file section most relevant to the change description using
-    /// keyword matching. Used to show the LLM the ACTUAL target section when its oldString
-    /// matched a different section of the file (e.g. another popup with a similar structure).
-    /// </summary>
     public static string? ExtractVerbatimTargetSection(
         string fileContent, string changeDesc, int contextLines = 10, int centerLine = 0)
     {
@@ -3993,10 +3895,6 @@ public static class AgentUtilities
         return string.Join("\n", lines[start..(end + 1)]);
     }
 
-    /// <summary>
-    /// Deterministically resolves the 1-based target line for an edit step by scanning the
-    /// actual file — never trusting planner-guessed line numbers alone.
-    /// </summary>
     public static int ResolveTargetLineNumber(
         string fileContent,
         string changeDesc,
@@ -4135,12 +4033,10 @@ public static class AgentUtilities
             if (lineLower.Contains("faq entries go here", StringComparison.Ordinal))
                 candidates.Add((i + 1, 90));
         }
-    } 
+    }
 
     private static string? ExtractField(string text, string fieldName)
     {
-        // Match fieldName: followed by content up to the next field name, <<<tag>>>, or end of string
-        // Handles both same-line (FILE: pathCHANGE: desc) and multi-line formats
         var pattern = $@"{fieldName}:\s*(.*?)(?=\s*(?:FILE:|CHANGE:|DESCRIPTION:|<<<|$))";
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
