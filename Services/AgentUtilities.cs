@@ -482,10 +482,7 @@ public static class AgentUtilities
             ? output[..maxCharsPerSection] + "\n    // ... [truncated]"
             : output;
     }
-    /// <summary>
-    /// Fixes indentation for multiline method arguments inside (), [], and {}
-    /// when the LLM or ReindentByBraceDepth flattens them to the base indent.
-    /// </summary>
+    
     public static string FixMultilineParenIndentation(string code)
     {
         var lines = code.Split('\n');
@@ -1783,10 +1780,7 @@ public static class AgentUtilities
         }
         return changed ? sb.ToString() : null;
     }
-    // FIX 2: Also count 'rename' steps as successful work so Phase 4 does not
-    // re-enter the plan+edit loop after a rename completes.  Previously only
-    // 'edit' was checked, so every rename caused two extra spurious LLM calls
-    // that would pick an unrelated file (e.g. app.js) and try to patch it.
+    
     public static bool HasSuccessfulEdits(IEnumerable<object> steps) =>
         steps.OfType<Dictionary<string, object?>>().Any(s =>
             s.TryGetValue("type", out var t) &&
@@ -1799,7 +1793,6 @@ public static class AgentUtilities
     {
         var steps = new List<AgentStep>();
 
-        // Fix common unquoted-key LLM blunder
         var unquotedNew = text.IndexOf(",newString\"", StringComparison.OrdinalIgnoreCase);
         var unquotedOld = text.IndexOf(",oldString\"", StringComparison.OrdinalIgnoreCase);
         if (unquotedNew >= 0 || unquotedOld >= 0)

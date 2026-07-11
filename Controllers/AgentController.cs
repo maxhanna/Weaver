@@ -4290,9 +4290,6 @@ emitSse, ct);
                             finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
                         }
 
-                        // Auto-indent HTML: strip all existing indentation so AutoIndentHtml
-                        // sees flat content and reconstructs from tag hierarchy (the basic
-                        // fixer above creates partially-correct indentation that confuses it).
                         var rawNew = string.Join("\n", finalNewLines);
                         if (IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
                         {
@@ -4304,8 +4301,6 @@ emitSse, ct);
                             finalNewLines = fixedHtml.Split('\n').ToList();
                         }
 
-                        // Brace-based auto-indent for TypeScript/C# code — handles method
-                        // bodies that the LLM flattens (all lines at same indent level).
                         var rawAfter = string.Join("\n", finalNewLines);
                         if ((rawAfter.Contains('{') || rawAfter.Contains('}')) &&
                             !IsHtmlLikeContent(rawAfter) && finalNewLines.Count > 2)
@@ -4444,7 +4439,6 @@ emitSse, ct);
                     wipeReason = await DetectMissingCreateTableAsync(oldStr!, newStr!, fileContent, relPath, emitSse, ct);
                 }
 
-                // Enforce atomic steps: if the step says "Remove", the newString must NOT re-add the element elsewhere
                 var changeLower = (step.Change ?? "").ToLowerInvariant();
                 if (wipeReason == null && (changeLower.StartsWith("remove ") || changeLower.StartsWith("delete ")))
                 {
@@ -4464,8 +4458,6 @@ emitSse, ct);
 
                 if (wipeReason != null)
                 {
-                    // Check if this is a "trying to add a method that already exists" scenario:
-                    // signature change where the NEW method name is already defined in the file.
                     if (wipeReason.StartsWith("SIGNATURE CHANGE", StringComparison.Ordinal))
                     {
                         var existingFn = CheckMethodExistsInFile(fileContent, newStr!);
@@ -4516,7 +4508,6 @@ emitSse, ct);
                 var err = matchError ?? "oldString not found verbatim";
                 if (!string.IsNullOrEmpty(snippet)) err += $". Nearby: {snippet}";
 
-                // If we have a target line, show the LLM the ACTUAL code at that line
                 if (step.LineNumber > 0)
                 {
                     var fileLinesArr = fileContent.Split('\n');
@@ -4532,7 +4523,6 @@ emitSse, ct);
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}",
                     new { step }, ct: ct);
 
-                // Self-heal: extract verbatim file lines at the fuzzy match location
                 var correctedBlock = BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
@@ -4584,8 +4574,6 @@ emitSse, ct);
                                     fullPath, newContent2, Encoding.UTF8, ct);
                                 await EmitLog(emitSse, "success",
                                     $"✓ Edited {relPath} (self-healed)", step, ct: ct);
-                                // Update outer state so the LLM verification gate below
-                                // can review this edit instead of bypassing it.
                                 newStr = correctedBlock;
                                 newContent = newContent2;
                                 goto AfterSelfHeal;
@@ -4702,7 +4690,6 @@ emitSse, ct);
                     }
                 }
 
-                // Auto-fix: add space after || when followed by digit/identifier (e.g., ||0 → || 0)
                 var fixedPipeContent = Regex.Replace(newContent, @"\|\|(\d|[a-zA-Z])", "|| $1");
                 if (fixedPipeContent != newContent)
                 {
@@ -4723,7 +4710,6 @@ emitSse, ct);
                 }
             }
 
-            // For HTML edits, strip unnecessary ?. from properties that the .ts file initializes non-null
             if ((relPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
                  relPath.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase)) &&
                 !string.IsNullOrWhiteSpace(newStr))
@@ -4735,14 +4721,12 @@ emitSse, ct);
                 {
                     var tsContent2 = await System.IO.File.ReadAllTextAsync(tsFullPath2, Encoding.UTF8, ct);
                     var definedProps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    // Match patterns like: "propName: Type = <non-null-value>;" or "propName?:" won't match
                     foreach (System.Text.RegularExpressions.Match m in Regex.Matches(
                         tsContent2, @"^\s*(\w+)\s*:\s*\w+(?:<[^>]*>)?\[\]?\s*=\s*(?!null|undefined)([^;]+);",
                         RegexOptions.Multiline))
                     {
                         definedProps.Add(m.Groups[1].Value);
                     }
-                    // Also match simple initializers: propName: Type = '' or = 0 or = false or = true
                     foreach (System.Text.RegularExpressions.Match m in Regex.Matches(
                         tsContent2, @"^\s*(\w+)\s*:\s*\w+\s*=\s*(?:''|""""|0|false|true|new\s+\w+|\[|\{);",
                         RegexOptions.Multiline))
@@ -4765,7 +4749,6 @@ emitSse, ct);
                             await EmitLog(emitSse, "info",
                                 $"Stripped unnecessary ?. from defined properties in {relPath}", ct: ct);
                             newStr = fixed2;
-                            // Re-apply the edit with the corrected newStr
                             var (replaced3, newContent3, _, _) =
                                 TryReplaceSafe(fileContent, oldStr!, fixed2, step.LineNumber, step.Change);
                             if (replaced3)
@@ -4854,7 +4837,6 @@ emitSse, ct);
                         $"Verify failed for {relPath}: {verr}", step, ct: ct);
                     history.Add((oldStr!, newStr, verr));
 
-                    // ← ADD stuckCount tracking so this aborts after 3 identical failures
                     if (string.Equals(
                         AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
                         AgentUtilities.NormalizeLineEndings(lastOld),
@@ -4906,7 +4888,6 @@ emitSse, ct);
                 }
             }
 
-            // Post-edit C# fixup: clean verbatim string & flatten hallucinated DTO wrappers
             if (fileExt == ".cs")
             {
                 var writtenContent = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
@@ -4920,7 +4901,6 @@ emitSse, ct);
                 }
             }
 
-            // Roslyn syntax check: parse the .cs file and report syntax errors
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newContent))
             {
                 try
@@ -4988,14 +4968,12 @@ emitSse, ct);
                 }
             }
 
-            // Post-edit style fix: check for spacing issues in the new content and fix via LLM
             if (!string.IsNullOrWhiteSpace(newStr) &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
             {
                 newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
-            // Safety net: reverse space before '(' only on lines that were actually edited
             if (!string.IsNullOrWhiteSpace(newStr))
             {
                 var fileLines = newContent.Split('\n');
@@ -5028,7 +5006,6 @@ emitSse, ct);
         AfterSelfHeal:
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
-                // Multi-round LLM verification: run 3 independent checks, average scores
                 const int VerificationRounds = 3;
                 var decisions = new List<string>();
                 var reasons = new List<string>();
@@ -5080,8 +5057,6 @@ emitSse, ct);
                     new { attempt = attempt + 1, scores, averageScore = avgScore, decision = llmGateDecision, reason = llmGateReason },
                     ct: ct);
 
-                // Programmatic override: if the LLM abandoned because a child method/property
-                // doesn't exist yet, check if a future plan step adds it. If so, force keep.
                 if (llmGateDecision == "abandon" && plan?.Plan?.Count > 0 && planItemIndex >= 0)
                 {
                     var methodMatches = Regex.Matches(llmGateReason,
@@ -5263,8 +5238,6 @@ emitSse, ct);
                 catch { /* swallow */ }
                 try
                 {
-                    // Update architecture facts (endpoints, schemas, method sigs, build tools)
-                    // from the successfully applied content.
                     await _editKnowledge.UpdateArchitectureAsync(
                         projectRoot, relPath, newStr ?? "", ct);
                 }
@@ -5432,7 +5405,6 @@ emitSse, ct);
                 return stepIndex + replanResults.Count;
             }
 
-            // Update failure context with replan failures
             failureContext = $"Replan attempt {replanAttempts} also failed.\n" + failureContext;
             allResults.AddRange(replanResults);
         }
@@ -5520,32 +5492,18 @@ emitSse, ct);
             await EmitLog(true, "error", "Failed to persist full plan to boarddata - halting to prevent data loss", new { cardId, error = ex.Message });
             throw;
         }
-    } 
-
-    public void test()
-    {
-        
     }
 
-    /// <summary>
-    /// Post-edit style pass: scans the applied newStr for common spacing issues
-    /// (missing spaces around operators, colons, etc.) and calls the LLM to fix them.
-    /// Returns the (possibly unchanged) content.
-    /// </summary>
     private async Task<string> PostEditStyleFixAsync(
         string fullPath, string relPath, string content, string appliedNewStr,
         bool emitSse, CancellationToken ct)
     {
-        // Skip HTML files — spacing patterns are for code operators, not HTML attributes
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         if (ext == ".html" || ext == ".htm")
             return content;
 
-        // Check for common spacing issues in the applied edit: e.g. `-1)` or `*5` or `:5`
-        // We look only in the changed region to keep the LLM call focused.
         var hasSpacingIssue = false;
         var needleLines = appliedNewStr.Split('\n');
-        // Build a compact excerpt of lines in the file that contain the new string lines
         var fileLines = content.Split('\n');
         var excerptStart = -1;
         var excerptEnd = -1;
@@ -5559,7 +5517,6 @@ emitSse, ct);
                 {
                     if (excerptStart < 0 || i < excerptStart) excerptStart = i;
                     if (i > excerptEnd) excerptEnd = i;
-                    // Check this line for spacing issues
                     if (Regex.IsMatch(fileLines[i], @"\(\w+\s*[+\-*/%]\d") ||  // `(page -1` no space before digit
                         Regex.IsMatch(fileLines[i], @"\d\s*[+\-*/%]\s*\d") ||  // `5*5` `5 *5` `5* 5` missing spaces
                         Regex.IsMatch(fileLines[i], @"(?<![=!<>])=(?!=)\d") || // `=1` no space after = (but not ==, !=, <=, >=)
@@ -5577,7 +5534,6 @@ emitSse, ct);
         if (!hasSpacingIssue || excerptStart < 0)
             return content;
 
-        // Send excerpt to LLM for fixing
         var contextWindowStart = Math.Max(0, excerptStart - 3);
         var contextWindowEnd = Math.Min(fileLines.Length, excerptEnd + 4);
         var excerpt = string.Join("\n", fileLines[contextWindowStart..contextWindowEnd]);
@@ -5620,24 +5576,19 @@ emitSse, ct);
             {
                 var oldStr = fix.TryGetProperty("oldString", out var oEl) ? oEl.GetString() : null;
                 var newStr = fix.TryGetProperty("newString", out var nEl) ? nEl.GetString() : null;
-                if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr) || oldStr == newStr)
-                    continue;
-                // Reject any fix that adds space before '('
-                if (Regex.IsMatch(newStr, @"\w\s+\("))
-                    continue;
-                // Replace only the FIRST occurrence to avoid corrupting unrelated regions
+                if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(newStr) || oldStr == newStr) 
+                { continue; }
+                if (Regex.IsMatch(newStr, @"\w\s+\(")) { continue; }
                 var idx = fixedContent.IndexOf(oldStr, StringComparison.Ordinal);
-                if (idx < 0) continue;
-                // Skip if oldStr appears more than once (ambiguous)
+                if (idx < 0) {continue;}
                 var secIdx = fixedContent.IndexOf(oldStr, idx + oldStr.Length, StringComparison.Ordinal);
-                if (secIdx >= 0) continue;
+                if (secIdx >= 0) { continue; }
                 fixedContent = fixedContent[..idx] + newStr + fixedContent[(idx + oldStr.Length)..];
                 fixCount++;
             }
 
             if (fixCount > 0)
             {
-                // Cleanup pass: reverse any space before '(' that the LLM may have sneaked in
                 fixedContent = Regex.Replace(fixedContent, @"\b(\w+)\s+\(", "$1(");
                 await System.IO.File.WriteAllTextAsync(fullPath, fixedContent, Encoding.UTF8, ct);
                 await EmitLog(emitSse, "info",
@@ -5695,7 +5646,6 @@ emitSse, ct);
                 continue;
             }
         }
-        // Long-needle sub-string scan: only within a window around exact matches
         if (longNeedles.Count > 0 && firstExact >= 0)
         {
             var windowStart = Math.Max(0, firstExact - 30);
@@ -5744,7 +5694,6 @@ emitSse, ct);
 
         var result = sb.ToString();
 
-        // Pass 2: Stray closing paren dedent
         var resultLines = result.Split('\n');
         var parensChanged = false;
         for (var i = 0; i < resultLines.Length; i++)
@@ -5773,7 +5722,6 @@ emitSse, ct);
             var next = (i + 1 < line.Length) ? line[i + 1] : '\0';
             var prev = (i > 0) ? line[i - 1] : '\0';
 
-            // ── Block comment ──
             if (inBlockComment)
             {
                 sb.Append(c);
@@ -5788,7 +5736,6 @@ emitSse, ct);
                 continue;
             }
 
-            // ── Line comment ──
             if (inLineComment)
             {
                 sb.Append(c);
@@ -5796,7 +5743,6 @@ emitSse, ct);
                 continue;
             }
 
-            // ── Verbatim String (C# @"..." or multi-line) ──
             if (inVerbatimString)
             {
                 sb.Append(c);
@@ -5816,7 +5762,6 @@ emitSse, ct);
                     }
                 }
 
-                // Apply SQL spacing rules inside verbatim strings
                 if (char.IsLetter(c))
                 {
                     var rest = line.Substring(i);
@@ -5853,10 +5798,8 @@ emitSse, ct);
                 continue;
             }
 
-            // ── Inside normal string literal ──
             if (inStringDouble || inStringSingle || inTemplate)
             {
-                // Apply SQL spacing rules inside regular strings too (e.g. "SELECT ... INTERVAL5 MINUTE")
                 if (char.IsLetter(c))
                 {
                     var rest = line.Substring(i);
@@ -5903,7 +5846,6 @@ emitSse, ct);
                 continue;
             }
 
-            // ── Not in string or comment — check for state transitions ──
             if (c == '/' && next == '/')
             {
                 inLineComment = true;
@@ -5930,9 +5872,7 @@ emitSse, ct);
             if (c == '\'') { inStringSingle = true; sb.Append(c); i++; continue; }
             if (c == '`') { inTemplate = true; sb.Append(c); i++; continue; }
 
-            // ── Not in string or comment — apply C# spacing fixes ──
 
-            // Rule 1: ',' followed by non-whitespace, non-')', ']', '}' -> insert space
             if (c == ',')
             {
                 sb.Append(c);
@@ -5949,7 +5889,6 @@ emitSse, ct);
                 continue;
             }
 
-            // Rule 2: ':' -> insert space after (but not for :: or URLs)
             if (c == ':')
             {
                 sb.Append(c);
@@ -5966,7 +5905,6 @@ emitSse, ct);
                 continue;
             }
 
-            // Rule 3: ';' -> insert space after
             if (c == ';')
             {
                 sb.Append(c);
@@ -5983,7 +5921,6 @@ emitSse, ct);
                 continue;
             }
 
-            // Rule 4: '=' -> insert spaces around standalone '='
             if (c == '=')
             {
                 const string operatorPrevChars = "!<>=+-*/%&|^~?:";
@@ -6025,7 +5962,6 @@ emitSse, ct);
                 continue;
             }
 
-            // Rule 5: '?' (ternary operator) -> insert space after if followed by digit
             if (c == '?')
             {
                 sb.Append(c);
@@ -6057,7 +5993,6 @@ emitSse, ct);
         var trimmed = line.TrimStart();
         if (trimmed.Length == 0) return line;
 
-        // Must START with a closing delimiter.
         char closeCh;
         if (trimmed[0] == ')') closeCh = ')';
         else if (trimmed[0] == ']') closeCh = ']';
@@ -6066,7 +6001,6 @@ emitSse, ct);
 
         char openCh = closeCh == ')' ? '(' : (closeCh == ']' ? '[' : '{');
 
-        // After the closing delimiter, only allow a tiny set of safe suffixes.
         var suffix = trimmed.Substring(1);
         if (!IsSafeCloseSuffix(suffix)) return line;
 
@@ -6080,7 +6014,6 @@ emitSse, ct);
             var upLine = fileLines[li];
             if (string.IsNullOrEmpty(upLine))
             {
-                // Blank line resets line-comment state (block comments persist).
                 inLineCmt = false;
                 continue;
             }
@@ -6370,14 +6303,12 @@ emitSse, ct);
         if (string.IsNullOrWhiteSpace(newStr) || string.IsNullOrWhiteSpace(fileContent))
             return null;
 
-        // ── Quick extension filter ──
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         var sqlCapableExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt", ".php", ".rb", ".sql" };
 
         if (!sqlCapableExtensions.Contains(ext)) return null;
 
-        // ── Extract table names from INSERT INTO / UPDATE in newStr ──────────
         var insertUpdateRegex = new Regex(
             @"\b(?:INSERT\s+INTO|UPDATE)\s+`?(\w+)`?",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -6388,11 +6319,9 @@ emitSse, ct);
         foreach (Match m in insertUpdateRegex.Matches(newStr))
         {
             var tbl = m.Groups[1].Value;
-            // Filter out SQL keywords that might be captured as table names
             if (tbl.Length <= 2 || char.IsDigit(tbl[0])) continue;
             referencedTables.Add(tbl);
 
-            // Grab surrounding context for the LLM to inspect
             var start = Math.Max(0, m.Index - 60);
             var end = Math.Min(newStr.Length, m.Index + m.Length + 60);
             matchExcerpts.Add(newStr.Substring(start, end - start).Replace("\n", " ").Trim());
@@ -6400,7 +6329,6 @@ emitSse, ct);
 
         if (referencedTables.Count == 0) return null;
 
-        // ── Collect tables that already exist (CREATE TABLE in newStr or file) ──
         var createTableRegex = new Regex(
             @"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?(\w+)`?",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -6411,21 +6339,18 @@ emitSse, ct);
         foreach (Match m in createTableRegex.Matches(fileContent))
             existingTables.Add(m.Groups[1].Value);
 
-        // Also treat tables referenced in FROM/JOIN/INTO in existing file as existing
         var tableMentionRegex = new Regex(
             @"\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+`?(\w+)`?",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
         foreach (Match m in tableMentionRegex.Matches(fileContent))
             existingTables.Add(m.Groups[1].Value);
 
-        // ── Find tables referenced by INSERT/UPDATE but not known to exist ──
         var missingTables = referencedTables
             .Where(t => !existingTables.Contains(t))
             .ToList();
 
         if (missingTables.Count == 0) return null;
 
-        // ── LLM Verification ──
         var sysPrompt = "You are a code analysis AI. You examine code snippets to determine if they contain actual SQL statements (INSERT INTO, UPDATE) that are meant to modify a database table, or if they are just regular text/prose/comments that happen to contain those words. Output ONLY a JSON object: {\"isSql\": true|false}";
         var userPrompt = $"File: {relPath}\n\nSnippets found:\n{string.Join("\n---\n", matchExcerpts)}\n\nDo these snippets contain actual SQL statements executing against a database table?";
 
@@ -6572,10 +6497,8 @@ emitSse, ct);
         return null;
     }
 
-    /// <summary>Checks if a newString contains a function/method name that already exists in the file content.</summary>
     private static string? CheckMethodExistsInFile(string fileContent, string newStr)
     {
-        // Extract function name from newString: patterns like vm.sendBenchmarkToServer = function( or function sendBenchmarkToServer(
         var fnMatch = Regex.Match(newStr, @"(?:vm\.)?(\w+)\s*(?:[:=])\s*function\s*\(", RegexOptions.IgnoreCase);
         if (!fnMatch.Success)
             fnMatch = Regex.Match(newStr, @"function\s+(\w+)\s*\(", RegexOptions.IgnoreCase);
@@ -6585,12 +6508,10 @@ emitSse, ct);
         var fnName = fnMatch.Groups[1].Value;
         if (fnName.Length <= 2) return null;
 
-        // Check if this function name already has a definition in the file
         var existingPattern = $@"(?:vm\.)?{Regex.Escape(fnName)}\s*(?:[:=])\s*function\s*\(";
         if (Regex.IsMatch(fileContent, existingPattern, RegexOptions.IgnoreCase))
             return fnName;
 
-        // Also check traditional function declaration: function fnName(
         var existingPattern2 = $@"function\s+{Regex.Escape(fnName)}\s*\(";
         if (Regex.IsMatch(fileContent, existingPattern2, RegexOptions.IgnoreCase))
             return fnName;
@@ -6948,7 +6869,6 @@ emitSse, ct);
                 return plan;
             }
 
-            // Log every gap
             var gapSummaries = new List<string>();
             if (root.TryGetProperty("gaps", out var gapsEl) && gapsEl.ValueKind == JsonValueKind.Array)
             {
@@ -7283,8 +7203,6 @@ emitSse, ct);
 
             lastEnd = rule.End;
         }
-
-        // Add trailing text
         result.Append(css[lastEnd..]);
 
         return (result.ToString(), warnings);
@@ -7788,7 +7706,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     (maybeFile.StartsWith("_explore", StringComparison.OrdinalIgnoreCase)))
                 {
                     var maybeChange = maybeExploreStep.TryGetProperty("change", out var mcEl) ? mcEl.GetString() : "";
-                    // Try to pull a real path out of the change text; otherwise treat change itself as the target
                     var pathMatch = Regex.Match(maybeChange ?? "", @"[\w./\\-]+\.\w{1,5}\b");
                     var target = pathMatch.Success ? pathMatch.Value : maybeChange;
                     if (!string.IsNullOrWhiteSpace(target))
@@ -7842,7 +7759,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
             return (false, "Step is missing file or change description.");
 
-        // 1. Duplicate of an already-committed step
         var normNew = NormalizeChangeForDedup(step.Change);
         foreach (var existing in planSoFar)
         {
@@ -7854,7 +7770,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var changeLower = step.Change.ToLowerInvariant();
 
-        // 2. Remove-then-add contradiction against something just added in this plan
         if (changeLower.StartsWith("remove") || changeLower.StartsWith("delete"))
         {
             var targetMatch = Regex.Match(step.Change, @"remove\s+(?:the\s+)?(\w+)", RegexOptions.IgnoreCase);
@@ -7881,12 +7796,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                  p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
                 (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
 
-            // 3. Modifying a file that doesn't exist and isn't created earlier
             if (isModifyVerb && !fileExists && !willBeCreatedEarlier)
                 return (false, $"Says '{changeLower.Split(' ')[0]}' but {step.File} does not exist yet and no earlier " +
                                 "step creates it. Add a creation step first, or rephrase as a creation ('Add ...').");
 
-            // 4. Already satisfied on disk
             if (fileExists)
             {
                 var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
@@ -7898,7 +7811,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (isSpecial) return (true, null); // commands/web/etc. skip the coherence LLM check
 
-        // 5. LLM coherence check
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
@@ -8512,7 +8424,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         $"Meta-plan: complexity {result.Complexity}/10, {result.SubPlans.Count} sub-plan(s): " +
                         string.Join(" → ", result.SubPlans.Select(s => s.Title)), ct: ct);
 
-                    // Deterministic guard against over-planning single-file tasks
                     var allTargetFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var sp in result.SubPlans)
                     {
@@ -8543,7 +8454,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     result = await ValidateMetaPlanCoherenceAsync(
                         result, prompt, discoveryContext, projectRoot, emitSse, ct);
 
-                    // ── Collapse sub-plans whose target changes already exist in files ──
                     if (result?.SubPlans?.Count > 1)
                     {
                         var collapsed = new List<MetaPlanSubPlan>();
@@ -8559,17 +8469,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
                                     var contentLower = content.ToLowerInvariant();
 
-                                    // Check for common known-pattern sub-plans that often target already-existing code:
-                                    //   1. Adding system-spec properties (OS, CPU, RAM, GPU) to a DTO
-                                    //   2. Adding an endpoint method that already exists
-                                    //   3. Adding a known method name that already exists
-
+                                
                                     var sysSpecProps = new[] { "OS", "CPU", "RAM", "GPU" };
                                     var allSysPropsExist = sysSpecProps.All(prop =>
                                         Regex.IsMatch(content, $@"\b{Regex.Escape(prop)}\b\s*\{{"));
                                     if (allSysPropsExist)
                                     {
-                                        // Check if the sub-plan specifically targets these properties
                                         var mentionsSysSpec = sysSpecProps.Any(prop =>
                                             sp.Description?.Contains(prop, StringComparison.OrdinalIgnoreCase) == true);
                                         if (mentionsSysSpec)
@@ -8596,7 +8501,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                         }
                                     }
 
-                                    // Check for route-based endpoint detection
                                     if (!alreadyExists)
                                     {
                                         var routeMatch = Regex.Match(sp.Description ?? "",
@@ -8638,7 +8542,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                     }
 
-                    // ── NEW: Emit SSE event for frontend ──
                     if (emitSse)
                     {
                         await SendSse(Response, "meta-plan", new
@@ -8657,7 +8560,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }, ct);
                     }
 
-                    // ── NEW: Persist to card ──
                     if (!string.IsNullOrWhiteSpace(cardId))
                     {
                         await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
@@ -8896,12 +8798,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     private static bool IsVisualLayoutTask(string prompt)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) return false;
+        if (string.IsNullOrWhiteSpace(prompt)) { return false; }
         var p = prompt.ToLowerInvariant();
 
-        // "Move inside/into/under" is a DOM structural change, not a CSS positioning task.
         if (Regex.IsMatch(p, @"\bmove\b.{0,60}\b(inside|into|to|under|below|above|after|before)\b"))
-            return false;
+        { return false; }
 
         return Regex.IsMatch(p, @"\b(position|layout|align(?:ed|ment)?|margin|padding|spacing)\b") ||
                Regex.IsMatch(p, @"\b(overlap|z[- ]?index|float|sticky|fixed|absolute|relative)\b") ||
@@ -8915,10 +8816,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return ext is ".css" or ".scss" or ".sass" or ".less" or ".styl";
     }
 
-    /// <summary>Quick LLM validation of plan steps before execution. Returns null if valid, or a reason string if invalid.</summary>
     private async Task<string?> ValidatePlanAsync(string userPrompt, AgentPlan plan, CancellationToken ct)
     {
-        // Safety check: ask user to confirm _command steps that modify project structure
         if (plan?.Plan != null)
         {
             string? lastImpliedDir = null;
@@ -8951,7 +8850,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     }
                 }
 
-                // Apply the directory context to subsequent _create_file steps that lack a path
                 if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase) && lastImpliedDir != null)
                 {
                     if (!step.Change.Contains("/") && !step.Change.Contains("\\"))
@@ -8964,7 +8862,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (plan?.Plan != null && IsVisualLayoutTask(userPrompt))
         {
-            // If the plan is about removing/deleting content, it's not a positioning task
             var allChanges = string.Join(" ", plan.Plan.Select(s => s.Change ?? ""));
             if (Regex.IsMatch(allChanges, @"\b(remove|delete|hide)\b", RegexOptions.IgnoreCase))
                 goto SkipLayoutCheck;
@@ -8995,9 +8892,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
     SkipLayoutCheck:;
 
-        // Deterministic check: detect unnecessarily split steps in the same .cs file.
-        // If two consecutive steps both add methods targeting the same file and share
-        // 3+ significant keywords, they describe the same feature and should be one step.
         if (plan?.Plan != null && plan.Plan.Count >= 2)
         {
             var splitStopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -9018,7 +8912,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 var c1 = s1.Change ?? "";
                 var c2 = s2.Change ?? "";
-                // Both must be about adding/creating methods
+
                 if (!Regex.IsMatch(c1, @"\b(add|create|insert)\b.*\b(method|endpoint|handler)\b", RegexOptions.IgnoreCase)) continue;
                 if (!Regex.IsMatch(c2, @"\b(add|create|insert)\b.*\b(method|endpoint|handler)\b", RegexOptions.IgnoreCase)) continue;
 
@@ -9266,14 +9160,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             s.File.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase)) ?? false;
         if (hasWebStep) return null;
         return $"Prompt contains \"{hit}\" but plan has no _web_search step.";
-    }
+    } 
 
-    /// <summary>
-    /// After plan audit &amp; decoupling, correct each step's LineNumber by asking the LLM
-    /// to examine the actual file content and determine the correct line for each step.
-    /// Keyword matching is too brittle — only the LLM understands semantic placement like
-    /// "add method near selectArticle" vs "add property after totalResults".
-    /// </summary>
     private async Task ValidatePlanLineNumbersAsync(AgentPlan plan, string projectRoot, CancellationToken ct = default)
     {
         if (plan?.Plan == null) return;
@@ -9295,13 +9183,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8);
             var lines = content.Split('\n');
 
-            // Build prompt with line-numbered file content and step descriptions
             var sb = new StringBuilder();
             sb.AppendLine("Find the exact 1-based line number where each edit should be applied in this file.");
             sb.AppendLine();
             sb.AppendLine("File content (line numbers shown):");
             sb.AppendLine("```");
-            // Truncate to first 500 lines if file is very large
+
             var displayLines = lines.Take(500).ToList();
             for (var i = 0; i < displayLines.Count; i++)
                 sb.AppendLine($"{i + 1}: {displayLines[i]}");
@@ -9343,7 +9230,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
 
-                // Parse JSON response
                 var cleaned = raw.Trim();
                 if (cleaned.StartsWith("```"))
                 {
@@ -9443,7 +9329,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (files.Count == 0) return ("", new List<object>());
 
-        // Phase 1: Read ALL files reliably — no SSE interleaved
         var sb = new StringBuilder();
         sb.AppendLine("Attached files (edit these paths only):");
         foreach (var f in files)
@@ -10224,21 +10109,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine();
         if (!string.IsNullOrWhiteSpace(steeringContext)) { sb.AppendLine("## Steering"); sb.AppendLine(steeringContext); sb.AppendLine(); }
 
-        // Show what was already planned and their results
         if (existingPlan?.Plan?.Count > 0)
         {
             sb.AppendLine("## Existing plan with results");
             for (var i = 0; i < existingPlan.Plan.Count; i++)
             {
                 var step = existingPlan.Plan[i];
-                // Look up the result for this step
+
                 string? status = null;
                 string? output = null;
                 if (executedSteps != null)
                 {
-                    // FIX: Match on planItemIndex to get the exact result for this step.
-                    // Sub-steps from decoupling may share the same file path, so matching
-                    // on path alone returns the wrong result for all but the last sub-step.
                     var result = executedSteps.OfType<Dictionary<string, object?>>()
                         .LastOrDefault(s =>
                             s.TryGetValue("planItemIndex", out var pIdxObj) &&
@@ -10302,8 +10183,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("⚠ CRITICAL: The Quality Check assessment below may claim something is missing. DO NOT blindly trust it.");
         sb.AppendLine("Read the file content yourself. If the code IS already there, return an EMPTY plan. The quality check LLM often hallucinates failures.");
 
-        // FIX: Only enforce the "NEVER introduce" rule if there is no quality check reason.
-        // If the quality check identified a missing method, the LLM MUST be allowed to introduce it.
         if (string.IsNullOrWhiteSpace(qualityCheckReason))
         {
             sb.AppendLine("NEVER introduce a property/variable name that does not already appear in the current file content above —");
@@ -11370,7 +11249,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
                 if (m.Success) cleaned = m.Groups[1].Value.Trim();
             }
-            // FIX: Use ExtractFirstJsonObject
             cleaned = ExtractFirstJsonObject(cleaned);
 
             using var doc = JsonDocument.Parse(cleaned);
