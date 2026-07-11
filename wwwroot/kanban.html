@@ -184,13 +184,18 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -355,13 +360,18 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -421,9 +431,13 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
@@ -463,6 +477,7 @@
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>
@@ -659,9 +674,13 @@
                   <details>
                     <summary>
                       <span
-                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='pending'?'○':'✓'))}}</span>
-                      <span class="step-title"><strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
-                        s.url || ''}}</span>
+                        class="step-status">{{s.status==='error'?'✕':(s.status==='running'?'⏳':(s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='pending'?'○':'✓')))))}}</span>
+                      <span class="step-title"
+                        ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring'}">
+                        <strong>{{s.type}}</strong> {{s.description || s.path || s.command ||
+                        s.url || ''}}
+                        <span ng-if="s.thinking && s.status==='proposing'" class="step-thinking"> — {{s.thinking}}</span>
+                      </span>
                     </summary>
                     <div class="step-body">
                       <div class="edit-diff" ng-if="s.type==='edit' && (s.oldLines || s.newLines)">
@@ -701,6 +720,7 @@
                       </div>
                       <pre class="step-output" ng-if="s.output">{{s.output | limitTo:500}}</pre>
                       <span class="step-err" ng-if="s.error">{{s.error}}</span>
+                      <span class="step-justification" ng-if="s.justification">{{s.justification}}</span>
                     </div>
                   </details>
                 </div>

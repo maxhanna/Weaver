@@ -7849,6 +7849,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             ct.ThrowIfCancellationRequested();
 
+            if (emitSse)
+                await SendSse(Response, "phase", new { message = $"Planning — step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
+
             var proposal = await ProposeNextIncrementalStepAsync(
                 prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
 
@@ -7862,6 +7865,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (proposal.PlanComplete)
             {
+                if (emitSse)
+                    await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
                 await EmitLog(emitSse, "success",
                     $"Incremental planning: plan complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
                 break;
@@ -7869,12 +7874,33 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
             {
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = planSoFar.Count,
+                        type = "explore",
+                        status = "exploring",
+                        path = proposal.ExploreFile,
+                        description = $"Exploring: {proposal.ExploreFile}",
+                        planItemIndex = planSoFar.Count,
+                        message = proposal.Thinking ?? ""
+                    }, ct);
+
                 if (exploredFiles.Add(proposal.ExploreFile))
                 {
                     await EmitLog(emitSse, "info", $"Incremental planning: exploring {proposal.ExploreFile}", ct: ct);
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct);
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = planSoFar.Count,
+                            type = "explore",
+                            status = "done",
+                            path = proposal.ExploreFile,
+                            description = $"Explored: {proposal.ExploreFile}"
+                        }, ct);
                     regenAttempts = 0;
                     continue;
                 }
@@ -7884,6 +7910,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
                         "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
                         "step now, using the exact symbol/method names visible there.");
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = planSoFar.Count,
+                            type = "explore",
+                            status = "error",
+                            path = proposal.ExploreFile,
+                            description = $"Already explored: {proposal.ExploreFile}"
+                        }, ct);
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
@@ -7896,6 +7931,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 continue;
             }
 
+            if (emitSse && !string.IsNullOrWhiteSpace(proposal.Thinking))
+                await SendSse(Response, "thinking", new { text = proposal.Thinking }, ct);
+
+            var stepIndex = planSoFar.Count + 1;
+            if (emitSse)
+                await SendSse(Response, "step", new
+                {
+                    index = stepIndex,
+                    type = "plan",
+                    status = "proposing",
+                    path = proposal.Step.File,
+                    description = proposal.Step.Change,
+                    line = proposal.Step.LineNumber,
+                    planItemIndex = planSoFar.Count,
+                    thinking = proposal.Thinking,
+                    justification = proposal.CompletionReason
+                }, ct);
+
             var (valid, reason) = await ValidateIncrementalStepAsync(
                 proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct);
 
@@ -7904,12 +7957,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "warn",
                     $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
                 rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                if (emitSse)
+                    await SendSse(Response, "step", new
+                    {
+                        index = stepIndex,
+                        type = "plan",
+                        status = "rejected",
+                        path = proposal.Step.File,
+                        description = proposal.Step.Change,
+                        error = reason,
+                        line = proposal.Step.LineNumber,
+                        planItemIndex = planSoFar.Count
+                    }, ct);
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
                 {
                     consecutiveSlotFailures++;
                     await EmitLog(emitSse, "warn",
                         $"Incremental planning: giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. " +
                         $"({consecutiveSlotFailures} consecutive slot failures)", ct: ct);
+                    if (emitSse)
+                        await SendSse(Response, "thinking", new
+                        {
+                            text = $"Giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. ({consecutiveSlotFailures} consecutive slot failures)"
+                        }, ct);
                     rejectionFeedback.Clear();
                     regenAttempts = 0;
 
@@ -7933,6 +8003,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 $"Incremental planning: committed step {planSoFar.Count} — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
 
             if (emitSse)
+            {
+                await SendSse(Response, "step", new
+                {
+                    index = stepIndex,
+                    type = "plan",
+                    status = "pending",
+                    path = proposal.Step.File,
+                    description = proposal.Step.Change,
+                    line = proposal.Step.LineNumber,
+                    planItemIndex = planSoFar.Count,
+                    message = proposal.CompletionReason
+                }, ct);
+
                 await SendSse(Response, "plan", new
                 {
                     thinking = thinkingLog.ToString(),
@@ -7940,6 +8023,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     items = planSoFar,
                     incremental = true
                 }, ct);
+            }
         }
 
         if (planSoFar.Count == 0)
@@ -8533,7 +8617,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }, ct);
                     }
 
-                    if (!string.IsNullOrWhiteSpace(cardId))
+                    if (!string.IsNullOrWhiteSpace(cardId) && result != null)
                     {
                         await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
                     }
@@ -9078,7 +9162,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             await EmitLog(emitSse, "info",
-                $"Plan: {plan.Plan.Count} step(s) — score {plan.Score}/100", new { plan }, ct: ct);
+                $"Plan: {plan?.Plan?.Count ?? 0} step(s) — score {plan?.Score ?? 0}/100", new { plan }, ct: ct);
 
             return plan;
         }
@@ -10661,7 +10745,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 plan = MergePlans(plan, replan);
                 if (plan?.Plan?.Count > 0)
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
-                if (emitSse)
+                if (emitSse && plan != null)
                     await SendSse(Response, "plan",
                         new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
             }
@@ -10860,7 +10944,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 attachedFiles: attachedFiles,
                 qualityCheckReason: verificationDetails + "\n\nPrior failures:\n" + failureContextForReplan.ToString());
 
-            if (replanSteps != null && replanSteps.Count > 0)
+            if (replanSteps != null && replanSteps.Count > 0 && plan != null)
             {
                 var originalStepCount = plan?.Plan?.Count ?? 0;
                 plan = MergePlans(plan ?? new AgentPlan(),
@@ -10869,27 +10953,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (plan?.Plan?.Count > 0)
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
-                if (emitSse)
+                if (emitSse && plan != null) {
                     await SendSse(Response, "plan",
                         new { thinking = plan.Thinking, summary = "Re-plan: added steps", items = plan.Plan }, ct);
+                }
 
-                await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
-                    summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: false);
+                if (plan != null)
+                {
+                    await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
+                        summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: false);
+                } 
 
                 var mergedDone = new HashSet<int>();
-                for (var i = 0; i < originalStepCount && i < plan.Plan.Count; i++)
-                    mergedDone.Add(i);
-
-                await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
-                    steeringContext: enhancedSteering, attachedFiles: attachedFiles,
-                    completedStepIndices: mergedDone, cardId: cardId);
+                for (var i = 0; i < originalStepCount && i < plan?.Plan?.Count; i++)
+                { mergedDone.Add(i); }
+                if (plan!=null)
+                { 
+                    await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
+                        steeringContext: enhancedSteering, attachedFiles: attachedFiles,
+                        completedStepIndices: mergedDone, cardId: cardId);
+                }
             }
             else
             {
 
                 await EmitLog(emitSse, "warn",
                     "Re-plan returned no steps. Reverting changes and generating a fresh plan with verification feedback...", ct: ct);
-
 
                 foreach (var kvp in fileBackups)
                 {

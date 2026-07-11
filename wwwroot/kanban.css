@@ -420,6 +420,34 @@ body.dragging-active .card:hover {
     margin-top: 2px;
 }
 
+.step-proposing {
+    opacity: 0.85;
+}
+
+.step-rejected {
+    opacity: 0.6;
+    text-decoration: line-through;
+}
+
+.step-exploring {
+    opacity: 0.8;
+    font-style: italic;
+}
+
+.step-thinking {
+    font-size: 10px;
+    opacity: 0.7;
+    color: var(--accent, #6366f1);
+}
+
+.step-justification {
+    font-size: 10px;
+    opacity: 0.6;
+    color: #888;
+    display: block;
+    margin-top: 2px;
+}
+
 .analysis-step .edit-diff {
     margin: 4px 0;
 }

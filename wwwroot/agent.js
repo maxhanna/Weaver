@@ -7,6 +7,7 @@ angular.module('kanbanApp')
 
         function normalizeStepStatus(status) {
             if (status === 'written' || status === 'ok' || status === 'created' || status === 'modified') return 'done';
+            if (status === 'proposing' || status === 'rejected' || status === 'exploring') return status;
             return status || 'pending';
         }
         function normalizeStep(step) { if (!step) return step; step.status = normalizeStepStatus(step.status); return step; }
@@ -214,6 +215,12 @@ angular.module('kanbanApp')
                                                                         pushAgentLog(vm, 'error', '✕ ' + parsed.type + ': ' + (parsed.error || parsed.description || ''));
                                                                     } else if (parsed.skipped) {
                                                                         pushAgentLog(vm, 'info', '⏭ ' + parsed.type + ': ' + (parsed.description || parsed.path || '') + ' (already done)');
+                                                                    } else if (parsed.status === 'proposing') {
+                                                                        pushAgentLog(vm, 'info', '💡 Proposing: ' + parsed.description + (parsed.thinking ? ' — ' + parsed.thinking : ''));
+                                                                    } else if (parsed.status === 'rejected') {
+                                                                        pushAgentLog(vm, 'warn', '✗ Rejected: ' + parsed.description + (parsed.error ? ' — ' + parsed.error : ''));
+                                                                    } else if (parsed.status === 'exploring') {
+                                                                        pushAgentLog(vm, 'info', '🔍 Exploring: ' + parsed.path);
                                                                     }
                                                                 }
                                                                 break;
