@@ -149,7 +149,6 @@ public class PRController : ControllerBase
     {
         public string? ProjectPath { get; set; }
         public string? CardId { get; set; }
-        public string? CardText { get; set; }
     }
 
     public class PrFinishRequest

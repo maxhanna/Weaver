@@ -97,11 +97,5 @@ public class WeaverLogo
                 // Console is not available (e.g., when running as a service or when output is redirected)
                 // Just skip the logo display in such cases
             }
-        }
-
-        public static async Task DisplayLogoAsync()
-        {
-            DisplayLogo();
-            await Task.Delay(100);
-        }
+        } 
     }

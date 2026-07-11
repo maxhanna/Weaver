@@ -62,13 +62,7 @@ public class GitResult
         public async Task<GitResult> RunGhAsync(string repoPath, string args)
         {
             return await RunProcessAsync("gh", args, repoPath);
-        }
-
-        public async Task<string> GetRemoteUrlAsync(string repoPath)
-        {
-            var result = await RunGitAsync(repoPath, "config --get remote.origin.url");
-            return result.Success ? result.Output.Trim() : string.Empty;
-        }
+        } 
 
         private async Task<GitResult> RunProcessAsync(string command, string args, string workingDir)
         {

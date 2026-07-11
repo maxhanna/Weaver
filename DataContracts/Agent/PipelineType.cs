@@ -1,3 +1,3 @@
 namespace Weaver;
 
-public enum PipelineType { QuickCheck, CommandExecution, CodeEdit, Compound }
+public enum PipelineType { CommandExecution, CodeEdit }

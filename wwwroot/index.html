@@ -619,7 +619,7 @@
     <!-- FLOATING IDE PANEL -->
     <div class="ide-floating-panel" ng-if="vm.showIDE"
       ng-style="{left: vm.ide.left + 'px', top: vm.ide.top + 'px', width: vm.ide.width + 'px', height: vm.ide.height + 'px'}">
-      <div ng-include="'ide.html'" style="height: 100%; width: 100%;"></div>
+      <div ng-include="'ide.html'" style="height: 100%; width: 100%; background: var(--bg);"></div>
       <div class="ide-resize-handle ide-resize-e" ng-mousedown="vm.startResize('e', $event)"></div>
       <div class="ide-resize-handle ide-resize-s" ng-mousedown="vm.startResize('s', $event)"></div>
       <div class="ide-resize-handle ide-resize-se" ng-mousedown="vm.startResize('se', $event)"></div>

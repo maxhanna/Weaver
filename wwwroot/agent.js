@@ -426,6 +426,12 @@ angular.module('kanbanApp')
                     });
                 };
 
+                vm.formatBenchmarkDuration = function (durMs) {
+                    if (durMs === null || durMs === undefined) return '';
+                    var seconds = Math.floor(durMs / 1000); var minutes = Math.floor(seconds / 60); seconds = seconds % 60; var hours = Math.floor(minutes / 60); minutes = minutes % 60;
+                    return (hours > 0 ? hours + 'h ' : '') + (minutes > 0 ? minutes + 'm ' : '') + seconds + 's';
+                }
+
                 vm.sendBenchmarkToServer = function (s) {
                     var benchmarkDto = {
                         Token: vm.bughostedClientId,

@@ -5,11 +5,8 @@ using System.Text.RegularExpressions;
 namespace Weaver.Services;
 
 public static class AgentUtilities
-{
-    private const int CompactThreshold75 = 2100;
-    private const int CompactThreshold90 = 2520;
-    private static readonly HashSet<string> ExplorationStepTypes =
-        new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "grep", "web" };
+{ 
+    private const int CompactThreshold90 = 2520; 
 
     public static (PipelineType Type, double CommandScore, double EditScore) ClassifyTask(string prompt)
     {
@@ -789,13 +786,33 @@ public static class AgentUtilities
 
         return null;
     }
-    /// <summary>
-    /// Checks whether a method/function name is already DEFINED in JavaScript source content.
-    /// Matches declarations only — not call sites like obj.foo() or property reads like this.foo = bar.
-    /// Covers: function decls, function expressions, arrow functions, object method shorthand,
-    /// class methods, vm/this/self assignments, prototype assignments, export declarations,
-    /// and Object.defineProperty.
-    /// </summary>
+    public static string BuildValidatorContextExcerpt(string discoveryContext, string stepChange, int maxChars = 9000)
+    {
+        if (discoveryContext.Length <= maxChars) return discoveryContext;
+
+        var keywords = ExtractMeaningfulKeywords(stepChange.ToLowerInvariant())
+            .Where(k => k.Length >= 4).ToList();
+
+        // Find the first line that actually mentions one of the step's keywords/symbols
+        var lines = discoveryContext.Split('\n');
+        var hitLine = -1;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (keywords.Any(k => lines[i].Contains(k, StringComparison.OrdinalIgnoreCase))) { hitLine = i; break; }
+        }
+
+        if (hitLine < 0)
+            return discoveryContext[..maxChars] + "\n...(truncated)";
+
+        // Center a window on the hit so the validator actually sees the referenced code
+        var charOffset = lines.Take(hitLine).Sum(l => l.Length + 1);
+        var halfWindow = maxChars / 2;
+        var start = Math.Max(0, charOffset - halfWindow);
+        var end = Math.Min(discoveryContext.Length, start + maxChars);
+        var prefix = start > 0 ? "...(truncated head)...\n" : "";
+        var suffix = end < discoveryContext.Length ? "\n...(truncated tail)..." : "";
+        return prefix + discoveryContext[start..end] + suffix;
+    } 
     public static bool JsMethodExistsInContent(string content, string methodName)
     {
         if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(methodName))
@@ -1525,63 +1542,7 @@ public static class AgentUtilities
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_explore", StringComparison.OrdinalIgnoreCase);
-    public static bool ContainsAny(this string s, params string[] terms) =>
-        terms.Any(t => s.Contains(t, StringComparison.Ordinal));
-
-    public static string InferTargetFolder(string fileName, string projectRoot)
-    {
-        var name = Path.GetFileName(fileName.Replace('/', Path.DirectorySeparatorChar));
-        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
-
-        var dir = Path.GetDirectoryName(fileName.Replace('/', Path.DirectorySeparatorChar)) ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(dir))
-            return dir.Replace(Path.DirectorySeparatorChar, '/') + "/";
-
-        if (name.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase))
-            return "Controllers/";
-        if (name.EndsWith("Service.cs", StringComparison.OrdinalIgnoreCase) ||
-            name.EndsWith("Manager.cs", StringComparison.OrdinalIgnoreCase))
-            return "Services/";
-        if (name.EndsWith("Pipeline.cs", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("Pipeline", StringComparison.OrdinalIgnoreCase))
-            return "Pipelines/";
-        if (name.EndsWith("Router.cs", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("Router", StringComparison.OrdinalIgnoreCase) ||
-            name.EndsWith("Routing.cs", StringComparison.OrdinalIgnoreCase))
-            return "Routing/";
-
-        var frontendExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { ".html", ".js", ".css", ".mjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte" };
-        
-        if (frontendExts.Contains(Path.GetExtension(name)))
-        {
-            var wwwrootPath = Path.Combine(projectRoot, "wwwroot");
-            if (Directory.Exists(wwwrootPath))
-            {
-                return "wwwroot/";
-            }
-        } 
-
-        var configFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "appsettings.json", ".gitignore", "appsettings.development.json", "appsettings.production.json"
-        };
-        if (configFiles.Contains(name))
-            return string.Empty;
-
-        if (name.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
-            return "Docs/";
-
-        var modelsDir = Path.Combine(projectRoot, "Models");
-        if ((name.EndsWith("Dto.cs", StringComparison.OrdinalIgnoreCase) ||
-             name.EndsWith("Model.cs", StringComparison.OrdinalIgnoreCase) ||
-             name.EndsWith("Entity.cs", StringComparison.OrdinalIgnoreCase)) &&
-            Directory.Exists(modelsDir))
-            return "Models/";
-
-        return string.Empty;
-    }
-
+   
     public static bool IsPathUnderRoot(string fullPath, string root)
     {
         root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -1621,10 +1582,7 @@ public static class AgentUtilities
         };
         // Word-boundary match to avoid "add" matching inside "address"
         return verbs.Any(v => Regex.IsMatch(lower, $@"\b{Regex.Escape(v)}\b"));
-    }
-
-    public static bool BatchWasExplorationOnly(IReadOnlyList<AgentStep> batch) =>
-        batch.Count > 0 && batch.All(s => ExplorationStepTypes.Contains(s.Type ?? ""));
+    } 
 
     public static List<string> FindSimilarFiles(string missingPath, string projectRoot)
     {
@@ -1665,44 +1623,7 @@ public static class AgentUtilities
 
         return string.IsNullOrWhiteSpace(target) || target.IndexOfAny(Path.GetInvalidPathChars()) >= 0 ? null : target;
     }
-
-    public static string ReconstructDiscoveryContext(List<object> steps)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("ONLY use paths that appear below. Do NOT invent paths.");
-        sb.AppendLine();
-        foreach (var item in steps)
-        {
-            if (item is not Dictionary<string, object?> r) continue;
-            var type = r.TryGetValue("type", out var t) ? t?.ToString() : string.Empty;
-
-            if (type is "list" or "grep" or "glob" or "read")
-            {
-                if (r.TryGetValue("output", out var output) && output != null)
-                {
-                    sb.AppendLine($"### {type} {r.GetValueOrDefault("path") ?? r.GetValueOrDefault("description")}");
-                    sb.AppendLine($"```\n{output}\n```");
-                    sb.AppendLine();
-                }
-            }
-            else if (type == "edit")
-            {
-                var status = r.TryGetValue("status", out var st) ? st?.ToString() : string.Empty;
-                if (status is "modified" or "created")
-                {
-                    var path = r.TryGetValue("path", out var p) ? p?.ToString() : string.Empty;
-                    var newContent = r.TryGetValue("newContent", out var nc) ? nc?.ToString() : string.Empty;
-                    if (!string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(newContent))
-                    {
-                        sb.AppendLine($"### edited {path} (current content)");
-                        sb.AppendLine($"```\n{newContent}\n```");
-                        sb.AppendLine();
-                    }
-                }
-            }
-        }
-        return sb.ToString();
-    }
+ 
 
     public static string BuildDiscoveryTextFromSteps(List<object> steps)
     {
@@ -1873,63 +1794,7 @@ public static class AgentUtilities
              string.Equals(t?.ToString(), "rename", StringComparison.OrdinalIgnoreCase)) &&
             s.TryGetValue("status", out var st) && st?.ToString() == "done");
 
-    /// <summary>
-    /// Extracts oldString/newString from a code generation LLM response.
-    /// Tries JSON parse first, then falls back to manual extraction.
-    /// </summary>
-    public static (string? oldString, string? newString, string? error) ExtractEditFromCodeGen(string raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-            return (null, null, "Empty response");
-
-        var json = raw.Trim();
-
-        // Strip markdown fences
-        if (json.StartsWith("```"))
-        {
-            var m = Regex.Match(json, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-            if (m.Success) json = m.Groups[1].Value.Trim();
-        }
-
-        // Extract first JSON object
-        var startIdx = json.IndexOf('{');
-        var endIdx = json.LastIndexOf('}');
-        if (startIdx >= 0 && endIdx > startIdx)
-            json = json.Substring(startIdx, endIdx - startIdx + 1);
-
-        var candidates = new List<string> { json };
-        var repaired = RepairJsonString(json);
-        if (repaired != null) candidates.Add(repaired);
-        var quoted = QuoteJsonKeys(json);
-        if (quoted != json) candidates.Add(quoted);
-        if (repaired != null)
-        {
-            var quotedRepaired = QuoteJsonKeys(repaired);
-            if (quotedRepaired != repaired) candidates.Add(quotedRepaired);
-        }
-
-        foreach (var candidate in candidates)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(candidate);
-                var root = doc.RootElement;
-                var os = root.TryGetProperty("oldString", out var osEl) ? osEl.GetString() : null;
-                var ns = root.TryGetProperty("newString", out var nsEl) ? nsEl.GetString() : null;
-                if (os != null || ns != null)
-                    return (os, ns, null);
-            }
-            catch { }
-        }
-
-        // Last resort: manual extraction via ExtractEditPairs logic
-        var pairs = ExtractEditPairs(raw, "");
-        if (pairs.Count > 0)
-            return (pairs[0].OldString, pairs[0].NewString, null);
-
-        return (null, null, "Could not parse oldString/newString from code gen response");
-    }
-
+  
     public static List<AgentStep> ExtractEditPairs(string text, string defaultPath)
     {
         var steps = new List<AgentStep>();
@@ -1986,8 +1851,6 @@ public static class AgentUtilities
         }
         return steps;
     }
-
-
 
     private static (string Text, int EndPos)? ExtractJsonStringValue(string text, int keyEndPos)
     {
@@ -2053,117 +1916,7 @@ public static class AgentUtilities
 
         return null;
     }
-
-
-    /// <summary>
-    /// Tries to parse a review response JSON from the LLM, with
-    /// multiple fallback strategies for common malformed outputs.
-    /// Returns (null, errorMessage) on failure.
-    /// </summary>
-    public static (bool? complete, string? feedback) TryParseReviewResponse(string raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-            return (null, "Empty response");
-
-        // Strategy 1: Try direct parse with repair
-        foreach (var candidate in GetReviewJsonCandidates(raw))
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(candidate);
-                var c = doc.RootElement.TryGetProperty("complete", out var cp) &&
-                        (cp.ValueKind == JsonValueKind.True ||
-                         (cp.ValueKind == JsonValueKind.String &&
-                          string.Equals(cp.GetString(), "true", StringComparison.OrdinalIgnoreCase)));
-                var f = doc.RootElement.TryGetProperty("feedback", out var fb) ? fb.GetString() : null;
-                return (c, f);
-            }
-            catch { }
-        }
-
-        return (null, "Failed to parse review JSON");
-    }
-
-
-    /// <summary>
-    /// Generates candidate JSON strings from raw LLM output,
-    /// trying increasingly aggressive repair strategies.
-    /// </summary>
-    public static IEnumerable<string> GetReviewJsonCandidates(string raw)
-    {
-        var trimmed = raw.Trim();
-
-        // Strip markdown fences
-        if (trimmed.StartsWith("```"))
-        {
-            var m = Regex.Match(trimmed, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-            if (m.Success) trimmed = m.Groups[1].Value.Trim();
-        }
-
-        // Extract JSON object
-        var start = trimmed.IndexOf('{');
-        var end = trimmed.LastIndexOf('}');
-        if (start < 0 || end <= start) yield break;
-        var json = trimmed.Substring(start, end - start + 1);
-
-        // Candidate 1: raw extracted JSON
-        yield return json;
-
-        // Candidate 2: run existing repair
-        var repaired = RepairJsonString(json);
-        if (repaired != null) yield return repaired;
-
-        // Candidate 3: quote unquoted property names
-        var quoted = QuoteJsonKeys(json);
-        if (quoted != json) yield return quoted;
-
-        // Candidate 4: repair + quote
-        if (repaired != null)
-        {
-            var quotedRepaired = QuoteJsonKeys(repaired);
-            if (quotedRepaired != repaired) yield return quotedRepaired;
-        }
-
-        // Candidate 5: try extracting JSON blocks
-        foreach (var block in ExtractJsonBlocks(trimmed))
-        {
-            yield return block;
-            var br = RepairJsonString(block);
-            if (br != null) yield return br;
-            var bq = QuoteJsonKeys(block);
-            if (bq != block) yield return bq;
-        }
-    }
-
-
-    /// <summary>
-    /// Extracts unique phone numbers from text using multiple common formats.
-    /// Matches North American (XXX-XXX-XXXX, (XXX) XXX-XXXX, XXX.XXX.XXXX, XXXXXXXXXX)
-    /// and international formats including leading +.
-    /// </summary>
-    public static List<string> ExtractPhoneNumbers(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
-
-        var phones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var patterns = new[]
-        {
-            @"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
-            @"\+\d{1,3}[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
-        };
-        foreach (var pattern in patterns)
-        {
-            var matches = Regex.Matches(text, pattern);
-            foreach (Match m in matches)
-            {
-                var normalized = Regex.Replace(m.Value, @"[^\d+]", "");
-                if (normalized.Length >= 10) phones.Add(normalized);
-            }
-        }
-        var result = phones.ToList();
-        result.Sort();
-        return result;
-    }
+  
 
     /// <summary>
     /// Strips stopwords and generic action verbs from a prompt, returning
@@ -2651,53 +2404,7 @@ public static class AgentUtilities
     }
 
     public static int EstimateTokens(string text) =>
-        string.IsNullOrEmpty(text) ? 0 : text.Length / 4;
-
-    public static string CompactDiscoveryContext(string discoveryContext, HashSet<string?> keepFull)
-    {
-        if (string.IsNullOrEmpty(discoveryContext) || EstimateTokens(discoveryContext) < CompactThreshold75)
-            return discoveryContext;
-
-        var sb = new StringBuilder(discoveryContext.Length / 2);
-        var blocks = discoveryContext.Split("### ", StringSplitOptions.None);
-        foreach (var block in blocks)
-        {
-            if (string.IsNullOrWhiteSpace(block)) continue;
-            var header = block;
-            var contentStart = block.IndexOf('\n');
-            string? body = null;
-            if (contentStart > 0)
-            {
-                header = block[..contentStart].Trim();
-                body = block[contentStart..].Trim();
-            }
-            // Extract file path from header: "read path/to/file" or "path/to/file"
-            var filePath = header.StartsWith("read ", StringComparison.Ordinal)
-                ? header[5..].Trim()
-                : header.Trim();
-            if (filePath == null || keepFull.Contains(filePath))
-            {
-                sb.Append("### ").Append(block);
-                continue;
-            }
-            var lines = (body ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            sb.Append("### ").AppendLine(header);
-            sb.Append("  [compacted — ").Append(lines.Length).AppendLine(" lines]");
-            if (lines.Length > 0)
-            {
-                var first = lines[0].Trim();
-                if (first.Length > 0) sb.Append("  first: ").AppendLine(first.Length > 200 ? first[..200] + "…" : first);
-                if (lines.Length > 1)
-                {
-                    var last = lines[^1].Trim();
-                    if (last.Length > 0 && last != first)
-                        sb.Append("  last:  ").AppendLine(last.Length > 200 ? last[..200] + "…" : last);
-                }
-            }
-            sb.AppendLine();
-        }
-        return sb.ToString();
-    }
+        string.IsNullOrEmpty(text) ? 0 : text.Length / 4; 
 
     public static void CompactConversation(StringBuilder conversation, int keepLastTurns = 3)
     {
@@ -3470,15 +3177,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrEmpty(s)) return s ?? "";
         return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
-    }
-    public static bool IsSqlLike(string content)
-    {
-        var lower = content.ToLower();
-        return lower.Contains("select ") || lower.Contains("insert ") || lower.Contains("update ") ||
-               lower.Contains("delete ") || lower.Contains("from ") || lower.Contains("where ") ||
-               lower.Contains("interval ") || lower.Contains("date_add") || lower.Contains("where ");
-    }
-    
+    } 
     public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return new List<string>();
@@ -4050,47 +3749,7 @@ public static class AgentUtilities
             Score = score,
             Plan = steps
         };
-    }
-
-    /// <summary>
-    /// Parse pre-planning decomposition output. Format:
-    ///   <<<SUBTASK 1>>>
-    ///   DESCRIPTION: description text
-    ///   <<<TASK END>>>
-    /// Returns list of task description strings.
-    /// </summary>
-    public static List<string> ParseDelimitedSubTasks(string raw)
-    {
-        var tasks = new List<string>();
-        if (string.IsNullOrWhiteSpace(raw)) return tasks;
-
-        var pattern = new Regex(@"<<<SUBTASK\s*\d+>>>\s*(.*?)(?=<<<SUBTASK\s*\d+>>>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-        var matches = pattern.Matches(raw.Trim());
-
-        foreach (Match m in matches)
-        {
-            var content = m.Groups[1].Value.Trim();
-            if (string.IsNullOrWhiteSpace(content)) continue;
-
-            // Try DESCRIPTION: field first
-            var desc = ExtractField(content, "DESCRIPTION");
-            if (!string.IsNullOrWhiteSpace(desc))
-            {
-                tasks.Add(desc);
-                continue;
-            }
-
-            // Fall back to raw content
-            tasks.Add(content);
-        }
-
-        // If no subtask delimiters found, treat the whole thing as one task
-        if (tasks.Count == 0 && !string.IsNullOrWhiteSpace(raw.Trim()))
-            tasks.Add(raw.Trim());
-
-        return tasks;
-    }
-
+    } 
     private static string? ExtractDelimitedSection(string text, string sectionName)
     {
         var pattern = $@"<<<{sectionName}>>>\s*(.*?)(?=<<<|$)";
@@ -4483,24 +4142,7 @@ public static class AgentUtilities
             if (lineLower.Contains("faq entries go here", StringComparison.Ordinal))
                 candidates.Add((i + 1, 90));
         }
-    }
-
-    /// <summary>
-    /// Formats a region of the file with absolute 1-based line numbers for LLM context.
-    /// </summary>
-    public static string FormatLineNumberedExcerpt(string fileContent, int centerLine, int radius = 25)
-    {
-        if (string.IsNullOrWhiteSpace(fileContent) || centerLine <= 0) return fileContent;
-        var lines = fileContent.Split('\n');
-        if (centerLine > lines.Length) centerLine = lines.Length;
-
-        var start = Math.Max(0, centerLine - 1 - radius);
-        var end = Math.Min(lines.Length - 1, centerLine - 1 + radius);
-        var sb = new StringBuilder();
-        for (var i = start; i <= end; i++)
-            sb.AppendLine($"{i + 1,5}: {lines[i]}");
-        return sb.ToString().TrimEnd();
-    }
+    } 
 
     private static string? ExtractField(string text, string fieldName)
     {

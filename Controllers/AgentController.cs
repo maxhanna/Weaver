@@ -26,6 +26,9 @@ public class AgentController : ControllerBase
     private readonly EmailService _emailService;
     private readonly BoardDataService _boardData;
     private readonly EditKnowledgeService _editKnowledge;
+    private const int MAX_INCREMENTAL_STEPS = 24;
+    private const int MAX_INCREMENTAL_SUBPLANS = 8;
+    private const int MAX_STEP_REGEN_ATTEMPTS = 3;
     private const int MAX_COMMAND_ITERATIONS = 30;
     private FrontendConfig? _cfgCache;
     private DateTime _cfgCacheTime = DateTime.MinValue;
@@ -5517,6 +5520,11 @@ emitSse, ct);
             await EmitLog(true, "error", "Failed to persist full plan to boarddata - halting to prevent data loss", new { cardId, error = ex.Message });
             throw;
         }
+    } 
+
+    public void test()
+    {
+        
     }
 
     /// <summary>
@@ -6040,42 +6048,7 @@ emitSse, ct);
         inLineComment = false; // reset at end of line
         return sb.ToString();
     }
-
-    /// <summary>
-    /// Fix over-indented standalone closing delimiters (`)`, `]`, `}`) by aligning
-    /// them to the indent of the line that opened their group.
-    ///
-    /// Targets the LLM regression where a multi-line function signature like
-    ///   private drawMesh(
-    ///     mesh: CityMesh | CityMesh[],
-    ///     ...
-    ///     pitch: number = 0
-    ///   ) {                ← over-indented to body-level (should be 0-indent)
-    /// gets the closing `)` pushed in to match the parameter indent or the body
-    /// indent, instead of the signature indent.
-    ///
-    /// SAFE BY CONSTRUCTION — the line is only rewritten if ALL of these hold:
-    ///   1. After trimming, the line starts with `)`, `]`, or `}` (a single
-    ///      closing delimiter).
-    ///   2. The rest of the line (after that delimiter) is empty OR is only
-    ///      one of: `;`, `,`, `)`, `]`, `}`, ` {`, `; {`, `, {`, `) {`, `] {`, `} {`.
-    ///      (i.e. we allow `} else {`, `} else if (...) {` etc. by NOT matching
-    ///      those — only the bare forms above are rewritten.)
-    ///   3. The opener for this delimiter can be found by scanning UPWARDS
-    ///      through the file, tracking paren/bracket/brace depth while
-    ///      respecting string and comment state.
-    ///   4. The opener's line has a strictly smaller indent than the current
-    ///      line. (If the current line is already at the opener's indent or
-    ///      less, there's nothing to fix.)
-    ///
-    /// The rewrite replaces the current line's leading whitespace with the
-    /// opener line's leading whitespace. Everything after the leading
-    /// whitespace is preserved character-for-character.
-    ///
-    /// Multi-line strings/comments are tracked across lines so a `(` inside a
-    /// verbatim string `@"..."` or block comment `/* ... */` never counts as
-    /// an opener.
-    /// </summary>
+ 
     private static string FixStrayClosingParens(string[] fileLines, int idx)
     {
         var line = fileLines[idx];
@@ -6208,194 +6181,7 @@ emitSse, ct);
         return s is ";" or "," or ")" or "]" or "}"
             or "{" or "; {" or ", {" or ") {" or "] {" or "} {" or ";{" or ",{" or "){" or "]{" or "}{";
     }
-
-    private static string FixLineSpacing(string line)
-    {
-        if (string.IsNullOrEmpty(line))
-            return line;
-
-        // Quick exit: if none of the target chars are present, skip.
-        if (!line.Contains(',') && !line.Contains(':') && !line.Contains(';'))
-            return line;
-
-        var sb = new StringBuilder(line.Length + 4);
-        var i = 0;
-        var inStringDouble = false;
-        var inStringSingle = false;
-        var inTemplate = false;
-        var inLineComment = false;
-        var inBlockComment = false;
-
-        while (i < line.Length)
-        {
-            var c = line[i];
-            var next = (i + 1 < line.Length) ? line[i + 1] : '\0';
-            var prev = (i > 0) ? line[i - 1] : '\0';
-
-            if (inBlockComment)
-            {
-                sb.Append(c);
-                if (c == '*' && next == '/')
-                {
-                    sb.Append(next);
-                    i += 2;
-                    inBlockComment = false;
-                    continue;
-                }
-                i++;
-                continue;
-            }
-
-            if (inLineComment)
-            {
-                sb.Append(c);
-                i++;
-                continue;
-            }
-
-            if (inStringDouble || inStringSingle || inTemplate)
-            {
-                sb.Append(c);
-                if (c == '\\' && next != '\0')
-                {
-                    sb.Append(next);
-                    i += 2;
-                    continue;
-                }
-                if (inStringDouble && c == '"') inStringDouble = false;
-                else if (inStringSingle && c == '\'') inStringSingle = false;
-                else if (inTemplate && c == '`') inTemplate = false;
-                i++;
-                continue;
-            }
-
-            if (c == '/' && next == '/')
-            {
-                inLineComment = true;
-                sb.Append(c);
-                i++;
-                continue;
-            }
-            if (c == '/' && next == '*')
-            {
-                inBlockComment = true;
-                sb.Append(c);
-                i++;
-                continue;
-            }
-            if (c == '"') { inStringDouble = true; sb.Append(c); i++; continue; }
-            if (c == '\'') { inStringSingle = true; sb.Append(c); i++; continue; }
-            if (c == '`') { inTemplate = true; sb.Append(c); i++; continue; }
-
-            // Rule 1: ',' followed by non-whitespace, non-')', ']', '}' -> insert space
-            if (c == ',')
-            {
-                sb.Append(c);
-                i++;
-                if (i < line.Length)
-                {
-                    var after = line[i];
-                    if (after != ' ' && after != '\t' && after != '\r' && after != '\n'
-                        && after != ')' && after != ']' && after != '}')
-                    {
-                        sb.Append(' ');
-                    }
-                }
-                continue;
-            }
-
-            // Rule 2: ':' — insert space after if:
-            //   - not part of '::' (prev != ':' and next != ':')
-            //   - next is not whitespace, not end-of-line
-            //   - (URLs like "http://" are handled by string state above)
-            if (c == ':')
-            {
-                sb.Append(c);
-                i++;
-                if (i < line.Length)
-                {
-                    var after = line[i];
-                    // Skip "::" — don't insert space inside double-colon
-                    if (prev != ':' && after != ':'
-                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
-                    {
-                        sb.Append(' ');
-                    }
-                }
-                continue;
-            }
-
-            // Rule 3: ';' — insert space after if:
-            //   - next is not ';', ')', whitespace, or end-of-line
-            //   - (catches "for(i=0;i<10;)" -> "for(i=0; i<10;)")
-            if (c == ';')
-            {
-                sb.Append(c);
-                i++;
-                if (i < line.Length)
-                {
-                    var after = line[i];
-                    if (after != ';' && after != ')'
-                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
-                    {
-                        sb.Append(' ');
-                    }
-                }
-                continue;
-            }
-
-            // Rule 4: '=' — insert spaces around standalone '='  
-            if (c == '=')
-            {
-                const string operatorPrevChars = "!<>=+-*/%&|^~?:";
-                var isOperatorContext = prev != '\0' && operatorPrevChars.IndexOf(prev) >= 0;
-                var nextChar = (i + 1 < line.Length) ? line[i + 1] : '\0';
-                var isHtmlAttributeLike =
-                    nextChar == '"' || nextChar == '\'' || nextChar == '`';
-
-                // HTML/JSX attribute: leave the whole '=' run untouched.
-                if (isHtmlAttributeLike)
-                {
-                    sb.Append(c);
-                    i++;
-                    continue;
-                }
-
-                // Insert space BEFORE '=' if prev is identifier-end (alnum, ) ] _ $) 
-                if (!isOperatorContext && sb.Length > 0)
-                {
-                    var lastChar = sb[sb.Length - 1];
-                    if (lastChar != ' ' && lastChar != '\t'
-                        && (char.IsLetterOrDigit(lastChar) || lastChar == ')' || lastChar == ']'
-                            || lastChar == '_' || lastChar == '$'))
-                    {
-                        sb.Append(' ');
-                    }
-                }
-
-                sb.Append(c);
-                i++;
-
-                // Insert space AFTER '=' if next is not '=', '>', quote, whitespace, 
-                if (i < line.Length)
-                {
-                    var after = line[i];
-                    if (after != '=' && after != '>'
-                        && after != '"' && after != '\'' && after != '`'
-                        && after != ' ' && after != '\t' && after != '\r' && after != '\n')
-                    {
-                        sb.Append(' ');
-                    }
-                }
-                continue;
-            }
-
-            sb.Append(c);
-            i++;
-        }
-
-        return sb.ToString();
-    }
+ 
 
     private async Task<(string decision, string reason, int score)> LlmVerifyEditStepAsync(
     string relPath,
@@ -7883,6 +7669,629 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         return stepIndex;
     }
+    private static string BuildIncrementalStepSystemPrompt() =>
+    "You are a senior autonomous coding agent building a code-change plan ONE STEP AT A TIME.\n" +
+    "You will be shown the task, the discovered file contents, and the PLAN SO FAR (steps already committed).\n" +
+    "Your job on EACH turn is to propose exactly ONE new step — the next atomic action required — " +
+    "or declare the plan complete if no further step is needed.\n\n" +
+    "Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n" +
+    "### DECISION ###\n" +
+    "If the plan-so-far, together with the discovery context, already fully satisfies the task:\n" +
+    "{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n" +
+    "If you need to read a file not yet in discovery context before you can safely propose the next step:\n" +
+    "{\"planComplete\": false, \"exploreFile\": \"relative/path.ext\", \"thinking\": \"why you need this file\"}\n\n" +
+    "Otherwise, propose exactly ONE next step:\n" +
+    "{\n" +
+    "  \"planComplete\": false,\n" +
+    "  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n" +
+    "  \"step\": {\n" +
+    "    \"file\": \"relative/path.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
+    "    \"change\": \"precise, atomic description of ONLY this step's change\",\n" +
+    "    \"line\": 42,\n" +
+    "    \"referenceFiles\": [\"relative/path/other.ext\"]\n" +
+    "  },\n" +
+    "  \"justification\": \"why this step must happen NOW relative to steps already committed " +
+    "(e.g. 'this DTO property must exist before step 2's endpoint can reference it')\"\n" +
+    "}\n\n" +
+    "### RULES ###\n" +
+    "1. ONE step per turn. Never propose multiple steps or a 'plan' array.\n" +
+    "2. The step MUST be atomic: one coherent edit at one location in one file. If the natural next " +
+    "   action touches two locations (e.g. add a field AND initialize it in a constructor), propose ONLY " +
+    "   the first location now — the second location gets its own turn later.\n" +
+    "3. NEVER repeat or restate a step already present in PLAN SO FAR.\n" +
+    "4. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in " +
+    "   the discovery context OR was introduced by an earlier committed step. If unsure, use exploreFile first.\n" +
+    "5. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, " +
+    "   services before UI code that calls them.\n" +
+    "6. CREATE TABLE IF NOT EXISTS belongs INSIDE the method body that needs it — never its own step.\n" +
+    "7. Prefer FEWER, more complete steps. If the whole task is one coherent edit, propose that one step, " +
+    "   then declare planComplete=true on the next turn.\n" +
+    "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake.\n" +
+    "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n";
+
+    private static string BuildIncrementalStepUserPrompt(
+        string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
+        string? steeringContext, List<string> rejectionFeedback)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### TASK ###");
+        sb.AppendLine(originalPrompt);
+        if (!string.IsNullOrWhiteSpace(steeringContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### STEERING ###");
+            sb.AppendLine(steeringContext);
+        }
+        sb.AppendLine();
+        sb.AppendLine("### DISCOVERY CONTEXT (only reference paths/content shown here) ###");
+        sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
+        sb.AppendLine();
+        sb.AppendLine("### PLAN SO FAR (already committed — do NOT repeat these) ###");
+        if (planSoFar.Count == 0)
+        {
+            sb.AppendLine("(empty — this will be the first step)");
+        }
+        else
+        {
+            for (var i = 0; i < planSoFar.Count; i++)
+                sb.AppendLine($"  Step {i + 1}: [{planSoFar[i].File}] {planSoFar[i].Change}");
+        }
+        if (rejectionFeedback.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("### REJECTED ATTEMPTS FOR THE NEXT STEP (fix these issues) ###");
+            foreach (var r in rejectionFeedback) sb.AppendLine($"  - {r}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("Propose the NEXT step now, or declare the plan complete. Output ONLY JSON.");
+        return sb.ToString();
+    }
+
+    private async Task<IncrementalStepProposal?> ProposeNextIncrementalStepAsync(
+        string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
+        string? steeringContext, List<string> rejectionFeedback, bool emitSse, CancellationToken ct)
+    {
+        var sys = BuildIncrementalStepSystemPrompt();
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback);
+
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct,
+            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 700);
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Incremental step proposal returned empty: {err}", ct: ct);
+            return null;
+        }
+
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+
+            var complete = root.TryGetProperty("planComplete", out var pc) && pc.ValueKind == JsonValueKind.True;
+            var completionReason = root.TryGetProperty("completionReason", out var cr) ? cr.GetString() : null;
+            var thinking = root.TryGetProperty("thinking", out var th) ? th.GetString() : null;
+            var exploreFile = root.TryGetProperty("exploreFile", out var ef) && ef.ValueKind == JsonValueKind.String
+                ? ef.GetString() : null;
+
+            if (complete)
+                return new IncrementalStepProposal { PlanComplete = true, CompletionReason = completionReason, Thinking = thinking };
+
+            if (!string.IsNullOrWhiteSpace(exploreFile))
+                return new IncrementalStepProposal { PlanComplete = false, ExploreFile = exploreFile, Thinking = thinking };
+
+            if (root.TryGetProperty("step", out var maybeExploreStep) && maybeExploreStep.ValueKind == JsonValueKind.Object)
+            {
+                var maybeFile = maybeExploreStep.TryGetProperty("file", out var mfEl) ? mfEl.GetString() : null;
+                if (!string.IsNullOrWhiteSpace(maybeFile) &&
+                    (maybeFile.StartsWith("_explore", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var maybeChange = maybeExploreStep.TryGetProperty("change", out var mcEl) ? mcEl.GetString() : "";
+                    // Try to pull a real path out of the change text; otherwise treat change itself as the target
+                    var pathMatch = Regex.Match(maybeChange ?? "", @"[\w./\\-]+\.\w{1,5}\b");
+                    var target = pathMatch.Success ? pathMatch.Value : maybeChange;
+                    if (!string.IsNullOrWhiteSpace(target))
+                        return new IncrementalStepProposal { PlanComplete = false, ExploreFile = target, Thinking = thinking };
+                }
+            }
+
+            if (!root.TryGetProperty("step", out var stepEl) || stepEl.ValueKind != JsonValueKind.Object)
+                return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
+
+            var file = stepEl.TryGetProperty("file", out var fEl) ? fEl.GetString() : null;
+            var change = stepEl.TryGetProperty("change", out var cEl) ? cEl.GetString() : null;
+            var line = stepEl.TryGetProperty("line", out var lEl) && lEl.ValueKind == JsonValueKind.Number ? lEl.GetInt32() : 0;
+
+            var refFiles = new List<string>();
+            if (stepEl.TryGetProperty("referenceFiles", out var rfArr) && rfArr.ValueKind == JsonValueKind.Array)
+                foreach (var rf in rfArr.EnumerateArray())
+                    if (rf.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(rf.GetString()))
+                        refFiles.Add(rf.GetString()!);
+
+            if (string.IsNullOrWhiteSpace(file) || string.IsNullOrWhiteSpace(change))
+                return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
+
+            var justification = root.TryGetProperty("justification", out var jEl) ? jEl.GetString() : null;
+
+            return new IncrementalStepProposal
+            {
+                PlanComplete = false,
+                Thinking = thinking,
+                CompletionReason = justification,
+                Step = new PlanStep
+                {
+                    File = file!.Replace('\\', '/'),
+                    Change = change!,
+                    Priority = 1,
+                    LineNumber = line,
+                    ReferenceFiles = refFiles
+                }
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
+        PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
+        string projectRoot, bool emitSse, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
+            return (false, "Step is missing file or change description.");
+
+        // 1. Duplicate of an already-committed step
+        var normNew = NormalizeChangeForDedup(step.Change);
+        foreach (var existing in planSoFar)
+        {
+            if (!string.Equals(existing.File, step.File, StringComparison.OrdinalIgnoreCase)) continue;
+            var normExisting = NormalizeChangeForDedup(existing.Change);
+            if (normNew == normExisting || CalculateChangeSimilarity(normNew, normExisting) >= 0.82)
+                return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
+        }
+
+        var changeLower = step.Change.ToLowerInvariant();
+
+        // 2. Remove-then-add contradiction against something just added in this plan
+        if (changeLower.StartsWith("remove") || changeLower.StartsWith("delete"))
+        {
+            var targetMatch = Regex.Match(step.Change, @"remove\s+(?:the\s+)?(\w+)", RegexOptions.IgnoreCase);
+            if (targetMatch.Success)
+            {
+                var target = targetMatch.Groups[1].Value;
+                var contradicts = planSoFar.Any(p =>
+                    string.Equals(p.File, step.File, StringComparison.OrdinalIgnoreCase) &&
+                    Regex.IsMatch(p.Change ?? "", $@"\b(add|create|insert)\b.*\b{Regex.Escape(target)}\b", RegexOptions.IgnoreCase));
+                if (contradicts)
+                    return (false, $"Removes '{target}' but an earlier committed step just added it — contradicts the plan so far.");
+            }
+        }
+
+        var isSpecial = AgentUtilities.IsSpecialMarker(step.File);
+
+        if (!isSpecial && AgentUtilities.IsRelativePath(step.File))
+        {
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+            var isModifyVerb = Regex.IsMatch(changeLower, @"^\s*(modify|update|change|replace|fix)\b");
+            var fileExists = System.IO.File.Exists(fullPath);
+            var willBeCreatedEarlier = planSoFar.Any(p =>
+                (p.File.Equals("_create_file", StringComparison.OrdinalIgnoreCase) ||
+                 p.File.Equals("_command", StringComparison.OrdinalIgnoreCase)) &&
+                (p.Change ?? "").Contains(Path.GetFileName(step.File), StringComparison.OrdinalIgnoreCase));
+
+            // 3. Modifying a file that doesn't exist and isn't created earlier
+            if (isModifyVerb && !fileExists && !willBeCreatedEarlier)
+                return (false, $"Says '{changeLower.Split(' ')[0]}' but {step.File} does not exist yet and no earlier " +
+                                "step creates it. Add a creation step first, or rephrase as a creation ('Add ...').");
+
+            // 4. Already satisfied on disk
+            if (fileExists)
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                var (verdict, reason) = PreEditValidation(content, step);
+                if (verdict == PreEditVerdict.AlreadyDone)
+                    return (false, $"Already satisfied in the current file — {reason}. Move on to the next requirement.");
+            }
+        }
+
+        if (isSpecial) return (true, null); // commands/web/etc. skip the coherence LLM check
+
+        // 5. LLM coherence check
+        var sb = new StringBuilder();
+        sb.AppendLine("### ORIGINAL TASK ###");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### PLAN SO FAR (already committed, in order) ###");
+        if (planSoFar.Count == 0) sb.AppendLine("(none yet — this would be the first step)");
+        else for (var i = 0; i < planSoFar.Count; i++) sb.AppendLine($"  Step {i + 1}: [{planSoFar[i].File}] {planSoFar[i].Change}");
+        sb.AppendLine();
+        sb.AppendLine("### PROPOSED NEXT STEP ###");
+        sb.AppendLine($"[{step.File}] {step.Change}");
+        sb.AppendLine();
+        sb.AppendLine("### RELEVANT DISCOVERY CONTEXT (current file state) ###");
+        var ctxSnippet = AgentUtilities.BuildValidatorContextExcerpt(discoveryContext, step.Change ?? "");
+        sb.AppendLine(ctxSnippet);
+        sb.AppendLine();
+        sb.AppendLine("Judge the PROPOSED NEXT STEP ONLY. Answer:");
+        sb.AppendLine("1. Does it reference any method/property/symbol that does NOT exist in the discovery context " +
+                      "AND is NOT introduced by an earlier committed step? (if so: invalid)");
+        sb.AppendLine("2. Does it contradict or redo anything already committed? (if so: invalid)");
+        sb.AppendLine("3. Does it require a prerequisite step not yet committed (e.g. an endpoint before its DTO)? (if so: invalid)");
+        sb.AppendLine("4. Is it a genuinely necessary, atomic step toward the ORIGINAL TASK (not scope creep)? (if not: invalid)");
+        sb.AppendLine();
+        sb.AppendLine("Output ONLY JSON: {\"valid\": true|false, \"reason\": \"short reason, only if invalid\"}");
+
+        var (raw, _, err) = await CallLlmRaw(
+            "You are a strict plan-coherence validator. Output ONLY the requested JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 200);
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await EmitLog(emitSse, "warn", $"Coherence validator call failed ({err}) — accepting step by default.", ct: ct);
+            return (true, null); // fail open — a flaky validator call must never wedge planning
+        }
+
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            var valid = !doc.RootElement.TryGetProperty("valid", out var v) || v.ValueKind != JsonValueKind.False;
+            var reason = doc.RootElement.TryGetProperty("reason", out var r) ? r.GetString() : null;
+            return (valid, valid ? null : (reason ?? "Rejected by coherence validator."));
+        }
+        catch
+        {
+            return (true, null);
+        }
+    }
+
+    private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        CancellationToken ct, string? steeringContext)
+    {
+        var planSoFar = new List<PlanStep>();
+        var rejectionFeedback = new List<string>();
+        var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var thinkingLog = new StringBuilder();
+        var regenAttempts = 0;
+        var consecutiveSlotFailures = 0;
+
+        await EmitLog(emitSse, "info", "Incremental planning: proposing steps one at a time…", ct: ct);
+
+        for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var proposal = await ProposeNextIncrementalStepAsync(
+                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
+
+            if (proposal == null)
+            {
+                rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
+                    "Output ONLY the JSON object described in the system prompt.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+
+            if (proposal.PlanComplete)
+            {
+                await EmitLog(emitSse, "success",
+                    $"Incremental planning: plan complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
+            {
+                if (exploredFiles.Add(proposal.ExploreFile))
+                {
+                    await EmitLog(emitSse, "info", $"Incremental planning: exploring {proposal.ExploreFile}", ct: ct);
+                    discoveryContext = await ExplorationPipeline(
+                        new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
+                        discoveryContext, projectRoot, emitSse, ct);
+                    regenAttempts = 0;
+                    continue;
+                }
+                else
+                {
+                    rejectionFeedback.Add(
+                        $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full in the " +
+                        "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
+                        "step now, using the exact symbol/method names visible there.");
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+            }
+
+            if (proposal.Step == null)
+            {
+                rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+
+            var (valid, reason) = await ValidateIncrementalStepAsync(
+                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct);
+
+            if (!valid)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
+                rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                {
+                    consecutiveSlotFailures++;
+                    await EmitLog(emitSse, "warn",
+                        $"Incremental planning: giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. " +
+                        $"({consecutiveSlotFailures} consecutive slot failures)", ct: ct);
+                    rejectionFeedback.Clear();
+                    regenAttempts = 0;
+
+                    if (consecutiveSlotFailures >= 3)
+                        throw new InvalidOperationException(
+                            "Incremental planner failed 3 slots in a row — the discovery context likely doesn't contain " +
+                            "what the task needs (wrong file attached, or the target method/property doesn't exist as described). " +
+                            "Attach the correct file(s) and retry.");
+                    continue;
+                }
+                continue;
+            }
+            consecutiveSlotFailures = 0;
+            planSoFar.Add(proposal.Step);
+            rejectionFeedback.Clear();
+            regenAttempts = 0;
+            if (!string.IsNullOrWhiteSpace(proposal.Thinking))
+                thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
+
+            await EmitLog(emitSse, "info",
+                $"Incremental planning: committed step {planSoFar.Count} — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
+
+            if (emitSse)
+                await SendSse(Response, "plan", new
+                {
+                    thinking = thinkingLog.ToString(),
+                    summary = $"Building plan incrementally — {planSoFar.Count} step(s) so far",
+                    items = planSoFar,
+                    incremental = true
+                }, ct);
+        }
+
+        if (planSoFar.Count == 0)
+            throw new InvalidOperationException("Incremental planner did not produce any actionable steps.");
+
+        var plan = new AgentPlan
+        {
+            Thinking = thinkingLog.ToString(),
+            Summary = $"Built incrementally across {planSoFar.Count} validated step(s)",
+            Score = 90,
+            Plan = planSoFar
+        };
+
+        return (plan, discoveryContext);
+    }
+    private static string BuildIncrementalSubPlanSystemPrompt() =>
+    "You are a senior software architect building a MULTI-STAGE execution plan ONE STAGE AT A TIME.\n" +
+    "Each stage ('sub-plan') is a self-contained deliverable — a concrete file (or small related set) with a " +
+    "precise, atomic modification. Stages execute strictly in the order you produce them, and each later stage " +
+    "can rely on symbols introduced by earlier ones.\n\n" +
+    "Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n" +
+    "If the STAGES SO FAR already fully cover everything the task requires:\n" +
+    "{\"metaPlanComplete\": true, \"completionReason\": \"why nothing more is needed\"}\n\n" +
+    "Otherwise, propose exactly ONE next stage:\n" +
+    "{\n" +
+    "  \"metaPlanComplete\": false,\n" +
+    "  \"thinking\": \"1-2 sentences: why this is the correct NEXT deliverable given what's already staged\",\n" +
+    "  \"subPlan\": {\n" +
+    "    \"title\": \"Concrete deliverable with exact file path(s)\",\n" +
+    "    \"description\": \"Exact files and exact modifications for THIS stage only\",\n" +
+    "    \"files\": [\"relative/path.ext\"],\n" +
+    "    \"contextNote\": \"Concrete symbol names/schemas THIS stage introduces, for later stages to reference\"\n" +
+    "  }\n" +
+    "}\n\n" +
+    "### RULES ###\n" +
+    "1. ONE sub-plan per turn.\n" +
+    "2. Order dependencies correctly: data models/DTOs before endpoints, backend before frontend, services before UI.\n" +
+    "3. ATOMICITY: table creation lives INSIDE the endpoint method that needs it, never its own stage. " +
+    "   A method's signature and body are one stage, not two.\n" +
+    "4. NEVER repeat a stage already listed in STAGES SO FAR.\n" +
+    "5. If the whole task fits in ONE stage, propose that single stage, then declare metaPlanComplete=true next turn.\n" +
+    "6. Only split into multiple stages when the task genuinely spans multiple files/layers — never manufacture " +
+    "   stages for a single-file change.\n";
+
+    private static string BuildIncrementalSubPlanUserPrompt(
+        string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar, List<string> rejectionFeedback)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### TASK ###");
+        sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### DISCOVERY CONTEXT ###");
+        var ctx = discoveryContext.Length > 8000 ? discoveryContext[..8000] + "\n...(truncated)" : discoveryContext;
+        sb.AppendLine(ctx);
+        sb.AppendLine();
+        sb.AppendLine("### STAGES SO FAR (already committed, in execution order) ###");
+        if (subPlansSoFar.Count == 0) sb.AppendLine("(none yet — this will be the first stage)");
+        else for (var i = 0; i < subPlansSoFar.Count; i++)
+            sb.AppendLine($"  Stage {i + 1}: {subPlansSoFar[i].Title} — {subPlansSoFar[i].Description}");
+        if (rejectionFeedback.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("### REJECTED ATTEMPTS (fix these) ###");
+            foreach (var r in rejectionFeedback) sb.AppendLine($"  - {r}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("Propose the NEXT stage now, or declare the meta-plan complete. Output ONLY JSON.");
+        return sb.ToString();
+    }
+
+    private async Task<IncrementalSubPlanProposal?> ProposeNextSubPlanAsync(
+        string originalPrompt, string discoveryContext, List<MetaPlanSubPlan> subPlansSoFar,
+        List<string> rejectionFeedback, bool emitSse, CancellationToken ct)
+    {
+        var sys = BuildIncrementalSubPlanSystemPrompt();
+        var user = BuildIncrementalSubPlanUserPrompt(originalPrompt, discoveryContext, subPlansSoFar, rejectionFeedback);
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, TimeSpan.FromMinutes(2), maxTokens: 500);
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
+            var root = doc.RootElement;
+            var complete = root.TryGetProperty("metaPlanComplete", out var mc) && mc.ValueKind == JsonValueKind.True;
+            var reason = root.TryGetProperty("completionReason", out var cr) ? cr.GetString() : null;
+            var thinking = root.TryGetProperty("thinking", out var th) ? th.GetString() : null;
+
+            if (complete)
+                return new IncrementalSubPlanProposal { MetaPlanComplete = true, CompletionReason = reason, Thinking = thinking };
+
+            if (!root.TryGetProperty("subPlan", out var spEl) || spEl.ValueKind != JsonValueKind.Object)
+                return new IncrementalSubPlanProposal { MetaPlanComplete = false, Thinking = thinking };
+
+            var title = spEl.TryGetProperty("title", out var tEl) ? tEl.GetString() : null;
+            var desc = spEl.TryGetProperty("description", out var dEl) ? dEl.GetString() : null;
+            var note = spEl.TryGetProperty("contextNote", out var nEl) ? nEl.GetString() : "";
+            var files = new List<string>();
+            if (spEl.TryGetProperty("files", out var fArr) && fArr.ValueKind == JsonValueKind.Array)
+                foreach (var f in fArr.EnumerateArray())
+                    if (f.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(f.GetString()))
+                        files.Add(f.GetString()!);
+
+            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(desc))
+                return new IncrementalSubPlanProposal { MetaPlanComplete = false, Thinking = thinking };
+
+            return new IncrementalSubPlanProposal
+            {
+                MetaPlanComplete = false,
+                Thinking = thinking,
+                SubPlan = new MetaPlanSubPlan
+                {
+                    Id = $"sp-{subPlansSoFar.Count + 1}",
+                    Title = title!,
+                    Description = desc!,
+                    ContextNote = note ?? "",
+                    Files = files
+                }
+            };
+        }
+        catch { return null; }
+    }
+
+    private async Task<(bool valid, string? reason)> ValidateSubPlanAsync(
+        MetaPlanSubPlan subPlan, string originalPrompt, List<MetaPlanSubPlan> subPlansSoFar, CancellationToken ct)
+    {
+        foreach (var existing in subPlansSoFar)
+        {
+            var sim = CalculateChangeSimilarity(NormalizeChangeForDedup(subPlan.Description), NormalizeChangeForDedup(existing.Description));
+            if (sim >= 0.82)
+                return (false, $"Duplicates already-committed stage '{existing.Title}'.");
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("### ORIGINAL TASK ###"); sb.AppendLine(originalPrompt);
+        sb.AppendLine();
+        sb.AppendLine("### STAGES SO FAR ###");
+        if (subPlansSoFar.Count == 0) sb.AppendLine("(none)");
+        else foreach (var s in subPlansSoFar) sb.AppendLine($"  - {s.Title}: {s.Description}");
+        sb.AppendLine();
+        sb.AppendLine("### PROPOSED NEXT STAGE ###");
+        sb.AppendLine($"{subPlan.Title}: {subPlan.Description}");
+        sb.AppendLine();
+        sb.AppendLine("Judge ONLY the proposed next stage. Is it atomic (not two concerns split apart, e.g. table " +
+                      "creation split from its endpoint)? Does it depend on something not yet staged (e.g. an endpoint " +
+                      "before its DTO)? Is it genuinely required by the task (not scope creep)?");
+        sb.AppendLine("Output ONLY JSON: {\"valid\": true|false, \"reason\": \"short reason if invalid\"}");
+
+        var (raw, _, _) = await CallLlmRaw(
+            "You are a strict meta-plan coherence validator. Output ONLY the requested JSON.",
+            sb.ToString(), ct, TimeSpan.FromSeconds(25), maxTokens: 200);
+
+        if (string.IsNullOrWhiteSpace(raw)) return (true, null);
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            var valid = !doc.RootElement.TryGetProperty("valid", out var v) || v.ValueKind != JsonValueKind.False;
+            var reason = doc.RootElement.TryGetProperty("reason", out var r) ? r.GetString() : null;
+            return (valid, valid ? null : reason);
+        }
+        catch { return (true, null); }
+    }
+
+    private async Task<MetaPlanResult?> RunIncrementalMetaPlanLoop(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct,
+        string? cardId = null)
+    {
+        var (skipMetaPlan, gateScore) = DeterministicMetaPlanGate(prompt);
+        if (skipMetaPlan)
+        {
+            await EmitLog(emitSse, "info", $"Meta-plan skipped deterministically (score {gateScore} < 6) — atomic task.", ct: ct);
+            return null;
+        }
+
+        var subPlansSoFar = new List<MetaPlanSubPlan>();
+        var rejectionFeedback = new List<string>();
+        var attempts = 0;
+
+        for (var turn = 0; turn < MAX_INCREMENTAL_SUBPLANS; turn++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var proposal = await ProposeNextSubPlanAsync(prompt, discoveryContext, subPlansSoFar, rejectionFeedback, emitSse, ct);
+
+            if (proposal == null)
+            {
+                if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+
+            if (proposal.MetaPlanComplete)
+            {
+                await EmitLog(emitSse, "success", $"Meta-plan: complete after {subPlansSoFar.Count} stage(s) — {proposal.CompletionReason}", ct: ct);
+                break;
+            }
+
+            if (proposal.SubPlan == null) { if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) break; continue; }
+
+            var (valid, reason) = await ValidateSubPlanAsync(proposal.SubPlan, prompt, subPlansSoFar, ct);
+            if (!valid)
+            {
+                await EmitLog(emitSse, "warn", $"Meta-plan: rejected stage '{proposal.SubPlan.Title}' — {reason}", ct: ct);
+                rejectionFeedback.Add($"REJECTED — '{proposal.SubPlan.Title}' → {reason}");
+                if (++attempts >= MAX_STEP_REGEN_ATTEMPTS) { rejectionFeedback.Clear(); attempts = 0; }
+                continue;
+            }
+
+            subPlansSoFar.Add(proposal.SubPlan);
+            rejectionFeedback.Clear();
+            attempts = 0;
+            await EmitLog(emitSse, "info", $"Meta-plan: committed stage {subPlansSoFar.Count} — {proposal.SubPlan.Title}", ct: ct);
+        }
+
+        if (subPlansSoFar.Count <= 1)
+            return null; // not worth treating as multi-stage — normal incremental planning handles it as one flow
+
+        var result = new MetaPlanResult
+        {
+            MetaThinking = "Built incrementally, one validated stage at a time.",
+            MetaSummary = $"{subPlansSoFar.Count}-stage plan built incrementally",
+            Complexity = Math.Min(10, 6 + subPlansSoFar.Count),
+            SubPlans = subPlansSoFar
+        };
+
+        if (emitSse)
+            await SendSse(Response, "meta-plan", new
+            {
+                summary = result.MetaSummary,
+                complexity = result.Complexity,
+                subPlans = result.SubPlans.Select(sp => new { id = sp.Id, title = sp.Title, description = sp.Description, files = sp.Files, contextNote = sp.ContextNote, done = false })
+            }, ct);
+
+        if (!string.IsNullOrWhiteSpace(cardId))
+            await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
+
+        return result;
+    }
 
     private async Task<(AgentPlan? plan, HashSet<int>? completedIndices, bool isBenchmark)> LoadPlanFromBoardDataAsync(string? cardId)
     {
@@ -7958,7 +8367,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         return (null, null, false);
     }
+    private sealed class IncrementalStepProposal
+    {
+        public bool PlanComplete { get; set; }
+        public string? CompletionReason { get; set; }
+        public string? Thinking { get; set; }
+        public string? ExploreFile { get; set; }
+        public PlanStep? Step { get; set; }
+    }
 
+    private sealed class IncrementalSubPlanProposal
+    {
+        public bool MetaPlanComplete { get; set; }
+        public string? CompletionReason { get; set; }
+        public string? Thinking { get; set; }
+        public MetaPlanSubPlan? SubPlan { get; set; }
+    }
     private class MetaPlanSubPlan
     {
         public string Id { get; set; } = "";
@@ -10202,20 +10626,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
         }
 
-        // Phase 1.5: Meta-Plan — decompose complex tasks into sequential sub-plans
-        // AFTER
-        MetaPlanResult? metaPlan = null;
-        var (skipMetaPlan, gateScore) = DeterministicMetaPlanGate(prompt);
-        if (skipMetaPlan)
-        {
-            await EmitLog(emitSse, "info",
-                $"Phase 1.5 — META-PLAN skipped deterministically (score {gateScore} < 6) — treating as atomic task", ct: ct);
-        }
-        else
-        {
-            await EmitLog(emitSse, "info", $"Phase 1.5 — META-PLAN (deterministic score {gateScore})", ct: ct);
-            metaPlan = await GenerateMetaPlanAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-        }
+        await EmitLog(emitSse, "info", "Phase 1.5 — META-PLAN (incremental construction)", ct: ct);
+        var metaPlan = await RunIncrementalMetaPlanLoop(prompt, discoveryContext, projectRoot, emitSse, ct, cardId);
 
         // Phase 2: Plan
         AgentPlan plan;
@@ -10234,12 +10646,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var subPlan = metaPlan.SubPlans[i];
 
                 var subPrompt = BuildSubPlanPrompt(
-                    prompt, subPlan, i + 1, metaPlan.SubPlans.Count,
-                    accumulatedContext.Length > 0 ? accumulatedContext.ToString() : null);
+                      prompt, subPlan, i + 1, metaPlan.SubPlans.Count,
+                      accumulatedContext.Length > 0 ? accumulatedContext.ToString() : null);
 
-                // AFTER
-                var subPlanResult = await AnalyzePromptAndPlanCodeChanges(
-                    subPrompt, discoveryContext, projectRoot, emitSse, ct);
+                AgentPlan? subPlanResult;
+                try
+                {
+                    var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
+                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote);
+                    subPlanResult = incSubPlan;
+                    discoveryContext = updatedCtx;
+                }
+                catch (InvalidOperationException)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Sub-plan '{subPlan.Title}' produced no actionable steps — treating as already satisfied.", ct: ct);
+                    subPlanResult = new AgentPlan { Plan = new List<PlanStep>() };
+                }
 
                 if (subPlanResult?.Plan != null && subPlanResult.Plan.Count > 0)
                 {
@@ -10351,8 +10774,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
             }
 
-            var (p, convergedContext) = await RunPlanningConvergenceLoop(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+            var (p, convergedContext) = await RunIncrementalPlanningLoop(
+                   prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
             plan = p;
             discoveryContext = convergedContext;
         }
@@ -15212,8 +15635,7 @@ Respond with JSON only:
         return "\n### AUTO-ENRICHED TYPE CONTEXT (followed type references recursively)\n" +
                "⚠ These type definitions show EXACT property names. Use ONLY these property names in your edit.\n" +
                buf.ToString();
-    }
-
+    } 
 
     /// <summary>Normalize spacing after colons in .ts/.js object literals.
     /// Ensures property:value pairs inside {...} have a space after the colon,

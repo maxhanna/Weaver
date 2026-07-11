@@ -33,14 +33,4 @@ public class AgentUtilitiesEdgeCasesTests
         Assert.NotNull(repaired);
         Assert.EndsWith("]}", repaired);
     }
-
-    [Fact]
-    public void ExtractEditFromCodeGen_IgnoresLeadingMarkdownAndMissingCodeFence()
-    {
-        var raw = "Here you go:\noldString: \"before\"\nnewString: \"after\"";
-        var (oldString, newString, error) = AgentUtilities.ExtractEditFromCodeGen(raw);
-
-        Assert.NotNull(error);
-        Assert.Contains("parse", error!, StringComparison.OrdinalIgnoreCase);
-    }
 }

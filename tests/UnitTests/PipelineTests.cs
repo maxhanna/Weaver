@@ -302,24 +302,7 @@ public class PipelineTests
         Assert.Contains("func", result);
         Assert.Contains("main", result);
     }
-
-    [Fact]
-    public void ExtractEditFromCodeGen_RobustParsing()
-    {
-        // Case 1: Markdown + JSON
-        var raw1 = "Sure, here is the edit:\n```json\n{\n  \"oldString\": \"public void Old()\",\n  \"newString\": \"public void New()\"\n}\n```";
-        var (os1, ns1, err1) = AgentUtilities.ExtractEditFromCodeGen(raw1);
-        Assert.Null(err1);
-        Assert.Equal("public void Old()", os1);
-        Assert.Equal("public void New()", ns1);
-
-        // Case 2: Malformed JSON (unquoted keys)
-        var raw2 = "{ oldString: \"old\", newString: \"new\" }";
-        var (os2, ns2, err2) = AgentUtilities.ExtractEditFromCodeGen(raw2);
-        Assert.Null(err2);
-        Assert.Equal("old", os2);
-        Assert.Equal("new", ns2);
-    }
+ 
 
     [Fact]
     public void ParseDelimitedPlan_HandlesMultipleSteps()
