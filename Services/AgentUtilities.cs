@@ -3387,12 +3387,11 @@ public static class AgentUtilities
         const string IndentStep = "  ";
         var lines = html.Split('\n');
 
-
         var distinctDepths = lines
             .Where(l => l.Trim().Length > 0)
-            .Select(l => AgentUtilities.GetLeadingWhitespace(l).Length)
+            .Select(l => GetLeadingWhitespace(l).Length)
             .Distinct().Count();
-        if (distinctDepths > 1) return html;
+        if (distinctDepths > 1) { return html; }
 
         var depth = 0;
         for (var i = 0; i < lines.Length; i++)
@@ -3400,9 +3399,8 @@ public static class AgentUtilities
             var trimmed = lines[i].Trim();
             if (trimmed.Length == 0) continue;
 
-
             if (Regex.IsMatch(trimmed, @"^</[\w-]"))
-                depth = Math.Max(0, depth - 1);
+            { depth = Math.Max(0, depth - 1); }
 
             lines[i] = baseIndent + new string(' ', depth * IndentStep.Length) + trimmed;
 
@@ -3416,7 +3414,7 @@ public static class AgentUtilities
                 var isClosing = trimmed.StartsWith("</");
                 var isComment = trimmed.StartsWith("<!--");
                 if (!isSelfClosing && !closedInline && !isClosing && !isComment)
-                    depth++;
+                { depth++; }
             }
         }
 
@@ -3426,10 +3424,9 @@ public static class AgentUtilities
     public static string AutoIndentFromFile(string replacement, string fileIndent, string[] fileLines, int start)
     {
         if (!replacement.Contains('{') && !replacement.Contains('}'))
-            return replacement;
+        { return replacement; }
 
-
-        var indentSize = AgentUtilities.InferIndentSize(fileLines, start);
+        var indentSize = InferIndentSize(fileLines, start);
         if (indentSize <= 0) return replacement;
 
         var lines = replacement.Split('\n');
@@ -3445,7 +3442,7 @@ public static class AgentUtilities
                 lineDepth = Math.Max(0, lineDepth - 1);
 
             var expectedIndent = fileIndent + new string(' ', lineDepth * indentSize);
-            var lineIndent = AgentUtilities.GetLeadingWhitespace(lines[i]);
+            var lineIndent = GetLeadingWhitespace(lines[i]);
             if (lineIndent != expectedIndent)
                 lines[i] = expectedIndent + trimmed;
 
@@ -3507,7 +3504,6 @@ public static class AgentUtilities
         }
         return string.Join("\n", lines);
     }
-
 
     public static string FindLastBalancedPrefix(string content)
     {
@@ -3620,7 +3616,6 @@ public static class AgentUtilities
             if (m.Success) trimmed = m.Groups[1].Value.Trim();
         }
 
-
         trimmed = Regex.Replace(trimmed, @"###\s*STEP\s*(\d+)\s*###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
 
         trimmed = Regex.Replace(trimmed, @"###STEP(\d+)###", "<<<STEP $1>>>", RegexOptions.IgnoreCase);
@@ -3708,13 +3703,11 @@ public static class AgentUtilities
         string oldStr, string fileContent, string stepChange, string relPath)
     {
         if (string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(stepChange))
-            return null;
+        { return null; }
 
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         if (ext is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"))
-            return null;
-
-
+        { return null; }
 
         var sectionRegex = new Regex(
             @"\*ngIf\s*=\s*""(\w+)\s*={2,3}\s*'([^']+)'""",
@@ -3734,9 +3727,8 @@ public static class AgentUtilities
 
         if (sections.Count < 2) return null;
 
-
-        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
-        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+        var normFile = NormalizeLineEndings(fileContent);
+        var normOld = NormalizeLineEndings(oldStr);
         var oldStrIdx = normFile.IndexOf(normOld, StringComparison.Ordinal);
         if (oldStrIdx < 0) return null;
 
@@ -3752,7 +3744,7 @@ public static class AgentUtilities
 
 
 
-        if (actualSection == null) return null;
+        if (actualSection == null) { return null; }
 
 
         var stepLower = stepChange.ToLowerInvariant();
@@ -3771,10 +3763,8 @@ public static class AgentUtilities
 
         if (targetSection == null) return null;
 
-
         if (string.Equals(actualSection, targetSection, StringComparison.OrdinalIgnoreCase))
-            return null;
-
+        { return null; }
 
         var targetSectionEntry = sections.FirstOrDefault(s =>
             string.Equals(s.name, targetSection, StringComparison.OrdinalIgnoreCase));
