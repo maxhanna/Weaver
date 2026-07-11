@@ -515,7 +515,7 @@
                         <div class="diff-wrapper">
                           <div class="diff-col diff-col-old">
                             <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              ng-repeat="line in s.diffLines track by $index">
                               <div class="diff-cell diff-cell-old"
                                 ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                 <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -525,7 +525,7 @@
                           </div>
                           <div class="diff-col diff-col-new">
                             <div class="diff-row"
-                              ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                              ng-repeat="line in s.diffLines track by $index">
                               <div class="diff-cell diff-cell-new"
                                 ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                 <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -1313,6 +1313,12 @@
   <script src="/app.js"></script>
   <script src="/kanban.js"></script>
   <script src="/calendar.js"></script>
+  <script src="/calendar.mixin.js"></script>
+  <script src="/settings.js"></script>
+  <script src="/bughosted.js"></script>
+  <script src="/filepicker.js"></script>
+  <script src="/terminal.js"></script>
+  <script src="/agent.js"></script>
   <script src="/voice-input.js"></script>
   <script src="/ide.js"></script>
 </body>

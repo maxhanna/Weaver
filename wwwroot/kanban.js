@@ -3,22 +3,34 @@
 angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, VoiceInput, $http) {
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
-  function loadCards() {
-    // Return a default state immediately; actual persisted state will be
-    // loaded asynchronously after the controller initializes.
+  function loadCards() { 
     return { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
   }
 
   var _cardsCache = {};
   var _cardsVersion = 0;
+  var _saveCardTextTimer = null;
 
   return {
-    init: function (vm, $scope) {
-      // Start with an immediate default state, then replace with persisted
-      // state loaded from the server when available.
+    init: function (vm, $scope) { 
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
 
-
+      vm.findCardById = function (cardId) {
+        if (!cardId || !vm.state) return null;
+        try {
+          var cols = ['todo', 'doing', 'done', 'selfImproving'];
+          for (var c = 0; c < cols.length; c++) {
+            var cards = vm.state[cols[c]] || [];
+            for (var i = 0; i < cards.length; i++) {
+              if (cards[i].id === cardId) return cards[i];
+            }
+          }
+        } catch (e) {
+          console.log("findCardById error", e);
+        }
+        return null;
+      };
+      
       function loadBoardData() {
         $http.get('/api/boarddata/load').then(function (resp) {
           try {
@@ -511,10 +523,14 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           vm.saveCards();
         }
       };
-
+ 
       vm.saveCardText = function (card) {
-        console.log("saving card text");
-        vm.saveCards();
+        // Debounce the save so it only fires 500ms after the user stops typing
+        if (_saveCardTextTimer) { $timeout.cancel(_saveCardTextTimer); }
+        _saveCardTextTimer = $timeout(function () {
+          console.log("saving card text");
+          vm.saveCards();
+        }, 500);
       };
 
       vm.todoTextAreaClicked = function (event) {

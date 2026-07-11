@@ -41,7 +41,7 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2"
+            <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2"  
               ng-click="vm.todoTextAreaClicked($event)"
               placeholder="One small task (read → tiny edit). Use Split for big work."></textarea>
             <button ng-click="vm.recordVoice(card)" class="small-icon recordButton"
@@ -437,7 +437,7 @@
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
                               <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -447,7 +447,7 @@
                             </div>
                             <div class="diff-col diff-col-new">
                               <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -675,7 +675,7 @@
                           <div class="diff-wrapper">
                             <div class="diff-col diff-col-old">
                               <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-old"
                                   ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                   <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -685,7 +685,7 @@
                             </div>
                             <div class="diff-col diff-col-new">
                               <div class="diff-row"
-                                ng-repeat="line in vm.buildDiffLines(s.oldLines, s.newLines, s.oldStartLine) track by $index">
+                                ng-repeat="line in s.diffLines track by $index">
                                 <div class="diff-cell diff-cell-new"
                                   ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                   <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -755,7 +755,7 @@
             <span ng-if="card.createdAt" class="text-xs">{{card.createdAt | date:'short'}}</span>
           </div>
           <div class="card-text">
-            <textarea ng-model="card.text" ng-blur="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
+            <textarea ng-model="card.text" ng-change="vm.saveCardText(card)" rows="2" ng-click="$event.stopPropagation()"
               placeholder="Self-improving task..."></textarea>
             <button ng-click="vm.copyCardText(card)" class="small-icon" title="Copy card text">📋</button>
           </div>
