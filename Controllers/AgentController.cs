@@ -8738,6 +8738,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             if (singleStepPlan.Plan.Count > 1)
             {
+                var chainIntact = true;
+                var anyNestedGeneration = false;
                 for (var si = 1; si < singleStepPlan.Plan.Count; si++)
                 {
                     var synthStep = singleStepPlan.Plan[si];
@@ -8759,7 +8761,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                     var synthPlan = new AgentPlan
                     { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
-                    var synthBefore = allResults.Count;
                     try
                     {
                         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
@@ -8770,10 +8771,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "error",
                             $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                        chainIntact = false;
                         break;
                     }
 
+                    if (synthPlan.Plan.Count > 1)
+                        anyNestedGeneration = true;
+
                     discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
+                }
+
+                if (chainIntact && !anyNestedGeneration)
+                {
+                    await EmitLog(emitSse, "info",
+                        "Auto-generated follow-up chain exhausted — plan complete without further LLM round-trip", ct: ct);
+                    break;
                 }
             }
 
