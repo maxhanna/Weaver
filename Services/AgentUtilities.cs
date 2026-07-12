@@ -4025,6 +4025,23 @@ public static class AgentUtilities
             }
         }
 
+        if (changeDesc.TrimStart().StartsWith("<"))
+        {
+            var textFragments = Regex.Matches(changeDesc, @">([^<]{8,})<")
+                .Select(m => m.Groups[1].Value.Trim())
+                .Where(t => t.Length >= 8)
+                .OrderByDescending(t => t.Length)
+                .ToList();
+            if (textFragments.Count > 0)
+            {
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    if (textFragments.Any(t => lines[i].Contains(t, StringComparison.Ordinal)))
+                        candidates.Add((i + 1, 90));
+                }
+            }
+        }
+
         if (plannerLineNumber > 0 && plannerLineNumber <= lines.Length)
         {
             candidates.Add((plannerLineNumber, 1));

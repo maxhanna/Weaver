@@ -5290,52 +5290,16 @@ emitSse, ct);
                         }
                     }
 
-                    if (mentionedNames.Count > 0)
+                    if (mentionedNames.Count > 0 && Regex.IsMatch(llmGateReason,
+                        @"(doesn't exist|does not exist|not exist|undefined|not defined)",
+                        RegexOptions.IgnoreCase))
                     {
-                        var foundInFuture = false;
-                        for (int i = planItemIndex + 1; i < plan.Plan.Count; i++)
-                        {
-                            var futureStep = plan.Plan[i];
-                            if (mentionedNames.Any(n =>
-                                futureStep.Change?.IndexOf(n, StringComparison.OrdinalIgnoreCase) >= 0))
-                            {
-                                await EmitLog(emitSse, "info",
-                                    $"  🔄 LLM abandon reason mentions methods [{string.Join(", ", mentionedNames)}] " +
-                                    $"that appear in future step {i + 1}: {futureStep.Change} — " +
-                                    $"overriding to KEEP",
-                                    ct: ct);
-                                llmGateDecision = "keep";
-                                llmGateScore = Math.Max(llmGateScore, 70);
-                                foundInFuture = true;
-                                break;
-                            }
-                        }
-
-                        if (!foundInFuture && Regex.IsMatch(llmGateReason,
-                            @"(doesn't exist|does not exist|not exist|undefined|missing|not defined)",
-                            RegexOptions.IgnoreCase))
-                        {
-                            foreach (var methodName in mentionedNames)
-                            {
-                                var methodRelPath = Path.ChangeExtension(relPath, ".js");
-                                if (!System.IO.File.Exists(Path.GetFullPath(
-                                        Path.Combine(projectRoot, methodRelPath.Replace('/', Path.DirectorySeparatorChar)))))
-                                    methodRelPath = Path.ChangeExtension(relPath, ".ts");
-                                plan.Plan.Insert(planItemIndex + 1, new PlanStep
-                                {
-                                    File = methodRelPath,
-                                    Change = $"Add {methodName} method to implement the new feature",
-                                    Priority = 1
-                                });
-                            }
-                            await EmitLog(emitSse, "info",
-                                $"  🔄 Auto-injected {mentionedNames.Count} step(s) for missing method(s) " +
-                                $"[{string.Join(", ", mentionedNames)}] into plan at position {planItemIndex + 2} — " +
-                                $"overriding to KEEP",
-                                ct: ct);
-                            llmGateDecision = "keep";
-                            llmGateScore = Math.Max(llmGateScore, 70);
-                        }
+                        await EmitLog(emitSse, "info",
+                            $"  🔄 LLM abandon reason mentions missing names [{string.Join(", ", mentionedNames)}] — " +
+                            $"overriding to KEEP (planner adds them in follow-up steps)",
+                            ct: ct);
+                        llmGateDecision = "keep";
+                        llmGateScore = Math.Max(llmGateScore, 70);
                     }
                 }
 
@@ -5622,6 +5586,17 @@ emitSse, ct);
                 string.Join(" | ", replanSteps.Select(s => s.Change)), ct: ct);
 
             replanSteps = await PruneIrrelevantPlanStepsAsync(replanSteps, projectRoot, ct);
+
+            var isRepetitive = replanSteps.Any(s => s.File == relPath &&
+                s.Change != null &&
+                TokenOverlap(s.Change, step.Change ?? "") > 0.5);
+            if (isRepetitive)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Replan cycle {replanAttempts}: new step is too similar to the failed step — stopping",
+                    ct: ct);
+                break;
+            }
 
             var replanResults = new List<object>();
             foreach (var replanStep in replanSteps)
@@ -6474,7 +6449,7 @@ emitSse, ct);
             "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
             "    - The edit changed an existing method's signature (return type, name, or parameter list).\n" +
             "    - The edit is functionally a no-op (old and new do the same thing).\n" +
-            "    - The edit breaks the build (syntax errors, missing braces, undefined vars).\n" +
+            "    - The edit breaks the build (syntax errors, missing braces).\n" +
             "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
             "      (e.g., *ngIf=\"activeDataTab === 'users'\" vs *ngIf=\"activeDataTab === 'general'\"), " +
             "      if the step says 'add X to the general tab' but the oldString comes from the 'users' " +
@@ -6565,6 +6540,17 @@ emitSse, ct);
         return s.Substring(0, headLen) +
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
+    }
+
+    private static double TokenOverlap(string a, string b)
+    {
+        var tokensA = new HashSet<string>(Regex.Split(a.ToLowerInvariant(), @"[^a-z0-9]+")
+            .Where(t => t.Length >= 3));
+        var tokensB = new HashSet<string>(Regex.Split(b.ToLowerInvariant(), @"[^a-z0-9]+")
+            .Where(t => t.Length >= 3));
+        if (tokensA.Count == 0 || tokensB.Count == 0) return 0;
+        var intersection = tokensA.Intersect(tokensB).Count();
+        return (double)intersection / Math.Min(tokensA.Count, tokensB.Count);
     }
 
     private async Task<string?> DetectMissingCreateTableAsync(
@@ -8532,6 +8518,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 continue;
             }
 
+            if (proposal.Step.File != null && planSoFar.Count > 0)
+            {
+                var duplicateOf = planSoFar.FirstOrDefault(s => s.File == proposal.Step.File &&
+                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.5);
+                if (duplicateOf != null)
+                {
+                    rejectionFeedback.Add($"DUPLICATE — [{proposal.Step.File}] {proposal.Step.Change} is too similar to " +
+                        $"[{duplicateOf.File}] {duplicateOf.Change} which was already executed. " +
+                        "Look at the EDIT LOG and PLAN SO FAR — this step is already done. Propose a DIFFERENT next step.");
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+            }
+
             var skipLlm = regenAttempts > 0;
             if (!skipLlm && !AgentUtilities.IsSpecialMarker(proposal.Step.File))
             {
@@ -8611,6 +8611,31 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             foreach (var touched in touchedPaths)
                 discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+
+            var newEditLogLines = newResults
+                .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
+                            r.GetValueOrDefault("status")?.ToString() != "skipped")
+                .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("editAction") ?? "modified"}")
+                .ToList();
+            if (newEditLogLines.Count > 0)
+            {
+                var fullLog = "### EDIT LOG (changes applied — do NOT repeat them) ###\n" +
+                    string.Join("\n", newEditLogLines) + "\n";
+                if (!discoveryContext.Contains(fullLog))
+                    discoveryContext += "\n" + fullLog;
+            }
+
+            var editLog = newResults
+                .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
+                .Select(r => $"  {r.GetValueOrDefault("path")} — " +
+                    (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
+                .ToList();
+            if (editLog.Count > 0)
+            {
+                var logSection = "\n### EDIT LOG (changes applied in previous steps) ###\n" +
+                    string.Join("\n", editLog) + "\n";
+                discoveryContext += logSection;
+            }
 
             var hadFailure = newResults.Any(r =>
                 r.GetValueOrDefault("status")?.ToString() == "error" ||
