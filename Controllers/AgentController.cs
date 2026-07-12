@@ -5292,6 +5292,7 @@ emitSse, ct);
 
                     if (mentionedNames.Count > 0)
                     {
+                        var foundInFuture = false;
                         for (int i = planItemIndex + 1; i < plan.Plan.Count; i++)
                         {
                             var futureStep = plan.Plan[i];
@@ -5305,8 +5306,35 @@ emitSse, ct);
                                     ct: ct);
                                 llmGateDecision = "keep";
                                 llmGateScore = Math.Max(llmGateScore, 70);
+                                foundInFuture = true;
                                 break;
                             }
+                        }
+
+                        if (!foundInFuture && Regex.IsMatch(llmGateReason,
+                            @"(doesn't exist|does not exist|not exist|undefined|missing|not defined)",
+                            RegexOptions.IgnoreCase))
+                        {
+                            foreach (var methodName in mentionedNames)
+                            {
+                                var methodRelPath = Path.ChangeExtension(relPath, ".js");
+                                if (!System.IO.File.Exists(Path.GetFullPath(
+                                        Path.Combine(projectRoot, methodRelPath.Replace('/', Path.DirectorySeparatorChar)))))
+                                    methodRelPath = Path.ChangeExtension(relPath, ".ts");
+                                plan.Plan.Insert(planItemIndex + 1, new PlanStep
+                                {
+                                    File = methodRelPath,
+                                    Change = $"Add {methodName} method to implement the new feature",
+                                    Priority = 1
+                                });
+                            }
+                            await EmitLog(emitSse, "info",
+                                $"  🔄 Auto-injected {mentionedNames.Count} step(s) for missing method(s) " +
+                                $"[{string.Join(", ", mentionedNames)}] into plan at position {planItemIndex + 2} — " +
+                                $"overriding to KEEP",
+                                ct: ct);
+                            llmGateDecision = "keep";
+                            llmGateScore = Math.Max(llmGateScore, 70);
                         }
                     }
                 }
