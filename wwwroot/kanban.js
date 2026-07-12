@@ -3,7 +3,7 @@
 angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, VoiceInput, $http) {
   function uid() { return Math.random().toString(36).slice(2, 9); }
 
-  function loadCards() { 
+  function loadCards() {
     return { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
   }
 
@@ -12,7 +12,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
   var _saveCardTextTimer = null;
 
   return {
-    init: function (vm, $scope) { 
+    init: function (vm, $scope) {
       vm.state = { todo: [], doing: [], done: [], archived: [], selfImproving: [] };
 
       vm.findCardById = function (cardId) {
@@ -30,7 +30,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         }
         return null;
       };
-      
+
       function loadBoardData() {
         $http.get('/api/boarddata/load').then(function (resp) {
           try {
@@ -69,7 +69,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       }
 
       loadBoardData();
-      
+
       vm.clearMetaPlan = function (card) {
         if (!card) return;
         if (!$window.confirm('Clear meta-plan for this card? This will remove the sub-plan tracking and allow a clean restart.')) return;
@@ -187,6 +187,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         if (idx === -1) return;
         var card = vm.state[col].splice(idx, 1)[0];
         vm.state.archived.push(card);
+        vm.saveCards();
+      };
+
+      vm.clearAllArchivedCards = function () {
+        if (!$window.confirm('Delete all archived cards?')) return;
+        vm.state.archived = [];
         vm.saveCards();
       };
 
@@ -523,7 +529,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           vm.saveCards();
         }
       };
- 
+
       vm.saveCardText = function (card) {
         // Debounce the save so it only fires 500ms after the user stops typing
         if (_saveCardTextTimer) { $timeout.cancel(_saveCardTextTimer); }
