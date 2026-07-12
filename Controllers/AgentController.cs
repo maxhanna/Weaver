@@ -6415,10 +6415,12 @@ emitSse, ct);
                 }
             }
         }
-        var ctxStart = Math.Max(0, anchorIdx - 5);
-        var ctxEnd = Math.Min(postLines.Length, anchorIdx + 5);
         var contextWindow = anchorIdx >= 0
-            ? string.Join("\n", postLines[ctxStart..ctxEnd])
+            ? postEditContent.Length < 4000
+                ? postEditContent
+                : string.Join("\n", postLines[
+                    Math.Max(0, anchorIdx - 25)..
+                    Math.Min(postLines.Length, anchorIdx + 26)])
             : "(anchor not found in post-edit file)";
 
         var priorBlock = new StringBuilder();
@@ -6506,7 +6508,7 @@ emitSse, ct);
             futureStepsBlock.ToString() +
             $"### OLD CODE (what was there before) ###\n```\n{TruncateForLlm(oldStr, 1500)}\n```\n\n" +
             $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
-            $"### POST-EDIT CONTEXT WINDOW (10 lines around the edit) ###\n```\n{contextWindow}\n```\n" +
+            $"### POST-EDIT CONTEXT WINDOW ({(postEditContent.Length < 4000 ? "full file" : "50+ lines around the edit")}) ###\n```\n{contextWindow}\n```\n" +
             (priorAttempts != null && priorAttempts.Count > 0 ? priorBlock.ToString() : "") +
             "\nDecide: keep or abandon? Provide a quality score 0-100. Output JSON only.";
 
