@@ -2928,7 +2928,7 @@ public class AgentController : ControllerBase
                 EnrichedStep = step,
                 ExplorationContext = ctx.ToString(),
                 FilesRead = filesRead.ToList(),
-                RefinedChange = step.Change,
+                RefinedChange = step?.Change ?? "",
                 TargetSymbol = null,
                 EstimatedLineRange = null,
                 Confidence = 100,
@@ -5769,21 +5769,21 @@ emitSse, ct);
     private static string StripEditKnowledgeHeader(string discoveryContext)
     {
         if (string.IsNullOrWhiteSpace(discoveryContext)) return discoveryContext;
- 
+
         var priorKnowledgeIdx = discoveryContext.IndexOf("### PRIOR EDIT KNOWLEDGE FOR THIS PROJECT ###", StringComparison.Ordinal);
         var relevantKnowledgeIdx = discoveryContext.IndexOf("### EDIT KNOWLEDGE (relevant to this file/task) ###", StringComparison.Ordinal);
-        
+
         var headerIdx = priorKnowledgeIdx >= 0 ? priorKnowledgeIdx :
                         relevantKnowledgeIdx >= 0 ? relevantKnowledgeIdx : -1;
 
         if (headerIdx < 0) return discoveryContext;
- 
+
         var afterHeader = headerIdx + 50;
         var nextMainSectionIdx = discoveryContext.IndexOf("\n### ", afterHeader, StringComparison.Ordinal);
-        
+
         if (nextMainSectionIdx < 0)
-            return discoveryContext;  
- 
+            return discoveryContext;
+
         return discoveryContext.Substring(nextMainSectionIdx + 1).TrimStart();
     }
 
@@ -8012,7 +8012,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("### PROPOSED NEXT STEP ###");
         sb.AppendLine($"[{step.File}] {step.Change}");
         sb.AppendLine();
-        sb.AppendLine("### RELEVANT DISCOVERY CONTEXT (target file only) ###"); 
+        sb.AppendLine("### RELEVANT DISCOVERY CONTEXT (target file only) ###");
         var validatorDiscovery = StripEditKnowledgeHeader(discoveryContext);
         var fileSection = AgentUtilities.ExtractFileSectionFromContext(validatorDiscovery, step.File);
         sb.AppendLine(string.IsNullOrWhiteSpace(fileSection) ? validatorDiscovery : fileSection);
@@ -8162,8 +8162,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }, ct);
 
                     if (!string.IsNullOrWhiteSpace(cardId))
+                    {
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
-
+                    }
                     regenAttempts = 0;
                     continue;
                 }
@@ -8174,6 +8175,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         "DISCOVERY CONTEXT above. Do not re-request it. Read it carefully and propose the actual next " +
                         "step now, using the exact symbol/method names visible there.");
                     if (emitSse)
+                    {
                         await SendSse(Response, "step", new
                         {
                             index = ++stepEventIndex,
@@ -8182,7 +8184,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             path = proposal.ExploreFile,
                             description = $"Already explored: {proposal.ExploreFile}"
                         }, ct);
-                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    }
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
                     continue;
                 }
             }
@@ -8195,10 +8198,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             if (emitSse && !string.IsNullOrWhiteSpace(proposal.Thinking))
+            {
                 await SendSse(Response, "thinking", new { text = proposal.Thinking }, ct);
-
+            }
             var stepIndex = ++stepEventIndex;
             if (emitSse)
+            {
                 await SendSse(Response, "step", new
                 {
                     index = stepIndex,
@@ -8211,7 +8216,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     thinking = proposal.Thinking,
                     justification = proposal.CompletionReason
                 }, ct);
-
+            }
             var skipLlm = regenAttempts > 0;
             if (!skipLlm && proposal.Step != null && !AgentUtilities.IsSpecialMarker(proposal.Step.File))
             {
@@ -8220,81 +8225,86 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (System.IO.File.Exists(fullPath))
                     skipLlm = true;
             }
-            var (valid, reason) = await ValidateIncrementalStepAsync(
-                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
-                skipLlm: skipLlm);
 
-            if (!valid)
+            if (proposal.Step != null)
             {
-                await EmitLog(emitSse, "warn",
-                    $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
-                rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                var (valid, reason) = await ValidateIncrementalStepAsync(
+                    proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
+                    skipLlm: skipLlm);
+                if (!valid)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Incremental planning: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
+                    rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                    if (emitSse)
+                        await SendSse(Response, "step", new
+                        {
+                            index = stepIndex,
+                            type = "plan",
+                            status = "rejected",
+                            path = proposal.Step.File,
+                            description = proposal.Step.Change,
+                            error = reason,
+                            line = proposal.Step.LineNumber,
+                            planItemIndex = planSoFar.Count
+                        }, ct);
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                    {
+                        consecutiveSlotFailures++;
+                        await EmitLog(emitSse, "warn",
+                            $"Incremental planning: giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. " +
+                            $"({consecutiveSlotFailures} consecutive slot failures)", ct: ct);
+                        if (emitSse)
+                            await SendSse(Response, "thinking", new
+                            {
+                                text = $"Giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. ({consecutiveSlotFailures} consecutive slot failures)"
+                            }, ct);
+                        rejectionFeedback.Clear();
+                        regenAttempts = 0;
+
+                        if (consecutiveSlotFailures >= 3)
+                            throw new InvalidOperationException(
+                                "Incremental planner failed 3 slots in a row — the discovery context likely doesn't contain " +
+                                "what the task needs (wrong file attached, or the target method/property doesn't exist as described). " +
+                                "Attach the correct file(s) and retry.");
+                        continue;
+                    }
+                    continue;
+                }
+
+                consecutiveSlotFailures = 0;
+                planSoFar.Add(proposal.Step);
+                rejectionFeedback.Clear();
+                regenAttempts = 0;
+                if (!string.IsNullOrWhiteSpace(proposal.Thinking))
+                {
+                    thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
+                }
+                await EmitLog(emitSse, "info",
+                    $"Incremental planning: committed step {planSoFar.Count} — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
+
                 if (emitSse)
+                {
                     await SendSse(Response, "step", new
                     {
                         index = stepIndex,
                         type = "plan",
-                        status = "rejected",
+                        status = "pending",
                         path = proposal.Step.File,
                         description = proposal.Step.Change,
-                        error = reason,
                         line = proposal.Step.LineNumber,
-                        planItemIndex = planSoFar.Count
+                        planItemIndex = planSoFar.Count,
+                        message = proposal.CompletionReason
                     }, ct);
-                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
-                {
-                    consecutiveSlotFailures++;
-                    await EmitLog(emitSse, "warn",
-                        $"Incremental planning: giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. " +
-                        $"({consecutiveSlotFailures} consecutive slot failures)", ct: ct);
-                    if (emitSse)
-                        await SendSse(Response, "thinking", new
-                        {
-                            text = $"Giving up on this slot after {MAX_STEP_REGEN_ATTEMPTS} rejections — moving on. ({consecutiveSlotFailures} consecutive slot failures)"
-                        }, ct);
-                    rejectionFeedback.Clear();
-                    regenAttempts = 0;
 
-                    if (consecutiveSlotFailures >= 3)
-                        throw new InvalidOperationException(
-                            "Incremental planner failed 3 slots in a row — the discovery context likely doesn't contain " +
-                            "what the task needs (wrong file attached, or the target method/property doesn't exist as described). " +
-                            "Attach the correct file(s) and retry.");
-                    continue;
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = thinkingLog.ToString(),
+                        summary = $"Building plan incrementally — {planSoFar.Count} step(s) so far",
+                        items = planSoFar,
+                        incremental = true
+                    }, ct);
                 }
-                continue;
-            }
-            consecutiveSlotFailures = 0;
-            planSoFar.Add(proposal.Step);
-            rejectionFeedback.Clear();
-            regenAttempts = 0;
-            if (!string.IsNullOrWhiteSpace(proposal.Thinking))
-                thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
-
-            await EmitLog(emitSse, "info",
-                $"Incremental planning: committed step {planSoFar.Count} — [{proposal.Step.File}] {proposal.Step.Change}", ct: ct);
-
-            if (emitSse)
-            {
-                await SendSse(Response, "step", new
-                {
-                    index = stepIndex,
-                    type = "plan",
-                    status = "pending",
-                    path = proposal.Step.File,
-                    description = proposal.Step.Change,
-                    line = proposal.Step.LineNumber,
-                    planItemIndex = planSoFar.Count,
-                    message = proposal.CompletionReason
-                }, ct);
-
-                await SendSse(Response, "plan", new
-                {
-                    thinking = thinkingLog.ToString(),
-                    summary = $"Building plan incrementally — {planSoFar.Count} step(s) so far",
-                    items = planSoFar,
-                    incremental = true
-                }, ct);
             }
             break;
         }
@@ -8624,7 +8634,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         public string? CompletionReason { get; set; }
         public string? Thinking { get; set; }
         public MetaPlanSubPlan? SubPlan { get; set; }
-    } 
+    }
 
     private static string BuildSubPlanPrompt(
   string originalPrompt,
@@ -10962,7 +10972,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (plan?.Plan?.Count > 0)
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
-                if (emitSse && plan != null) {
+                if (emitSse && plan != null)
+                {
                     await SendSse(Response, "plan",
                         new { thinking = plan.Thinking, summary = "Re-plan: added steps", items = plan.Plan }, ct);
                 }
@@ -10971,13 +10982,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                         summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: false);
-                } 
+                }
 
                 var mergedDone = new HashSet<int>();
                 for (var i = 0; i < originalStepCount && i < plan?.Plan?.Count; i++)
                 { mergedDone.Add(i); }
-                if (plan!=null)
-                { 
+                if (plan != null)
+                {
                     await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                         completedStepIndices: mergedDone, cardId: cardId);
@@ -11179,7 +11190,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .Select(p => p!)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            if (exploredPaths.Count == 0) {
+            if (exploredPaths.Count == 0)
+            {
                 return (true, "");
             }
 
@@ -13246,7 +13258,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? new AgentPlan { Plan = planSteps, Summary = summary, Thinking = "Command execution plan" }
             : null;
         return (steps, agentPlan);
-    } 
+    }
 
     [HttpPost("execute")]
     public async Task<IActionResult> Execute([FromBody] AgentRequest req)
