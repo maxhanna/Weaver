@@ -5177,6 +5177,15 @@ emitSse, ct);
                     await EmitLog(emitSse, "info",
                         $"Auto-formatted edited region in {relPath} (commas/colons/semicolons/equals + closing-dedent)", ct: ct);
                 }
+
+                var beforeIndent = newContent;
+                newContent = NormalizeEditIndentation(newContent, newStr);
+                if (newContent != beforeIndent)
+                {
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "info",
+                        $"Normalized indentation of edited region in {relPath}", ct: ct);
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
@@ -5228,10 +5237,11 @@ emitSse, ct);
                 var decisions = new List<string>();
                 var reasons = new List<string>();
                 var scores = new List<int>();
+                var needsExtraStepFlags = new List<bool>();
 
                 for (int r = 0; r < VerificationRounds; r++)
                 {
-                    var (d, reason, score) = await LlmVerifyEditStepAsync(
+                    var (d, reason, score, needsEs) = await LlmVerifyEditStepAsync(
                         relPath, prompt ?? step.Change ?? "", step.Change ?? "",
                         oldStr!, newStr!, preEditContent, newContent, emitSse, ct,
                         priorAttempts: attemptScores.Count > 0
@@ -5243,6 +5253,7 @@ emitSse, ct);
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
+                    needsExtraStepFlags.Add(needsEs);
                 }
 
                 var keepCount = 0;
@@ -5275,31 +5286,60 @@ emitSse, ct);
                     new { attempt = attempt + 1, scores, averageScore = avgScore, decision = llmGateDecision, reason = llmGateReason },
                     ct: ct);
 
-                if (llmGateDecision == "abandon" && plan?.Plan?.Count > 0 && planItemIndex >= 0)
+                if (plan?.Plan != null && planItemIndex >= 0)
                 {
-                    var methodMatches = Regex.Matches(llmGateReason,
-                        @"(?:'([a-zA-Z]\w+)'|`([a-zA-Z]\w+)`|method\s+'?([a-zA-Z]\w+)'?)",
-                        RegexOptions.IgnoreCase);
-                    var mentionedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (System.Text.RegularExpressions.Match m in methodMatches)
+                    var extraStepCount = needsExtraStepFlags.Count(f => f);
+                    if (extraStepCount >= 2)
                     {
-                        for (int g = 1; g < m.Groups.Count; g++)
+                        var allReasons = string.Join(" ", reasons);
+                        var methodMatches = Regex.Matches(allReasons,
+                            @"(?:'([a-zA-Z]\w+)'|`([a-zA-Z]\w+)`|method\s+'?([a-zA-Z]\w+)'?)",
+                            RegexOptions.IgnoreCase);
+                        var mentionedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (System.Text.RegularExpressions.Match m in methodMatches)
                         {
-                            if (m.Groups[g].Success)
-                                mentionedNames.Add(m.Groups[g].Value);
+                            for (int g = 1; g < m.Groups.Count; g++)
+                            {
+                                if (m.Groups[g].Success)
+                                    mentionedNames.Add(m.Groups[g].Value);
+                            }
                         }
-                    }
 
-                    if (mentionedNames.Count > 0 && Regex.IsMatch(llmGateReason,
-                        @"(doesn't exist|does not exist|not exist|undefined|not defined)",
-                        RegexOptions.IgnoreCase))
-                    {
-                        await EmitLog(emitSse, "info",
-                            $"  🔄 LLM abandon reason mentions missing names [{string.Join(", ", mentionedNames)}] — " +
-                            $"overriding to KEEP (planner adds them in follow-up steps)",
-                            ct: ct);
-                        llmGateDecision = "keep";
-                        llmGateScore = Math.Max(llmGateScore, 70);
+                        var missingName = mentionedNames.FirstOrDefault();
+                        if (!string.IsNullOrEmpty(missingName))
+                        {
+                            var fext = Path.GetExtension(relPath).ToLowerInvariant();
+                            var targetFile = relPath;
+                            if (fext is ".html" or ".htm")
+                            {
+                                var tsCandidate = Path.ChangeExtension(relPath, ".ts");
+                                var jsCandidate = Path.ChangeExtension(relPath, ".js");
+                                var tsPath = System.IO.Path.GetFullPath(Path.Combine(projectRoot, tsCandidate));
+                                var jsPath = System.IO.Path.GetFullPath(Path.Combine(projectRoot, jsCandidate));
+                                if (System.IO.File.Exists(tsPath)) targetFile = tsCandidate;
+                                else if (System.IO.File.Exists(jsPath)) targetFile = jsCandidate;
+                            }
+
+                            var syntheticStep = new PlanStep
+                            {
+                                File = targetFile,
+                                Change = $"Add implementation of {missingName}() method referenced in {System.IO.Path.GetFileName(relPath)}",
+                                LineNumber = 0,
+                                OldString = null,
+                                NewString = null,
+                            };
+                            plan.Plan.Insert(planItemIndex + 1, syntheticStep);
+
+                            await EmitLog(emitSse, "info",
+                                $"  🔄 Verifier ({extraStepCount}/3 needsExtraStep): auto-added synthetic step to implement {missingName}() in {targetFile}",
+                                ct: ct);
+                        }
+
+                        if (llmGateDecision == "abandon")
+                        {
+                            llmGateDecision = "keep";
+                            llmGateScore = Math.Max(llmGateScore, 70);
+                        }
                     }
                 }
 
@@ -6359,7 +6399,7 @@ emitSse, ct);
     }
 
 
-    private async Task<(string decision, string reason, int score)> LlmVerifyEditStepAsync(
+    private async Task<(string decision, string reason, int score, bool needsExtraStep)> LlmVerifyEditStepAsync(
     string relPath,
     string originalPrompt,
     string stepChange,
@@ -6436,7 +6476,7 @@ emitSse, ct);
             "the wrong thing, introduced undefined references, deleted guards/caches, or otherwise " +
             "missed the intent of the step).\n\n" +
             "STRICT OUTPUT FORMAT — output ONLY a JSON object, no prose, no markdown fences:\n" +
-            "{\"decision\":\"keep\"|\"abandon\", \"reason\":\"one short sentence\", \"score\": 0-100}\n\n" +
+            "{\"decision\":\"keep\"|\"abandon\", \"reason\":\"one short sentence\", \"score\": 0-100, \"needsExtraStep\": true|false}\n\n" +
             "SCORE GUIDELINES:\n" +
             "  90-100: Perfect — correctly implements the step, no issues\n" +
             "  70-89:  Good — mostly correct, minor issues that could be fixed in a follow-up\n" +
@@ -6444,6 +6484,13 @@ emitSse, ct);
             "  0-39:   Broken — signature change, deleted functionality, invented symbols\n\n" +
             "DECISION RULES:\n" +
             " * Return \"keep\" if the edit correctly implements the step. Score 85+.\n" +
+            " * Set \"needsExtraStep\": true if the edit is CORRECT but references a method/property " +
+            "that doesn't exist in any file yet and needs to be added in a follow-up step (e.g. the HTML " +
+            "adds a button with ng-click=\"vm.foo()\" but vm.foo() doesn't exist in the .js/.ts file). " +
+            "When needsExtraStep is true, ALWAYS also include the missing method name in parentheses " +
+            "in the reason, e.g. 'added button with ng-click calling missing method (vm.clearAll).'\n" +
+            " * If needsExtraStep is true AND the edit is otherwise correct, set decision to \"keep\" " +
+            "(do NOT abandon — the system will auto-generate the follow-up step).\n" +
             " * Return \"abandon\" if ANY of these are true:\n" +
             "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
             "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
@@ -6485,7 +6532,7 @@ emitSse, ct);
             $"### NEW CODE (what the edit replaced it with) ###\n```\n{TruncateForLlm(newStr, 1500)}\n```\n\n" +
             $"### POST-EDIT CONTEXT WINDOW ({(postEditContent.Length < 4000 ? "full file" : "50+ lines around the edit")}) ###\n```\n{contextWindow}\n```\n" +
             (priorAttempts != null && priorAttempts.Count > 0 ? priorBlock.ToString() : "") +
-            "\nDecide: keep or abandon? Provide a quality score 0-100. Output JSON only.";
+            "\nDecide: keep or abandon? Set needsExtraStep=true if a follow-up step is needed to add a missing method/property. Output JSON only.";
 
         try
         {
@@ -6495,7 +6542,7 @@ emitSse, ct);
                 maxTokens: 256);
 
             if (string.IsNullOrWhiteSpace(raw))
-                return ("error", $"LLM returned empty response. {error}", 0);
+                return ("error", $"LLM returned empty response. {error}", 0, false);
 
             var cleaned = raw.Trim();
             if (cleaned.StartsWith("```"))
@@ -6520,14 +6567,16 @@ emitSse, ct);
                 ? sEl.GetInt32()
                 : (decision == "keep" ? 85 : 30);
 
-            if (decision != "keep" && decision != "abandon")
-                return ("error", $"LLM returned unknown decision '{decision}'", score);
+            var needsExtraStep = doc.RootElement.TryGetProperty("needsExtraStep", out var nEl) && nEl.ValueKind == JsonValueKind.True;
 
-            return (decision, reason, score);
+            if (decision != "keep" && decision != "abandon")
+                return ("error", $"LLM returned unknown decision '{decision}'", score, false);
+
+            return (decision, reason, score, needsExtraStep);
         }
         catch (Exception ex)
         {
-            return ("error", $"Exception during LLM verify: {ex.Message}", 0);
+            return ("error", $"Exception during LLM verify: {ex.Message}", 0, false);
         }
     }
 
@@ -6540,6 +6589,65 @@ emitSse, ct);
         return s.Substring(0, headLen) +
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
+    }
+
+    private string NormalizeEditIndentation(string content, string appliedNewStr)
+    {
+        if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
+            return content;
+
+        var fileLines = content.Split('\n');
+        var needleLines = appliedNewStr.Split('\n');
+
+        var firstNeedle = needleLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l.Trim()) && l.Trim().Length >= 3);
+        if (firstNeedle == null) return content;
+
+        var trimmedFirst = firstNeedle.Trim();
+        var firstMatch = -1;
+        for (var i = 1; i < fileLines.Length; i++)
+        {
+            if (fileLines[i].Trim() == trimmedFirst)
+            {
+                var prevNonBlank = i - 1;
+                while (prevNonBlank >= 0 && string.IsNullOrWhiteSpace(fileLines[prevNonBlank]))
+                    prevNonBlank--;
+                if (prevNonBlank >= 0)
+                {
+                    var prevIndent = Regex.Match(fileLines[prevNonBlank], @"^(\s*)").Groups[1].Value;
+                    var curIndent = Regex.Match(fileLines[i], @"^(\s*)").Groups[1].Value;
+                    if (prevIndent.Length >= 3 && curIndent.Length < prevIndent.Length - 1 && curIndent.Length * 2 < prevIndent.Length)
+                    {
+                        firstMatch = i;
+                        break;
+                    }
+                }
+            }
+        }
+        if (firstMatch < 0) return content;
+
+        var prevLine = fileLines[firstMatch - 1];
+        var expectedBase = Regex.Match(prevLine, @"^(\s*)").Groups[1].Value;
+
+        var lastMatch = firstMatch;
+        for (var i = firstMatch + 1; i < fileLines.Length; i++)
+        {
+            var lt = fileLines[i].Trim();
+            if (lt.Length >= 3 && needleLines.Any(n => n.Trim() == lt))
+                lastMatch = i;
+        }
+
+        var changed = false;
+        for (var i = firstMatch; i <= lastMatch; i++)
+        {
+            if (string.IsNullOrWhiteSpace(fileLines[i])) continue;
+            var curIndent = Regex.Match(fileLines[i], @"^(\s*)").Groups[1].Value;
+            if (curIndent.Length >= expectedBase.Length) continue;
+            var newLine = expectedBase + fileLines[i].TrimStart();
+            if (newLine != fileLines[i]) { fileLines[i] = newLine; changed = true; }
+        }
+
+        if (!changed) return content;
+        return string.Join("\n", fileLines);
     }
 
     private static double TokenOverlap(string a, string b)
@@ -8601,6 +8709,46 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
+
+            if (singleStepPlan.Plan.Count > 1)
+            {
+                for (var si = 1; si < singleStepPlan.Plan.Count; si++)
+                {
+                    var synthStep = singleStepPlan.Plan[si];
+                    planSoFar.Add(synthStep);
+                    await EmitLog(emitSse, "info",
+                        $"▶ Executing auto-generated follow-up step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
+
+                    if (emitSse)
+                        await SendSse(Response, "plan", new
+                        {
+                            thinking = thinkingLog.ToString(),
+                            summary = $"Executed {planSoFar.Count - 1} step(s) — running auto step {planSoFar.Count}",
+                            items = planSoFar,
+                            incremental = true
+                        }, ct);
+
+                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                        summary: $"Interleaved execution — {planSoFar.Count} step(s) so far (incl. auto)", score: 90);
+
+                    var synthPlan = new AgentPlan
+                    { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
+                    var synthBefore = allResults.Count;
+                    try
+                    {
+                        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
+                            steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        await EmitLog(emitSse, "error",
+                            $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                        break;
+                    }
+
+                    discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
+                }
+            }
 
             var touchedPaths = newResults
                 .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")

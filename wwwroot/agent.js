@@ -99,10 +99,17 @@ angular.module('kanbanApp')
                         function startAgent() {
                             vm.agentResult = null; vm._agentStopped = false; vm.aiResponse = ''; vm.streamingThinking = ''; vm.streamingSummary = '';
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
-                            vm.streamingSteps = []; vm.streamingFilesEdited = []; vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
-                            vm.agentActivityLog = []; vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
+                            vm.cohesionIssues = []; vm.cohesionFile = '';
+                            vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
 
-                            pushAgentLog(vm, 'info', 'Agent started', { project: proj, task: card.text });
+                            if (!isAutoRestart) {
+                                vm.streamingSteps = [];
+                                vm.streamingFilesEdited = [];
+                                vm.planItems = [];
+                                vm.agentActivityLog = [];
+                            }
+
+                            pushAgentLog(vm, 'info', isAutoRestart ? 'Agent restarting (' + (card._agentIteration || 0) + '/5)' : 'Agent started', { project: proj, task: card.text });
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
                             var payload = { prompt: card.text, project: proj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, buildCommands: vm.getProjectBuildCommands(proj) || null };
