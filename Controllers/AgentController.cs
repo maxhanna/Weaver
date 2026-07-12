@@ -1257,7 +1257,9 @@ public class AgentController : ControllerBase
 
         sb.AppendLine();
         var changeLower = (step.Change ?? "").ToLowerInvariant();
-        if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+        var isActualDeletion = changeLower.Contains("remove") ||
+            (changeLower.Contains("delete") && !Regex.IsMatch(changeLower, @"\b(add|create|insert|implement)\b"));
+        if (isActualDeletion)
         {
             sb.AppendLine("⚠ CRITICAL DELETION INSTRUCTION: You are deleting code. Your oldString MUST be EXACTLY the 1-5 lines of code being deleted. Set newString to an empty array []. Do NOT include the parent <div> or any surrounding lines in oldString. Output ONLY the exact lines to delete.");
         }
@@ -1322,7 +1324,8 @@ public class AgentController : ControllerBase
         {
             editFormat = "format_c_class_fill";
         }
-        else if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+        else if (changeLower.Contains("remove") ||
+            (changeLower.Contains("delete") && !Regex.IsMatch(changeLower, @"\b(add|create|insert|implement)\b")))
         {
             editFormat = "delete";
         }
@@ -2333,7 +2336,8 @@ public class AgentController : ControllerBase
                     sb.AppendLine("```");
                     if (content.Length > 8000)
                     {
-                        if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+                        if (changeLower.Contains("remove") ||
+                            (changeLower.Contains("delete") && !Regex.IsMatch(changeLower, @"\b(add|create|insert|implement)\b")))
                         {
 
                             var keywords = Regex.Matches(step.Change ?? "", @"[\w-]+")
@@ -15145,7 +15149,8 @@ Respond with JSON only:
 
 
         var changeLower = (changeDesc ?? "").ToLowerInvariant();
-        bool isRemoval = changeLower.Contains("remove") || changeLower.Contains("delete");
+        bool isRemoval = changeLower.Contains("remove") ||
+            (changeLower.Contains("delete") && !Regex.IsMatch(changeLower, @"\b(add|create|insert|implement)\b"));
 
         if (!isRemoval)
         {
