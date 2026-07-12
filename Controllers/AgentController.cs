@@ -2595,7 +2595,11 @@ public class AgentController : ControllerBase
         "Guid", "Uri", "Exception", "InvalidOperationException", "ArgumentNullException",
         "ArgumentException", "NotSupportedException", "MySqlConnection", "MySqlCommand",
         "MySqlDataReader", "MySqlParameter", "MySqlDbType", "DbConnection", "DbCommand",
-        "HttpClient", "HttpContent", "HttpMethod", "HttpStatusCode"
+        "HttpClient", "HttpContent", "HttpMethod", "HttpStatusCode",
+        "IHttpResponseBodyFeature", "IHttpRequestLifetimeFeature", "IHttpConnectionFeature",
+        "IHttpWebSocketFeature", "Stream", "PipeWriter", "PipeReader",
+        "HttpProtocol", "HttpVersion", "HttpContext", "HttpRequest", "HttpResponse",
+        "Model", "ViewDataDictionary", "ViewData", "TempData", "ViewBag", "RouteData"
     };
 
     private static List<string> ScanMissingTypes(string fullFileContent, string newCode)
@@ -2641,8 +2645,6 @@ public class AgentController : ControllerBase
 
             if (c.EndsWith("Request", StringComparison.OrdinalIgnoreCase) ||
                 c.EndsWith("Response", StringComparison.OrdinalIgnoreCase) ||
-                c.EndsWith("Dto", StringComparison.OrdinalIgnoreCase) ||
-                c.EndsWith("Model", StringComparison.OrdinalIgnoreCase) ||
                 c.EndsWith("Result", StringComparison.OrdinalIgnoreCase))
             { result.Add(c); continue; }
 
@@ -4987,14 +4989,27 @@ emitSse, ct);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
             {
                 var missing = ScanMissingTypes(newContent, newStr);
-                if (missing.Count > 0)
+                var stubsToAdd = new List<string>();
+                foreach (var t in missing)
                 {
-                    newContent += "\n" + string.Join("\n\n",
-                        missing.Select(t => $"public class {t}\n{{\n}}"));
+                    var definition = FindTypeDefinitionInContext(t, explorationContext ?? "");
+                    if (definition != null)
+                    {
+                        stubsToAdd.Add(definition);
+                        continue;
+                    }
+                    if (t.EndsWith("Dto", StringComparison.OrdinalIgnoreCase) ||
+                        t.EndsWith("DTO", StringComparison.Ordinal))
+                        continue;
+                    stubsToAdd.Add($"public class {t}\n{{\n}}");
+                }
+                if (stubsToAdd.Count > 0)
+                {
+                    newContent += "\n" + string.Join("\n\n", stubsToAdd);
                     await SaveEditWithUndoAsync(
                         fullPath, newContent, relPath, projectRoot, preEditContent, ct);
                     await EmitLog(emitSse, "info",
-                        $"Appended missing type(s): {string.Join(", ", missing)}", ct: ct);
+                        $"Appended missing type(s): {string.Join(", ", stubsToAdd.Select(s => ExtractTypeNameForLog(s)))}", ct: ct);
                 }
             }
 
@@ -16395,6 +16410,36 @@ done = build OK; command = run this to fix; ask_user = need input";
             }
         }
         catch { }
+    }
+
+    private static string? FindTypeDefinitionInContext(string typeName, string context)
+    {
+        if (string.IsNullOrWhiteSpace(context) || string.IsNullOrWhiteSpace(typeName))
+            return null;
+        var declPattern = @"(class|record|struct)\s+" + Regex.Escape(typeName) + @"\b";
+        var decl = Regex.Match(context, declPattern);
+        if (!decl.Success) return null;
+
+        var startIdx = decl.Index;
+        var braceStart = context.IndexOf('{', startIdx);
+        if (braceStart < 0) return null;
+
+        var depth = 0;
+        var endIdx = -1;
+        for (var i = braceStart; i < context.Length; i++)
+        {
+            if (context[i] == '{') depth++;
+            else if (context[i] == '}') { depth--; if (depth == 0) { endIdx = i; break; } }
+        }
+        if (endIdx < 0) return null;
+
+        return context[startIdx..(endIdx + 1)].Trim();
+    }
+
+    private static string ExtractTypeNameForLog(string classDef)
+    {
+        var m = Regex.Match(classDef, @"\b(class|record|struct)\s+([A-Za-z_][A-Za-z0-9_]*)");
+        return m.Success ? m.Groups[2].Value : "?";
     }
 
     private static int CountRoslynErrors(string content)

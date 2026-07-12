@@ -779,6 +779,11 @@ public class BughostedController : ControllerBase
     }
 }
 
+public class BenchmarkDataDTO
+{
+}
+
+
 public class BughostedLoginRequest
 {
     public string Username { get; set; } = "";
@@ -833,21 +838,4 @@ public class BughostedFsSaveRequest
     public string Path { get; set; } = "";
     public string Content { get; set; } = "";
     public bool CreateIfMissing { get; set; } = true;
-}
-
-
-public class Response
-{
-}
-
-public class IHttpResponseBodyFeature
-{
-}
-
-public class BenchmarkDataDTO
-{
-}
-
-public class Model
-{
 }
