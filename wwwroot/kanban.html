@@ -275,10 +275,9 @@
             </div>
           </div>
 
-          <div class="card-plan" ng-if="card._plan && card._plan.items && card._plan.items.length">
-            <div class="plan-header">📋 Plan{{card._plan.summary ? ': ' + card._plan.summary : ''}}
-              <span class="text-xs"
-                style="margin-left:4px;opacity:0.6;">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
+          <div class="card-plan" ng-if="(card._plan && card._plan.items && card._plan.items.length) || (vm.streamingActive && vm.activeCardId === card.id && vm.streamingSteps.length)">
+            <div class="plan-header">📋 Plan{{card._plan && card._plan.summary ? ': ' + card._plan.summary : ''}}
+              <span class="text-xs" style="margin-left:4px;opacity:0.6;" ng-if="card._plan && card._plan.items">({{vm.planDoneCount(card._plan.items)}}/{{card._plan.items.length}})</span>
               <button ng-click="vm.clearPlan(card); $event.stopPropagation();" class="small ghost"
                 style="float:right;font-size:10px;" title="Delete entire plan and start fresh">🗑</button>
             </div>
@@ -317,6 +316,30 @@
                   </div>
                 </div>
               </div>
+              <div ng-repeat="s in vm.streamingSteps track by s.index"
+                ng-if="vm.streamingActive && vm.activeCardId === card.id && (s.type==='plan' || s.type==='explore')"
+                class="plan-item-row"
+                ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
+                <span class="plan-item-icon">
+                  {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
+                </span>
+                <div class="plan-item-body" style="flex:1;min-width:0;">
+                  <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                    <div class="plan-item-text">
+                      <span class="plan-item-file">{{s.path || s.file || '?'}}<span ng-if="s.line">:{{s.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{s.description || s.change || ''}}</span>
+                    </div>
+                  </div>
+                  <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                    {{s.thinking}}
+                  </div>
+                  <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
+                    style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                    {{s.error}}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -347,7 +370,7 @@
           </div>
           <!-- Live agent output on Doing cards -->
           <div class="card-analysis" ng-if="vm.streamingActive && vm.activeCardId === card.id">
-            <details>
+            <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>🤖 Running…</summary>
               <div class="analysis-phase" ng-if="vm.streamingPhase">
                 <strong>Phase:</strong> {{vm.streamingPhase}}

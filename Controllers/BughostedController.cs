@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http.Features;
 using System.Text.Json;
@@ -452,6 +452,38 @@ public class BughostedController : ControllerBase
             catch { break; }
         }
     }
+    /// <summary>
+    /// Send benchmark data to BugHosted server.
+    /// Body: BenchmarkDataDTO with Token, Date, Benchmark, Steps, Score, Status, Duration, Model, OS, CPU, RAM, GPU
+    /// </summary>
+    [HttpPost("addbenchmark")]
+    public async Task<IActionResult> AddBenchmark([FromBody] BenchmarkDataDTO dto)
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
+
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var payload = JsonSerializer.Serialize(dto);
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/addbenchmark")
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+
+            if (!httpRes.IsSuccessStatusCode)
+            return BadRequest(new { error = "Failed to send benchmark", detail = body });
+
+            return Ok(new { message = "Benchmark sent successfully" });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error sending benchmark: {ex.Message}");
+            return StatusCode(500, new { error = "Internal server error while sending benchmark" });
+        }
+    }
 
     [HttpPost("commands/ack")]
     public async Task<IActionResult> AckCommand([FromBody] BughostedAckRequest req)
@@ -803,3 +835,19 @@ public class BughostedFsSaveRequest
     public bool CreateIfMissing { get; set; } = true;
 }
 
+
+public class Response
+{
+}
+
+public class IHttpResponseBodyFeature
+{
+}
+
+public class BenchmarkDataDTO
+{
+}
+
+public class Model
+{
+}

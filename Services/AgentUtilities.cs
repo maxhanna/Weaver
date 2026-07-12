@@ -789,6 +789,44 @@ public static class AgentUtilities
         var suffix = end < discoveryContext.Length ? "\n...(truncated tail)..." : "";
         return prefix + discoveryContext[start..end] + suffix;
     }
+    public static string? ExtractFileSectionFromContext(string discoveryContext, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(discoveryContext) || string.IsNullOrWhiteSpace(filePath))
+            return null;
+        var normPath = filePath.Replace('\\', '/').TrimStart('/');
+        var fileName = Path.GetFileName(normPath);
+        var lines = discoveryContext.Split('\n');
+        var startLine = -1;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].TrimStart();
+            if ((trimmed.StartsWith("### read ") || trimmed.StartsWith("### list ")) &&
+                trimmed.EndsWith(normPath, StringComparison.OrdinalIgnoreCase))
+            { startLine = i; break; }
+            if (trimmed.StartsWith("### ") && trimmed.EndsWith(normPath, StringComparison.OrdinalIgnoreCase))
+            { startLine = i; break; }
+        }
+        if (startLine < 0)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].TrimStart();
+                if ((trimmed.StartsWith("### read ") || trimmed.StartsWith("### list ") || trimmed.StartsWith("### ")) &&
+                    trimmed.EndsWith(fileName, StringComparison.OrdinalIgnoreCase) &&
+                    trimmed.IndexOfAny(new[] { ' ', '\t' }) > 3)
+                { startLine = i; break; }
+            }
+        }
+        if (startLine < 0) return null;
+        var endLine = startLine + 1;
+        for (var i = startLine + 1; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].TrimStart();
+            if (trimmed.StartsWith("### ") && !trimmed.StartsWith("####"))
+            { endLine = i; break; }
+        }
+        return string.Join("\n", lines.Skip(startLine).Take(endLine - startLine));
+    }
     public static bool JsMethodExistsInContent(string content, string methodName)
     {
         if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(methodName))
@@ -1619,15 +1657,7 @@ public static class AgentUtilities
             }
         }
         return sb.ToString().TrimEnd();
-    }
-
-    public static string QuoteJsonKeys(string json)
-    {
-        if (string.IsNullOrEmpty(json)) return json;
-        return Regex.Replace(json,
-            @"(?<=[\{\,])\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=:)",
-            m => $"\"{m.Groups[1].Value}\"");
-    }
+    } 
 
     public static string? RepairJsonString(string json)
     {
@@ -3964,13 +3994,11 @@ public static class AgentUtilities
 
         if (plannerLineNumber > 0 && plannerLineNumber <= lines.Length)
         {
-            var plannerLine = lines[plannerLineNumber - 1];
-            var plannerHits = keywords.Count(w => plannerLine.Contains(w, StringComparison.OrdinalIgnoreCase));
-            candidates.Add((plannerLineNumber, plannerHits >= 2 ? 55 + plannerHits * 5 : 15));
+            candidates.Add((plannerLineNumber, 1));
         }
 
         if (candidates.Count == 0)
-            return plannerLineNumber > 0 ? plannerLineNumber : 0;
+            return 0;
 
         var best = candidates
             .GroupBy(c => c.line)

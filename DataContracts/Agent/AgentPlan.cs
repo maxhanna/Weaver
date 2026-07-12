@@ -11,7 +11,22 @@ public class PlanItem
     public string Change { get; set; } = "";
     public int Priority { get; set; } = 1;
 }
+public class MetaPlanSubPlan
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string ContextNote { get; set; } = "";
+    public List<string> Files { get; set; } = new();
+}
 
+public class MetaPlanResult
+{
+    public string MetaThinking { get; set; } = "";
+    public string MetaSummary { get; set; } = "";
+    public int Complexity { get; set; }
+    public List<MetaPlanSubPlan> SubPlans { get; set; } = new();
+}
 public class PlanItemDeserialized
 {
     public string file { get; set; } = "";

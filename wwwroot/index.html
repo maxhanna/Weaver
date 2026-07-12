@@ -424,10 +424,11 @@
                       </div>
                     </div>
                   
-                            <div class="agent-streaming-thinking" ng-if="vm.streamingThinking || vm.planItems.length">
-                              <details>
+                            <div class="agent-streaming-thinking" ng-if="vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length">
+                              <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length) ? 'open' : undefined}}">
                                 <summary>
                                   <span>🧠 Plan</span>
+                                  <span class="plan-count" ng-if="vm.planItems.length || vm.streamingSteps.length">({{(vm.streamingSteps | filter:{type:'plan'}).length + (vm.streamingSteps | filter:{type:'explore'}).length + vm.planItems.length}})</span>
                                   <span class="log-font-controls">
                                     <button class="log-font-btn" ng-click="vm.decreasePlanFont(); $event.stopPropagation()"
                                       title="Decrease font size">−</button>
@@ -437,7 +438,7 @@
                                   </span>
                                 </summary>
                                 <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}" ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
-                                <div ng-if="vm.planItems.length" class="plan-items-list" ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
+                                <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list" ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
                                   <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
                                     ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
                                     <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
@@ -459,6 +460,28 @@
                                           item.oldString.slice(0,200) + '…' : item.oldString}}</div>
                                         <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
                                           item.newString.slice(0,200) + '…' : item.newString}}</div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div ng-repeat="s in vm.streamingSteps track by s.index"
+                                    ng-if="s.type==='plan' || s.type==='explore'"
+                                    class="plan-item-row"
+                                    ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
+                                    <span class="plan-item-icon">
+                                      {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
+                                    </span>
+                                    <div class="plan-item-body" style="flex:1;min-width:0;">
+                                      <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                                        <span class="plan-item-file">{{s.path || s.file || '?'}}<span ng-if="s.line">:{{s.line}}</span></span>
+                                        <span class="plan-item-change" style="flex:1;min-width:0;">{{s.description || s.change || ''}}</span>
+                                      </div>
+                                      <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
+                                        style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                                        {{s.thinking}}
+                                      </div>
+                                      <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
+                                        style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                                        {{s.error}}
                                       </div>
                                     </div>
                                   </div>
@@ -490,7 +513,7 @@
           </div>
 
           <div>
-            <details>
+            <details ng-attr-open="{{vm.streamingActive ? 'open' : undefined}}">
               <summary>💻 Commands ({{vm.streamingSteps.length}})</summary>
               <div class="agent-steps-list span-full" ng-if="vm.streamingSteps.length">
                 <details class="agent-step-panel" ng-repeat="s in vm.streamingSteps track by s.index"

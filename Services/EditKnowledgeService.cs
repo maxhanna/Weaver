@@ -324,7 +324,7 @@ public class EditKnowledgeService
             }
             if (methods.Count > 0)
             {
-                archSb.AppendLine("KEY METHOD SIGNATURES (existing — preserve these contracts):");
+                archSb.AppendLine("KNOWN METHOD SIGNATURES (informational — preserve these contracts where referenced; this list is NOT exhaustive):");
                 foreach (var m in methods) archSb.AppendLine($"  {m}");
                 hasAny = true;
             }

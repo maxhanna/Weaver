@@ -622,9 +622,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
       vm.moveCardToDone = function (card) {
         var cardId = card.id || card._id;
-        targetCol = card.selfImproving ? 'selfImproving' : 'done';
+        var targetCol = card.selfImproving ? 'selfImproving' : 'done';
         console.log("Moving card to " + targetCol);
         var idx = vm.state.doing.findIndex(function (c) { return c.id === cardId; });
+        if (idx === -1) {
+          idx = vm.state.doing.findIndex(function (c) { return (c.id || c._id) == cardId; });
+        }
         if (idx === -1) {
           console.log("ERROR: Could not find card in doing column");
           return;

@@ -305,8 +305,8 @@ angular.module('kanbanApp')
 
                                                                 function finishCard() {
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
-                                                                    if (!incomplete) { pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`); vm.moveCardToDone(card); }
-                                                                    if (incomplete && card.id === vm.activeCardId) {
+                                                                     if (!incomplete) { pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`); vm.moveCardToDone(card); return; }
+                                                                     if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
                                                                         if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }

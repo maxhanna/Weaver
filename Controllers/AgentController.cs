@@ -858,24 +858,40 @@ public class AgentController : ControllerBase
                           "methods inside a class body MUST be indented, nested blocks " +
                           "must be indented relative to their parent. Copy the leading " +
                           "whitespace from oldString character-for-character into newString.");
-        else if (ext == ".cs")
-            sb.AppendLine("⚠ C# FILE: Choose your edit format based on change SIZE.");
-        sb.AppendLine("  • For SMALL targeted changes (1-5 lines, e.g. add a column to SQL, add a property, change a return value):");
-        sb.AppendLine("    USE oldString/newString. Copy 2-3 lines verbatim from the file as oldString.");
-        sb.AppendLine("    Include the line above and below your change as anchor context, repeating them unchanged in newString.");
-        sb.AppendLine("  • For FULL method/class replacements (entire method body rewrite - ONLY if the change is massive):");
-        sb.AppendLine("    USE FORMAT C (targetType/targetName/newCode). AST-based, bypasses text matching.");
-        sb.AppendLine("    CRITICAL: Preserve the existing attribute(s), return type, method name, and parameter list VERBATIM from the file.");
-        sb.AppendLine("    Only change the method BODY. Do NOT change [FromBody], route templates, or parameter names.");
-        sb.AppendLine("    ⚠ WARNING: If the method is very long, rewriting it via FORMAT C is highly likely to fail or hallucinate logic. " +
-                      "STRONGLY PREFER oldString/newString for targeted changes in long methods.");
-        sb.AppendLine("  • To ADD a new method: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
-        sb.AppendLine("  • Do NOT use targetType=\"class\" — that replaces the entire class.");
-        sb.AppendLine("INDENTATION: newCode MUST include proper C# indentation.");
-        sb.AppendLine("SQL STRINGS: PRESERVE exact whitespace inside SQL. 'INTERVAL 15 MINUTE' is CORRECT; " +
-                      "'INTERVAL15 MINUTE' is WRONG. '= 1' is CORRECT; '=1' is WRONG. " +
-                      "Copy SQL lines VERBATIM from the file and only change what the task requires.");
-        sb.AppendLine();
+        var changeLowerForFormat = (step.Change ?? "").ToLowerInvariant();
+        if (ext == ".cs")
+        {
+            var isNewCsMethod = fileExists &&
+                Regex.IsMatch(changeLowerForFormat, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b");
+            var isHttpEndpoint = (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase);
+            var isDeletion = changeLowerForFormat.Contains("remove") || changeLowerForFormat.Contains("delete");
+            if (isNewCsMethod || isHttpEndpoint)
+            {
+                sb.AppendLine("⚠ EDIT FORMAT: FORMAT C (insertAfter) — adding a new C# method/endpoint.");
+                sb.AppendLine("  You MUST use targetType=\"method\", targetName=existing method, insertAfter=true, newCode=complete method.");
+                sb.AppendLine("  Preserve existing attributes, return type, name, and parameters verbatim in newCode.");
+                sb.AppendLine("  Do NOT use oldString/newString or fullFile — ONLY FORMAT C with insertAfter:true.");
+            }
+            else if (isDeletion)
+            {
+                sb.AppendLine("⚠ EDIT FORMAT: oldString/newString (deletion) — removing code.");
+                sb.AppendLine("  oldString = exact lines to delete (1-5 max). newString = empty.");
+                sb.AppendLine("  Do NOT include surrounding container lines — delete ONLY what's asked.");
+            }
+            else
+            {
+                sb.AppendLine("⚠ EDIT FORMAT: oldString/newString (targeted edit) — modifying existing code.");
+                sb.AppendLine("  Copy 2-3 lines verbatim from the file as oldString.");
+                sb.AppendLine("  Include the line above and below your change as anchor context, repeating them unchanged in newString.");
+                sb.AppendLine("  SQL STRINGS: Preserve exact whitespace. 'INTERVAL 15 MINUTE' is correct, 'INTERVAL15MINUTE' is wrong.");
+            }
+            sb.AppendLine();
+        }
+        else if (!fileExists)
+        {
+            sb.AppendLine("⚠ FILE DOES NOT EXIST YET. Use fullFile format to create it with complete content.");
+            sb.AppendLine();
+        }
 
         if (!string.IsNullOrWhiteSpace(explorationContext))
         {
@@ -1092,7 +1108,8 @@ public class AgentController : ControllerBase
                             sb.AppendLine($"  {hint}");
                         }
                     }
-                    var targetSectionHint = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change ?? "", 10);
+                    var targetSectionHint = AgentUtilities.ExtractVerbatimTargetSection(
+                        fileContent, step.Change ?? "", 10, centerLine: step.LineNumber > 0 ? step.LineNumber : 0);
                     if (!string.IsNullOrWhiteSpace(targetSectionHint))
                     {
                         sb.AppendLine();
@@ -1170,7 +1187,8 @@ public class AgentController : ControllerBase
                     sb.AppendLine("  4. In newString: include that unchanged line, then add your new elements around it.");
                     sb.AppendLine("  ⚠ Do NOT use <div class=\"popupPanelActions\"> alone — it appears multiple times. Use a more specific line.");
                     sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected.");
-                    var targetSectionForEscalation = AgentUtilities.ExtractVerbatimTargetSection(fileContent, step.Change ?? "", 8);
+                    var targetSectionForEscalation = AgentUtilities.ExtractVerbatimTargetSection(
+                        fileContent, step.Change ?? "", 8, centerLine: step.LineNumber > 0 ? step.LineNumber : 0);
                     if (targetSectionForEscalation != null)
                     {
                         sb.AppendLine();
@@ -1224,7 +1242,7 @@ public class AgentController : ControllerBase
         else if (ext == ".cs" && (
             Regex.IsMatch(changeLower, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b") ||
             Regex.IsMatch(step.Change ?? "", @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
-            Regex.IsMatch(step.Change ?? "", @"\b[A-Z]\w+\s+method\b")))
+            Regex.IsMatch(step.Change ?? "", @"\b(add|create|implement|replace|define|modify|change|update)\s+(the\s+)?[A-Z]\w+\s+method\b", RegexOptions.IgnoreCase)))
         {
             sb.AppendLine("⚠ CRITICAL — .cs NEW METHOD CREATION: You MUST use FORMAT C with insertAfter:true.");
             sb.AppendLine("  Set targetType=\"method\", targetName to an EXISTING method name that already exists");
@@ -1238,16 +1256,29 @@ public class AgentController : ControllerBase
             sb.AppendLine();
         }
 
+        if (!string.IsNullOrWhiteSpace(fileContent))
+        {
+            var verbatimSection = AgentUtilities.ExtractVerbatimTargetSection(
+                fileContent, step.Change ?? "", contextLines: 10, centerLine: step.LineNumber > 0 ? step.LineNumber : 0);
+            if (!string.IsNullOrWhiteSpace(verbatimSection))
+            {
+                sb.AppendLine("⚡ ACTUAL TARGET SECTION (copy oldString character-for-character from here):");
+                sb.AppendLine("```");
+                sb.AppendLine(verbatimSection);
+                sb.AppendLine("```");
+                sb.AppendLine("Your oldString MUST be copied character-for-character from one or more lines in this section.");
+                sb.AppendLine();
+            }
+        }
+
         sb.AppendLine();
         sb.AppendLine("Output the edit now:");
         if (emitSse)
             await SendSse(Response, "edit-resolve", new { }, ct);
 
-
-        var classIsNewCsMethod = ext == ".cs" && fileExists &&
-            (changeLower.Contains("add") || changeLower.Contains("create") || changeLower.Contains("insert") || changeLower.Contains("new") || changeLower.Contains("define") || changeLower.Contains("implement")) &&
-            (changeLower.Contains("method") || changeLower.Contains("endpoint") || changeLower.Contains("action") || changeLower.Contains("route") ||
-             (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+        var classIsNewCsMethod = ext == ".cs" && fileExists && (
+            Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b") ||
+            (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
 
         string editFormat;
         if (!fileExists)
@@ -1343,12 +1374,8 @@ public class AgentController : ControllerBase
 
 
 
-            if (ext == ".cs" &&
-                !jRoot.TryGetProperty("targetType", out _) &&
-                !string.IsNullOrWhiteSpace(step.Change) &&
-                (Regex.IsMatch(step.Change, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase) ||
-                 Regex.IsMatch(step.Change, @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
-                 Regex.IsMatch(step.Change, @"\b[A-Z]\w+\s+method\b")))
+            if (ext == ".cs" && classIsNewCsMethod &&
+                !jRoot.TryGetProperty("targetType", out _))
             {
                 var hasFullFile = jRoot.TryGetProperty("fullFile", out _);
                 return (null, null, false, null, false,
@@ -1365,11 +1392,7 @@ public class AgentController : ControllerBase
 
             if (jRoot.TryGetProperty("fullFile", out var ffVal))
             {
-                var isNewCsMethod = ext == ".cs" &&
-                    !string.IsNullOrWhiteSpace(step.Change) &&
-                    (Regex.IsMatch(step.Change, @"\b(add|create|insert|new|define|implement)\b.{0,60}\b(method|endpoint|action|route)\b", RegexOptions.IgnoreCase) ||
-                     Regex.IsMatch(step.Change, @"\[Http(Get|Post|Put|Delete|Patch)\]") ||
-                     Regex.IsMatch(step.Change, @"\b[A-Z]\w+\s+method\b"));
+                var isNewCsMethod = ext == ".cs" && classIsNewCsMethod;
 
                 if (isNewCsMethod)
                 {
@@ -2477,14 +2500,24 @@ public class AgentController : ControllerBase
 
                         if (!string.IsNullOrWhiteSpace(dcChange) && dcChange != plan.Plan[idx].Change)
                         {
-                            decoupled.Add(new PlanStep
+                            var dcChangeLower = dcChange.ToLowerInvariant();
+                            var researchVerbs = new[] { "locate", "find", "examine", "understand", "read", "explore", "look at", "inspect", "review", "check", "see", "search" };
+                            if (researchVerbs.Any(v => dcChangeLower.StartsWith(v)))
                             {
-                                File = dcFile,
-                                Change = dcChange,
-                                Priority = plan.Plan[idx].Priority,
-                                ReferenceFiles = plan.Plan[idx].ReferenceFiles,
-                                LineNumber = plan.Plan[idx].LineNumber
-                            });
+                                await EmitLog(emitSse, "warn",
+                                    $"Audit rejected research sub-step: \"{dcChange}\" — every step must make actual code changes.", ct: ct);
+                            }
+                            else
+                            {
+                                decoupled.Add(new PlanStep
+                                {
+                                    File = dcFile,
+                                    Change = dcChange,
+                                    Priority = plan.Plan[idx].Priority,
+                                    ReferenceFiles = plan.Plan[idx].ReferenceFiles,
+                                    LineNumber = plan.Plan[idx].LineNumber
+                                });
+                            }
                         }
                     }
                     if (decoupled.Count > 1)
@@ -2875,6 +2908,30 @@ public class AgentController : ControllerBase
             ctx.AppendLine();
             AddFileRead(relPath);
             await EmitLog(emitSse, "info", $"  📄 {relPath}", ct: ct);
+        }
+
+        var targetWasAttached = attachedFiles != null &&
+            attachedFiles.Any(af =>
+            {
+                var normAf = af.TrimStart('/', '\\').Replace('\\', '/');
+                return string.Equals(normAf, relPath, StringComparison.OrdinalIgnoreCase);
+            });
+
+        if (targetWasAttached)
+        {
+            await EmitLog(emitSse, "info",
+                $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly", ct: ct);
+            return new StepExplorationResult
+            {
+                EnrichedStep = step,
+                ExplorationContext = ctx.ToString(),
+                FilesRead = filesRead.ToList(),
+                RefinedChange = step.Change,
+                TargetSymbol = null,
+                EstimatedLineRange = null,
+                Confidence = 100,
+                LowConfidenceWarning = null
+            };
         }
 
         for (var round = 0; round < MaxRounds; round++)
@@ -3712,6 +3769,51 @@ public class AgentController : ControllerBase
         catch { }
     }
 
+    private async Task AutoAttachFileToCardAsync(string cardId, string filePath, bool emitSse, CancellationToken ct)
+    {
+        try
+        {
+            var raw = await _boardData.LoadRawAsync();
+            if (raw == null) return;
+            var root = JsonNode.Parse(raw)?.AsObject();
+            if (root == null) return;
+            var columns = root["columns"]?.AsArray();
+            if (columns == null) return;
+            foreach (var col in columns)
+            {
+                var cards = col?["cards"]?.AsArray();
+                if (cards == null) continue;
+                foreach (var c in cards)
+                {
+                    var id = c?["id"]?.GetValue<string>();
+                    if (id != cardId) continue;
+                    var attached = c!["attached"];
+                    if (attached == null)
+                        c["attached"] = new JsonArray { filePath };
+                    else
+                    {
+                        var arr = attached.AsArray();
+                        var exists = arr.Any(e => e?.GetValue<string>() == filePath);
+                        if (!exists)
+                            arr.Add(filePath);
+                    }
+                    await _boardData.SaveRawAsync(
+                        root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                    if (emitSse)
+                        await SendSse(Response, "refresh", new
+                        {
+                            target = "boarddata",
+                            reason = "auto-attach",
+                            cardId,
+                            filePath
+                        }, ct);
+                    return;
+                }
+            }
+        }
+        catch { }
+    }
+
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -3900,6 +4002,36 @@ emitSse, ct);
 
         }
 
+        if (System.IO.File.Exists(fullPath))
+        {
+            var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var resolvedLine = AgentUtilities.ResolveTargetLineNumber(
+                preExtractContent, step.Change ?? "", exploration.TargetSymbol);
+            if (resolvedLine > 0)
+            {
+                step.LineNumber = resolvedLine;
+                await EmitLog(emitSse, "info",
+                    $"Corrected step.LineNumber from planner guess to resolved line {resolvedLine} via text matching", ct: ct);
+            }
+
+            if (resolvedLine > 0 && string.IsNullOrWhiteSpace(planOldStr))
+            {
+                var preExtracted = AgentUtilities.ExtractVerbatimTargetSection(
+                    preExtractContent, step.Change ?? "", contextLines: 3, centerLine: resolvedLine);
+                if (!string.IsNullOrWhiteSpace(preExtracted))
+                {
+                    var preLines = preExtracted.Split('\n');
+                    if (preLines.Length <= 7)
+                    {
+                        step.OldString = preExtracted;
+                        planOldStr = preExtracted;
+                        await EmitLog(emitSse, "info",
+                            $"Pre-extracted {preLines.Length} lines from resolved line {resolvedLine} as oldString anchor", ct: ct);
+                    }
+                }
+            }
+        }
+
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             string? oldStr = null, newStr = null, resolveError = null;
@@ -4003,9 +4135,11 @@ emitSse, ct);
                 var isCssDeletion = fullFileExt is ".css" or ".scss" or ".less" &&
                     (step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase);
 
-                var allowFullFileEscalation = (history.Count >= 3 || isCssDeletion) && fileAlreadyExists
-                    && fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" or ".cs"
-                    or ".ts" or ".tsx" or ".js" or ".jsx");
+                var codeFileExtRestricted = fullFileExt is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx";
+                var allowFullFileEscalation = fileAlreadyExists &&
+                    fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte") &&
+                    ((history.Count >= 3 || isCssDeletion) && !codeFileExtRestricted ||
+                     codeFileExtRestricted && history.Count >= 5);
 
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
@@ -4014,8 +4148,11 @@ emitSse, ct);
                           "Use a single unique line from the TARGET SECTION as your ENTIRE oldString (must appear only once in the file, ≥20 chars). " +
                           "Look at the ⚡ ACTUAL TARGET SECTION shown in the history above."
                         : fullFileExt == ".cs"
-                        ? "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
-                          "Use a targeted oldString/newString edit. Pick a single unique line from the target method as your anchor."
+                        ? (history.Count >= 5
+                            ? "fullFile ALLOWED for C# after many retries — the LLM cannot produce valid oldString/newString. " +
+                              "Set fullFile to the ENTIRE file content with your changes applied."
+                            : "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
+                              "Use a targeted oldString/newString edit. Pick a single unique line from the target method as your anchor.")
                         : "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
@@ -4864,13 +5001,27 @@ emitSse, ct);
             if (fileExt == ".cs")
             {
                 var writtenContent = System.IO.File.ReadAllText(fullPath, Encoding.UTF8);
+
+                var beforeErrors = CountRoslynErrors(writtenContent);
+
                 var fixedContent = AgentUtilities.PostEditCSharpFixup(writtenContent);
                 if (fixedContent != writtenContent)
                 {
-                    await SaveEditWithUndoAsync(fullPath, fixedContent, relPath, projectRoot, preEditContent, ct);
-                    newContent = fixedContent;
-                    await EmitLog(emitSse, "info",
-                        $"Post-edit fixup applied to {relPath} (verbatim escapes / DTO wrappers / doubled braces)", ct: ct);
+                    var afterErrors = CountRoslynErrors(fixedContent);
+                    if (afterErrors > beforeErrors)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"Post-edit fixup would introduce {afterErrors - beforeErrors} new error(s) in {relPath} — skipping fixup", ct: ct);
+                        await EmitLog(emitSse, "warn",
+                            $"  Before: {beforeErrors} errors, After: {afterErrors} errors", ct: ct);
+                    }
+                    else
+                    {
+                        await SaveEditWithUndoAsync(fullPath, fixedContent, relPath, projectRoot, preEditContent, ct);
+                        newContent = fixedContent;
+                        await EmitLog(emitSse, "info",
+                            $"Post-edit fixup applied to {relPath} (verbatim escapes / DTO wrappers / doubled braces)", ct: ct);
+                    }
                 }
             }
 
@@ -4927,7 +5078,7 @@ emitSse, ct);
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr) &&
+            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
                   or ".css" or ".scss" or ".less" or ".json"))
             {
@@ -4941,13 +5092,13 @@ emitSse, ct);
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr) &&
+            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
             {
                 newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr))
+            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
             {
                 var fileLines = newContent.Split('\n');
                 var changed = false;
@@ -4955,12 +5106,19 @@ emitSse, ct);
                 {
                     var trimmed = nLine.Trim();
                     if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                    var trimmedLower = trimmed.ToLowerInvariant();
+                    var isCommentOrString = trimmedLower.StartsWith("//") || trimmedLower.StartsWith("/*") ||
+                        trimmedLower.StartsWith("*") || trimmedLower.StartsWith("'") || trimmedLower.StartsWith("\"");
+                    if (isCommentOrString) continue;
                     for (var i = 0; i < fileLines.Length; i++)
                     {
                         if (fileLines[i].Contains(trimmed, StringComparison.Ordinal))
                         {
+                            var before = fileLines[i];
                             var fixedLine = Regex.Replace(fileLines[i], @"\b(\w+)\s+\(", "$1(");
-                            if (fixedLine != fileLines[i])
+                            var stillComment = fixedLine.TrimStart().StartsWith("//") || fixedLine.TrimStart().StartsWith("/*") || fixedLine.TrimStart().StartsWith("*");
+                            if (stillComment) break;
+                            if (fixedLine != before)
                             {
                                 fileLines[i] = fixedLine;
                                 changed = true;
@@ -5592,6 +5750,28 @@ emitSse, ct);
         var union = words1.Union(words2).Count();
         return union == 0 ? 0.0 : (double)intersection / union;
     }
+
+    private static string StripEditKnowledgeHeader(string discoveryContext)
+    {
+        if (string.IsNullOrWhiteSpace(discoveryContext)) return discoveryContext;
+ 
+        var priorKnowledgeIdx = discoveryContext.IndexOf("### PRIOR EDIT KNOWLEDGE FOR THIS PROJECT ###", StringComparison.Ordinal);
+        var relevantKnowledgeIdx = discoveryContext.IndexOf("### EDIT KNOWLEDGE (relevant to this file/task) ###", StringComparison.Ordinal);
+        
+        var headerIdx = priorKnowledgeIdx >= 0 ? priorKnowledgeIdx :
+                        relevantKnowledgeIdx >= 0 ? relevantKnowledgeIdx : -1;
+
+        if (headerIdx < 0) return discoveryContext;
+ 
+        var afterHeader = headerIdx + 50;
+        var nextMainSectionIdx = discoveryContext.IndexOf("\n### ", afterHeader, StringComparison.Ordinal);
+        
+        if (nextMainSectionIdx < 0)
+            return discoveryContext;  
+ 
+        return discoveryContext.Substring(nextMainSectionIdx + 1).TrimStart();
+    }
+
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
     {
         if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
@@ -7570,16 +7750,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     "If the plan-so-far, together with the discovery context, already fully satisfies the task:\n" +
     "{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n" +
     "If you need to read a file not yet in discovery context before you can safely propose the next step:\n" +
-    "{\"planComplete\": false, \"exploreFile\": \"relative/path.ext\", \"thinking\": \"why you need this file\"}\n\n" +
+    "{\"planComplete\": false, \"exploreFile\": \"{path/to/FILE_TO_EXPLORE.ext}\", \"thinking\": \"why you need this file\"}\n\n" +
     "Otherwise, propose exactly ONE next step:\n" +
     "{\n" +
     "  \"planComplete\": false,\n" +
     "  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n" +
     "  \"step\": {\n" +
-    "    \"file\": \"relative/path.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
+    "    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
     "    \"change\": \"precise, atomic description of ONLY this step's change\",\n" +
     "    \"line\": 42,\n" +
-    "    \"referenceFiles\": [\"relative/path/other.ext\"]\n" +
+    "    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n" +
     "  },\n" +
     "  \"justification\": \"why this step must happen NOW relative to steps already committed " +
     "(e.g. 'this DTO property must exist before step 2's endpoint can reference it')\"\n" +
@@ -7591,14 +7771,21 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     "   the first location now — the second location gets its own turn later.\n" +
     "3. NEVER repeat or restate a step already present in PLAN SO FAR.\n" +
     "4. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in " +
-    "   the discovery context OR was introduced by an earlier committed step. If unsure, use exploreFile first.\n" +
+    "   the discovery context OR was introduced by an earlier committed step. NEVER explore files outside the " +
+    "   attached files listed in the task or steering. Only explore to find a symbol definition when the symbol " +
+    "   is referenced in an already-attached file.\n" +
     "5. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, " +
     "   services before UI code that calls them.\n" +
     "6. CREATE TABLE IF NOT EXISTS belongs INSIDE the method body that needs it — never its own step.\n" +
     "7. Prefer FEWER, more complete steps. If the whole task is one coherent edit, propose that one step, " +
     "   then declare planComplete=true on the next turn.\n" +
-    "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake.\n" +
-    "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n";
+    "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. " +
+    "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
+    "   unrelated files.\n" +
+    "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
+    "10. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
+    "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
+    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n";
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -7727,7 +7914,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
-        string projectRoot, bool emitSse, CancellationToken ct)
+        string projectRoot, bool emitSse, CancellationToken ct,
+        bool skipLlm = false)
     {
         if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
             return (false, "Step is missing file or change description.");
@@ -7742,6 +7930,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
 
         var changeLower = step.Change.ToLowerInvariant();
+
+        var researchVerbs = new[] { "locate", "find", "examine", "understand", "read", "explore", "look at", "inspect", "review", "check", "see", "search" };
+        if (researchVerbs.Any(v => changeLower.StartsWith(v)))
+        {
+            return (false, $"Research step rejected — '{changeLower.Split(' ')[0]}' is not an actionable edit. " +
+                            "All steps must make actual code changes (add/modify/delete/replace). " +
+                            "The file content is already available in the discovery context.");
+        }
 
         if (changeLower.StartsWith("remove") || changeLower.StartsWith("delete"))
         {
@@ -7784,6 +7980,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (isSpecial) return (true, null);
 
+        if (skipLlm)
+        {
+            await EmitLog(emitSse, "info", $"LLM validator skipped (retry mode) — accepting step: [{step.File}] {step.Change}", ct: ct);
+            return (true, null);
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
@@ -7795,9 +7997,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("### PROPOSED NEXT STEP ###");
         sb.AppendLine($"[{step.File}] {step.Change}");
         sb.AppendLine();
-        sb.AppendLine("### RELEVANT DISCOVERY CONTEXT (current file state) ###");
-        var ctxSnippet = AgentUtilities.BuildValidatorContextExcerpt(discoveryContext, step.Change ?? "");
-        sb.AppendLine(ctxSnippet);
+        sb.AppendLine("### RELEVANT DISCOVERY CONTEXT (target file only) ###"); 
+        var validatorDiscovery = StripEditKnowledgeHeader(discoveryContext);
+        var fileSection = AgentUtilities.ExtractFileSectionFromContext(validatorDiscovery, step.File);
+        sb.AppendLine(string.IsNullOrWhiteSpace(fileSection) ? validatorDiscovery : fileSection);
         sb.AppendLine();
         sb.AppendLine("Judge the PROPOSED NEXT STEP ONLY. Answer:");
         sb.AppendLine("1. Does it reference any method/property/symbol that does NOT exist in the discovery context " +
@@ -7834,7 +8037,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
-        CancellationToken ct, string? steeringContext)
+        CancellationToken ct, string? steeringContext, string? cardId = null)
     {
         var planSoFar = new List<PlanStep>();
         var rejectionFeedback = new List<string>();
@@ -7842,8 +8045,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
+        var stepEventIndex = 0;
 
         await EmitLog(emitSse, "info", "Incremental planning: proposing steps one at a time…", ct: ct);
+
+        if (emitSse)
+            await SendSse(Response, "plan", new
+            {
+                thinking = "",
+                summary = "Building plan incrementally — 0 steps so far",
+                items = Array.Empty<PlanStep>(),
+                incremental = true
+            }, ct);
 
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
@@ -7877,7 +8090,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (emitSse)
                     await SendSse(Response, "step", new
                     {
-                        index = planSoFar.Count,
+                        index = ++stepEventIndex,
                         type = "explore",
                         status = "exploring",
                         path = proposal.ExploreFile,
@@ -7888,6 +8101,37 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 if (exploredFiles.Add(proposal.ExploreFile))
                 {
+                    var isMarker = proposal.ExploreFile.StartsWith("_");
+                    var alreadyInContext = false;
+                    if (!isMarker)
+                    {
+                        var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
+                        alreadyInContext = discoveryContext.Contains($"### read {normPath}") ||
+                                           discoveryContext.Contains($"### {normPath}") ||
+                                           Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b");
+                    }
+
+                    if (alreadyInContext)
+                    {
+                        var contextMsg = $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above (its full content is already shown). " +
+                            "Do NOT request it again. Read the file content from the DISCOVERY CONTEXT and propose the actual edit step now.";
+                        await EmitLog(emitSse, "warn",
+                            $"Incremental planning: skipped explore — {proposal.ExploreFile} already in discovery context", ct: ct);
+                        rejectionFeedback.Add(contextMsg);
+                        if (emitSse)
+                            await SendSse(Response, "step", new
+                            {
+                                index = ++stepEventIndex,
+                                type = "explore",
+                                status = "error",
+                                path = proposal.ExploreFile,
+                                description = $"Already in context: {proposal.ExploreFile}",
+                                error = contextMsg
+                            }, ct);
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                        continue;
+                    }
+
                     await EmitLog(emitSse, "info", $"Incremental planning: exploring {proposal.ExploreFile}", ct: ct);
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
@@ -7895,12 +8139,16 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
-                            index = planSoFar.Count,
+                            index = ++stepEventIndex,
                             type = "explore",
                             status = "done",
                             path = proposal.ExploreFile,
                             description = $"Explored: {proposal.ExploreFile}"
                         }, ct);
+
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                        await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
+
                     regenAttempts = 0;
                     continue;
                 }
@@ -7913,7 +8161,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
-                            index = planSoFar.Count,
+                            index = ++stepEventIndex,
                             type = "explore",
                             status = "error",
                             path = proposal.ExploreFile,
@@ -7934,7 +8182,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse && !string.IsNullOrWhiteSpace(proposal.Thinking))
                 await SendSse(Response, "thinking", new { text = proposal.Thinking }, ct);
 
-            var stepIndex = planSoFar.Count + 1;
+            var stepIndex = ++stepEventIndex;
             if (emitSse)
                 await SendSse(Response, "step", new
                 {
@@ -7949,8 +8197,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     justification = proposal.CompletionReason
                 }, ct);
 
+            var skipLlm = regenAttempts > 0;
+            if (!skipLlm && proposal.Step != null && !AgentUtilities.IsSpecialMarker(proposal.Step.File))
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(projectRoot,
+                    proposal.Step.File.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(fullPath))
+                    skipLlm = true;
+            }
             var (valid, reason) = await ValidateIncrementalStepAsync(
-                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct);
+                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
+                skipLlm: skipLlm);
 
             if (!valid)
             {
@@ -8024,6 +8281,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     incremental = true
                 }, ct);
             }
+            break;
         }
 
         if (planSoFar.Count == 0)
@@ -8351,294 +8609,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         public string? CompletionReason { get; set; }
         public string? Thinking { get; set; }
         public MetaPlanSubPlan? SubPlan { get; set; }
-    }
-    private class MetaPlanSubPlan
-    {
-        public string Id { get; set; } = "";
-        public string Title { get; set; } = "";
-        public string Description { get; set; } = "";
-        public string ContextNote { get; set; } = "";
-        public List<string> Files { get; set; } = new();
-    }
-
-    private class MetaPlanResult
-    {
-        public string MetaThinking { get; set; } = "";
-        public string MetaSummary { get; set; } = "";
-        public int Complexity { get; set; }
-        public List<MetaPlanSubPlan> SubPlans { get; set; } = new();
-    }
-
-    private static string BuildMetaPlanPrompt() =>
-     "You are a senior software architect. Determine if this task is complex enough to require a " +
-     "META-PLAN (multiple sub-plans executed sequentially).\n\n" +
-     "A task needs a META-PLAN ONLY when it adds 3+ NEW methods/endpoints across 2+ source files " +
-     "(e.g. full CRUD + data model + UI + routing), or when it requires 7+ plan steps.\n\n" +
-     "COMMON NON-EXAMPLES that do NOT need a meta-plan:\n" +
-     "  - Adding ONE new endpoint + its supporting database table\n" +
-     "  - Modifying a single method or adding one handler\n" +
-     "  - Creating a DTO/model class + its table + one endpoint (this is 1 concern: data persistence)\n" +
-     "  - Adding a simple property or field to an existing class\n" +
-     "  - Any change touching only 1-2 files\n" +
-     "  - Any task that only requires modifying 1 file, even if it involves multiple steps (e.g., adding properties AND a method to the same file). Normal planning handles multi-step single-file edits natively.\n\n" +
-     "Rate complexity 1-10:\n" +
-     "  1-3: Trivial (single file, one method/property change)\n" +
-     "  4-6: Moderate (2-4 steps, 1-2 files, one endpoint + table, straightforward)\n" +
-     "  7-10: Complex (7+ steps, 3+ new methods/endpoints, 2+ files, cross-cutting architecture)\n\n" +
-     "If complexity >= 7, generate a META-PLAN — a list of detailed sub-plans. " +
-     "Each sub-plan will be independently planned and executed SEQUENTIALLY, with context passed between them.\n\n" +
-     "### META-PLAN RULES (CRITICAL) ###\n" +
-     "1. PRECISION: Each sub-plan MUST specify:\n" +
-     "   - The EXACT file path(s) it will modify (e.g. 'maxhanna.Server/Controllers/WeaverController.cs')\n" +
-     "   - The EXACT changes it will make (e.g. 'Add GPU string property to BenchmarkDataDTO class')\n" +
-     "   - NOT abstract concepts like 'Database Schema Creation' — instead be very precise about what the change is.'\n" +
-     "\n" +
-     "2. ATOMICITY (CRITICAL): Do NOT split things that belong together:\n" +
-     "   - CREATE TABLE + INSERT/UPDATE = ONE sub-plan (the CREATE TABLE is an inline guard clause inside the method body, NOT a separate schema definition step)\n" +
-     "   - Method signature + method body = ONE sub-plan\n" +
-     "   - DTO class + its properties = ONE sub-plan\n" +
-     "   BAD: Sub-plan 1='Create database schema for benchmarks table', Sub-plan 2='Add endpoint method with INSERT'\n" +
-     "   GOOD: Sub-plan 1='Add OS/CPU/RAM/GPU properties to BenchmarkDataDTO', Sub-plan 2='Add AddBenchmark POST endpoint with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT'\n" +
-     "\n" +
-     "3. COHERENT CHAIN: Each sub-plan MUST build on the previous one:\n" +
-     "   - Sub-plan 2 must reference symbols/files created or modified in sub-plan 1\n" +
-     "   - The contextNote must contain CONCRETE details: exact symbol names, property names, SQL table schemas, method signatures\n" +
-     "   - NOT prose like 'The next sub-plan needs this database schema information'\n" +
-     "   - INSTEAD: 'Sub-plan 1 added properties OS, CPU, RAM, GPU (all string?) to BenchmarkDataDTO in WeaverController.cs. The AddBenchmark method in sub-plan 2 must reference these properties in its INSERT statement as @OS, @CPU, @RAM, @GPU parameters.'\n" +
-     "\n" +
-     "4. NO REDUNDANCY: Each sub-plan must produce UNIQUE value. If two sub-plans modify the same file at the same location, merge them.\n" +
-     "\n" +
-     "5. DELIVERABLE ORIENTATION: Each sub-plan title must describe the CONCRETE DELIVERABLE with file path, not the abstract concern:\n" +
-     "   BAD: 'Database Schema Creation for Benchmarks Table'\n" +
-     "   GOOD: 'Add OS, CPU, RAM, GPU string properties to BenchmarkDataDTO in WeaverController.cs'\n" +
-     "   BAD: 'Service Layer Implementation with Database Access Logic'\n" +
-     "   GOOD: 'Add AddBenchmark POST endpoint with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT in WeaverController.cs'\n" +
-     "   BAD: 'Update Data Model Class Definition'\n" +
-     "   GOOD: 'Add 4 nullable string properties (OS, CPU, RAM, GPU) to BenchmarkDataDTO class after existing Model property'\n" +
-     "\n" +
-     "6. ORDERING: Sub-plans must be ordered so that dependencies come first:\n" +
-     "   - Data models/DTOs before endpoints that use them\n" +
-     "   - Service methods before UI components that call them\n" +
-     "   - Backend endpoints before frontend service methods that call them\n" +
-     "\n" +
-     "7. FILE SCOPE (CRITICAL): If a task only modifies ONE file (even with multiple steps like adding properties AND a method to the same file), complexity MUST be <= 6. Meta-plans are ONLY for cross-file architecture.\n" +
-     "\n" +
-     "Output ONLY valid JSON — no markdown fences, no extra text:\n" +
-     "{\n" +
-     "  \"metaThinking\": \"1-2 lines: why this task does or doesn't need a meta-plan\",\n" +
-     "  \"metaSummary\": \"one-sentence overall plan\",\n" +
-     "  \"complexity\": 7,\n" +
-     "  \"subPlans\": [\n" +
-     "    {\n" +
-     "      \"id\": \"sp-1\",\n" +
-     "      \"title\": \"Concrete deliverable: exact file + exact modification\",\n" +
-     "      \"description\": \"EXACT file path(s) and EXACT modifications. Name specific methods, properties, classes, SQL table/column names. This description will be fed directly to the planner.\",\n" +
-     "      \"files\": [\"path/to/file.ext\"],\n" +
-     "      \"contextNote\": \"Concrete details for next sub-plan: exact symbol names, property names, table schemas, method signatures that were created/modified in THIS sub-plan\"\n" +
-     "    }\n" +
-     "  ]\n" +
-     "}\n\n" +
-     "If complexity < 7, set subPlans to an empty array [].\n" +
-     "If you do output subPlans, include at least 2 and at most 6 sub-plans.";
-
-    private async Task<MetaPlanResult?> GenerateMetaPlanAsync(
-    string prompt, string discoveryContext, string projectRoot, bool emitSse, CancellationToken ct,
-    string? cardId = null)
-    {
-        var metaPrompt = BuildMetaPlanPrompt();
-        var userPrompt = new StringBuilder();
-        userPrompt.AppendLine("### TASK ###");
-        userPrompt.AppendLine(prompt);
-        userPrompt.AppendLine();
-        userPrompt.AppendLine("### PROJECT ROOT ###");
-        userPrompt.AppendLine(projectRoot);
-        userPrompt.AppendLine();
-        userPrompt.AppendLine("### DISCOVERY CONTEXT ###");
-        userPrompt.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
-
-        const int MaxRetries = 2;
-        for (var attempt = 1; attempt <= MaxRetries; attempt++)
-        {
-            if (attempt > 1)
-                await EmitLog(emitSse, "warn", $"Retrying meta-plan generation (attempt {attempt}/{MaxRetries})...", ct: ct);
-
-            var (raw, _, error) = await CallLlmRawStreaming(
-                metaPrompt, userPrompt.ToString(), emitSse, ct,
-                requestTimeout: TimeSpan.FromMinutes(4), maxTokens: 1024);
-
-            if (string.IsNullOrWhiteSpace(raw)) continue;
-
-            try
-            {
-                var result = JsonSerializer.Deserialize<MetaPlanResult>(raw, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
-
-                if (result != null && result.Complexity >= 7 && result.SubPlans?.Count > 0)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Meta-plan: complexity {result.Complexity}/10, {result.SubPlans.Count} sub-plan(s): " +
-                        string.Join(" → ", result.SubPlans.Select(s => s.Title)), ct: ct);
-
-                    var allTargetFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var sp in result.SubPlans)
-                    {
-                        if (sp.Files != null)
-                        {
-                            foreach (var f in sp.Files)
-                            {
-                                if (!string.IsNullOrWhiteSpace(f))
-                                    allTargetFiles.Add(f.Replace('\\', '/').Trim());
-                            }
-                        }
-                        var textToScan = (sp.Title ?? "") + " " + (sp.Description ?? "");
-                        var matches = Regex.Matches(textToScan, @"[\w\-/\\]+\.(?:cs|ts|tsx|js|jsx|html|css|scss|go|py|java|kt|php|rb)");
-                        foreach (Match m in matches)
-                        {
-                            allTargetFiles.Add(m.Value.Replace('\\', '/').Trim());
-                        }
-                    }
-
-                    if (allTargetFiles.Count <= 2 && result.SubPlans.Count <= 3)
-                    {
-                        await EmitLog(emitSse, "info",
-                            $"Meta-plan skipped deterministically: {result.SubPlans.Count} sub-plan(s) target only {allTargetFiles.Count} file(s) " +
-                            "— normal planning is sufficient for tasks touching 2 or fewer files.", ct: ct);
-                        return null;
-                    }
-
-                    result = await ValidateMetaPlanCoherenceAsync(
-                        result, prompt, discoveryContext, projectRoot, emitSse, ct);
-
-                    if (result?.SubPlans?.Count > 1)
-                    {
-                        var collapsed = new List<MetaPlanSubPlan>();
-                        foreach (var sp in result.SubPlans)
-                        {
-                            var alreadyExists = false;
-                            if (sp.Files != null && sp.Files.Count == 1)
-                            {
-                                var fullPath = Path.GetFullPath(
-                                    Path.Combine(projectRoot, sp.Files[0].Replace('/', Path.DirectorySeparatorChar)));
-                                if (System.IO.File.Exists(fullPath))
-                                {
-                                    var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                                    var contentLower = content.ToLowerInvariant();
-
-
-                                    var sysSpecProps = new[] { "OS", "CPU", "RAM", "GPU" };
-                                    var allSysPropsExist = sysSpecProps.All(prop =>
-                                        Regex.IsMatch(content, $@"\b{Regex.Escape(prop)}\b\s*\{{"));
-                                    if (allSysPropsExist)
-                                    {
-                                        var mentionsSysSpec = sysSpecProps.Any(prop =>
-                                            sp.Description?.Contains(prop, StringComparison.OrdinalIgnoreCase) == true);
-                                        if (mentionsSysSpec)
-                                        {
-                                            alreadyExists = true;
-                                            await EmitLog(emitSse, "info",
-                                                $"Meta-plan: system spec properties (OS/CPU/RAM/GPU) already exist — collapsing sub-plan", ct: ct);
-                                        }
-                                    }
-
-                                    if (!alreadyExists)
-                                    {
-                                        var knownEndpointMethods = new[] { "AddBenchmark", "PostBenchmarks", "PostBenchmarksTable", "CreateBenchmarksTable" };
-                                        foreach (var methodName in knownEndpointMethods)
-                                        {
-                                            if (sp.Description?.Contains(methodName, StringComparison.OrdinalIgnoreCase) == true &&
-                                                Regex.IsMatch(content, $@"\b{Regex.Escape(methodName)}\s*\("))
-                                            {
-                                                alreadyExists = true;
-                                                await EmitLog(emitSse, "info",
-                                                    $"Meta-plan: method '{methodName}' already exists in file — collapsing sub-plan", ct: ct);
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    if (!alreadyExists)
-                                    {
-                                        var routeMatch = Regex.Match(sp.Description ?? "",
-                                            "\"/([a-zA-Z0-9_/]+)\"", RegexOptions.IgnoreCase);
-                                        if (routeMatch.Success)
-                                        {
-                                            var route = routeMatch.Groups[1].Value.Trim('/');
-                                            if (!string.IsNullOrWhiteSpace(route) &&
-                                                content.Contains($"(\"{route}\"", StringComparison.OrdinalIgnoreCase))
-                                            {
-                                                alreadyExists = true;
-                                                await EmitLog(emitSse, "info",
-                                                    $"Meta-plan: route '/{route}' already exists in file — collapsing sub-plan", ct: ct);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (alreadyExists)
-                            {
-                                await EmitLog(emitSse, "info",
-                                    $"Meta-plan: sub-plan '{sp.Title}' collapsed — target changes already present in file", ct: ct);
-                            }
-                            else
-                            {
-                                collapsed.Add(sp);
-                            }
-                        }
-
-                        var originalSubPlanCount = result.SubPlans.Count;
-                        if (collapsed.Count < originalSubPlanCount && collapsed.Count > 0)
-                        {
-                            var removedCount = originalSubPlanCount - collapsed.Count;
-                            result.SubPlans = collapsed;
-                            result.MetaSummary = (result.MetaSummary ?? "") + " (collapsed redundant sub-plans)";
-                            await EmitLog(emitSse, "info",
-                                $"Meta-plan: collapsed {removedCount} sub-plan(s) whose changes already existed", ct: ct);
-                        }
-                    }
-
-                    if (emitSse)
-                    {
-                        await SendSse(Response, "meta-plan", new
-                        {
-                            summary = result?.MetaSummary ?? "",
-                            complexity = result?.Complexity ?? 1,
-                            subPlans = result?.SubPlans.Select(sp => new
-                            {
-                                id = sp.Id,
-                                title = sp.Title,
-                                description = sp.Description,
-                                files = sp.Files,
-                                contextNote = sp.ContextNote,
-                                done = false
-                            })
-                        }, ct);
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(cardId) && result != null)
-                    {
-                        await PersistMetaPlanToCardAsync(cardId, result, emitSse, ct);
-                    }
-
-                    return result;
-                }
-
-                if (result != null && result.Complexity < 7)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Meta-plan skipped: complexity {result.Complexity}/10 (below threshold)", ct: ct);
-                    return null;
-                }
-            }
-            catch (JsonException ex)
-            {
-                await EmitLog(emitSse, "error", $"Failed to parse meta-plan JSON: {ex.Message}", ct: ct);
-            }
-        }
-        return null;
-    }
+    } 
 
     private static string BuildSubPlanPrompt(
   string originalPrompt,
@@ -10535,9 +10506,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
-            var attachedSteering = "The user has explicitly attached the following files for editing:\n" +
-                                   string.Join("\n", attachedFiles.Select(f => $"- {f}")) +
-                                   "\n\nYou MUST plan your edits to target THESE files. Do NOT add _explore steps. Do NOT inspect the project structure. Read the attached files in the DISCOVERY CONTEXT and plan the required edits directly. If the files are empty, plan steps to populate them with the necessary code based on the user's task.";
+            var attachedSteering = "The user has explicitly attached one or more files for editing " +
+                                   "(visible in DISCOVERY CONTEXT below).\n" +
+                                   "You MUST plan your edits to target only the attached file(s). " +
+                                   "Do NOT add _explore steps. Do NOT search for or reference any other files. " +
+                                   "Do NOT try to understand how the code is called from elsewhere. " +
+                                   "Read the attached files in the DISCOVERY CONTEXT and plan the required edits directly. " +
+                                   "If the files are empty, plan steps to populate them with the necessary code based on the user's task.";
 
             steeringContext = string.IsNullOrWhiteSpace(steeringContext)
                 ? attachedSteering
@@ -10584,7 +10559,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 try
                 {
                     var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
-                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote);
+                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId);
                     subPlanResult = incSubPlan;
                     discoveryContext = updatedCtx;
                 }
@@ -10700,7 +10675,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             var (p, convergedContext) = await RunIncrementalPlanningLoop(
-                   prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext);
+                   prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId);
             plan = p;
             discoveryContext = convergedContext;
         }
@@ -10893,11 +10868,30 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (!taskComplete)
         {
-            if (await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct))
+            var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
+            if (stepTruthCompleted)
             {
-                await EmitLog(emitSse, "info",
-                    "Post-execution verification claimed incomplete, but every planned step is confirmed done — trusting the plan, not the verifier.", ct: ct);
-                taskComplete = true;
+                await EmitLog(emitSse, "warn",
+                    $"Post-execution verification says task is incomplete despite all steps having status 'done'. " +
+                    $"Verifier details: {verificationDetails}. Re-running verifier to check for race/staleness...", ct: ct);
+
+                var (reverifyComplete, reverifyDetails) = await PostExecuteVerify(
+                    prompt, projectRoot, emitSse, allSteps, ct);
+                if (reverifyComplete)
+                {
+                    await EmitLog(emitSse, "info",
+                        "Re-verification passed — trusting verifier on retry.", ct: ct);
+                    taskComplete = true;
+                    verificationDetails = reverifyDetails;
+                }
+                else
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Re-verification still says incomplete: {reverifyDetails}. " +
+                        $"All steps are done — trusting step truth over verifier.", ct: ct);
+                    taskComplete = true;
+                    verificationDetails = reverifyDetails + " (overridden: all steps completed successfully despite verifier concerns)";
+                }
             }
         }
 
@@ -13237,162 +13231,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ? new AgentPlan { Plan = planSteps, Summary = summary, Thinking = "Command execution plan" }
             : null;
         return (steps, agentPlan);
-    }
-    private async Task<MetaPlanResult?> ValidateMetaPlanCoherenceAsync(
-     MetaPlanResult metaPlan, string originalPrompt, string discoveryContext,
-     string projectRoot, bool emitSse, CancellationToken ct)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("You are validating a META-PLAN before it gets executed. Your job is to ensure the sub-plans form a precise, coherent, atomic chain.");
-        sb.AppendLine();
-        sb.AppendLine("### ORIGINAL TASK ###");
-        sb.AppendLine(originalPrompt);
-        sb.AppendLine();
-        sb.AppendLine("### DISCOVERY CONTEXT ###");
-        sb.AppendLine(BuildPlannerDiscoveryContext(discoveryContext));
-        sb.AppendLine();
-        sb.AppendLine("### META-PLAN TO VALIDATE ###");
-        sb.AppendLine($"Summary: {metaPlan.MetaSummary}");
-        sb.AppendLine($"Complexity: {metaPlan.Complexity}/10");
-        sb.AppendLine();
-        for (var i = 0; i < metaPlan.SubPlans.Count; i++)
-        {
-            var sp = metaPlan.SubPlans[i];
-            sb.AppendLine($"Sub-plan {i + 1}: {sp.Title}");
-            sb.AppendLine($"  Description: {sp.Description}");
-            if (sp.Files != null && sp.Files.Count > 0)
-                sb.AppendLine($"  Files: {string.Join(", ", sp.Files)}");
-            sb.AppendLine($"  Context Note: {sp.ContextNote}");
-            sb.AppendLine();
-        }
-        sb.AppendLine();
-        sb.AppendLine("### VALIDATION CHECKS ###");
-        sb.AppendLine("1. PRECISION: Does each sub-plan title and description specify:");
-        sb.AppendLine("   - EXACT file path(s)? (not just 'the controller' but 'maxhanna.Server/Controllers/WeaverController.cs')");
-        sb.AppendLine("   - EXACT modifications? (not just 'update data model' but 'add OS, CPU, RAM, GPU string properties to BenchmarkDataDTO')");
-        sb.AppendLine("   Flag any sub-plan with abstract titles like 'Database Schema Creation' or 'Service Layer Implementation'.");
-        sb.AppendLine();
-        sb.AppendLine("2. ATOMICITY: Are there sub-plans that split things that should be TOGETHER?");
-        sb.AppendLine("   - CREATE TABLE + INSERT/UPDATE must be in the SAME sub-plan (CREATE TABLE is an inline guard inside the method)");
-        sb.AppendLine("   - Method signature + body must be in the SAME sub-plan");
-        sb.AppendLine("   - DTO class + its properties must be in the SAME sub-plan");
-        sb.AppendLine("   - DTO/model changes and the endpoint/method that uses them must be in the SAME sub-plan (they are coupled)");
-        sb.AppendLine("   - If two sub-plans target the same file, try to MERGE them into one unless they have a clear dependency");
-        sb.AppendLine("   If you find such splits, MERGE them in correctedSubPlans.");
-        sb.AppendLine();
-        sb.AppendLine("3. COHERENT CHAIN: Does each sub-plan build on the previous?");
-        sb.AppendLine("   - Does sub-plan N+1 reference exact symbols from sub-plan N's output?");
-        sb.AppendLine("   - Are contextNotes CONCRETE (contain exact symbol names, property names, table schemas)?");
-        sb.AppendLine("   - If a contextNote is vague prose, replace it with concrete details.");
-        sb.AppendLine();
-        sb.AppendLine("4. ORDERING: Are sub-plans in dependency order?");
-        sb.AppendLine("   - DTOs/models before endpoints that use them");
-        sb.AppendLine("   - Backend before frontend");
-        sb.AppendLine();
-        sb.AppendLine("5. NO REDUNDANCY: Are any two sub-plans doing the same thing?");
-        sb.AppendLine();
-        sb.AppendLine("### OUTPUT FORMAT ###");
-        sb.AppendLine("If the meta-plan passes ALL checks:");
-        sb.AppendLine("{\"valid\": true, \"correctedSubPlans\": null, \"issues\": []}");
-        sb.AppendLine();
-        sb.AppendLine("If ANY check fails, output corrected sub-plans that fix ALL issues:");
-        sb.AppendLine("{");
-        sb.AppendLine("  \"valid\": false,");
-        sb.AppendLine("  \"issues\": [\"short description of each issue found\"],");
-        sb.AppendLine("  \"correctedSubPlans\": [");
-        sb.AppendLine("    {\"id\":\"sp-1\",\"title\":\"Concrete deliverable with file path\",\"description\":\"Exact files and modifications\",\"contextNote\":\"Concrete symbols/schemas for next sub-plan\"}");
-        sb.AppendLine("  ]");
-        sb.AppendLine("}");
-        sb.AppendLine();
-        sb.AppendLine("Output ONLY JSON — no markdown, no explanation.");
-
-        var (raw, _, err) = await CallLlmRaw(
-            "You validate meta-plans for precision, atomicity, and coherence. Output ONLY JSON.",
-            sb.ToString(), ct, TimeSpan.FromSeconds(45), maxTokens: 2048);
-
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            await EmitLog(emitSse, "warn", $"Meta-plan validation skipped: {err ?? "empty response"}", ct: ct);
-            return metaPlan;
-        }
-
-        try
-        {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
-            {
-                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                if (m.Success) cleaned = m.Groups[1].Value.Trim();
-            }
-            var fb = cleaned.IndexOf('{');
-            var lb = cleaned.LastIndexOf('}');
-            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
-
-            using var doc = JsonDocument.Parse(cleaned, new JsonDocumentOptions { AllowTrailingCommas = true });
-            var root = doc.RootElement;
-
-            var valid = root.TryGetProperty("valid", out var vEl) && vEl.GetBoolean();
-
-
-            if (root.TryGetProperty("issues", out var issuesEl) && issuesEl.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var issue in issuesEl.EnumerateArray())
-                {
-                    var issueStr = issue.ValueKind == JsonValueKind.String ? issue.GetString() : issue.ToString();
-                    await EmitLog(emitSse, "warn", $"Meta-plan issue: {issueStr}", ct: ct);
-                }
-            }
-
-            if (valid)
-            {
-                await EmitLog(emitSse, "info", "Meta-plan validation: ✓ sub-plans form a coherent, precise chain", ct: ct);
-                return metaPlan;
-            }
-
-            await EmitLog(emitSse, "warn", "Meta-plan validation: ✗ issues found — applying corrections", ct: ct);
-
-            if (root.TryGetProperty("correctedSubPlans", out var cspArr) && cspArr.ValueKind == JsonValueKind.Array)
-            {
-                var corrected = new List<MetaPlanSubPlan>();
-                foreach (var el in cspArr.EnumerateArray())
-                {
-                    corrected.Add(new MetaPlanSubPlan
-                    {
-                        Id = el.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : $"sp-{corrected.Count + 1}",
-                        Title = el.TryGetProperty("title", out var tEl) ? tEl.GetString() ?? "" : "",
-                        Description = el.TryGetProperty("description", out var dEl) ? dEl.GetString() ?? "" : "",
-                        ContextNote = el.TryGetProperty("contextNote", out var cnEl) ? cnEl.GetString() ?? "" : ""
-                    });
-                }
-
-                if (corrected.Count > 0)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Meta-plan corrected: {corrected.Count} sub-plan(s): " +
-                        string.Join(" → ", corrected.Select(s => s.Title)), ct: ct);
-
-                    if (emitSse)
-                    {
-                        await SendSse(Response, "meta-plan-corrected", new
-                        {
-                            originalCount = metaPlan.SubPlans.Count,
-                            correctedCount = corrected.Count,
-                            subPlans = corrected.Select(s => new { s.Id, s.Title, s.Description })
-                        }, ct);
-                    }
-
-                    metaPlan.SubPlans = corrected;
-                    return metaPlan;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            await EmitLog(emitSse, "warn", $"Meta-plan validation parse error: {ex.Message}", ct: ct);
-        }
-
-        return metaPlan;
-    }
+    } 
 
     [HttpPost("execute")]
     public async Task<IActionResult> Execute([FromBody] AgentRequest req)
@@ -16556,5 +16395,19 @@ done = build OK; command = run this to fix; ask_user = need input";
             }
         }
         catch { }
+    }
+
+    private static int CountRoslynErrors(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return 0;
+        try
+        {
+            var tree = CSharpSyntaxTree.ParseText(content);
+            return tree.GetDiagnostics().Count(d => d.Severity == DiagnosticSeverity.Error);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 }
