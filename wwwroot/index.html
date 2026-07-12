@@ -375,7 +375,8 @@
           <div class="agent-streaming-tokens" ng-if="vm.streamingTokenBuffer">
             <details open>
               <summary>
-                <span>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : '' }}</span>
+                <span>💬 LLM Streaming{{ vm.streamingStableCount ? ' (' + vm.streamingStableCount + ' chars)' : ''
+                  }}</span>
                 <span class="log-font-controls">
                   <button class="log-font-btn" ng-click="vm.decreaseLlmFont(); $event.stopPropagation()"
                     title="Decrease font size">−</button>
@@ -384,7 +385,8 @@
                     title="Increase font size">+</button>
                 </span>
               </summary>
-              <pre class="streaming-text streaming-tokens" ng-style="{'font-size': vm.llmFontSize + 'px'}">{{vm.streamingTokenBuffer}}</pre>
+              <pre class="streaming-text streaming-tokens"
+                ng-style="{'font-size': vm.llmFontSize + 'px'}">{{vm.streamingTokenBuffer}}</pre>
             </details>
           </div>
 
@@ -398,110 +400,120 @@
             </div>
           </div>
 
-                    <!-- META-PLAN BLOCK -->
-                    <div class="card-meta-plan" ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
-                      style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
-                      <div class="meta-plan-header"
-                        style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
-                        <span>🧠 Meta-Plan: {{card._metaPlan.summary}} <span class="text-xs"
-                            style="margin-left:4px;opacity:0.6;">(Complexity: {{card._metaPlan.complexity}}/10)</span></span>
-                        <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
-                          style="font-size:10px; padding: 0 4px; line-height: 1.2;" title="Clear meta-plan and restart">🗑</button>
-                      </div>
-                      <div class="meta-plan-items">
-                        <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
-                          ng-class="{'meta-plan-done': sp.done}" style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
-                          <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
-                          <div class="meta-plan-body" style="flex: 1; min-width: 0;">
-                            <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
-                            <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
-                            <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
-                              <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
-                                style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  
-                            <div class="agent-streaming-thinking" ng-if="vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length">
-                              <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length) ? 'open' : undefined}}">
-                                <summary>
-                                  <span>🧠 Plan</span>
-                                  <span class="plan-count" ng-if="vm.planItems.length || vm.streamingSteps.length">({{(vm.streamingSteps | filter:{type:'plan'}).length + (vm.streamingSteps | filter:{type:'explore'}).length + vm.planItems.length}})</span>
-                                  <span class="log-font-controls">
-                                    <button class="log-font-btn" ng-click="vm.decreasePlanFont(); $event.stopPropagation()"
-                                      title="Decrease font size">−</button>
-                                    <span class="log-font-size-label">{{vm.planFontSize}}px</span>
-                                    <button class="log-font-btn" ng-click="vm.increasePlanFont(); $event.stopPropagation()"
-                                      title="Increase font size">+</button>
-                                  </span>
-                                </summary>
-                                <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}" ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
-                                <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list" ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
-                                  <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
-                                    ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
-                                    <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
-                                      '⬜'}}</span>
-                                    <div class="plan-item-body" style="flex:1;min-width:0;">
-                                      <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
-                                        <span ng-if="item.metaGroup" class="plan-item-metagroup" title="Sub-plan group">{{item.metaGroup}}</span>
-                                        <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
-                                        <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
-                                        <span ng-if="item.oldString || item.newString"
-                                          ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
-                                          style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
-                                          {{item._showDetail ? '▲' : '▼'}}
-                                        </span>
-                                      </div>
-                                      <div ng-if="item._showDetail" class="plan-item-detail"
-                                        style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
-                                        <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
-                                          item.oldString.slice(0,200) + '…' : item.oldString}}</div>
-                                        <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
-                                          item.newString.slice(0,200) + '…' : item.newString}}</div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div ng-repeat="s in vm.streamingSteps track by s.index"
-                                    ng-if="s.type==='plan' || s.type==='explore'"
-                                    class="plan-item-row"
-                                    ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
-                                    <span class="plan-item-icon">
-                                      {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
-                                    </span>
-                                    <div class="plan-item-body" style="flex:1;min-width:0;">
-                                      <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
-                                        <span class="plan-item-file">{{s.path || s.file || '?'}}<span ng-if="s.line">:{{s.line}}</span></span>
-                                        <span class="plan-item-change" style="flex:1;min-width:0;">{{s.description || s.change || ''}}</span>
-                                      </div>
-                                      <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
-                                        style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
-                                        {{s.thinking}}
-                                      </div>
-                                      <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
-                                        style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
-                                        {{s.error}}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              </details>
-                            </div>
+          <!-- META-PLAN BLOCK -->
+          <div class="card-meta-plan"
+            ng-if="card._metaPlan && card._metaPlan.subPlans && card._metaPlan.subPlans.length"
+            style="margin-bottom: 8px; padding: 6px 8px; background: rgba(98, 114, 164, 0.1); border-radius: 4px; border-left: 3px solid var(--accent);">
+            <div class="meta-plan-header"
+              style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--accent); display: flex; justify-content: space-between; align-items: center;">
+              <span>🧠 Meta-Plan: {{card._metaPlan.summary}} <span class="text-xs"
+                  style="margin-left:4px;opacity:0.6;">(Complexity: {{card._metaPlan.complexity}}/10)</span></span>
+              <button ng-click="vm.clearMetaPlan(card); $event.stopPropagation();" class="small ghost"
+                style="font-size:10px; padding: 0 4px; line-height: 1.2;"
+                title="Clear meta-plan and restart">🗑</button>
+            </div>
+            <div class="meta-plan-items">
+              <div ng-repeat="sp in card._metaPlan.subPlans track by sp.id" class="meta-plan-item"
+                ng-class="{'meta-plan-done': sp.done}"
+                style="display: flex; gap: 6px; margin-bottom: 4px; font-size: 10px;">
+                <span class="meta-plan-icon" style="flex-shrink: 0;">{{sp.done ? '✅' : '⬜'}}</span>
+                <div class="meta-plan-body" style="flex: 1; min-width: 0;">
+                  <div class="meta-plan-title" style="font-weight: 600; color: var(--fg);">{{sp.title}}</div>
+                  <div class="meta-plan-desc" style="opacity: 0.8; margin-top: 2px;">{{sp.description}}</div>
+                  <div class="meta-plan-files" ng-if="sp.files && sp.files.length" style="margin-top: 2px;">
+                    <span ng-repeat="f in sp.files" class="meta-plan-file-chip"
+                      style="display: inline-block; padding: 1px 4px; background: var(--bg2); border-radius: 3px; margin-right: 2px; font-family: monospace; font-size: 9px;">{{f}}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-                            <div class="agent-streaming-thinking" ng-if="vm.cohesionIssues && vm.cohesionIssues.length">
-                              <details>
-                                <summary>
-                                  <span>🔍 Cohesion Issues{{vm.cohesionFile ? ' (' + vm.cohesionFile + ')' : ''}}</span>
-                                </summary>
-                                <div class="cohesion-issues-list" style="margin-top: 4px;">
-                                  <div ng-repeat="issue in vm.cohesionIssues track by $index"
-                                    style="padding: 2px 6px; margin-bottom: 2px; background: rgba(255, 100, 50, 0.08); border-left: 2px solid #ff6432; border-radius: 2px; font-size: 12px;">
-                                    ⚠ {{issue}}
-                                  </div>
-                                </div>
-                              </details>
-                            </div>
+          <div class="agent-streaming-thinking"
+            ng-if="vm.streamingThinking || vm.planItems.length || vm.streamingSteps.length">
+            <details ng-attr-open="{{(vm.streamingSteps.length || vm.planItems.length) ? 'open' : undefined}}">
+              <summary>
+                <span>🧠 Plan</span>
+                <span class="plan-count" ng-if="vm.planItems.length || vm.streamingSteps.length">({{(vm.streamingSteps |
+                  filter:{type:'plan'}).length + (vm.streamingSteps | filter:{type:'explore'}).length +
+                  vm.planItems.length}})</span>
+                <span class="log-font-controls">
+                  <button class="log-font-btn" ng-click="vm.decreasePlanFont(); $event.stopPropagation()"
+                    title="Decrease font size">−</button>
+                  <span class="log-font-size-label">{{vm.planFontSize}}px</span>
+                  <button class="log-font-btn" ng-click="vm.increasePlanFont(); $event.stopPropagation()"
+                    title="Increase font size">+</button>
+                </span>
+              </summary>
+              <pre class="streaming-text" ng-style="{'font-size': vm.planFontSize + 'px'}"
+                ng-if="vm.streamingThinking">{{vm.streamingThinking}}</pre>
+              <div ng-if="vm.planItems.length || vm.streamingSteps.length" class="plan-items-list"
+                ng-style="{'font-size': vm.planFontSize + 'px'}" style="margin-top: 8px;">
+                <div ng-repeat="item in vm.planItems track by item.index" class="plan-item-row"
+                  ng-class="{'plan-done': item.done, 'plan-pending': !item.done}">
+                  <span class="plan-item-icon" title="{{item.done ? 'Done' : 'Not Done'}}">{{item.done ? '✅' :
+                    '⬜'}}</span>
+                  <div class="plan-item-body" style="flex:1;min-width:0;">
+                    <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <span ng-if="item.metaGroup" class="plan-item-metagroup"
+                        title="Sub-plan group">{{item.metaGroup}}</span>
+                      <span class="plan-item-file">{{item.file}}<span ng-if="item.line">:{{item.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{item.change}}</span>
+                      <span ng-if="item.oldString || item.newString"
+                        ng-click="item._showDetail = !item._showDetail; $event.stopPropagation();"
+                        style="cursor:pointer;opacity:0.5;font-size:10px;flex-shrink:0;" title="Show edit details">
+                        {{item._showDetail ? '▲' : '▼'}}
+                      </span>
+                    </div>
+                    <div ng-if="item._showDetail" class="plan-item-detail"
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      <div ng-if="item.oldString"><strong>OLD:</strong> {{item.oldString.length > 200 ?
+                        item.oldString.slice(0,200) + '…' : item.oldString}}</div>
+                      <div ng-if="item.newString"><strong>NEW:</strong> {{item.newString.length > 200 ?
+                        item.newString.slice(0,200) + '…' : item.newString}}</div>
+                    </div>
+                  </div>
+                </div>
+                <div ng-repeat="s in vm.streamingSteps track by s.index" ng-if="s.type==='plan' || s.type==='explore'"
+                  class="plan-item-row"
+                  ng-class="{'step-proposing': s.status==='proposing', 'step-rejected': s.status==='rejected', 'step-exploring': s.status==='exploring', 'plan-pending': s.status==='pending' || s.status==='done'}">
+                  <span class="plan-item-icon">
+                    {{s.status==='proposing'?'💡':(s.status==='rejected'?'✗':(s.status==='exploring'?'🔍':(s.status==='done'?'✓':'○')))}}
+                  </span>
+                  <div class="plan-item-body" style="flex:1;min-width:0;">
+                    <div class="plan-item-heading" style="display:flex;gap:4px;align-items:center;">
+                      <span class="plan-item-file">{{s.path || s.file || '?'}}<span
+                          ng-if="s.line">:{{s.line}}</span></span>
+                      <span class="plan-item-change" style="flex:1;min-width:0;">{{s.description || s.change ||
+                        ''}}</span>
+                    </div>
+                    <div ng-if="s.thinking && s.status==='proposing'" class="plan-item-detail"
+                      style="padding:4px 8px;margin-top:4px;background:var(--bg2);border-radius:4px;font-size:10px;font-family:monospace;white-space:pre-wrap;overflow-x:auto;max-height:200px;overflow-y:auto;">
+                      {{s.thinking}}
+                    </div>
+                    <div ng-if="s.error && s.status==='rejected'" class="plan-item-detail"
+                      style="padding:4px 8px;margin-top:4px;background:rgba(255,100,50,0.08);border-radius:4px;font-size:10px;color:#e06c75;white-space:pre-wrap;overflow-x:auto;">
+                      {{s.error}}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div class="agent-streaming-thinking" ng-if="vm.cohesionIssues && vm.cohesionIssues.length">
+            <details>
+              <summary>
+                <span>🔍 Cohesion Issues{{vm.cohesionFile ? ' (' + vm.cohesionFile + ')' : ''}}</span>
+              </summary>
+              <div class="cohesion-issues-list" style="margin-top: 4px;">
+                <div ng-repeat="issue in vm.cohesionIssues track by $index"
+                  style="padding: 2px 6px; margin-bottom: 2px; background: rgba(255, 100, 50, 0.08); border-left: 2px solid #ff6432; border-radius: 2px; font-size: 12px;">
+                  ⚠ {{issue}}
+                </div>
+              </div>
+            </details>
+          </div>
 
           <div class="agent-summary-live" ng-if="vm.streamingSummary">
             <strong>Batch:</strong> {{vm.streamingSummary}}
@@ -537,8 +549,7 @@
                         </div>
                         <div class="diff-wrapper">
                           <div class="diff-col diff-col-old">
-                            <div class="diff-row"
-                              ng-repeat="line in s.diffLines track by $index">
+                            <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                               <div class="diff-cell diff-cell-old"
                                 ng-class="{'diff-empty': !line.oldLine, 'diff-changed': line.changed && line.bothExist, 'diff-removed': !line.newLine}">
                                 <span class="diff-lineno">{{line.oldLineNum + 1}}</span>
@@ -547,8 +558,7 @@
                             </div>
                           </div>
                           <div class="diff-col diff-col-new">
-                            <div class="diff-row"
-                              ng-repeat="line in s.diffLines track by $index">
+                            <div class="diff-row" ng-repeat="line in s.diffLines track by $index">
                               <div class="diff-cell diff-cell-new"
                                 ng-class="{'diff-empty': !line.newLine, 'diff-changed': line.changed && line.bothExist, 'diff-added': !line.oldLine}">
                                 <span class="diff-lineno">{{line.newLineNum + 1}}</span>
@@ -814,15 +824,16 @@
             <p>`weaverconfig.json` contains `llamaUrl` (defaults to `http://localhost:8080`). Edit if your llama server
               is at a different address</p>
           </details>
-          <summary>What is the purpose of the agent activity log?</summary>
-          <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
-            you track what the agent is doing and why.</p>
-        </details>
-        <details>
-          <summary>How do I add tasks to my project?</summary>
-          <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
-            create tasks for you.</p>
-        </details>
+          <details>
+            <summary>How do I add tasks to my project?</summary>
+            <p>You can add tasks by using the 'Add Task' button in the kanban board or by asking the AI assistant to
+              create tasks for you.</p>
+          </details>
+          <details>
+            <summary>What is the purpose of the agent activity log?</summary>
+            <p>The agent activity log shows all the actions taken by the AI agent during project management. It helps
+              you track what the agent is doing and why.</p>
+          </details>
         </details>
       </div>
       <div class="popup-footer">

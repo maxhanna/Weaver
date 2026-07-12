@@ -8394,6 +8394,245 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         return (plan, discoveryContext);
     }
+
+    /// <summary>
+    /// Propose ONE atomic step → execute it → verify → refresh ground truth → decide whether
+    /// another step is genuinely needed. Never plans ahead of what has actually been executed,
+    /// so it can't hallucinate a runaway multi-step plan.
+    /// </summary>
+    private async Task<(AgentPlan plan, List<object> results, string discoveryContext)> RunInterleavedPlanExecutionLoop(
+        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        CancellationToken ct, string? steeringContext, string? cardId = null,
+        List<string>? attachedFiles = null)
+    {
+        var planSoFar = new List<PlanStep>();
+        var allResults = new List<object>();
+        var rejectionFeedback = new List<string>();
+        var exploredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var thinkingLog = new StringBuilder();
+        var regenAttempts = 0;
+        var consecutiveSlotFailures = 0;
+
+        await EmitLog(emitSse, "info",
+            "Interleaved execution: propose ONE atomic step → execute it → verify → decide if another step is needed…", ct: ct);
+
+        if (emitSse)
+            await SendSse(Response, "plan", new
+            {
+                thinking = "",
+                summary = "Executing one atomic step at a time — 0 done so far",
+                items = Array.Empty<PlanStep>(),
+                incremental = true
+            }, ct);
+
+        for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (emitSse)
+                await SendSse(Response, "phase", new { message = $"Step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
+
+            var proposal = await ProposeNextIncrementalStepAsync(
+                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
+
+            if (proposal == null)
+            {
+                rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
+                    "Output ONLY the JSON object described in the system prompt.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+
+            if (proposal.PlanComplete)
+            {
+                if (emitSse)
+                    await SendSse(Response, "thinking", new { text = $"Plan complete: {proposal.CompletionReason}" }, ct);
+                await EmitLog(emitSse, "success",
+                    $"Interleaved execution: complete after {planSoFar.Count} step(s) — {proposal.CompletionReason}", ct: ct);
+                break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(proposal.ExploreFile))
+            {
+                if (exploredFiles.Add(proposal.ExploreFile))
+                {
+                    var isMarker = proposal.ExploreFile.StartsWith("_");
+                    var alreadyInContext = false;
+                    if (!isMarker)
+                    {
+                        var normPath = proposal.ExploreFile.Replace('\\', '/').TrimStart('/');
+                        alreadyInContext = discoveryContext.Contains($"### read {normPath}") ||
+                                           discoveryContext.Contains($"### {normPath}") ||
+                                           Regex.IsMatch(discoveryContext, $@"### (?:read )?\S*{Regex.Escape(Path.GetFileName(normPath))}\b");
+                    }
+
+                    if (alreadyInContext)
+                    {
+                        rejectionFeedback.Add(
+                            $"STOP — '{proposal.ExploreFile}' is ALREADY in the DISCOVERY CONTEXT above. " +
+                            "Do NOT request it again. Read it and propose the actual next step.");
+                        if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                        continue;
+                    }
+
+                    await EmitLog(emitSse, "info", $"Interleaved execution: exploring {proposal.ExploreFile}", ct: ct);
+                    discoveryContext = await ExplorationPipeline(
+                        new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
+                        discoveryContext, projectRoot, emitSse, ct);
+
+                    if (!string.IsNullOrWhiteSpace(cardId))
+                        await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
+                    regenAttempts = 0;
+                    continue;
+                }
+                else
+                {
+                    rejectionFeedback.Add(
+                        $"You asked to explore '{proposal.ExploreFile}' again — it is ALREADY shown in full above. " +
+                        "Do not re-request it. Propose the actual next step using the exact names visible there.");
+                    if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                    continue;
+                }
+            }
+
+            if (proposal.Step == null)
+            {
+                rejectionFeedback.Add("You returned neither planComplete=true, exploreFile, nor a step — return exactly one.");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                continue;
+            }
+
+            var skipLlm = regenAttempts > 0;
+            if (!skipLlm && !AgentUtilities.IsSpecialMarker(proposal.Step.File))
+            {
+                var fp = Path.GetFullPath(Path.Combine(projectRoot, proposal.Step.File.Replace('/', Path.DirectorySeparatorChar)));
+                if (System.IO.File.Exists(fp)) skipLlm = true;
+            }
+
+            var (valid, reason) = await ValidateIncrementalStepAsync(
+                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct, skipLlm: skipLlm);
+
+            if (!valid)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Interleaved execution: rejected [{proposal.Step.File}] {proposal.Step.Change} — {reason}", ct: ct);
+                rejectionFeedback.Add($"REJECTED — [{proposal.Step.File}] {proposal.Step.Change} → {reason}");
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS)
+                {
+                    consecutiveSlotFailures++;
+                    rejectionFeedback.Clear();
+                    regenAttempts = 0;
+                    if (consecutiveSlotFailures >= 3)
+                        throw new InvalidOperationException(
+                            "Interleaved planner failed 3 slots in a row — attach the correct file(s) and retry.");
+                    continue;
+                }
+                continue;
+            }
+
+            consecutiveSlotFailures = 0;
+            regenAttempts = 0;
+            rejectionFeedback.Clear();
+
+            var stepToRun = proposal.Step;
+            planSoFar.Add(stepToRun);
+
+            if (!string.IsNullOrWhiteSpace(proposal.Thinking))
+                thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
+
+            await EmitLog(emitSse, "info",
+                $"▶ Executing atomic step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
+
+            if (emitSse)
+                await SendSse(Response, "plan", new
+                {
+                    thinking = thinkingLog.ToString(),
+                    summary = $"Executed {planSoFar.Count - 1} step(s) — running step {planSoFar.Count}",
+                    items = planSoFar,
+                    incremental = true
+                }, ct);
+
+            await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
+
+            var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { stepToRun }, Summary = stepToRun.Change, Score = 90 };
+            var beforeCount = allResults.Count;
+
+            try
+            {
+                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
+                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                await EmitLog(emitSse, "error",
+                    $"⛔ Interleaved execution halted — step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                break;
+            }
+
+            var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
+
+            var touchedPaths = newResults
+                .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                .Select(r => r.GetValueOrDefault("path")?.ToString())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var touched in touchedPaths)
+                discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+
+            var hadFailure = newResults.Any(r =>
+                r.GetValueOrDefault("status")?.ToString() == "error" ||
+                r.GetValueOrDefault("type")?.ToString() == "plan_halted");
+
+            if (hadFailure)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
+                    "so post-execution verification can assess what genuinely remains.", ct: ct);
+                break;
+            }
+        }
+
+        var finalPlan = new AgentPlan
+        {
+            Thinking = thinkingLog.ToString(),
+            Summary = $"Executed {planSoFar.Count} atomic step(s) via interleaved plan → execute → verify loop",
+            Score = 90,
+            Plan = planSoFar
+        };
+
+        return (finalPlan, allResults, discoveryContext);
+    }
+
+    /// <summary>
+    /// Replaces (or appends) a file's section in the discovery context with its CURRENT on-disk
+    /// content, so the next proposed step is grounded in what actually happened, not stale context.
+    /// </summary>
+    private async Task<string> RefreshFileInDiscoveryContext(
+        string relPath, string discoveryContext, string projectRoot, CancellationToken ct)
+    {
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!System.IO.File.Exists(fullPath)) return discoveryContext;
+
+        string content;
+        try { content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct); }
+        catch { return discoveryContext; }
+
+        var normPath = relPath.Replace('\\', '/');
+        var pattern = new Regex(
+            $@"^###\s+(?:read\s+)?{Regex.Escape(normPath)}\b.*?(?=^### |\z)",
+            RegexOptions.Multiline | RegexOptions.Singleline);
+
+        var replacement = $"### read {normPath}\n```\n{content}\n```\n\n";
+
+        if (pattern.IsMatch(discoveryContext))
+            return pattern.Replace(discoveryContext, m => replacement, 1);
+
+        return discoveryContext.TrimEnd() + "\n\n" + replacement;
+    }
+
     private static string BuildIncrementalSubPlanSystemPrompt() =>
     "You are a senior software architect building a MULTI-STAGE execution plan ONE STAGE AT A TIME.\n" +
     "Each stage ('sub-plan') is a self-contained deliverable — a concrete file (or small related set) with a " +
@@ -10632,7 +10871,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info", "Phase 1.5 — META-PLAN (incremental construction)", ct: ct);
         var metaPlan = await RunIncrementalMetaPlanLoop(prompt, discoveryContext, projectRoot, emitSse, ct, cardId);
 
-
+        var planAlreadyExecuted = false;
         AgentPlan plan;
         if (metaPlan?.SubPlans?.Count > 0)
         {
@@ -10762,19 +11001,22 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 Plan = combinedSteps
             };
             discoveryContext = accumulatedContext.ToString();
+            planAlreadyExecuted = true;
         }
         else
         {
-            await EmitLog(emitSse, "info", "Phase 2 — PLAN", ct: ct);
+            await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
             if (emitSse)
             {
-                await SendSse(Response, "phase", new { phase = "plan", message = "Planning...", contextSize = discoveryContext.Length, prompt }, ct);
+                await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = discoveryContext.Length, prompt }, ct);
             }
 
-            var (p, convergedContext) = await RunIncrementalPlanningLoop(
-                   prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId);
-            plan = p;
-            discoveryContext = convergedContext;
+            var (interleavedPlan, interleavedResults, updatedContext) = await RunInterleavedPlanExecutionLoop(
+                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles);
+            plan = interleavedPlan;
+            discoveryContext = updatedContext;
+            allSteps.AddRange(interleavedResults);
+            planAlreadyExecuted = true;
         }
 
         if (emitSse && !string.IsNullOrWhiteSpace(plan.Thinking))
@@ -10797,173 +11039,176 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         });
 
 
-        var validationReason = await ValidatePlanAsync(prompt, plan, ct);
-        if (_gracefulStop)
+        var fileBackups = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        if (!planAlreadyExecuted)
         {
-            await EmitLog(emitSse, "warn", "User did not respond to command confirmation — skipping card.", ct: ct);
-            return (allSteps, plan);
-        }
-        if (validationReason != null)
-        {
-            await EmitLog(emitSse, "warn",
-                $"Plan validation failed: {validationReason} — replanning…", ct: ct);
-            var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
-                "Fix exactly that issue — do not add unrelated files, features, or refactors." +
-                (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
-            var replan = await AnalyzePromptAndPlanCodeChanges(
-                prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
-            if (replan != null && replan.Plan.Count > 0)
+            var validationReason = await ValidatePlanAsync(prompt, plan, ct);
+            if (_gracefulStop)
             {
-                plan = MergePlans(plan, replan);
+                await EmitLog(emitSse, "warn", "User did not respond to command confirmation — skipping card.", ct: ct);
+                return (allSteps, plan);
+            }
+            if (validationReason != null)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Plan validation failed: {validationReason} — replanning…", ct: ct);
+                var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
+                    "Fix exactly that issue — do not add unrelated files, features, or refactors." +
+                    (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
+                var replan = await AnalyzePromptAndPlanCodeChanges(
+                    prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
+                if (replan != null && replan.Plan.Count > 0)
+                {
+                    plan = MergePlans(plan, replan);
+                    if (plan?.Plan?.Count > 0)
+                        plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
+                    if (emitSse && plan != null)
+                        await SendSse(Response, "plan",
+                            new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+                }
+            }
+            else
+            {
+                await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
+            }
+
+            if (plan != null && !string.IsNullOrEmpty(projectRoot))
+            {
+                plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot) ?? plan;
+                plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot) ?? plan;
+            }
+
+            if (emitSse && plan?.Plan?.Count > 0)
+            {
+                await SendSse(Response, "plan",
+                    new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+            }
+
+            if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
+            {
+                await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct, summary: plan.Summary ?? "", score: plan.Score);
+            }
+
+            if (plan?.Plan?.Count > 0)
+            {
+                var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);
+                if (auditResult != null && auditResult.Steps.Count > 0)
+                {
+                    var alreadyDoneIndices = auditResult.Steps
+                        .Where(s => s.AlreadyDone)
+                        .Select(s => s.Index)
+                        .ToHashSet();
+                    var decoupledSteps = new List<(int originalIndex, List<PlanStep> newSteps)>();
+                    foreach (var step in auditResult.Steps)
+                    {
+                        if (step.NeedsDecoupling && step.DecoupledSteps?.Count > 0)
+                        {
+                            decoupledSteps.Add((step.Index, step.DecoupledSteps));
+                        }
+                    }
+
+                    if (alreadyDoneIndices.Count > 0 || decoupledSteps.Count > 0)
+                    {
+                        var newPlanItems = new List<PlanStep>();
+                        for (var i = 0; i < plan.Plan.Count; i++)
+                        {
+                            if (alreadyDoneIndices.Contains(i))
+                            {
+                                await EmitLog(emitSse, "info",
+                                    $"Plan audit: step {i + 1} already done — skipping. Reason: {auditResult.Steps.First(s => s.Index == i).Reason}", ct: ct);
+                                continue;
+                            }
+                            var decoupled = decoupledSteps.FirstOrDefault(d => d.originalIndex == i);
+                            if (decoupled != default)
+                            {
+                                await EmitLog(emitSse, "info",
+                                    $"Plan audit: step {i + 1} decoupled into {decoupled.newSteps.Count} sub-steps", ct: ct);
+                                newPlanItems.Add(plan.Plan[i]);
+                                foreach (var sub in decoupled.newSteps)
+                                {
+                                    sub.Priority = plan.Plan[i].Priority;
+                                    newPlanItems.Add(sub);
+                                }
+                                continue;
+                            }
+                            newPlanItems.Add(plan.Plan[i]);
+                        }
+                        plan.Plan = newPlanItems;
+                        plan.Plan = AgentUtilities.RemergeTableCreationSplits(plan.Plan);
+                        plan.Plan = AgentUtilities.DeduplicateSimilarSteps(plan.Plan);
+                        plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
+
+                        if (emitSse)
+                        {
+                            await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
+                        }
+                    }
+                }
+            }
+
+
+            if (plan != null)
+                await ValidatePlanLineNumbersAsync(plan, projectRoot, ct);
+
+
+
+            if (plan?.Plan?.Count > 1)
+            {
+                plan = await RunPlanCoherenceCheckAsync(
+                    plan, projectRoot, prompt, emitSse, ct);
                 if (plan?.Plan?.Count > 0)
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
-                if (emitSse && plan != null)
-                    await SendSse(Response, "plan",
-                        new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan }, ct);
+                if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
+                    await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
+                        summary: plan.Summary ?? "", score: plan.Score);
             }
-        }
-        else
-        {
-            await EmitLog(emitSse, "success", $"Plan validation passed.", ct: ct);
-        }
-
-        if (plan != null && !string.IsNullOrEmpty(projectRoot))
-        {
-            plan = AgentUtilities.EnforceAngularScaffolding(plan, projectRoot) ?? plan;
-            plan = AgentUtilities.EnforceProxyConfigForControllers(plan, projectRoot) ?? plan;
-        }
-
-        if (emitSse && plan?.Plan?.Count > 0)
-        {
-            await SendSse(Response, "plan",
-                new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
-        }
-
-        if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
-        {
-            await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct, summary: plan.Summary ?? "", score: plan.Score);
-        }
-
-        if (plan?.Plan?.Count > 0)
-        {
-            var auditResult = await PlanPreAuditAsync(plan, projectRoot, emitSse, ct, prompt);
-            if (auditResult != null && auditResult.Steps.Count > 0)
-            {
-                var alreadyDoneIndices = auditResult.Steps
-                    .Where(s => s.AlreadyDone)
-                    .Select(s => s.Index)
-                    .ToHashSet();
-                var decoupledSteps = new List<(int originalIndex, List<PlanStep> newSteps)>();
-                foreach (var step in auditResult.Steps)
-                {
-                    if (step.NeedsDecoupling && step.DecoupledSteps?.Count > 0)
-                    {
-                        decoupledSteps.Add((step.Index, step.DecoupledSteps));
-                    }
-                }
-
-                if (alreadyDoneIndices.Count > 0 || decoupledSteps.Count > 0)
-                {
-                    var newPlanItems = new List<PlanStep>();
-                    for (var i = 0; i < plan.Plan.Count; i++)
-                    {
-                        if (alreadyDoneIndices.Contains(i))
-                        {
-                            await EmitLog(emitSse, "info",
-                                $"Plan audit: step {i + 1} already done — skipping. Reason: {auditResult.Steps.First(s => s.Index == i).Reason}", ct: ct);
-                            continue;
-                        }
-                        var decoupled = decoupledSteps.FirstOrDefault(d => d.originalIndex == i);
-                        if (decoupled != default)
-                        {
-                            await EmitLog(emitSse, "info",
-                                $"Plan audit: step {i + 1} decoupled into {decoupled.newSteps.Count} sub-steps", ct: ct);
-                            newPlanItems.Add(plan.Plan[i]);
-                            foreach (var sub in decoupled.newSteps)
-                            {
-                                sub.Priority = plan.Plan[i].Priority;
-                                newPlanItems.Add(sub);
-                            }
-                            continue;
-                        }
-                        newPlanItems.Add(plan.Plan[i]);
-                    }
-                    plan.Plan = newPlanItems;
-                    plan.Plan = AgentUtilities.RemergeTableCreationSplits(plan.Plan);
-                    plan.Plan = AgentUtilities.DeduplicateSimilarSteps(plan.Plan);
-                    plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
-
-                    if (emitSse)
-                    {
-                        await SendSse(Response, "plan", new { thinking = plan.Thinking, summary = plan.Summary, items = plan.Plan, audited = true }, ct);
-                    }
-                }
-            }
-        }
 
 
-        if (plan != null)
-            await ValidatePlanLineNumbersAsync(plan, projectRoot, ct);
-
-
-
-        if (plan?.Plan?.Count > 1)
-        {
-            plan = await RunPlanCoherenceCheckAsync(
-                plan, projectRoot, prompt, emitSse, ct);
-            if (plan?.Plan?.Count > 0)
-                plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
-            if (!string.IsNullOrWhiteSpace(cardId) && plan?.Plan?.Count > 0)
-                await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
-                    summary: plan.Summary ?? "", score: plan.Score);
-        }
-
-
-        await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
-        if (emitSse)
-        {
-            await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
-        }
-
-        var fileBackups = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var step in plan?.Plan ?? [])
-        {
-            if (!AgentUtilities.IsRelativePath(step.File)) continue;
-            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
-            if (!fileBackups.ContainsKey(fullPath))
-            {
-                fileBackups[fullPath] = System.IO.File.Exists(fullPath)
-                    ? System.IO.File.ReadAllText(fullPath, Encoding.UTF8)
-                    : null;
-            }
-        }
-
-        try
-        {
-            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
-                steeringContext: steeringContext, attachedFiles: attachedFiles,
-                cardId: cardId);
-        }
-        catch (StepFatalException ex)
-        {
-            await EmitLog(emitSse, "error",
-                $"⛔ Plan execution halted due to fatal step failure: {ex.Message}", ct: ct);
-
+            await EmitLog(emitSse, "info", "Phase 3 — EXECUTE", ct: ct);
             if (emitSse)
             {
-                await SendSse(Response, "fatal", new
-                {
-                    reason = "A plan step failed irrecoverably — execution halted",
-                    failedStep = ex.FailedFilePath,
-                    error = ex.Message
-                }, ct);
+                await SendSse(Response, "phase", new { phase = "execute", message = "Executing plan…" }, ct);
             }
 
-            return (allSteps, plan ?? new AgentPlan());
+            foreach (var step in plan?.Plan ?? [])
+            {
+                if (!AgentUtilities.IsRelativePath(step.File)) continue;
+                var fullPath = Path.GetFullPath(Path.Combine(projectRoot, step.File.Replace('/', Path.DirectorySeparatorChar)));
+                if (!fileBackups.ContainsKey(fullPath))
+                {
+                    fileBackups[fullPath] = System.IO.File.Exists(fullPath)
+                        ? System.IO.File.ReadAllText(fullPath, Encoding.UTF8)
+                        : null;
+                }
+            }
+
+            try
+            {
+                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
+                    steeringContext: steeringContext, attachedFiles: attachedFiles,
+                    cardId: cardId);
+            }
+            catch (StepFatalException ex)
+            {
+                await EmitLog(emitSse, "error",
+                    $"⛔ Plan execution halted due to fatal step failure: {ex.Message}", ct: ct);
+
+                if (emitSse)
+                {
+                    await SendSse(Response, "fatal", new
+                    {
+                        reason = "A plan step failed irrecoverably — execution halted",
+                        failedStep = ex.FailedFilePath,
+                        error = ex.Message
+                    }, ct);
+                }
+
+                return (allSteps, plan ?? new AgentPlan());
+            }
+
         }
 
         var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
-
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
