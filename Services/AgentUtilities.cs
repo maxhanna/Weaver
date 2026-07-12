@@ -3152,6 +3152,25 @@ public static class AgentUtilities
         if (string.IsNullOrEmpty(s)) return s ?? "";
         return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
     }
+    public static string? ExtractTargetSymbolFromChange(string change)
+    {
+        if (string.IsNullOrWhiteSpace(change)) return null;
+
+        var m = Regex.Match(change, @"\b(?:class|struct|interface|record)\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        m = Regex.Match(change, @"\b([A-Z]\w*(?:DTO|Dto|Model|Request|Response|Controller|Service))\b");
+        if (m.Success) return m.Groups[1].Value;
+
+        m = Regex.Match(change, @"\bmethod\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        m = Regex.Match(change, @"\b(?:in|inside)\s+(?:the\s+)?([A-Z]\w+)\b");
+        if (m.Success) return m.Groups[1].Value;
+
+        return null;
+    }
+
     public static List<string> ExtractDisambiguationKeywords(string? changeDesc)
     {
         if (string.IsNullOrWhiteSpace(changeDesc)) return new List<string>();
@@ -3954,12 +3973,26 @@ public static class AgentUtilities
 
         if (!string.IsNullOrWhiteSpace(targetSymbol))
         {
+            var declPattern = $@"\b(class|record|struct)\s+{Regex.Escape(targetSymbol)}\b";
             var symPattern = $@"\b{Regex.Escape(targetSymbol)}\s*[\(<{{]";
+            var foundDecl = false;
             for (var i = 0; i < lines.Length; i++)
             {
-                if (!Regex.IsMatch(lines[i], symPattern, RegexOptions.IgnoreCase)) continue;
-                candidates.Add((i + 1, 92));
-                break;
+                if (Regex.IsMatch(lines[i], declPattern, RegexOptions.IgnoreCase))
+                {
+                    candidates.Add((i + 1, 99));
+                    foundDecl = true;
+                    break;
+                }
+            }
+            if (!foundDecl)
+            {
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    if (!Regex.IsMatch(lines[i], symPattern, RegexOptions.IgnoreCase)) continue;
+                    candidates.Add((i + 1, 92));
+                    break;
+                }
             }
         }
 

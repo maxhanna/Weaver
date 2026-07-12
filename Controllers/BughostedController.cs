@@ -302,7 +302,7 @@ public class BughostedController : ControllerBase
         {
             return StatusCode(500, new { error = ex.Message });
         }
-    } 
+    }
 
     [HttpGet("version")]
     public async Task<IActionResult> GetVersion()
@@ -459,9 +459,12 @@ public class BughostedController : ControllerBase
     [HttpPost("addbenchmark")]
     public async Task<IActionResult> AddBenchmark([FromBody] BenchmarkDataDTO dto)
     {
+        if (string.IsNullOrWhiteSpace(dto.ClientId) || !_sessions.TryGetValue(dto.ClientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
         var cfg = await _configFile.LoadConfigAsync();
         var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
-
+        dto.Token = session.Token; // Ensure the token is set from the session
         try
         {
             var client = _clientFactory.CreateClient();
@@ -474,7 +477,9 @@ public class BughostedController : ControllerBase
             var body = await httpRes.Content.ReadAsStringAsync();
 
             if (!httpRes.IsSuccessStatusCode)
-            return BadRequest(new { error = "Failed to send benchmark", detail = body });
+            {
+                return BadRequest(new { error = "Failed to send benchmark", detail = body });
+            }
 
             return Ok(new { message = "Benchmark sent successfully" });
         }
@@ -586,7 +591,7 @@ public class BughostedController : ControllerBase
         if (!string.IsNullOrWhiteSpace(req.ClientId))
             _sessions.Remove(req.ClientId);
         return Ok(new { status = "logged_out" });
-    } 
+    }
 
     /// <summary>
     /// Polls bughosted.com for pending file requests, processes them locally,
@@ -663,63 +668,63 @@ public class BughostedController : ControllerBase
         switch (type)
         {
             case "listing":
-            {
-                if (!Directory.Exists(targetFull))
-                    return JsonSerializer.Serialize(new { error = "Directory not found" });
-
-                var dirs = Directory.GetDirectories(targetFull)
-                    .Select(d => new
-                    {
-                        name = Path.GetFileName(d),
-                        path = Path.GetRelativePath(workspaceRoot, d).Replace('\\', '/'),
-                        isDirectory = true
-                    });
-
-                var files = Directory.GetFiles(targetFull)
-                    .Select(f => new
-                    {
-                        name = Path.GetFileName(f),
-                        path = Path.GetRelativePath(workspaceRoot, f).Replace('\\', '/'),
-                        isDirectory = false
-                    });
-
-                var entries = dirs.Concat(files)
-                    .OrderByDescending(x => x.isDirectory)
-                    .ThenBy(x => x.name);
-
-                return JsonSerializer.Serialize(new
                 {
-                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
-                    entries
-                });
-            }
+                    if (!Directory.Exists(targetFull))
+                        return JsonSerializer.Serialize(new { error = "Directory not found" });
+
+                    var dirs = Directory.GetDirectories(targetFull)
+                        .Select(d => new
+                        {
+                            name = Path.GetFileName(d),
+                            path = Path.GetRelativePath(workspaceRoot, d).Replace('\\', '/'),
+                            isDirectory = true
+                        });
+
+                    var files = Directory.GetFiles(targetFull)
+                        .Select(f => new
+                        {
+                            name = Path.GetFileName(f),
+                            path = Path.GetRelativePath(workspaceRoot, f).Replace('\\', '/'),
+                            isDirectory = false
+                        });
+
+                    var entries = dirs.Concat(files)
+                        .OrderByDescending(x => x.isDirectory)
+                        .ThenBy(x => x.name);
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                        entries
+                    });
+                }
 
             case "content":
-            {
-                if (!System.IO.File.Exists(targetFull))
-                    return JsonSerializer.Serialize(new { error = "File not found" });
-
-                var fileContent = System.IO.File.ReadAllText(targetFull, Encoding.UTF8);
-                return JsonSerializer.Serialize(new
                 {
-                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
-                    content = fileContent
-                });
-            }
+                    if (!System.IO.File.Exists(targetFull))
+                        return JsonSerializer.Serialize(new { error = "File not found" });
+
+                    var fileContent = System.IO.File.ReadAllText(targetFull, Encoding.UTF8);
+                    return JsonSerializer.Serialize(new
+                    {
+                        path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                        content = fileContent
+                    });
+                }
 
             case "save":
-            {
-                var dir = Path.GetDirectoryName(targetFull);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                System.IO.File.WriteAllText(targetFull, content ?? string.Empty, Encoding.UTF8);
-                return JsonSerializer.Serialize(new
                 {
-                    path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
-                    written = true
-                });
-            }
+                    var dir = Path.GetDirectoryName(targetFull);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+
+                    System.IO.File.WriteAllText(targetFull, content ?? string.Empty, Encoding.UTF8);
+                    return JsonSerializer.Serialize(new
+                    {
+                        path = Path.GetRelativePath(workspaceRoot, targetFull).Replace('\\', '/'),
+                        written = true
+                    });
+                }
 
             default:
                 return JsonSerializer.Serialize(new { error = $"Unknown request type: {type}" });
@@ -781,6 +786,19 @@ public class BughostedController : ControllerBase
 
 public class BenchmarkDataDTO
 {
+    public string? ClientId { get; set; }
+    public string? Token { get; set; }
+    public string? Date { get; set; }
+    public string? Benchmark { get; set; }
+    public string? Steps { get; set; }
+    public string? Score { get; set; }
+    public string? Status { get; set; }
+    public string? Duration { get; set; }
+    public string? Model { get; set; }
+    public string? OS { get; set; }
+    public string? CPU { get; set; }
+    public string? RAM { get; set; }
+    public string? GPU { get; set; }
 }
 
 

@@ -105,6 +105,19 @@ public class AgentController : ControllerBase
                 "  - fullFile MUST contain EVERY line of the new file.\n" +
                 "  - Use array format for multi-line content.\n\n",
 
+            "format_c_class_fill" =>
+                "You MUST use FORMAT C to fill an EXISTING class body with new property/field declarations:\n" +
+                "{\n" +
+                "  \"targetType\": \"class\",\n" +
+                "  \"targetName\": \"ExistingClassName\",\n" +
+                "  \"newCode\": [\"    public string? Token { get; set; }\", \"    public string? Date { get; set; }\"]\n" +
+                "}\n" +
+                "  - targetType MUST be \"class\".\n" +
+                "  - targetName MUST be the EXISTING class name copied VERBATIM from the file (e.g. the class already shown as empty `{ }` in the file content below).\n" +
+                "  - newCode MUST contain ONLY the new property/field lines to insert inside the class body — one per line.\n" +
+                "  - Do NOT repeat the class declaration or braces in newCode. Do NOT set insertAfter.\n" +
+                "  - Do NOT use oldString/newString. Do NOT use fullFile. Do NOT touch any other method in the file.\n\n",
+
             _ =>
                 "Use oldString/newString targeted edit format:\n" +
                 "{\n" +
@@ -865,7 +878,16 @@ public class AgentController : ControllerBase
                 Regex.IsMatch(changeLowerForFormat, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b");
             var isHttpEndpoint = (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase);
             var isDeletion = changeLowerForFormat.Contains("remove") || changeLowerForFormat.Contains("delete");
-            if (isNewCsMethod || isHttpEndpoint)
+            var isClassFillHint = !isNewCsMethod && Regex.IsMatch(changeLowerForFormat, @"\bclass\b") &&
+                (Regex.IsMatch(changeLowerForFormat, @"\bfill\s+in\b") || Regex.IsMatch(changeLowerForFormat, @"\bpopulate\b") ||
+                 (Regex.IsMatch(changeLowerForFormat, @"\bpropert") && changeLowerForFormat.Count(c => c == ',') >= 2));
+            if (isClassFillHint)
+            {
+                sb.AppendLine("⚠ EDIT FORMAT: FORMAT C (targetType=\"class\", NO insertAfter) — filling an existing class with new properties.");
+                sb.AppendLine("  Set targetType=\"class\", targetName to the EXISTING class name, and newCode to ONLY the new property lines.");
+                sb.AppendLine("  Do NOT repeat the class declaration/braces. Do NOT touch any other method in the file. Do NOT use oldString/newString for this.");
+            }
+            else if (isNewCsMethod || isHttpEndpoint)
             {
                 sb.AppendLine("⚠ EDIT FORMAT: FORMAT C (insertAfter) — adding a new C# method/endpoint.");
                 sb.AppendLine("  You MUST use targetType=\"method\", targetName=existing method, insertAfter=true, newCode=complete method.");
@@ -1277,18 +1299,37 @@ public class AgentController : ControllerBase
             await SendSse(Response, "edit-resolve", new { }, ct);
 
         var classIsNewCsMethod = ext == ".cs" && fileExists && (
-            Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b") ||
-            (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+          Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b") ||
+          (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+
+        var isClassPropertyFill = ext == ".cs" && fileExists && !classIsNewCsMethod &&
+            Regex.IsMatch(changeLower, @"\bclass\b") &&
+            (Regex.IsMatch(changeLower, @"\bfill\s+in\b") ||
+             Regex.IsMatch(changeLower, @"\bpopulate\b") ||
+             Regex.IsMatch(changeLower, @"\ball\s+(?:the\s+)?(?:specified|required|listed)\s+propert") ||
+             (Regex.IsMatch(changeLower, @"\bpropert") && changeLower.Count(c => c == ',') >= 2));
 
         string editFormat;
         if (!fileExists)
+        {
             editFormat = "full_file";
+        }
         else if (classIsNewCsMethod)
+        {
             editFormat = "format_c_insert";
+        }
+        else if (isClassPropertyFill)
+        {
+            editFormat = "format_c_class_fill";
+        }
         else if (changeLower.Contains("remove") || changeLower.Contains("delete"))
+        {
             editFormat = "delete";
+        }
         else
+        {
             editFormat = "old_new";
+        }
 
         var systemPrompt = BuildEditSystemPrompt(editFormat);
         var (raw, _, resolveError2) = await CallLlmRawStreaming(systemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
@@ -1299,10 +1340,9 @@ public class AgentController : ControllerBase
         }
 
         if (string.IsNullOrWhiteSpace(raw))
+        {
             return (null, null, false, null, false, "LLM returned empty response", false);
-
-
-
+        }
 
         if (raw.Length > 6000 || raw.Split('\n').Length > 80)
         {
@@ -2227,6 +2267,10 @@ public class AgentController : ControllerBase
         sb.AppendLine("      → alreadyDone = true.");
         sb.AppendLine();
         sb.AppendLine("   DO NOT decouple if the step is a single coherent edit in one location (e.g., 'Modify the CalculateTotal method to include tax').");
+        sb.AppendLine("   DO NOT decouple filling in a class/record/struct with multiple properties or fields.");
+        sb.AppendLine("   'Fill in UserDTO with Name, Email, Age' is ONE step — add all properties at once in the same location.");
+        sb.AppendLine("   'Add properties Token, Date, Score to BenchmarkDataDTO' is ONE step, not 12 individual property steps.");
+        sb.AppendLine("   Multiple properties grouped in the same step are intentionally one coherent change.");
         sb.AppendLine("   DO NOT decouple method route attributes from the method itself. In C#/Java/Python, route attributes");
         sb.AppendLine("   ([HttpGet], @app.get, @RequestMapping, etc.) ARE part of the method declaration at the same");
         sb.AppendLine("   location — they are NOT a separate 'endpoint registration'. 'Add GetBenchmarks method with [HttpGet]'");
@@ -2921,15 +2965,17 @@ public class AgentController : ControllerBase
 
         if (targetWasAttached)
         {
+            var fallbackSymbol = AgentUtilities.ExtractTargetSymbolFromChange(step.Change ?? "");
             await EmitLog(emitSse, "info",
-                $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly", ct: ct);
+                $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly" +
+                (fallbackSymbol != null ? $" (target symbol: '{fallbackSymbol}')" : ""), ct: ct);
             return new StepExplorationResult
             {
                 EnrichedStep = step,
                 ExplorationContext = ctx.ToString(),
                 FilesRead = filesRead.ToList(),
                 RefinedChange = step?.Change ?? "",
-                TargetSymbol = null,
+                TargetSymbol = fallbackSymbol,
                 EstimatedLineRange = null,
                 Confidence = 100,
                 LowConfidenceWarning = null
@@ -3158,8 +3204,8 @@ public class AgentController : ControllerBase
                 {
                     var lineCount = astOld.Split('\n').Length;
                     var changeLower = (refinedChange ?? step.Change ?? "").ToLowerInvariant();
-                    var isPropertyAdd = changeLower.Contains("add") &&
-                        (changeLower.Contains("property") || changeLower.Contains("field") ||
+                    var isPropertyAdd = (changeLower.Contains("add") || changeLower.Contains("fill") || changeLower.Contains("populate")) &&
+                        (changeLower.Contains("propert") || changeLower.Contains("field") ||
                          changeLower.Contains("column") || changeLower.Contains("setting") ||
                          changeLower.Contains("option") || changeLower.Contains("bool") ||
                          changeLower.Contains("string") || changeLower.Contains("int") ||
@@ -4022,13 +4068,16 @@ emitSse, ct);
                     preExtractContent, step.Change ?? "", contextLines: 3, centerLine: resolvedLine);
                 if (!string.IsNullOrWhiteSpace(preExtracted))
                 {
-                    var preLines = preExtracted.Split('\n');
-                    if (preLines.Length <= 7)
+                    var preLines = preExtracted.Split('\n').ToList();
+                    while (preLines.Count > 0 && Regex.IsMatch(preLines[0].TrimEnd(), @"^}$"))
+                        preLines.RemoveAt(0);
+                    if (preLines.Count > 0 && preLines.Count <= 7)
                     {
-                        step.OldString = preExtracted;
-                        planOldStr = preExtracted;
+                        var joined = string.Join("\n", preLines);
+                        step.OldString = joined;
+                        planOldStr = joined;
                         await EmitLog(emitSse, "info",
-                            $"Pre-extracted {preLines.Length} lines from resolved line {resolvedLine} as oldString anchor", ct: ct);
+                            $"Pre-extracted {preLines.Count} lines from resolved line {resolvedLine} as oldString anchor (stripped leading '}}')", ct: ct);
                     }
                 }
             }
@@ -4138,10 +4187,9 @@ emitSse, ct);
                     (step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase);
 
                 var codeFileExtRestricted = fullFileExt is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx";
-                var allowFullFileEscalation = fileAlreadyExists &&
+                var allowFullFileEscalation = fileAlreadyExists && !codeFileExtRestricted &&
                     fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte") &&
-                    ((history.Count >= 3 || isCssDeletion) && !codeFileExtRestricted ||
-                     codeFileExtRestricted && history.Count >= 5);
+                    (history.Count >= 3 || isCssDeletion);
 
                 if (fileAlreadyExists && !allowFullFileEscalation)
                 {
@@ -4150,11 +4198,9 @@ emitSse, ct);
                           "Use a single unique line from the TARGET SECTION as your ENTIRE oldString (must appear only once in the file, ≥20 chars). " +
                           "Look at the ⚡ ACTUAL TARGET SECTION shown in the history above."
                         : fullFileExt == ".cs"
-                        ? (history.Count >= 5
-                            ? "fullFile ALLOWED for C# after many retries — the LLM cannot produce valid oldString/newString. " +
-                              "Set fullFile to the ENTIRE file content with your changes applied."
-                            : "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
-                              "Use a targeted oldString/newString edit. Pick a single unique line from the target method as your anchor.")
+                            ? "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
+                              "Use a targeted oldString/newString edit. Pick a single unique line INSIDE the target class/method as your anchor. " +
+                              "Do NOT include the preceding closing brace } in your oldString."
                         : "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
@@ -4229,6 +4275,28 @@ emitSse, ct);
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
             string? preEditContent = null;
+
+            if (!string.IsNullOrWhiteSpace(oldStr) && step.LineNumber > 0 && !fullFile && !fromFormatC)
+            {
+                var targetSection = AgentUtilities.ExtractVerbatimTargetSection(
+                    fileContent, step.Change ?? "", 10, centerLine: step.LineNumber);
+                if (!string.IsNullOrWhiteSpace(targetSection))
+                {
+                    var targetLines = new HashSet<string>(targetSection.Split('\n')
+                        .Select(l => l.Trim()).Where(l => l.Length >= 8));
+                    var oldContentLines = oldStr.Split('\n')
+                        .Select(l => l.Trim()).Where(l => l.Length >= 8 && l != "}")
+                        .ToList();
+                    if (oldContentLines.Count > 0 && !oldContentLines.Any(l => targetLines.Contains(l)))
+                    {
+                        var err = "WRONG SECTION: None of the oldString lines appear inside the ⚡ ACTUAL TARGET SECTION. " +
+                                  "Your oldString lines must be a subset of the target section shown in the prompt.";
+                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                        history.Add((oldStr!, newStr ?? "", err));
+                        continue;
+                    }
+                }
+            }
 
             if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
             {
@@ -10806,6 +10874,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             await EmitLog(emitSse, "info",
                                 $"Plan audit: step {i + 1} decoupled into {decoupled.newSteps.Count} sub-steps", ct: ct);
+                            newPlanItems.Add(plan.Plan[i]);
                             foreach (var sub in decoupled.newSteps)
                             {
                                 sub.Priority = plan.Plan[i].Priority;
@@ -12497,33 +12566,38 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         if (!fromFormatC)
         {
-            var uniqueRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (Match m in Regex.Matches(newContent,
-                @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)"""))
-            {
-                if (!uniqueRoutes.Add(m.Groups[1].Value))
-                    return (false,
-                        $"Duplicate route \"{m.Groups[1].Value}\" in result — LLM likely " +
-                        "copied an entire existing method instead of inserting the new code. " +
-                        "Use a precise insertion anchor or insertAfter instead.", 1);
-            }
+            var newRoutes = Regex.Matches(newContent,
+                @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)""")
+                .Cast<Match>().Select(m => m.Groups[1].Value).ToList();
+            var oldRoutes = Regex.Matches(oldContent,
+                @"\[Http(?:Get|Post|Put|Delete|Patch)\(""([^""]+)""")
+                .Cast<Match>().Select(m => m.Groups[1].Value).ToList();
+            var introducedDups = newRoutes
+                .GroupBy(r => r, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .Where(r => !oldRoutes.Contains(r, StringComparer.OrdinalIgnoreCase) ||
+                             oldRoutes.Count(o => o.Equals(r, StringComparison.OrdinalIgnoreCase)) < 2)
+                .ToList();
+            if (introducedDups.Count > 0)
+                return (false,
+                    $"Edit introduces duplicate route(s): {string.Join(", ", introducedDups)}. " +
+                    "LLM likely copied an entire existing method instead of inserting new code. " +
+                    "Use a precise insertion anchor or insertAfter instead.", 1);
         }
 
-
-        var emptyDecls = Regex.Matches(newContent,
-            @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\{\s*(?:\/\*[\s\S]*?\*\/)?\s*\}|" +
-            @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\n\s*\{\s*\n\s*\}")
-            .Cast<Match>().ToList();
-        if (emptyDecls.Count > 0)
+        var emptyDeclPattern =
+             @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\{\s*(?:\/\*[\s\S]*?\*\/)?\s*\}|" +
+             @"(?:public|private|internal|protected)?\s*(?:class|struct|interface|record)\s+\w+\s*\n\s*\{\s*\n\s*\}";
+        var emptyDeclsNew = Regex.Matches(newContent, emptyDeclPattern).Cast<Match>().Select(m => m.Value.Trim()).ToHashSet(StringComparer.Ordinal);
+        var emptyDeclsOld = Regex.Matches(oldContent, emptyDeclPattern).Cast<Match>().Select(m => m.Value.Trim()).ToHashSet(StringComparer.Ordinal);
+        var introducedEmpty = emptyDeclsNew.Except(emptyDeclsOld).ToList();
+        if (introducedEmpty.Count > 0)
         {
-            var names = emptyDecls.Select(m => m.Value.Trim()).Distinct().ToList();
             return (false,
-                $"Edit introduces empty type(s): {string.Join(", ", names)}. These types already exist in the project — " +
+                $"Edit introduces NEW empty type(s): {string.Join(", ", introducedEmpty)}. These types already exist in the project — " +
                 "find their definition and use the existing type instead of creating a stub.", 1);
         }
-
-
-
 
         var specificSqlPatterns = new[]
         {
