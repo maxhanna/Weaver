@@ -1049,12 +1049,61 @@ public static class AgentUtilities
         }
         return merged;
     }
+    public static string StripSpuriousBlankLines(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return code;
+
+        var lines = code.Split('\n');
+        if (lines.Length < 6) return code;
+
+        var codeCount = lines.Count(l => !string.IsNullOrWhiteSpace(l));
+        var blankCount = lines.Count(l => string.IsNullOrWhiteSpace(l));
+        if (codeCount < 3 || blankCount < codeCount * 0.7) return code;
+ 
+        var alternating = 0;
+        for (var i = 0; i < lines.Length - 1; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]) &&
+                string.IsNullOrWhiteSpace(lines[i + 1]))
+                alternating++;
+        }
+
+        if (alternating < codeCount * 0.5) return code;
+ 
+        var result = new List<string>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(lines[i]))
+            {
+                var hasPrev = result.Count > 0 && !string.IsNullOrWhiteSpace(result[^1]);
+                var hasNext = i + 1 < lines.Length && !string.IsNullOrWhiteSpace(lines[i + 1]);
+                if (hasPrev && hasNext)
+                { 
+                    var prevTrimmed = result[^1].TrimEnd();
+                    var prevIndent = result[^1].TakeWhile(c => c == ' ' || c == '\t').Count();
+                    var nextIndent = lines[i + 1].TakeWhile(c => c == ' ' || c == '\t').Count();
+
+                    if ((prevTrimmed.EndsWith(';') || prevTrimmed.EndsWith('}')) &&
+                        Math.Abs(prevIndent - nextIndent) <= 1 &&
+                        (i == 0 || i - 1 < 0 || string.IsNullOrWhiteSpace(lines[i - 1]) == false))
+                    {
+                        // Check if line before prev was also blank — if so, skip
+                        if (result.Count > 1 && string.IsNullOrWhiteSpace(result[^2]))
+                            continue;
+                        result.Add(lines[i]);
+                        continue;
+                    }
+                    continue; // Skip spurious blank
+                }
+            }
+            result.Add(lines[i]);
+        }
+
+        return string.Join("\n", result);
+    }
     public static string CleanVerbatimStringEscapes(string content)
     {
-        if (string.IsNullOrEmpty(content)) return content;
-
-
-
+        if (string.IsNullOrEmpty(content)) return content; 
 
         var regex = new Regex(@"@""(?:""|[^""])*""", RegexOptions.Compiled);
         bool changed = false;
@@ -3167,6 +3216,156 @@ public static class AgentUtilities
 
         m = Regex.Match(change, @"\b(?:in|inside)\s+(?:the\s+)?([A-Z]\w+)\b");
         if (m.Success) return m.Groups[1].Value;
+
+        return null;
+    }
+    public static string CollapseExcessiveBlankLines(string content, string appliedNewStr)
+    {
+        if (string.IsNullOrWhiteSpace(appliedNewStr) || string.IsNullOrWhiteSpace(content))
+            return content;
+
+        var fileLines = content.Split('\n');
+
+        // Build a set of distinctive needle lines from the edited region
+        var needleLines = appliedNewStr.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l) && l.Length >= 5)
+            .ToHashSet(StringComparer.Ordinal);
+
+        if (needleLines.Count < 3) return content;
+ 
+        var startIdx = -1;
+        var endIdx = -1;
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            if (needleLines.Contains(fileLines[i].Trim()))
+            {
+                if (startIdx < 0) startIdx = i;
+                endIdx = i;
+            }
+        }
+
+        if (startIdx < 0 || endIdx <= startIdx) return content; 
+
+        startIdx = Math.Max(0, startIdx - 1);
+        endIdx = Math.Min(fileLines.Length - 1, endIdx + 1);
+ 
+        var regionLength = endIdx - startIdx + 1;
+        var regionCodeLines = 0;
+        var regionBlankLines = 0;
+        var regionAlternating = 0;
+
+        for (var i = startIdx; i <= endIdx; i++)
+        {
+            if (string.IsNullOrWhiteSpace(fileLines[i]))
+                regionBlankLines++;
+            else
+                regionCodeLines++;
+
+            if (i < endIdx &&
+                !string.IsNullOrWhiteSpace(fileLines[i]) &&
+                string.IsNullOrWhiteSpace(fileLines[i + 1]))
+                regionAlternating++;
+        }
+ 
+        if (regionCodeLines < 3 || regionAlternating < regionCodeLines * 0.5)
+            return content;
+ 
+        var result = new List<string>();
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            if (i < startIdx || i > endIdx)
+            {
+                result.Add(fileLines[i]);
+                continue;
+            }
+
+            // In the edited region
+            if (string.IsNullOrWhiteSpace(fileLines[i]))
+            {
+                // Check: is this a spurious blank line (between two code lines)?
+                var prevIsCode = i > startIdx && !string.IsNullOrWhiteSpace(fileLines[i - 1]);
+                var nextIsCode = i < endIdx && !string.IsNullOrWhiteSpace(fileLines[i + 1]);
+
+                if (prevIsCode && nextIsCode)
+                {
+                    // Check if the previous result line is already blank — don't stack
+                    if (result.Count > 0 && string.IsNullOrWhiteSpace(result[^1]))
+                        continue;
+
+                    // Check if this blank line is at a logical boundary:
+                    // Keep it only if the preceding code line ends with '}' or ';'
+                    // AND the following code line starts a new logical block
+                    var prevTrimmed = fileLines[i - 1].TrimEnd();
+                    var nextTrimmed = fileLines[i + 1].TrimStart();
+
+                    // If previous line ends with ';' or '}' and next starts a new
+                    // statement that's at the same indentation level, keep one blank
+                    var prevIndent = fileLines[i - 1].TakeWhile(c => c == ' ' || c == '\t').Count();
+                    var nextIndent = fileLines[i + 1].TakeWhile(c => c == ' ' || c == '\t').Count();
+
+                    // If both lines are at the same base indent and prev ends with ; or },
+                    // this MIGHT be an intentional separator — keep it only if there
+                    // wasn't already a blank line before the previous code line
+                    if ((prevTrimmed.EndsWith(';') || prevTrimmed.EndsWith('}')) &&
+                        prevIndent == nextIndent)
+                    {
+                        // Check if the line before prev was also blank — if so, this
+                        // is part of the alternating pattern, skip it
+                        if (i > startIdx + 1 && string.IsNullOrWhiteSpace(fileLines[i - 2]))
+                            continue;
+                        result.Add(fileLines[i]);
+                        continue;
+                    }
+
+                    // Spurious blank line — skip it
+                    continue;
+                }
+
+                result.Add(fileLines[i]);
+            }
+            else
+            {
+                result.Add(fileLines[i]);
+            }
+        }
+
+        var fixedContent = string.Join("\n", result);
+
+        // Normalize: collapse 3+ consecutive blank lines to 2 (preserve paragraph breaks)
+        fixedContent = Regex.Replace(fixedContent, @"\n{4,}", "\n\n\n");
+
+        return fixedContent != content ? fixedContent : content;
+    }
+    public static string? DetectExcessiveBlankLines(string newStr)
+    {
+        if (string.IsNullOrWhiteSpace(newStr)) return null;
+
+        var lines = newStr.Split('\n');
+        if (lines.Length < 6) return null;
+
+        var codeLines = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        var blankLines = lines.Where(l => string.IsNullOrWhiteSpace(l)).ToList();
+
+        if (codeLines.Count < 3) return null;
+
+        // Count the alternating pattern: code line → blank line → code line
+        var alternating = 0;
+        for (var i = 0; i < lines.Length - 1; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]) &&
+                string.IsNullOrWhiteSpace(lines[i + 1]))
+                alternating++;
+        }
+
+        // If ≥60% of code lines are followed by a blank line, it's the spurious pattern
+        if (alternating >= codeLines.Count * 0.6)
+        {
+            return $"EXCESSIVE BLANK LINES — newString has a blank line between nearly every code line " +
+                   $"({blankLines.Count} blank lines for {codeLines.Count} code lines, {alternating} alternating). " +
+                   "Remove the spurious blank lines. Statements should be on consecutive lines with normal spacing " +
+                   "(one blank line between logical sections at most, not between every single line).";
+        }
 
         return null;
     }

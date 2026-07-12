@@ -1736,6 +1736,11 @@ public class AgentController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(newStr))
                 {
                     var cleanedNewStr = AgentUtilities.CleanVerbatimStringEscapes(newStr);
+                    if (!string.IsNullOrWhiteSpace(newStr))
+                    {
+                        newStr = AgentUtilities.StripSpuriousBlankLines(newStr);
+                    }
+                    
                     if (cleanedNewStr != newStr)
                     {
                         newStr = cleanedNewStr;
@@ -3865,7 +3870,6 @@ public class AgentController : ControllerBase
         }
         catch { }
     }
-
     private async Task<int> ResolveAndApplyEdit(
         PlanStep step,
         string projectRoot,
@@ -4605,6 +4609,11 @@ emitSse, ct);
 
                 if (wipeReason == null)
                 {
+                    wipeReason = AgentUtilities.DetectExcessiveBlankLines(newStr!); 
+                }
+
+                if (wipeReason == null)
+                { 
                     wipeReason = AgentUtilities.DetectDuplicatePropertyAddition(oldStr!, newStr!);
                 }
 
@@ -5188,6 +5197,18 @@ emitSse, ct);
                 }
             }
 
+            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
+            {
+                var beforeBlankFix = newContent;
+                newContent = AgentUtilities.CollapseExcessiveBlankLines(newContent, newStr);
+                if (newContent != beforeBlankFix)
+                {
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                    await EmitLog(emitSse, "info",
+                        $"Collapsed excessive blank lines in edited region of {relPath}", ct: ct);
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
                 (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
             {
@@ -5293,7 +5314,7 @@ emitSse, ct);
                     {
                         var allReasons = string.Join(" ", reasons);
                         var methodMatches = Regex.Matches(allReasons,
-                            @"(?:'([a-zA-Z]\w+)'|`([a-zA-Z]\w+)`|method\s+'?([a-zA-Z]\w+)'?)",
+                            @"(?:'([a-zA-Z]\w+)'|`([a-zA-Z]\w+)`|method\s+'?([a-zA-Z]\w+)'?|vm\.([a-zA-Z]\w+)|([a-zA-Z]\w+)\s*\()",
                             RegexOptions.IgnoreCase);
                         var mentionedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         foreach (System.Text.RegularExpressions.Match m in methodMatches)
@@ -6520,7 +6541,11 @@ emitSse, ct);
             "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
             "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
             " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
-            " * Do NOT consider style/whitespace issues — those are handled by other passes.";
+            " * Do NOT consider style/whitespace issues — those are handled by other passes.\n" +
+            " * BLANK LINE SPAM: If the newString has a blank line between nearly every code line " +
+            "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
+            "  Code should have consecutive lines within a block, with at most one blank line " +
+            "  between logical sections.\n";
 
         var userMsg =
             $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
@@ -8699,7 +8724,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             try
             {
                 await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
-                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId);
+                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                    replanBudget: new[] { 0 });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -8737,7 +8763,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     try
                     {
                         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
-                            steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId);
+                            steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                            replanBudget: new[] { 0 });
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -12065,7 +12092,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
         string? steeringContext = null, List<string>? attachedFiles = null,
-        HashSet<int>? completedStepIndices = null, string? cardId = null)
+        HashSet<int>? completedStepIndices = null, string? cardId = null,
+        int[]? replanBudget = null)
     {
         var stepIndex = 0;
         var planItems = plan.Plan.ToList();
@@ -12073,7 +12101,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var checkpointCount = 0;
         const int MaxCheckpoints = 3;
         completedStepIndices ??= new HashSet<int>();
-        var replanBudget = new[] { 1 };
+        replanBudget ??= new[] { 1 };
         var alreadyDecoupled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var completedStepSignatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
