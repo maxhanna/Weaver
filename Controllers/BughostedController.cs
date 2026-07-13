@@ -468,7 +468,7 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var payload = JsonSerializer.Serialize(dto);
+            var payload = JsonSerializer.Serialize(new { dto });
             var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/addbenchmark")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")

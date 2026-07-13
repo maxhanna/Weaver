@@ -182,8 +182,14 @@ angular.module('kanbanApp')
                                                                 break;
                                                             case 'plan':
                                                                 if (parsed && parsed.items && parsed.items.length) {
+                                                                    var existingDone = {};
+                                                                    if (vm.planItems) vm.planItems.forEach(function (pi) { existingDone[pi.file + '|' + pi.change] = pi.done; });
                                                                     vm.planItems = parsed.items.map(function (item, i) {
-                                                                        return { index: i, file: item.File || item.file || '?', change: item.Change || item.change || '', priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: item.done || false, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
+                                                                        var file = item.File || item.file || '?';
+                                                                        var change = item.Change || item.change || '';
+                                                                        var key = file + '|' + change;
+                                                                        var wasDone = existingDone[key] || item.done || false;
+                                                                        return { index: i, file: file, change: change, priority: item.Priority || item.priority || i + 1, line: item.Line || item.line || 0, done: wasDone, oldString: item.OldString || item.oldString || '', newString: item.NewString || item.newString || '' };
                                                                     });
                                                                     if (parsed.thinking) vm.streamingThinking = parsed.thinking;
                                                                     if (parsed.summary) vm.streamingSummary = parsed.summary;
@@ -448,6 +454,7 @@ angular.module('kanbanApp')
 
                 vm.sendBenchmarkToServer = function (s) {
                     var benchmarkDto = {
+                        ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
                         Date: s.date,
                         Benchmark: s.level,
@@ -462,7 +469,7 @@ angular.module('kanbanApp')
                         GPU: vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || ''
                     };
 
-                    $http.post('/bughostedcontroller/addbenchmark', benchmarkDto)
+                    $http.post('/api/bughosted/addbenchmark', benchmarkDto)
                         .then(function (response) {
                             console.log('Successfully sent benchmark to server:', response.data);
                             alert('Benchmark successfully sent to BugHosted!');

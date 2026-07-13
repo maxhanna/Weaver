@@ -67,9 +67,19 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 var app = builder.Build();
 app.UseRouting();
 app.UseCors();
+
+// Serve static files from wwwroot/ on disk with caching (fast path)
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers.Append("Cache-Control", "public, max-age=3600");
+    }
+});
+
 var assembly = Assembly.GetExecutingAssembly();
 var resources = assembly.GetManifestResourceNames();
-// Serve index.html at root
+// Serve index.html at root (fallback to embedded resource)
 app.MapGet("/", async context =>
 {
     var indexRes = resources.First(r => r.EndsWith("wwwroot.index.html"));
@@ -79,7 +89,7 @@ app.MapGet("/", async context =>
     context.Response.ContentType = "text/html";
     await context.Response.WriteAsync(html);
 });
-// Serve ANY embedded static file
+// Serve static files from embedded resources (fallback if not on disk)
 app.MapGet("/{**path}", async context =>
 {
     string path = context.Request.Path.Value!.TrimStart('/').Replace("/", ".");

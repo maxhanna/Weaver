@@ -4308,4 +4308,48 @@ public static class AgentUtilities
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
+
+    public static bool HasUnbalancedBraces(string content)
+    {
+        var depth = 0;
+        var inSingle = false;
+        var inDouble = false;
+        var inTemplate = false;
+        var inLineComment = false;
+        var inBlockComment = false;
+
+        for (var i = 0; i < content.Length; i++)
+        {
+            var c = content[i];
+            var n = i + 1 < content.Length ? content[i + 1] : '\0';
+
+            if (inLineComment && c == '\n') { inLineComment = false; continue; }
+            if (inBlockComment && c == '*' && n == '/') { inBlockComment = false; i++; continue; }
+            if (inBlockComment) continue;
+            if (inLineComment) continue;
+
+            if (!inSingle && !inDouble && !inTemplate)
+            {
+                if (c == '/' && n == '/') { inLineComment = true; i++; continue; }
+                if (c == '/' && n == '*') { inBlockComment = true; i++; continue; }
+            }
+
+            if (c == '"' && !inSingle && !inTemplate) { inDouble = !inDouble; continue; }
+            if (c == '\'' && !inDouble && !inTemplate) { inSingle = !inSingle; continue; }
+            if (c == '`' && !inSingle && !inDouble) { inTemplate = !inTemplate; continue; }
+            if (c == '\\' && (inSingle || inDouble || inTemplate)) { i++; continue; }
+
+            if (!inSingle && !inDouble && !inTemplate)
+            {
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth < 0) return true;
+                }
+            }
+        }
+
+        return depth != 0;
+    }
 }

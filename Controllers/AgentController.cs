@@ -74,17 +74,17 @@ public class AgentController : ControllerBase
         var formatSection = editFormat switch
         {
             "format_c_insert" =>
-                "You MUST use FORMAT C to add a new method (insertAfter with an existing method as anchor):\n" +
+                "You MUST use FORMAT C to add a new method/function (insertAfter with an existing method as anchor):\n" +
                 "{\n" +
                 "  \"targetType\": \"method\",\n" +
                 "  \"targetName\": \"ExistingMethodName\",\n" +
                 "  \"insertAfter\": true,\n" +
-                "  \"newCode\": [\"    [HttpPost(\\\"route\\\")]\", \"    public async Task<IActionResult> NewMethod() {\", \"        ...\", \"    }\"]\n" +
+                "  \"newCode\": [\"    async myNewMethod(param: string): Promise<Result> {\", \"        // body\", \"    }\"]\n" +
                 "}\n" +
                 "  - targetType MUST be \"method\".\n" +
                 "  - targetName MUST be an EXISTING method name in the file (copy it VERBATIM from the file content).\n" +
                 "  - insertAfter MUST be true.\n" +
-                "  - newCode is the COMPLETE new method including attributes, signature, and body. Can be a string or array of lines.\n" +
+                "  - newCode is the COMPLETE new method including signature and body. Can be a string or array of lines.\n" +
                 "  - Do NOT use any other format. Do NOT return alreadyDone. Do NOT use fullFile.\n\n",
 
             "delete" =>
@@ -987,26 +987,49 @@ public class AgentController : ControllerBase
         }
 
         sb.AppendLine();
-        sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
-        sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
-                      "Include the line above/below for anchor context, repeat them unchanged in newString.");
-        sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
-                      "with unchanged signature and preserve all inline SQL verbatim.");
-        sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
-        sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
-        sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
-                      "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode. " +
-                      "PRESERVE all existing inline SQL queries verbatim — never rewrite them.");
-        sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
-                      "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
-                      "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
-                      "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
-                      "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
-        sb.AppendLine("To INSERT a new HTML element/block (or move an existing one): oldString MUST be the 1-2 lines IMMEDIATELY BEFORE the insertion point. " +
-                      "newString MUST be those exact same anchor lines PLUS the new element(s) appended after them. " +
-                      "CRITICAL: The new element MUST NOT be present in oldString. If oldString and newString are identical, the edit is a no-op and will fail.");
-        sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
-        sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
+        var isNewMethodInsertion = !string.IsNullOrWhiteSpace(step.Change) &&
+            langSupportsFormatC && (
+            Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route|function)\b",
+                RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(step.Change,
+                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual)\s+)*?" +
+                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface)\b)" +
+                @"[A-Za-z_]\w*\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase));
+
+        if (isNewMethodInsertion)
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠ NEW METHOD INSERTION — You MUST use FORMAT C with insertAfter:true.");
+            sb.AppendLine("  Set targetType=\"method\", targetName=\"NameOfExistingMethodToInsertAfter\".");
+            sb.AppendLine("  Set newCode to the FULL new method code (signature + body).");
+            sb.AppendLine("  NEVER use oldString/newString — it WILL fail for method insertion.");
+            sb.AppendLine("  NEVER use fullFile — it WILL overwrite the entire file.");
+            sb.AppendLine("  Do NOT output oldString or newString fields. ONLY output targetType, targetName, insertAfter:true, and newCode.");
+        }
+        else
+        {
+            sb.AppendLine("STRICT oldString SIZE LIMIT: MAXIMUM 10 lines. If you output more than 10 lines in oldString, the edit WILL fail.");
+            sb.AppendLine("SMALL targeted edits (1-5 lines, e.g. add a column to SQL, add one property): PREFER oldString/newString. " +
+                          "Include the line above/below for anchor context, repeat them unchanged in newString.");
+            sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
+                          "with unchanged signature and preserve all inline SQL verbatim.");
+            sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
+            sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
+            sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
+                          "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode. " +
+                          "PRESERVE all existing inline SQL queries verbatim — never rewrite them.");
+            sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
+                          "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
+                          "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
+                          "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
+                          "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
+            sb.AppendLine("To INSERT a new HTML element/block (or move an existing one): oldString MUST be the 1-2 lines IMMEDIATELY BEFORE the insertion point. " +
+                          "newString MUST be those exact same anchor lines PLUS the new element(s) appended after them. " +
+                          "CRITICAL: The new element MUST NOT be present in oldString. If oldString and newString are identical, the edit is a no-op and will fail.");
+            sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
+            sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
+        }
 
         if (history?.Count > 0)
         {
@@ -1017,7 +1040,18 @@ public class AgentController : ControllerBase
             {
                 var h = history[i];
                 sb.AppendLine($"\n--- Attempt {i + 1} — Error: {h.error} ---");
-                if (h.error.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
+                if (isNewMethodInsertion &&
+                    (h.error.Contains("oldString", StringComparison.OrdinalIgnoreCase) ||
+                     h.error.Contains("fullFile", StringComparison.OrdinalIgnoreCase) ||
+                     h.error.Contains("STRICT MAXIMUM", StringComparison.OrdinalIgnoreCase) ||
+                     h.error.Contains("does not contain any method", StringComparison.OrdinalIgnoreCase)))
+                {
+                    sb.AppendLine("  ⚠ NEW METHOD INSERTION: You MUST use FORMAT C with insertAfter:true.");
+                    sb.AppendLine("  Do NOT use oldString/newString or fullFile — they WILL fail.");
+                    sb.AppendLine("  You MUST output: targetType=\"method\", targetName=\"ExistingMethodName\", insertAfter=true, newCode=\"...full new method...\".");
+                    sb.AppendLine("  No oldString. No newString. No fullFile. ONLY targetType/targetName/insertAfter/newCode.");
+                }
+                else if (h.error.Contains("IDENTICAL to the existing code", StringComparison.OrdinalIgnoreCase) ||
     h.error.Contains("identical after normalization", StringComparison.OrdinalIgnoreCase))
                 {
                     sb.AppendLine("  ⚠ CRITICAL: Your newCode was IDENTICAL to the existing method — nothing changed.");
@@ -1300,9 +1334,22 @@ public class AgentController : ControllerBase
         if (emitSse)
             await SendSse(Response, "edit-resolve", new { }, ct);
 
+        var rawMethodCodeDetect = !string.IsNullOrEmpty(step.Change) &&
+            Regex.IsMatch(step.Change,
+                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual)\s+)*?" +
+                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface)\b)" +
+                @"[A-Za-z_]\w*\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase);
+
         var classIsNewCsMethod = ext == ".cs" && fileExists && (
           Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route)\b") ||
-          (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase));
+          (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase) ||
+          rawMethodCodeDetect);
+
+        var isNewMethodInsert = (fileExists && langSupportsFormatC && (
+            Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route|function)\b") ||
+            (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase) ||
+            rawMethodCodeDetect));
 
         var isClassPropertyFill = ext == ".cs" && fileExists && !classIsNewCsMethod &&
             Regex.IsMatch(changeLower, @"\bclass\b") &&
@@ -1316,7 +1363,7 @@ public class AgentController : ControllerBase
         {
             editFormat = "full_file";
         }
-        else if (classIsNewCsMethod)
+        else if (isNewMethodInsert)
         {
             editFormat = "format_c_insert";
         }
@@ -1562,17 +1609,29 @@ public class AgentController : ControllerBase
                     }
                     else
                     {
+                        // Match both patterns: "Add method FooName" AND "Add FooName method" AND "Add FooName method that..."
                         var addMethodMatch = Regex.Match(step.Change ?? "", @"Add\s+(?:a\s+)?(?:new\s+)?method\s+(\w+)", RegexOptions.IgnoreCase);
+                        if (!addMethodMatch.Success)
+                            addMethodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create|Implement|Insert|Define)\s+(?:a\s+)?(?:new\s+)?(\w+)\s+method\b", RegexOptions.IgnoreCase);
+                        if (!addMethodMatch.Success)
+                            addMethodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create|Implement|Insert|Define)\s+(?:a\s+)?(?:new\s+)?(\w+)\s*\(\s*\)", RegexOptions.IgnoreCase);
+
                         if (addMethodMatch.Success)
                         {
                             var requestedMethodName = addMethodMatch.Groups[1].Value;
+                            // Skip generic words that aren't method names
                             if (!string.IsNullOrWhiteSpace(requestedMethodName) &&
+                                requestedMethodName.Length > 2 &&
+                                !string.Equals(requestedMethodName, "method", StringComparison.OrdinalIgnoreCase) &&
+                                !string.Equals(requestedMethodName, "new", StringComparison.OrdinalIgnoreCase) &&
                                 !string.Equals(targetName, requestedMethodName, StringComparison.OrdinalIgnoreCase) &&
                                 !newCodeStr.Contains(requestedMethodName, StringComparison.OrdinalIgnoreCase))
                             {
                                 return (null, null, false, null, false,
-                                    $"WRONG METHOD MODIFIED — Step asks to add '{requestedMethodName}' but you targeted '{targetName}' and did not include '{requestedMethodName}' in newCode. " +
-                                    "Use insertAfter:true with an existing method, and provide ONLY the new method in newCode.", false);
+                                    $"WRONG METHOD — Step asks to add '{requestedMethodName}' but your newCode does NOT contain that name. " +
+                                    $"You produced code for '{targetName}' instead. " +
+                                    "Re-read CHANGE REQUIRED. The newCode MUST contain the method named in the step description. " +
+                                    "Use insertAfter:true with an EXISTING method as targetName, and provide ONLY the new method in newCode.", false);
                             }
                         }
 
@@ -3885,7 +3944,10 @@ public class AgentController : ControllerBase
         int replanDepth = 0)
     {
         var relPath = step.File.Replace('\\', '/');
-        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar))); 
+        bool stepNeedsExtraStep = false;
+        string? stepExtraStepReason = null;
+        string? stepExtraStepFile = relPath;
 
         if (!System.IO.File.Exists(fullPath) && !string.IsNullOrWhiteSpace(step.NewString) && string.IsNullOrWhiteSpace(step.OldString))
         {
@@ -5130,20 +5192,115 @@ emitSse, ct);
                         .Where(d => d.Severity == DiagnosticSeverity.Error)
                         .Take(10)
                         .ToList();
+
                     if (diagnostics.Count > 0)
                     {
-                        var errorLines = diagnostics
-                            .Select(d => $"  L{d.Location.GetLineSpan().StartLinePosition.Line + 1}: {d.GetMessage()}")
-                            .ToList();
-                        await EmitLog(emitSse, "warn",
-                            $"Roslyn syntax errors in {relPath} after edit ({diagnostics.Count} found):" +
-                            Environment.NewLine + string.Join(Environment.NewLine, errorLines), ct: ct);
+                        // Count pre-existing errors to determine if THIS edit introduced new ones
+                        var preEditErrorCount = 0;
+                        if (!string.IsNullOrWhiteSpace(preEditContent))
+                        {
+                            try
+                            {
+                                var preTree = CSharpSyntaxTree.ParseText(preEditContent);
+                                preEditErrorCount = preTree.GetDiagnostics()
+                                    .Count(d => d.Severity == DiagnosticSeverity.Error);
+                            }
+                            catch { }
+
+                            var errorLines = diagnostics
+                                .Select(d => $"  L{d.Location.GetLineSpan().StartLinePosition.Line + 1}: {d.GetMessage()}")
+                                .ToList();
+
+                            if (diagnostics.Count > preEditErrorCount)
+                            {
+                                // ── BLOCK: The edit INTRODUCED new syntax errors — revert and retry ──
+                                await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
+
+                                var roslynErr =
+                                    $"ROSLYN SYNTAX ERRORS INTRODUCED — {diagnostics.Count} error(s) in {relPath} after edit " +
+                                    $"(file had {preEditErrorCount} pre-existing). Edit REVERTED.\n" +
+                                    string.Join("\n", errorLines) +
+                                    "\n\nThe edit introduced C# compile errors. Common causes:\n" +
+                                    "  • Duplicate method/endpoint definitions (the method may already exist from a prior step)\n" +
+                                    "  • Missing closing braces — check that newCode has balanced { }\n" +
+                                    "  • Wrong insertion point — the anchor method may not be where you think it is\n" +
+                                    "  • The newCode contains a DIFFERENT method than what CHANGE REQUIRED asks for.\n" +
+                                    "Re-read CHANGE REQUIRED carefully and produce the CORRECT method.";
+
+                                await EmitLog(emitSse, "warn", roslynErr, ct: ct);
+                                history.Add((oldStr!, newStr ?? "", roslynErr));
+
+                                if (string.Equals(
+                                    AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                                    AgentUtilities.NormalizeLineEndings(lastOld),
+                                    StringComparison.Ordinal)) stuckCount++;
+                                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+
+                                if (stuckCount >= 2) goto RecordFailure;
+                                continue; // ← retry the edit
+                            }
+                            else
+                            {
+                                // Pre-existing errors — log but don't block
+                                await EmitLog(emitSse, "warn",
+                                    $"Roslyn syntax errors in {relPath} after edit ({diagnostics.Count} found, {preEditErrorCount} pre-existing — not blocking):" +
+                                    Environment.NewLine + string.Join(Environment.NewLine, errorLines), ct: ct);
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     await EmitLog(emitSse, "warn",
                         $"Roslyn parse failed for {relPath}: {ex.Message}", ct: ct);
+                }
+            }
+
+            if ((fileExt is ".js" or ".ts" or ".tsx" or ".jsx" or ".mjs" or ".cjs") && !string.IsNullOrWhiteSpace(newContent))
+            {
+                try
+                {
+                    var newUnbalanced = AgentUtilities.HasUnbalancedBraces(newContent);
+                    if (newUnbalanced)
+                    {
+                        var preBraceOk = !string.IsNullOrWhiteSpace(preEditContent) && !AgentUtilities.HasUnbalancedBraces(preEditContent);
+
+                        if (preBraceOk)
+                        {
+                            await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
+
+                            var braceErr = $"UNBALANCED BRACES in {relPath} after edit — " +
+                                "the edit introduced unmatched braces, likely inserting code at the wrong scope level. " +
+                                "Edit REVERTED.\n" +
+                                "Common causes:\n" +
+                                "  • New method inserted inside an existing method instead of at class level\n" +
+                                "  • Missing closing braces on a newly added code block\n" +
+                                "  • Wrong insertion point — the anchor may not be where you think it is\n" +
+                                "Re-read the CHANGE REQUIRED carefully and select the correct insertion point.";
+
+                            await EmitLog(emitSse, "warn", braceErr, ct: ct);
+                            history.Add((oldStr!, newStr ?? "", braceErr));
+
+                            if (string.Equals(
+                                AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
+                                AgentUtilities.NormalizeLineEndings(lastOld),
+                                StringComparison.Ordinal)) stuckCount++;
+                            else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+
+                            if (stuckCount >= 2) goto RecordFailure;
+                            continue;
+                        }
+                        else
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"Unbalanced braces in {relPath} after edit (pre-existing — not blocking)", ct: ct);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Brace balance check failed for {relPath}: {ex.Message}", ct: ct);
                 }
             }
 
@@ -5218,6 +5375,7 @@ emitSse, ct);
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
             {
                 var fileLines = newContent.Split('\n');
+                var preLines = !string.IsNullOrWhiteSpace(preEditContent) ? preEditContent.Split('\n') : null;
                 var changed = false;
                 foreach (var nLine in newStr.Split('\n'))
                 {
@@ -5231,6 +5389,10 @@ emitSse, ct);
                     {
                         if (fileLines[i].Contains(trimmed, StringComparison.Ordinal))
                         {
+                            if (preLines != null && i < preLines.Length && preLines[i] == fileLines[i])
+                            {
+                                break;
+                            }
                             var before = fileLines[i];
                             var fixedLine = Regex.Replace(fileLines[i], @"\b(\w+)\s+\(", "$1(");
                             var stillComment = fixedLine.TrimStart().StartsWith("//") || fixedLine.TrimStart().StartsWith("/*") || fixedLine.TrimStart().StartsWith("*");
@@ -5250,7 +5412,7 @@ emitSse, ct);
                     await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                 }
             }
-
+            
         AfterSelfHeal:
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
@@ -5275,6 +5437,9 @@ emitSse, ct);
                     reasons.Add(reason);
                     scores.Add(score);
                     needsExtraStepFlags.Add(needsEs);
+                    // Capture for propagation to interleaved loop
+                    stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
+                    stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
                 }
 
                 var keepCount = 0;
@@ -5519,6 +5684,9 @@ emitSse, ct);
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
             result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
+            result["needsExtraStep"] = stepNeedsExtraStep;            
+            result["extraStepReason"] = stepExtraStepReason;           
+            result["extraStepFile"] = stepExtraStepFile;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
             await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
@@ -5865,13 +6033,24 @@ emitSse, ct);
                 if (idx < 0) { continue; }
                 var secIdx = fixedContent.IndexOf(oldStr, idx + oldStr.Length, StringComparison.Ordinal);
                 if (secIdx >= 0) { continue; }
+                var matchLine = fixedContent[..idx].Count(c => c == '\n');
+                if (matchLine < contextWindowStart || matchLine > contextWindowEnd) { continue; }
                 fixedContent = fixedContent[..idx] + newStr + fixedContent[(idx + oldStr.Length)..];
                 fixCount++;
             }
 
             if (fixCount > 0)
             {
-                fixedContent = Regex.Replace(fixedContent, @"\b(\w+)\s+\(", "$1(");
+                var fixedLines = fixedContent.Split('\n');
+                var parenChanged = false;
+                for (var i = 0; i < fixedLines.Length; i++)
+                {
+                    if (i < contextWindowStart || i > contextWindowEnd) continue;
+                    var beforeLine = fixedLines[i];
+                    var afterLine = Regex.Replace(beforeLine, @"\b(\w+)\s+\(", "$1(");
+                    if (afterLine != beforeLine) { fixedLines[i] = afterLine; parenChanged = true; }
+                }
+                if (parenChanged) fixedContent = string.Join("\n", fixedLines);
                 await System.IO.File.WriteAllTextAsync(fullPath, fixedContent, Encoding.UTF8, ct);
                 await EmitLog(emitSse, "info",
                     $"Style fix: applied {fixCount} spacing fix(es) in {relPath}", ct: ct);
@@ -8650,16 +8829,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
-
+            
             if (proposal.Step.File != null && planSoFar.Count > 0)
             {
-                var duplicateOf = planSoFar.FirstOrDefault(s => s.File == proposal.Step.File &&
-                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.5);
+                // ── STEP IMMUTABILITY: Once a step is DONE, it cannot be revised or repeated ──
+                var duplicateOf = planSoFar.FirstOrDefault(s =>
+                    string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
+                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35); // lowered from 0.5
+
                 if (duplicateOf != null)
                 {
-                    rejectionFeedback.Add($"DUPLICATE — [{proposal.Step.File}] {proposal.Step.Change} is too similar to " +
-                        $"[{duplicateOf.File}] {duplicateOf.Change} which was already executed. " +
-                        "Look at the EDIT LOG and PLAN SO FAR — this step is already done. Propose a DIFFERENT next step.");
+                    rejectionFeedback.Add(
+                        $"STEP ALREADY DONE (IMMUTABLE) — [{proposal.Step.File}] {proposal.Step.Change}\n" +
+                        $"is too similar to the COMPLETED step:\n" +
+                        $"  [{duplicateOf.File}] {duplicateOf.Change}\n" +
+                        $"Completed steps CANNOT be revised, edited, or repeated. " +
+                        $"Look at the EDIT LOG — this work is DONE. " +
+                        $"If the task needs something ELSE, propose a DIFFERENT step. " +
+                        $"If the task is fully satisfied, return planComplete=true.");
                     if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                     continue;
                 }
@@ -8711,7 +8898,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     thinking = thinkingLog.ToString(),
                     summary = $"Executed {planSoFar.Count - 1} step(s) — running step {planSoFar.Count}",
-                    items = planSoFar,
+                    items = planSoFar.Select((s, idx) => new
+                    {
+                        File = s.File,
+                        Change = s.Change,
+                        Line = s.LineNumber,
+                        OldString = s.OldString,
+                        NewString = s.NewString,
+                        done = idx < planSoFar.Count - 1
+                    }).ToList(),
                     incremental = true
                 }, ct);
 
@@ -8736,6 +8931,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
             var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
 
+            var globalPlanIdx = planSoFar.Count - 1;
+            if (globalPlanIdx > 0)
+            {
+                foreach (var r in newResults)
+                {
+                    if (r.ContainsKey("planItemIndex"))
+                        r["planItemIndex"] = globalPlanIdx;
+                }
+                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+            }
+
             if (singleStepPlan.Plan.Count > 1)
             {
                 var chainIntact = true;
@@ -8752,7 +8958,15 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             thinking = thinkingLog.ToString(),
                             summary = $"Executed {planSoFar.Count - 1} step(s) — running auto step {planSoFar.Count}",
-                            items = planSoFar,
+                            items = planSoFar.Select((s, idx) => new
+                            {
+                                File = s.File,
+                                Change = s.Change,
+                                Line = s.LineNumber,
+                                OldString = s.OldString,
+                                NewString = s.NewString,
+                                done = idx < planSoFar.Count - 1
+                            }).ToList(),
                             incremental = true
                         }, ct);
 
@@ -8761,6 +8975,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                     var synthPlan = new AgentPlan
                     { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
+                    var synthBefore = allResults.Count;
                     try
                     {
                         await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
@@ -8773,6 +8988,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
                         chainIntact = false;
                         break;
+                    }
+
+                    var synthGlobalIdx = planSoFar.Count - 1;
+                    if (synthGlobalIdx > 0)
+                    {
+                        var synthResults = allResults.Skip(synthBefore).OfType<Dictionary<string, object?>>().ToList();
+                        foreach (var r in synthResults)
+                        {
+                            if (r.ContainsKey("planItemIndex"))
+                                r["planItemIndex"] = synthGlobalIdx;
+                        }
+                        await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
                     }
 
                     if (synthPlan.Plan.Count > 1)
@@ -8813,10 +9040,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
 
             var editLog = newResults
-                .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
-                .Select(r => $"  {r.GetValueOrDefault("path")} — " +
-                    (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
-                .ToList();
+    .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
+    .Select(r => $"  {r.GetValueOrDefault("path")} — " +
+        (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
+    .ToList();
             if (editLog.Count > 0)
             {
                 var logSection = "\n### EDIT LOG (changes applied in previous steps) ###\n" +
@@ -8834,6 +9061,102 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
                     "so post-execution verification can assess what genuinely remains.", ct: ct);
                 break;
+            }
+
+            // ── Check if the verifier flagged needsExtraStep ──
+            // If so, use the verifier's reason to propose the next step DIRECTLY,
+            // skipping the planner LLM entirely. The verifier already knows what's missing.
+            var needsExtraResult = newResults
+                .OfType<Dictionary<string, object?>>()
+                .FirstOrDefault(r => r.GetValueOrDefault("needsExtraStep") is true);
+
+            if (needsExtraResult != null && !hadFailure)
+            {
+                var extraReason = needsExtraResult.GetValueOrDefault("extraStepReason")?.ToString();
+                var extraFile = needsExtraResult.GetValueOrDefault("extraStepFile")?.ToString()
+                                ?? needsExtraResult.GetValueOrDefault("path")?.ToString()
+                                ?? stepToRun.File;
+
+                // Extract the missing method/symbol name from the verifier's reason
+                // e.g. "added button with ng-click calling missing method (vm.foo)" → "vm.foo"
+                var missingSymbolMatch = Regex.Match(extraReason ?? "",
+                    @"(?:missing\s+(?:method|property|function)\s*)[\(`]?(?:vm\.)?(\w+)[\)`]?");
+
+                var missingSymbol = missingSymbolMatch.Success ? missingSymbolMatch.Groups[1].Value : null;
+
+                if (!string.IsNullOrWhiteSpace(missingSymbol))
+                {
+                    var autoStep = new PlanStep
+                    {
+                        File = extraFile!,
+                        Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
+                                 $"Verifier reason: {extraReason}",
+                        Priority = 1,
+                        LineNumber = 0
+                    };
+
+                    // Validate it's not a duplicate
+                    var isDup = planSoFar.Any(s =>
+                        string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
+                        TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
+
+                    if (!isDup)
+                    {
+                        planSoFar.Add(autoStep);
+
+                        await EmitLog(emitSse, "info",
+                            $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
+                            $"[{autoStep.File}] {missingSymbol}()", ct: ct);
+
+                        if (emitSse)
+                            await SendSse(Response, "plan", new
+                            {
+                                thinking = thinkingLog.ToString(),
+                                summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
+                                items = planSoFar,
+                                incremental = true
+                            }, ct);
+
+                        await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                            summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
+
+                        // Execute directly — no planner round-trip
+                        var autoPlan = new AgentPlan
+                        {
+                            Plan = new List<PlanStep> { autoStep },
+                            Summary = autoStep.Change,
+                            Score = 90
+                        };
+                        var autoBeforeCount = allResults.Count;
+
+                        try
+                        {
+                            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
+                                steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                                replanBudget: new[] { 0 });
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            await EmitLog(emitSse, "error",
+                                $"⛔ Auto-step from verifier threw: {ex.Message}", ct: ct);
+                        }
+
+                        // Refresh discovery context with the auto-step's changes
+                        var autoResults = allResults.Skip(autoBeforeCount)
+                            .OfType<Dictionary<string, object?>>()
+                            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                            .Select(r => r.GetValueOrDefault("path")?.ToString())
+                            .Where(p => !string.IsNullOrWhiteSpace(p))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
+                        foreach (var touched in autoResults)
+                            discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+
+                        // Continue to next turn — the planner will be invoked only if no further needsExtraStep
+                        continue;
+                    }
+                }
             }
         }
 
@@ -11961,12 +12284,24 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (anchorBody == null)
         {
             var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var jsTsKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "catch", "if", "for", "while", "do", "switch", "else", "try", "finally",
+                "with", "of", "in", "function", "return", "yield", "await", "class", "new",
+                "this", "super", "typeof", "instanceof", "void", "delete", "import", "export",
+                "default", "from", "as", "extends", "implements", "interface", "throw",
+                "case", "break", "continue", "debugger"
+            };
             var lastMethodName = ext == ".cs"
                 ? Regex.Matches(sourceText,
                     @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|async)\s+)*\w+(?:<[^>]*>)?\s+(\w+)\s*\(")
                     .Cast<Match>().LastOrDefault()?.Groups[1].Value
-                : Regex.Matches(sourceText, @"\b(?:function\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*\{")
-                    .Cast<Match>().LastOrDefault()?.Groups[1].Value;
+                : Regex.Matches(sourceText,
+                    @"^\s*(?:(?:export|default|async|static|public|private|protected|get|set|readonly|override|abstract)\s+)*(?:(?:function\s+)|(?:[\w$.]+\.)?)?([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{]+?)?\s*\{",
+                    RegexOptions.Multiline)
+                    .Cast<Match>()
+                    .LastOrDefault(m => !jsTsKeywords.Contains(m.Groups[1].Value))
+                    ?.Groups[1].Value;
 
             if (string.IsNullOrWhiteSpace(lastMethodName)) return null;
             (anchorBody, astErr) = AstResolveEdit(fullPath, targetTypeForLang, lastMethodName, returnTail: false);
