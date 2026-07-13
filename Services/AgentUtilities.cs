@@ -7,6 +7,116 @@ namespace Weaver.Services;
 public static class AgentUtilities
 {
     private const int CompactThreshold90 = 2520;
+    public static readonly string[] UnsafeEditMarkers =
+    {
+        "…(truncated)", "â€¦(truncated)", "...(truncated)"
+    };
+
+    public enum PreEditVerdict { Proceed, AlreadyDone, Irrelevant }
+
+    public static readonly string[] _verifyPrefixes = {
+        "ensure", "verify", "make sure", "confirm", "validate",
+        "check", "guarantee", "see if", "determine if", "review"
+    };
+
+    public static readonly HashSet<string> _builtInTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "string", "int", "long", "double", "float", "decimal", "bool", "char", "byte",
+        "short", "uint", "ulong", "ushort", "sbyte", "object", "dynamic", "void",
+        "Task", "ValueTask", "Task<T>", "ValueTask<T>", "IActionResult", "ActionResult",
+        "OkResult", "OkObjectResult", "BadRequestResult", "BadRequestObjectResult",
+        "NotFoundResult", "StatusCodeResult", "ObjectResult", "RedirectResult",
+        "FileResult", "ContentResult", "JsonResult", "IEnumerable<T>", "IQueryable<T>",
+        "List<T>", "Dictionary<TKey,TValue>", "HashSet<T>", "IList<T>", "ICollection<T>",
+        "HttpResponse", "HttpRequest", "CancellationToken", "DateTime", "TimeSpan",
+        "Guid", "Uri", "Exception", "InvalidOperationException", "ArgumentNullException",
+        "ArgumentException", "NotSupportedException", "MySqlConnection", "MySqlCommand",
+        "MySqlDataReader", "MySqlParameter", "MySqlDbType", "DbConnection", "DbCommand",
+        "HttpClient", "HttpContent", "HttpMethod", "HttpStatusCode",
+        "IHttpResponseBodyFeature", "IHttpRequestLifetimeFeature", "IHttpConnectionFeature",
+        "IHttpWebSocketFeature", "Stream", "PipeWriter", "PipeReader",
+        "HttpProtocol", "HttpVersion", "HttpContext", "HttpRequest", "HttpResponse",
+        "Model", "ViewDataDictionary", "ViewData", "TempData", "ViewBag", "RouteData"
+    };
+
+    public static readonly Regex MethodDeclRegex = new(
+        @"(?:(?:public|private|protected|internal)\s+)?(?:(?:static|virtual|override|abstract|sealed|new|partial|async|unsafe)\s+)*(?:\w+(?:\[\])?(?:<[^>]*>)?)\s+(\w+)\s*\(([^)]*)\)",
+        RegexOptions.Compiled);
+
+    public static readonly HashSet<string> notTableWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "or", "not", "in", "on", "at", "to", "for", "of", "by",
+        "as", "is", "it", "an", "be", "has", "have", "are", "was", "were",
+        "from", "into", "with", "without", "using", "where", "when", "while",
+        "then", "than", "this", "that", "these", "those", "each", "all",
+        "both", "between", "after", "before", "above", "below", "under",
+        "over", "through", "during", "until", "since", "within", "about",
+        "join", "inner", "outer", "left", "right", "full", "cross", "natural",
+        "order", "group", "having", "limit", "offset", "set", "values",
+        "select", "insert", "update", "delete", "create", "alter", "drop",
+        "true", "false", "null", "default", "unique", "index", "key",
+        "primary", "foreign", "check", "cascade", "restrict", "action",
+        "count", "sum", "avg", "min", "max", "distinct", "exists", "case",
+        "when", "else", "then", "end", "cast", "convert", "coalesce",
+        "nullif", "date", "time", "timestamp", "year", "month", "day",
+        "hour", "minute", "second", "now", "utc_timestamp",
+        "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+        "decimal", "numeric", "float", "double", "real", "bit", "boolean",
+        "char", "varchar", "nvarchar", "text", "blob", "binary", "varbinary",
+        "enum", "set", "json", "geometry", "point", "linestring", "polygon",
+        "return", "returns", "declare", "begin", "end", "if", "else",
+        "iterate", "leave", "loop", "repeat", "while", "signal", "resignal",
+        "cursor", "handler", "continue", "exit", "undo", "condition",
+        "open", "close", "fetch", "into", "call", "rename", "truncate",
+        "start", "stop", "commit", "rollback", "savepoint", "release",
+        "lock", "unlock", "grant", "revoke", "analyze", "optimize",
+        "reorganize", "repair", "check", "checksum", "backup", "restore",
+        "utf8", "utf8mb4", "ascii", "latin1", "unicode", "?",
+        "auto_increment", "unsigned", "signed", "zerofill",
+        "current_timestamp", "current_date", "current_time", "localtime",
+        "localtimestamp"
+    };
+
+    public static readonly HashSet<string> skipTypes = new(StringComparer.Ordinal)
+    {
+        "string", "int", "bool", "long", "double", "float", "decimal", "char",
+        "byte", "short", "uint", "ulong", "ushort", "sbyte", "object", "void",
+        "Task", "ValueTask", "IEnumerable", "ICollection", "IList", "List",
+        "Dictionary", "HashSet", "Queue", "Stack", "Tuple", "Nullable",
+        "StringBuilder", "StringReader", "StringWriter",
+        "HttpResponseMessage", "HttpRequestMessage",
+        "ActionResult", "IActionResult", "OkResult", "OkObjectResult",
+        "BadRequestResult", "NotFoundResult", "StatusCodeResult",
+        "JsonResult", "FileResult", "ContentResult", "RedirectResult",
+        "ViewResult", "PartialViewResult", "IQueryable",
+        "Thread", "TaskCompletionSource", "CancellationToken",
+        "HttpClient", "HttpContext", "HttpRequest", "HttpResponse",
+        "Stream", "StreamReader", "StreamWriter", "MemoryStream",
+        "FileStream", "BinaryReader", "BinaryWriter", "TextReader", "TextWriter",
+        "DateTime", "DateTimeOffset", "TimeSpan", "Guid", "Uri", "Version",
+        "Regex", "Match", "Group", "Capture", "StringComparison",
+        "Encoding", "UTF8", "Unicode", "ASCII", "Declare", "TryParse",
+         "Parse", "Convert", "Math", "Random",
+        "Exception", "InvalidOperationException", "ArgumentNullException",
+        "ArgumentException", "IOException", "FormatException",
+        "Response", "Request", "Delegate", "Func", "Action", "Predicate",
+        "NameValueCollection", "IOrderedEnumerable",
+        "IServiceProvider", "IDisposable", "IAsyncDisposable",
+        "Startup", "Program", "MySqlConnection", "MySqlCommand", "MySqlDataReader",
+        "MySqlParameter", "MySqlTransaction", "MySqlException",
+        "SqlConnection", "SqlCommand", "SqlDataReader",
+        "NpgsqlConnection", "NpgsqlCommand", "NpgsqlDataReader", "?",
+        "IConfiguration", "Log", "JsonDocument", "JsonNode", "JsonObject",
+        "JsonArray", "JsonValue", "JsonSerializer", "JsonSerializerOptions"
+    };
+
+    public static readonly string[] serviceSuffixes = {
+        "Service", "Controller", "Handler", "Manager",
+        "Provider", "Factory", "Repository", "Helper", "Util", "Extension",
+        "Middleware", "Filter", "Attribute", "Converter", "Mapper", "Builder",
+        "Adapter", "Proxy", "Facade", "Strategy", "Observer", "Configuration",
+        "Options", "Settings"
+    };
 
     public static (PipelineType Type, double CommandScore, double EditScore) ClassifyTask(string prompt)
     {
@@ -3924,6 +4034,540 @@ public static class AgentUtilities
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
+    public static double ComputeLineSimilarity(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) && string.IsNullOrEmpty(b)) return 1.0;
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return 0.0;
+        var aNorm = a.Trim().ToLowerInvariant();
+        var bNorm = b.Trim().ToLowerInvariant();
+        var maxLen = Math.Max(aNorm.Length, bNorm.Length);
+        if (maxLen == 0) return 1.0;
+
+        if (maxLen <= 80)
+            return 1.0 - (double)AgentUtilities.ComputeLevenshteinDistance(aNorm, bNorm) / maxLen;
+
+        var common = 0; var minLen = Math.Min(aNorm.Length, bNorm.Length);
+        for (var i = 0; i < minLen; i++) { if (aNorm[i] == bNorm[i]) common++; else break; }
+        return (double)common / maxLen;
+    }
+
+
+    public static (bool replaced, string newContent, string? matchError, string? snippet) TryReplaceSafe(
+     string fileContent, string oldStr, string newStr, int targetLine = 0, string? changeDesc = null)
+    {
+        if (string.IsNullOrEmpty(oldStr) && string.IsNullOrEmpty(fileContent) && !string.IsNullOrEmpty(newStr))
+            return (true, newStr, null, null);
+
+
+        if (string.IsNullOrEmpty(oldStr) && !string.IsNullOrEmpty(fileContent))
+        {
+            return (false, fileContent,
+                "oldString is empty but the file is non-empty — refusing to perform an unbounded replacement. " +
+                "Provide a non-empty, specific anchor.", null);
+        }
+
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+
+
+        var matches = new List<int>();
+        var searchPos = 0;
+        var maxIterations = normFile.Length + 2;
+        var iterations = 0;
+        while (iterations++ < maxIterations)
+        {
+            var idx = normFile.IndexOf(normOld, searchPos, StringComparison.Ordinal);
+            if (idx < 0) break;
+            matches.Add(idx);
+            searchPos = idx + Math.Max(1, normOld.Length);
+        }
+
+
+        if (matches.Count == 1)
+        {
+            var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+            return (true, normFile[..matches[0]] + normNew + normFile[(matches[0] + normOld.Length)..], null, null);
+        }
+
+        if (matches.Count > 1)
+        {
+            int chosenIdx = -1;
+
+
+            var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+            if (keywords.Count > 0)
+            {
+                int bestContextScore = -1;
+                for (int i = 0; i < matches.Count; i++)
+                {
+                    var lookbackStart = Math.Max(0, matches[i] - 2000);
+                    var context = normFile.Substring(lookbackStart, matches[i] - lookbackStart).ToLowerInvariant();
+                    var score = keywords.Count(k => context.Contains(k));
+
+                    if (score > bestContextScore)
+                    {
+                        bestContextScore = score;
+                        chosenIdx = i;
+                    }
+                }
+            }
+
+
+            if (chosenIdx == -1 && targetLine > 0)
+            {
+                var bestDist = int.MaxValue;
+                for (int i = 0; i < matches.Count; i++)
+                {
+                    var matchLine = normFile[..matches[i]].Count(c => c == '\n') + 1;
+                    var dist = Math.Abs(matchLine - targetLine);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        chosenIdx = i;
+                    }
+                }
+
+
+                if (bestDist > 50) chosenIdx = -1;
+            }
+
+            if (chosenIdx >= 0)
+            {
+                var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+                return (true, normFile[..matches[chosenIdx]] + normNew + normFile[(matches[chosenIdx] + normOld.Length)..], null, null);
+            }
+
+            var firstLine = normOld.Split('\n')[0].Trim();
+            var uniqueLine = AgentUtilities.ExtractMostUniqueLine(normOld, normFile);
+
+            var err = $"oldString found {matches.Count} times in file — include more surrounding lines as anchor context.";
+            if (uniqueLine != null)
+                err += $" OR use ONLY this unique line as your entire oldString: `{uniqueLine.Trim()}`";
+
+            return (false, fileContent, err, firstLine);
+        }
+
+
+        var firstRealLine = normOld.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (firstRealLine != null)
+        {
+            var fuzzyIdx = normFile.IndexOf(firstRealLine, StringComparison.Ordinal);
+            if (fuzzyIdx >= 0)
+            {
+                var lineStart = normFile.LastIndexOf('\n', fuzzyIdx) + 1;
+                var fileSegment = normFile[lineStart..];
+                if (fileSegment.StartsWith(normOld.TrimStart()))
+                {
+                    var normNew = AgentUtilities.NormalizeLineEndings(newStr);
+                    return (true, normFile[..lineStart] + normNew + normFile[(lineStart + normOld.Length)..], null, null);
+                }
+            }
+        }
+
+        return (false, fileContent, "oldString not found verbatim in file", null);
+    }
+
+    public static string StripFullFileFence(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var cleaned = value.Replace("\r\n", "\n");
+        if (cleaned.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstNewline = cleaned.IndexOf('\n');
+            if (firstNewline >= 0)
+                cleaned = cleaned[(firstNewline + 1)..];
+            else
+                return string.Empty;
+        }
+
+        if (cleaned.EndsWith("```", StringComparison.Ordinal))
+            cleaned = cleaned[..^3];
+
+        return cleaned.TrimStart('\n').TrimEnd('\n');
+    }
+
+
+    public static string RepairJsonNewlines(string json)
+    {
+        var sb = new StringBuilder(json.Length);
+        var inString = false;
+        var escaped = false;
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+            if (escaped) { sb.Append(c); escaped = false; continue; }
+            if (c == '\\' && inString) { sb.Append(c); escaped = true; continue; }
+            if (c == '"' && !escaped)
+            {
+
+                if (!inString) { inString = true; sb.Append(c); continue; }
+
+
+
+                var lookahead = json.Length > i + 1 ? json[i + 1] : '\0';
+                if (lookahead == ',' || lookahead == ']' || lookahead == '}' ||
+                    lookahead == ':' || lookahead == '\t' ||
+                    lookahead == '\n' || lookahead == '\r' || lookahead == ' ')
+                {
+                    inString = false; sb.Append(c);
+                }
+                else
+                {
+                    sb.Append("\\\"");
+                }
+                continue;
+            }
+            if (inString && (c == '\n' || c == '\r'))
+            {
+                sb.Append("\\n");
+                if (c == '\r' && i + 1 < json.Length && json[i + 1] == '\n') i++;
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    public static List<string> ExtractQuotedStrings(string raw)
+    {
+        var result = new List<string>();
+        foreach (var line in raw.Split('\n'))
+        {
+            var trimmed = line.Trim().TrimEnd(',');
+            if (trimmed.Length < 2 || !trimmed.StartsWith("\"")) continue;
+            var lastQuote = trimmed.LastIndexOf('"');
+            if (lastQuote <= 0) continue;
+            result.Add(trimmed.Substring(1, lastQuote - 1).Replace("\\\"", "\""));
+        }
+        return result;
+    }
+
+    public static string CollapseWhitespace(string s)
+    {
+        var sb = new StringBuilder();
+        var inQuote = false;
+        var quoteChar = '\0';
+        var prevWasSpace = false;
+
+        foreach (var c in s)
+        {
+            if ((c == '"' || c == '\'' || c == '`') && (sb.Length == 0 || sb[sb.Length - 1] != '\\'))
+            {
+                if (!inQuote) { inQuote = true; quoteChar = c; }
+                else if (c == quoteChar) { inQuote = false; }
+            }
+
+            if (inQuote)
+            {
+                sb.Append(c);
+                prevWasSpace = false;
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (!prevWasSpace && sb.Length > 0) { sb.Append(' '); prevWasSpace = true; }
+            }
+            else
+            {
+                sb.Append(c);
+                prevWasSpace = false;
+            }
+        }
+
+        return sb.ToString().Trim();
+    }
+
+    public static string? BuildExactMatchBlock(string fileContent, string oldStr, int targetLine = 0, string? changeDesc = null)
+    {
+        if (string.IsNullOrWhiteSpace(oldStr)) return null;
+        var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+
+        var changeLower = (changeDesc ?? "").ToLowerInvariant();
+        bool isRemoval = changeLower.Contains("remove") ||
+            (changeLower.Contains("delete") && !Regex.IsMatch(changeLower, @"\b(add|create|insert|implement)\b"));
+
+        if (!isRemoval)
+        {
+            var htmlBlock = AgentUtilities.ExtractFullHtmlBlock(normFile, oldStr);
+            if (htmlBlock != null) return htmlBlock;
+        }
+
+        var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+        var oldLines = normOld.Split('\n').Select(l => l.Trim()).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        if (oldLines.Count == 0) return null;
+
+        var fileLines = normFile.Split('\n');
+        var candidates = new List<(int startIdx, int score)>();
+
+        for (var i = 0; i < fileLines.Length; i++)
+        {
+            var score = 0;
+            var fIdx = i;
+            var oIdx = 0;
+
+            while (fIdx < fileLines.Length && oIdx < oldLines.Count)
+            {
+                var fileTrim = fileLines[fIdx].Trim();
+                var oldTrim = oldLines[oIdx].Trim();
+
+                if (fileTrim == oldTrim || fileTrim.StartsWith(oldTrim) || oldTrim.StartsWith(fileTrim))
+                {
+                    score++;
+                    fIdx++;
+                    oIdx++;
+                }
+                else if (string.IsNullOrEmpty(fileTrim) || string.IsNullOrEmpty(oldTrim))
+                {
+                    if (string.IsNullOrEmpty(fileTrim)) fIdx++;
+                    if (string.IsNullOrEmpty(oldTrim)) oIdx++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            if (score >= Math.Max(1, oldLines.Count / 2))
+            {
+                candidates.Add((i, score));
+            }
+        }
+
+        if (candidates.Count == 0) return null;
+
+        int chosenCandidate = -1;
+
+        if (candidates.Count == 1)
+        {
+            chosenCandidate = 0;
+        }
+        else
+        {
+
+            var keywords = AgentUtilities.ExtractDisambiguationKeywords(changeDesc);
+            if (keywords.Count > 0)
+            {
+                int bestContextScore = -1;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    var startIdx = candidates[i].startIdx;
+                    var lookbackStart = Math.Max(0, startIdx - 50);
+                    var context = string.Join("\n", fileLines.Skip(lookbackStart).Take(startIdx - lookbackStart)).ToLowerInvariant();
+
+                    var score = keywords.Count(k => context.Contains(k));
+                    if (score > bestContextScore)
+                    {
+                        bestContextScore = score;
+                        chosenCandidate = i;
+                    }
+                }
+            }
+
+
+            if (chosenCandidate == -1 && targetLine > 0)
+            {
+                int bestDist = int.MaxValue;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    var dist = Math.Abs(candidates[i].startIdx + 1 - targetLine);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        chosenCandidate = i;
+                    }
+                }
+                if (bestDist > 50) chosenCandidate = -1;
+            }
+        }
+
+        if (chosenCandidate >= 0)
+        {
+            var bestStart = candidates[chosenCandidate].startIdx;
+            var endIdx = Math.Min(fileLines.Length, bestStart + oldLines.Count);
+            var joined = string.Join("\n", fileLines.Skip(bestStart).Take(endIdx - bestStart));
+            return string.IsNullOrWhiteSpace(joined) ? null : joined;
+        }
+
+        return null;
+    }
+
+    public static string? GetUnsafeEditPayloadReason(string oldString, string newString)
+    {
+        foreach (var marker in UnsafeEditMarkers)
+            if (oldString.Contains(marker, StringComparison.OrdinalIgnoreCase) ||
+                newString.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                return $"Edit contains placeholder marker '{marker}'.";
+        return null;
+    }
+
+    public static bool IsHtmlLikeContent(string content) =>
+     content.Contains('<') && Regex.IsMatch(content, @"</?\w+[\s/>]");
+
+    public static string IndentReplacement(string[] fileLines, int start, string replacement)
+    {
+        if (string.IsNullOrEmpty(replacement) || start >= fileLines.Length)
+            return replacement;
+
+        var fileIndent = AgentUtilities.GetLeadingWhitespace(fileLines[start]);
+        if (fileIndent.Length == 0)
+            return replacement;
+
+        var replLines = replacement.Split('\n');
+        var replBaseIndent = replLines.Where(l => l.Length > 0)
+                                      .Select(AgentUtilities.GetLeadingWhitespace)
+                                      .FirstOrDefault();
+
+        if (replBaseIndent != null && replBaseIndent != fileIndent)
+        {
+            for (var i = 0; i < replLines.Length; i++)
+            {
+                if (replLines[i].Length == 0) continue;
+                var lineIndent = AgentUtilities.GetLeadingWhitespace(replLines[i]);
+                if (lineIndent.StartsWith(replBaseIndent, StringComparison.Ordinal))
+                {
+                    var excess = lineIndent[replBaseIndent.Length..];
+                    replLines[i] = fileIndent + excess + replLines[i][lineIndent.Length..];
+                }
+                else
+                {
+                    replLines[i] = fileIndent + replLines[i];
+                }
+            }
+        }
+
+        if (IsHtmlLikeContent(replacement) && replLines.Length > 5)
+        {
+            return AgentUtilities.AutoIndentHtml(string.Join("\n", replLines), fileIndent);
+        }
+
+        var joined = string.Join("\n", replLines);
+        var distinctIndentDepths = replLines
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => AgentUtilities.GetLeadingWhitespace(l).Length)
+            .Distinct()
+            .Count();
+        return distinctIndentDepths <= 1 && replLines.Length > 2
+            ? AgentUtilities.AutoIndentFromFile(joined, fileIndent, fileLines, start)
+            : joined;
+    }
+
+    public static string? BuildExactMatchHint(string content, string oldString)
+    {
+        var fileLines = content.Split('\n');
+        var oldLines = oldString.Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => l.Length >= 8)
+            .ToList();
+        if (oldLines.Count == 0 || fileLines.Length == 0) return null;
+
+        bool IsTrivialLine(string line)
+        {
+            var t = line.Trim();
+            if (t.Length < 12) return true;
+
+            var meaningful = new string(t.Where(char.IsLetterOrDigit).ToArray());
+            if (meaningful.Length < 12) return true;
+
+            if (Regex.IsMatch(t, @"^\s*[\w-]+\s*:\s*[\w\d#.()-]+\s*;?\s*$"))
+            {
+
+                return true;
+            }
+            return false;
+        }
+
+        var results = new List<(int fileIdx, double score, string line)>();
+        for (var fi = 0; fi < fileLines.Length; fi++)
+        {
+            var fLine = fileLines[fi];
+            if (IsTrivialLine(fLine)) continue;
+            var bestSim = oldLines.Max(o => ComputeLineSimilarity(fLine, o));
+            if (bestSim >= 0.50)
+                results.Add((fi, bestSim, fLine));
+        }
+
+        var best = results
+            .OrderByDescending(r => r.score)
+            .ThenByDescending(r => r.line.Trim().Length)
+            .Take(3)
+            .ToList();
+        if (best.Count == 0) return null;
+
+        var sb = new StringBuilder();
+        foreach (var b in best)
+        {
+            sb.AppendLine($"  ({(b.score * 100):F0}% match) line {b.fileIdx + 1}: {b.line}");
+
+            var llmLine = oldLines
+                .OrderByDescending(o => ComputeLineSimilarity(b.line, o))
+                .FirstOrDefault();
+            if (llmLine != null && llmLine != b.line.Trim())
+            {
+                var fileTrimmed = b.line.Trim();
+                var diff = DescribeLineDiff(llmLine, fileTrimmed);
+                if (diff != null)
+                    sb.AppendLine($"    └ DIFF: {diff}");
+            }
+        }
+        return sb.ToString();
+    }
+
+    public static string? DescribeLineDiff(string llm, string file)
+    {
+        if (string.Equals(llm, file, StringComparison.Ordinal)) return null;
+
+        var diffs = new List<string>();
+
+
+        var llmNoCommaSpace = Regex.Replace(llm, @",\s*", ",");
+        var fileNoCommaSpace = Regex.Replace(file, @",\s*", ",");
+        if (llmNoCommaSpace == fileNoCommaSpace && llm != file)
+            diffs.Add("the file has spaces after commas that you omitted — e.g. 'rgba(255,255,255)' should be 'rgba(255, 255, 255)'");
+
+
+        var llmNoColonSpace = Regex.Replace(llm, @":\s*", ":");
+        var fileNoColonSpace = Regex.Replace(file, @":\s*", ":");
+        if (llmNoColonSpace == fileNoColonSpace && llmNoCommaSpace != fileNoCommaSpace)
+            diffs.Add("the file has spaces after colons that you omitted — e.g. 'padding:16px' should be 'padding: 16px'");
+
+
+        var llmNoEqSpace = Regex.Replace(llm, @"\s*=\s*", "=");
+        var fileNoEqSpace = Regex.Replace(file, @"\s*=\s*", "=");
+        if (llmNoEqSpace == fileNoEqSpace && llmNoCommaSpace != fileNoCommaSpace && llmNoColonSpace != fileNoColonSpace)
+            diffs.Add("the file has spaces around '=' that you omitted — e.g. 'x=0' should be 'x = 0'");
+
+
+        var llmNoParenSpace = Regex.Replace(llm, @"\(\s+", "(").Replace(")", " )").Replace(") )", "))");
+        var fileNoParenSpace = Regex.Replace(file, @"\(\s+", "(").Replace(")", " )").Replace(") )", "))");
+        if (llmNoParenSpace == fileNoParenSpace && llm != file
+            && llmNoCommaSpace == fileNoCommaSpace && llmNoColonSpace == fileNoColonSpace)
+            diffs.Add("the file has different whitespace inside parens");
+
+
+        if (diffs.Count == 0)
+        {
+            var minLen = Math.Min(llm.Length, file.Length);
+            var firstDiff = -1;
+            for (var i = 0; i < minLen; i++)
+            {
+                if (llm[i] != file[i]) { firstDiff = i; break; }
+            }
+            if (firstDiff >= 0)
+            {
+                var ctx = Math.Max(0, firstDiff - 8);
+                var llmCtx = llm.Substring(ctx, Math.Min(20, llm.Length - ctx));
+                var fileCtx = file.Substring(ctx, Math.Min(20, file.Length - ctx));
+                diffs.Add($"first difference at position {firstDiff}: you wrote '{llmCtx}' but file has '{fileCtx}'");
+            }
+            else
+            {
+                diffs.Add($"length differs: you wrote {llm.Length} chars, file has {file.Length} chars");
+            }
+        }
+
+        return string.Join("; ", diffs);
+    }
+
     public static string CollectCompleteSignatureLine(string[] lines)
     {
         var sb = new StringBuilder();
@@ -4259,6 +4903,49 @@ public static class AgentUtilities
         return best.line;
     }
 
+    public static string? FindTypeDefinitionInContext(string typeName, string context)
+    {
+        if (string.IsNullOrWhiteSpace(context) || string.IsNullOrWhiteSpace(typeName))
+        { return null; }
+        var declPattern = @"(class|record|struct)\s+" + Regex.Escape(typeName) + @"\b";
+        var decl = Regex.Match(context, declPattern);
+        if (!decl.Success) { return null; }
+
+        var startIdx = decl.Index;
+        var braceStart = context.IndexOf('{', startIdx);
+        if (braceStart < 0) return null;
+
+        var depth = 0;
+        var endIdx = -1;
+        for (var i = braceStart; i < context.Length; i++)
+        {
+            if (context[i] == '{') depth++;
+            else if (context[i] == '}') { depth--; if (depth == 0) { endIdx = i; break; } }
+        }
+        if (endIdx < 0) return null;
+
+        return context[startIdx..(endIdx + 1)].Trim();
+    }
+
+    public static string ExtractTypeNameForLog(string classDef)
+    {
+        var m = Regex.Match(classDef, @"\b(class|record|struct)\s+([A-Za-z_][A-Za-z0-9_]*)");
+        return m.Success ? m.Groups[2].Value : "?";
+    }
+
+    public static int CountRoslynErrors(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return 0;
+        try
+        {
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(content);
+            return tree.GetDiagnostics().Count(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
     private static void AddInsertionLineCandidates(
         string[] lines, string changeLower, List<(int line, int score)> candidates)
     {
