@@ -992,9 +992,11 @@ public class AgentController : ControllerBase
             Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route|function)\b",
                 RegexOptions.IgnoreCase) ||
             Regex.IsMatch(step.Change,
-                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual)\s+)*?" +
-                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface)\b)" +
-                @"[A-Za-z_]\w*\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
+                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual|function)\s+)*?" +
+                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface|foreach|do)\b)" +
+                @"[A-Za-z_]\w*(?:<[^<>]*(?:<[^<>]*>)*[^<>]*>)?" +
+                @"(?:\s+[A-Za-z_]\w*)?" +
+                @"\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
                 RegexOptions.Multiline | RegexOptions.IgnoreCase));
 
         if (isNewMethodInsertion)
@@ -1336,9 +1338,11 @@ public class AgentController : ControllerBase
 
         var rawMethodCodeDetect = !string.IsNullOrEmpty(step.Change) &&
             Regex.IsMatch(step.Change,
-                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual)\s+)*?" +
-                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface)\b)" +
-                @"[A-Za-z_]\w*\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
+                @"^\s*(?:(?:export|default|async|static|public|private|protected|internal|override|virtual|function)\s+)*?" +
+                @"(?!(?:if|for|while|switch|catch|using|return|throw|yield|var|let|const|new|this|base|class|struct|record|enum|interface|foreach|do)\b)" +
+                @"[A-Za-z_]\w*(?:<[^<>]*(?:<[^<>]*>)*[^<>]*>)?" +
+                @"(?:\s+[A-Za-z_]\w*)?" +
+                @"\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
                 RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
         var classIsNewCsMethod = ext == ".cs" && fileExists && (
