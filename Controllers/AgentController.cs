@@ -8859,7 +8859,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             var skipLlm = regenAttempts > 0;
             if (!skipLlm && !AgentUtilities.IsSpecialMarker(proposal.Step.File))
             {
-                var fp = Path.GetFullPath(Path.Combine(projectRoot, proposal.Step.File.Replace('/', Path.DirectorySeparatorChar)));
+                var fp = Path.GetFullPath(Path.Combine(projectRoot, (proposal.Step.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
                 if (System.IO.File.Exists(fp)) skipLlm = true;
             }
 

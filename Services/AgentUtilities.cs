@@ -1574,7 +1574,7 @@ public static class AgentUtilities
         catch { return empty; }
     }
 
-    public static bool IsSpecialMarker(string file) =>
+    public static bool IsSpecialMarker(string? file) => file != null && (
         file.Equals("_git", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_rename", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_delete_file", StringComparison.OrdinalIgnoreCase) ||
@@ -1586,7 +1586,7 @@ public static class AgentUtilities
         file.Equals("_command", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_search", StringComparison.OrdinalIgnoreCase) ||
         file.Equals("_web_fetch", StringComparison.OrdinalIgnoreCase) ||
-        file.Equals("_explore", StringComparison.OrdinalIgnoreCase);
+        file.Equals("_explore", StringComparison.OrdinalIgnoreCase));
 
     public static bool IsPathUnderRoot(string fullPath, string root)
     {

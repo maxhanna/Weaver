@@ -57,8 +57,8 @@ public class PlanStep
     public string File { get; set; } = string.Empty;
     public string Change { get; set; } = string.Empty;
     public int Priority { get; set; }
-    public string OldString { get; set; } = string.Empty;
-    public string NewString { get; set; } = string.Empty;
+    public string? OldString { get; set; } = string.Empty;
+    public string? NewString { get; set; } = string.Empty;
     public List<string>? ReferenceFiles { get; set; }
     /// <summary>Line number in the file where this edit targets (1-based).</summary>
     [JsonPropertyName("line")]
