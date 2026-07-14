@@ -78,7 +78,7 @@ angular.module('kanbanApp')
                 ];
 
                 // Benchmarks State
-                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
+                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkPlans = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -434,7 +434,7 @@ angular.module('kanbanApp')
                     $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () { vm.showQuestionModal = false; vm.pendingQuestion = null; });
                 };
 
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 vm.startBenchmark = function (level) {
                     if (vm.benchmarkRunning || vm.streamingActive) return; vm.benchmarkRunning = true; vm.benchmarkLevel = level;
