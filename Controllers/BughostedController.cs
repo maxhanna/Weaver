@@ -490,7 +490,7 @@ public class BughostedController : ControllerBase
         }
     }
 
-    [HttpGet("getbenchmarks")]
+    [HttpGet("benchmarks")]
     public async Task<IActionResult> GetBenchmarks([FromQuery] string clientId)
     {
         if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
@@ -502,7 +502,7 @@ public class BughostedController : ControllerBase
         {
             var client = _clientFactory.CreateClient();
             var httpReq = new HttpRequestMessage(HttpMethod.Get,
-                url + $"/weaver/getbenchmarks?token={Uri.EscapeDataString(session.Token)}");
+                url + $"/weaver/benchmarks?token={Uri.EscapeDataString(session.Token)}");
             var httpRes = await client.SendAsync(httpReq);
             var body = await httpRes.Content.ReadAsStringAsync();
 
