@@ -1152,6 +1152,14 @@
           <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
             {{vm.benchmarkLevel}} running...</div>
         </div>
+        <div ng-if="vm.routingCalibration" style="margin:8px 0 12px;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
+          <strong>Planner routing calibration</strong>
+          <span style="margin-left:10px;">{{vm.routingCalibration.accuracyPercent.toFixed(1)}}% accuracy</span>
+          <span class="muted" style="margin-left:8px;">{{vm.routingCalibration.correct}}/{{vm.routingCalibration.total}} cases · threshold {{vm.routingCalibration.threshold}} · FP {{vm.routingCalibration.falsePositives}} · FN {{vm.routingCalibration.falseNegatives}}</span>
+        </div>
+        <div ng-if="vm.benchmarkSummary && vm.benchmarkSummary.runCount" class="muted" style="margin:6px 0 10px;font-size:12px;">
+          History: {{vm.benchmarkSummary.runCount}} runs · {{vm.benchmarkSummary.averageScore.toFixed(1)}}% average · {{vm.formatBenchmarkDuration(vm.benchmarkSummary.averageDurationMs)}} average duration
+        </div>
         <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
           No benchmark scores yet. Run a benchmark above.
         </div>
@@ -1187,6 +1195,27 @@
             </tr>
           </tbody>
         </table>
+        <div ng-if="vm.selectedBenchmarkScore" style="margin:10px 0;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px;">
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;">
+            <strong>Evaluation details</strong>
+            <span>Correctness {{vm.selectedBenchmarkScore.correctnessPercent.toFixed(1)}}%</span>
+            <span ng-if="vm.selectedBenchmarkScore.preservationPercent != null">Preservation {{vm.selectedBenchmarkScore.preservationPercent.toFixed(1)}}%</span>
+            <span ng-if="vm.selectedBenchmarkScore.recoveryPercent != null">Recovery {{vm.selectedBenchmarkScore.recoveryPercent.toFixed(1)}}%</span>
+            <span ng-if="vm.selectedBenchmarkScore.efficiencyPercent != null">Efficiency {{vm.selectedBenchmarkScore.efficiencyPercent.toFixed(1)}}%</span>
+            <span ng-if="vm.selectedBenchmarkScore.plannerRoute">Route {{vm.selectedBenchmarkScore.plannerRoute}} ({{vm.selectedBenchmarkScore.plannerGateScore}})</span>
+          </div>
+          <div ng-if="vm.selectedBenchmarkScore.actualStrategies.length" class="muted" style="margin-bottom:6px;">Strategies: {{vm.selectedBenchmarkScore.actualStrategies.join(', ')}}</div>
+          <div ng-if="vm.selectedBenchmarkScore.regression" ng-style="{'color': vm.selectedBenchmarkScore.regression.hasRegression ? 'var(--danger)' : 'var(--success)'}" style="margin-bottom:6px;">
+            Baseline Δ {{vm.selectedBenchmarkScore.regression.scoreDelta.toFixed(1)}} points
+            <span ng-if="vm.selectedBenchmarkScore.regression.newlyFailingChecks.length"> · New failures: {{vm.selectedBenchmarkScore.regression.newlyFailingChecks.join(', ')}}</span>
+            <span ng-if="vm.selectedBenchmarkScore.regression.recoveredChecks.length"> · Recovered: {{vm.selectedBenchmarkScore.regression.recoveredChecks.join(', ')}}</span>
+          </div>
+          <div ng-repeat="check in vm.selectedBenchmarkScore.checks" style="padding:3px 0;">
+            <span ng-style="{'color': check.passed ? 'var(--success)' : 'var(--danger)'}">{{check.passed ? '✓' : '✕'}}</span>
+            <span>{{check.name}}</span>
+            <span ng-if="!check.passed && check.failureCode" class="muted">— {{check.failureCode}}: {{check.normalizedFailure}}</span>
+          </div>
+        </div>
         <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <strong style="font-size:13px;">System Specs</strong>

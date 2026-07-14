@@ -6,6 +6,39 @@ namespace Weaver.Services;
 
 public static class AgentUtilities
 {
+    public const int MetaPlanScoreThreshold = 6;
+
+    public static MetaPlanGateDecision EvaluateMetaPlanGate(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt)) return new(false, 0, "Empty prompt");
+        var lower = prompt.ToLowerInvariant();
+
+        if (Regex.IsMatch(lower,
+                @"\b(add|create|implement)\b.{0,50}\b(method|endpoint)\b.{0,80}\b(table|insert|create\s+table)\b") &&
+            !Regex.IsMatch(lower, @"\b(component|frontend|angular|service\s+layer|multiple\s+files)\b"))
+        {
+            return new(false, 0, "Atomic method/endpoint plus table task");
+        }
+
+        var distinctFileHints = Regex.Matches(prompt, @"[\w\-/\\]+\.(cs|ts|tsx|js|jsx|html|css|scss)")
+            .Select(m => m.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        var newSymbolVerbs = Regex.Matches(lower, @"\b(add|create|implement|build)\b").Count;
+        var crossCuttingWords = Regex.Matches(lower,
+            @"\b(component|service|controller|endpoint|frontend|backend|scaffold|module|full\s+crud|end.to.end)\b").Count;
+        var score = distinctFileHints * 2 + newSymbolVerbs + crossCuttingWords;
+
+        if (Regex.IsMatch(lower, @"\b(end.to.end\s+)?(authentication|password\s+reset)\b"))
+            return new(true, Math.Max(score, MetaPlanScoreThreshold), "Inherently cross-layer identity workflow");
+
+        if (distinctFileHints <= 2 && newSymbolVerbs <= 1 && crossCuttingWords <= 1)
+            return new(false, score, "Bounded task with at most two explicit files and one architectural concern");
+
+        var useMetaPlan = score >= MetaPlanScoreThreshold;
+        return new(useMetaPlan, score,
+            $"{distinctFileHints} file hint(s), {newSymbolVerbs} creation verb(s), {crossCuttingWords} cross-cutting term(s)");
+    }
     private const int CompactThreshold90 = 2520;
     public static readonly string[] UnsafeEditMarkers =
     {

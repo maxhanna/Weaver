@@ -5364,6 +5364,10 @@ emitSse, ct);
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
+            result["editStrategy"] = fullFile ? "whole-file" : fromFormatC ? "structural-insertion"
+                : attempt == 0 ? "old-string-replacement"
+                : attempt == 1 ? "verbatim-copy"
+                : attempt == 2 ? "single-line-anchor" : "line-range-replacement";
             result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
             result["needsExtraStep"] = stepNeedsExtraStep;            
             result["extraStepReason"] = stepExtraStepReason;           
@@ -14059,6 +14063,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
                     result["oldStartLine"] = 0;
                     PopulateEditResult(result, "created", step.Path!, null, newString, newString);
+                    result["editStrategy"] = "whole-file-create";
                     if (contentCache != null) contentCache[targetPath] = newString;
                     return;
                 }
@@ -14075,6 +14080,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
             if (contentCache != null) contentCache[targetPath] = content;
             PopulateEditResult(result, "modified", step.Path!, null, newString, newString);
+            result["editStrategy"] = "append-or-whole-file";
 
 
             try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
@@ -14104,6 +14110,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
         PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent);
+        result["editStrategy"] = "old-string-replacement";
 
 
         try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
@@ -14617,6 +14624,7 @@ Respond with JSON only:
         await EmitLog(emitSse, "success", $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
         var r = new Dictionary<string, object?>();
         PopulateEditResult(r, "modified", relPath, null, fullContent, "");
+        r["editStrategy"] = "whole-file";
         r["index"] = stepIndex;
         r["planItemIndex"] = planItemIndex;
         if (emitSse) await SendSse(Response, "step", r, ct);
@@ -15047,30 +15055,8 @@ done = build OK; command = run this to fix; ask_user = need input";
 
     private static (bool skipMetaPlan, int score) DeterministicMetaPlanGate(string prompt)
     {
-        if (string.IsNullOrWhiteSpace(prompt)) return (true, 0);
-        var lower = prompt.ToLowerInvariant();
-
-        if (Regex.IsMatch(lower,
-                @"\b(add|create|implement)\b.{0,50}\b(method|endpoint)\b.{0,80}\b(table|insert|create\s+table)\b") &&
-            !Regex.IsMatch(lower, @"\b(component|frontend|angular|service\s+layer|multiple\s+files)\b"))
-        {
-            return (true, 0);
-        }
-
-        var distinctFileHints = Regex.Matches(prompt, @"[\w\-/\\]+\.(cs|ts|tsx|js|jsx|html|css|scss)")
-            .Select(m => m.Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-
-        var newSymbolVerbs = Regex.Matches(lower, @"\b(add|create|implement|build)\b").Count;
-
-        var crossCuttingWords = Regex.Matches(lower,
-            @"\b(component|service|controller|endpoint|frontend|backend|scaffold|module|full\s+crud|end.to.end)\b").Count;
-
-        var score = distinctFileHints * 2 + newSymbolVerbs + crossCuttingWords;
-
-        const int MetaPlanFloor = 6;
-        return (score < MetaPlanFloor, score);
+        var decision = AgentUtilities.EvaluateMetaPlanGate(prompt);
+        return (!decision.UseMetaPlan, decision.Score);
     }
     private async Task RepairPipeline(
         string projectRoot, bool emitSse, CancellationToken ct,

@@ -154,7 +154,7 @@ public class EditKnowledgeService
         {
             sb.AppendLine("RECENT FAILURES (avoid repeating):");
             foreach (var f in k.RecentFailures)
-                sb.AppendLine($"  [{f.Ts}] {f.File} — {f.Outcome}: {f.Reason}");
+                sb.AppendLine($"  [{f.Ts}] {f.File} — {FailureLabel(f)}: {f.Reason}");
             sb.AppendLine();
         }
         return sb.ToString();
@@ -238,7 +238,7 @@ public class EditKnowledgeService
             {
                 sb.AppendLine("RECENT FAILURES (avoid repeating):");
                 foreach (var f in scored)
-                    sb.AppendLine($"  [{f.Ts}] {f.File} — {f.Outcome}: {f.Reason}");
+                    sb.AppendLine($"  [{f.Ts}] {f.File} — {FailureLabel(f)}: {f.Reason}");
                 sb.AppendLine();
             }
         }
@@ -420,22 +420,31 @@ public class EditKnowledgeService
 
                 if (outcome != "success")
                 {
+                    var normalized = FailureTaxonomy.Classify(reason, outcome);
+                    k.RecentFailures.RemoveAll(f =>
+                        string.Equals(f.File, relPath ?? "", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(f.Code, normalized.Code, StringComparison.OrdinalIgnoreCase));
                     k.RecentFailures.Add(new ProjectEditFailure
                     {
                         Ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                         File = relPath ?? "",
-                        Reason = TruncateForLlm(reason, 200),
-                        Outcome = outcome
+                        Reason = normalized.Summary,
+                        Outcome = outcome,
+                        Code = normalized.Code,
+                        Category = normalized.Category.ToString()
                     });
                     while (k.RecentFailures.Count > MaxRecentFailures)
                         k.RecentFailures.RemoveAt(0);
                 }
 
                 var fileExt = Path.GetExtension(relPath ?? "").ToLowerInvariant();
+                var knowledgeReason = outcome == "success"
+                    ? reason
+                    : FailureTaxonomy.Classify(reason, outcome).Summary;
                 var (newDoBullets, newDontBullets, newPatternBullets, summary)
                     = await SummarizeOutcomeAsync(
                         originalPrompt, stepChange, relPath ?? "", fileExt,
-                        oldStr ?? "", newStr ?? "", outcome, reason,
+                        oldStr ?? "", newStr ?? "", outcome, knowledgeReason,
                         k, bgCt);
 
                 if (!string.IsNullOrWhiteSpace(summary))
@@ -623,6 +632,12 @@ public class EditKnowledgeService
         return s.Substring(0, headLen) +
                $"\n... [truncated {s.Length - headLen - tailLen} chars] ...\n" +
                (tailLen > 0 ? s.Substring(s.Length - tailLen, tailLen) : "");
+    }
+
+    private static string FailureLabel(ProjectEditFailure failure)
+    {
+        if (!string.IsNullOrWhiteSpace(failure.Code)) return $"{failure.Outcome}/{failure.Code}";
+        return failure.Outcome;
     }
 
     // ── Architecture extraction ──────────────────────────────────────────────
@@ -972,4 +987,6 @@ public class ProjectEditFailure
     public string File { get; set; } = "";
     public string Reason { get; set; } = "";
     public string Outcome { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string Category { get; set; } = "";
 }
