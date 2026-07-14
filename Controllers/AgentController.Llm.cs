@@ -155,7 +155,23 @@ partial class AgentController
 
             var raw = sb.ToString();
             if (string.IsNullOrWhiteSpace(raw)) return ("", null, "Empty LLM response");
+
+            var braceCount = 0;
+            var topLevelOpens = 0;
+            foreach (var c in raw)
+            {
+                if (c == '{') { braceCount++; if (braceCount == 1) topLevelOpens++; }
+                else if (c == '}') braceCount--;
+            }
+            if (topLevelOpens > 1)
+            {
+                return (raw, null,
+                    $"Multiple JSON objects detected ({topLevelOpens}) in single response — " +
+                    "model is emitting multiple attempts. Use a stronger model or lower temperature.");
+            }
+
             var parsed2 = ParseAgentResponse(raw);
+
             return (raw, parsed2, parsed2 == null ? "JSON parse failed" : null);
         }
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }

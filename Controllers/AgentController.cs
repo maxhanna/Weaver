@@ -1228,6 +1228,28 @@ public partial class AgentController : ControllerBase
                 sb.AppendLine();
             }
         }
+ 
+        if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" && !string.IsNullOrWhiteSpace(fileContent))
+        {
+            var markers = Regex.Matches(fileContent, @"<!--\s*([^>]{3,80}?)\s*-->|<div[^>]*groupDomainTitle[^>]*>\s*([^<]+?)\s*</div>");
+            if (markers.Count > 0)
+            {
+                sb.AppendLine("\n📐 HTML STRUCTURE MARKERS (use these as anchors):");
+                foreach (Match m in markers)
+                {
+                    var lineNum = fileContent[..m.Index].Count(c => c == '\n') + 1;
+                    var label = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                    sb.AppendLine($"  Line {lineNum}: {label.Trim()}");
+                }
+                sb.AppendLine();
+            }
+        }
+
+        if (HtmlDomEditor.IsHtmlDomFile(relPath) && fileContent.Contains("<!-- WEAVER_INSERT:0 -->", StringComparison.Ordinal))
+        {
+            sb.AppendLine("⚠ HTML INSERTION MARKER found in the file. You MUST set `oldString` to exactly `<!-- WEAVER_INSERT:0 -->` " +
+                          "and set `newString` to the new HTML to insert. Do NOT remove the marker from the file.");
+        }
 
         sb.AppendLine();
         sb.AppendLine("Output the edit now:");
@@ -1315,12 +1337,8 @@ public partial class AgentController : ControllerBase
                 var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
                 if (m.Success) cleaned = m.Groups[1].Value.Trim();
             }
-            var fb = cleaned.IndexOf('{');
-            var lb = cleaned.LastIndexOf('}');
-            if (fb >= 0 && lb > fb)
-            {
-                cleaned = cleaned[fb..(lb + 1)];
-            }
+ 
+            cleaned = ExtractFirstJsonObject(cleaned);
             cleaned = RepairJsonNewlines(cleaned);
 
             using var jDoc = JsonDocument.Parse(cleaned);
@@ -1693,6 +1711,23 @@ public partial class AgentController : ControllerBase
 
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
+
+                if (!string.IsNullOrWhiteSpace(oldStr))
+                    oldStr = FixAngularAttributeCasing(oldStr);
+                if (!string.IsNullOrWhiteSpace(newStr))
+                    newStr = FixAngularAttributeCasing(newStr);
+
+                if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(fileContent) &&
+                    newStr.Split('\n').Length > 30 &&
+                    fileContent.Split('\n').Length > 0 &&
+                    (double)newStr.Split('\n').Length / fileContent.Split('\n').Length > 0.6)
+                {
+                    return (null, null, false, null, false,
+                        "newString is " + newStr.Split('\n').Length + " lines — that's >60% of the file. " +
+                        "For an INSERTION, newString should be the 1-2 anchor lines PLUS the new content. " +
+                        "Do NOT reproduce the entire file. Pick the SINGLE line immediately before the insertion point " +
+                        "as oldString, and set newString to that line + your new HTML block.", false);
+                }
 
                 if (!string.IsNullOrWhiteSpace(newStr))
                 {
@@ -3792,6 +3827,7 @@ emitSse, ct);
         var resolveStuckCount = 0;
         var lastResolveError = "";
         var lastOld = "";
+        string? preEditContent = null;
         const int MaxAttempts = 8;
         var forcedInsert = await TryForcedMethodInsertAsync(step, fullPath, relPath, explorationContext, emitSse, ct);
         if (forcedInsert.HasValue && !string.IsNullOrWhiteSpace(forcedInsert.Value.newStr))
@@ -3831,6 +3867,30 @@ emitSse, ct);
                             $"Pre-extracted {preLines.Count} lines from resolved line {resolvedLine} as oldString anchor (stripped leading '}}')", ct: ct);
                     }
                 }
+            }
+        }
+
+        if (System.IO.File.Exists(fullPath) && HtmlDomEditor.IsHtmlDomFile(relPath))
+        {
+            try
+            {
+                var rawHtml = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                if (!rawHtml.Contains("<!-- WEAVER_INSERT:", StringComparison.Ordinal))
+                {
+                    var result = HtmlDomEditor.InjectMarker(rawHtml, step.Change ?? "");
+                    if (result.success)
+                    {
+                        preEditContent = rawHtml;
+                        await System.IO.File.WriteAllTextAsync(fullPath, result.content, Encoding.UTF8, ct);
+                        await EmitLog(emitSse, "info",
+                            $"Inserted HTML comment marker for {relPath}", ct: ct);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await EmitLog(emitSse, "warn",
+                    $"HTML marker injection failed for {relPath}: {ex.Message} — falling through to normal flow", ct: ct);
             }
         }
 
@@ -4025,231 +4085,267 @@ emitSse, ct);
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
-            string? preEditContent = null;
-
-            if (!string.IsNullOrWhiteSpace(oldStr) && step.LineNumber > 0 && !fullFile && !fromFormatC)
-            {
-                var targetSection = AgentUtilities.ExtractVerbatimTargetSection(
-                    fileContent, step.Change ?? "", 10, centerLine: step.LineNumber);
-                if (!string.IsNullOrWhiteSpace(targetSection))
-                {
-                    var targetLines = new HashSet<string>(targetSection.Split('\n')
-                        .Select(l => l.Trim()).Where(l => l.Length >= 8));
-                    var oldContentLines = oldStr.Split('\n')
-                        .Select(l => l.Trim()).Where(l => l.Length >= 8 && l != "}")
-                        .ToList();
-                    if (oldContentLines.Count > 0 && !oldContentLines.Any(l => targetLines.Contains(l)))
-                    {
-                        var err = "WRONG SECTION: None of the oldString lines appear inside the ⚡ ACTUAL TARGET SECTION. " +
-                                  "Your oldString lines must be a subset of the target section shown in the prompt.";
-                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                        history.Add((oldStr!, newStr ?? "", err));
-                        continue;
-                    }
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
-            {
-                var oldLinesCount = oldStr!.Split('\n').Length;
-                var oldTrimmed = oldStr.TrimStart();
-
-
-                if (oldLinesCount > 3)
-                {
-                    var err = $"DELETION SIZE LIMIT: oldString is {oldLinesCount} lines long. When newString is empty (deletion), oldString MUST be 1-3 lines maximum. Output ONLY the exact element being deleted.";
-                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                    history.Add((oldStr!, newStr ?? "", err));
-                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                    if (stuckCount >= 2) goto RecordFailure;
-                    continue;
-                }
-
-
-                if (oldTrimmed.StartsWith("</div") || oldTrimmed.StartsWith("</label") || oldTrimmed.StartsWith("</span") ||
-                    oldTrimmed.StartsWith("<div class=\"card-tags\"") || oldTrimmed.StartsWith("<div class=\"attachments\"") ||
-                    oldTrimmed.StartsWith("<div class=\"card-actions\"") || oldTrimmed.StartsWith("<!--"))
-                {
-                    var err = "STRUCTURAL DELETION GUARD: Refusing to delete structural HTML elements (like </div>, container openings, or comments). Output ONLY the specific <span> or <label> being removed.";
-                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                    history.Add((oldStr!, newStr ?? "", err));
-                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                    if (stuckCount >= 2) goto RecordFailure;
-                    continue;
-                }
-            }
-
-            var oldLines = oldStr?.Split('\n').Length ?? 0;
-            var newLines = newStr?.Split('\n').Length ?? 0;
-            var oldPreview = oldStr is { Length: > 0 }
-                ? string.Join("\\n", oldStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
-                : "(empty)";
-            var newPreview = newStr is { Length: > 0 }
-                ? string.Join("\\n", newStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
-                : "(empty)";
-            await EmitLog(emitSse, "info",
-                $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
-                ct: ct);
-
-            bool replaced;
-            string newContent;
+            bool replaced = false;
+            string newContent = fileContent;
             string? matchError = null;
             string? snippet = null;
+            bool bypassVerify = false;
+            int oldLines = oldStr?.Split('\n').Length ?? 0;
+            int newLines = newStr?.Split('\n').Length ?? 0;
 
-            if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
+            // DOM Marker Fallback: If the file contains the injection marker, bypass standard matching
+            if (fileContent.Contains("<!-- WEAVER_INSERT:0 -->", StringComparison.Ordinal) &&
+                HtmlDomEditor.IsHtmlDomFile(relPath) &&
+                !string.IsNullOrWhiteSpace(newStr) &&
+                !fromFormatC)
             {
-                newContent = newStr;
-                replaced = true;
-                matchError = null;
-                snippet = null;
-            }
-            else if (fromFormatC && !string.IsNullOrEmpty(oldStr))
-            {
-                var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
-                var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
-                var idx = normFile.IndexOf(normOld, StringComparison.Ordinal);
-                if (idx >= 0)
+                var htmlResult = HtmlDomEditor.InsertHtmlViaDom(
+                    fileContent, step.Change ?? "", newStr);
+                if (htmlResult.success)
                 {
-                    var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "");
-                    newContent = normFile[..idx] + normNew + normFile[(idx + normOld.Length)..];
-                    replaced = true;
-                }
-                else
-                {
-                    replaced = false;
-                    newContent = fileContent;
-                    matchError = "FORMAT C oldString not found in file (direct match failed)";
-                }
-            }
-            else if (!string.IsNullOrWhiteSpace(oldStr) && !fromFormatC)
-            {
-                var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
-                var normOld = AgentUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
-                var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "").Trim('\n', '\r');
-
-                var fileLinesArr = normFile.Split('\n').ToList();
-                var oldLinesArr = normOld.Split('\n').ToList();
-                var newLinesArr = string.IsNullOrWhiteSpace(normNew)
-                    ? new List<string>()
-                    : normNew.Split('\n').ToList();
-
-                int matchIdx = -1;
-                var targetLineIdx = step.LineNumber > 0 ? step.LineNumber - 1 : -1;
-
-
-                var allMatches = new List<int>();
-                for (int i = 0; i <= fileLinesArr.Count - oldLinesArr.Count; i++)
-                {
-                    bool match = true;
-                    for (int j = 0; j < oldLinesArr.Count; j++)
-                    {
-                        var fileLine = fileLinesArr[i + j].Trim();
-                        var oldLine = oldLinesArr[j].Trim();
-                        if (fileLine == oldLine) continue;
-
-
-                        if (Regex.Replace(fileLine, @"\s+", "") == Regex.Replace(oldLine, @"\s+", ""))
-                            continue;
-                        match = false;
-                        break;
-                    }
-                    if (match) allMatches.Add(i);
-                }
-
-                if (allMatches.Count == 1)
-                {
-                    matchIdx = allMatches[0];
-                }
-                else if (allMatches.Count > 1)
-                {
-
-                    var keywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
-                    if (keywords.Count > 0)
-                    {
-                        var bestKwScore = -1;
-                        foreach (var mi in allMatches)
-                        {
-                            var ctxStart = Math.Max(0, mi - 3);
-                            var ctxLines = fileLinesArr
-                                .Skip(ctxStart)
-                                .Take(mi - ctxStart + oldLinesArr.Count)
-                                .ToList();
-                            var ctx = string.Join("\n", ctxLines).ToLowerInvariant();
-                            var score = keywords.Count(k => ctx.Contains(k));
-                            if (score > bestKwScore) { bestKwScore = score; matchIdx = mi; }
-                        }
-                    }
-
-
-                    if (matchIdx < 0 && targetLineIdx >= 0)
-                    {
-                        var bestDist = int.MaxValue;
-                        foreach (var mi in allMatches)
-                        {
-                            var dist = Math.Abs(mi - targetLineIdx);
-                            if (dist < bestDist) { bestDist = dist; matchIdx = mi; }
-                        }
-                    }
-
-
-                    if (matchIdx < 0) matchIdx = allMatches[0];
-                }
-
-                if (matchIdx >= 0)
-                {
-                    var finalNewLines = new List<string>();
-                    if (newLinesArr.Count > 0)
-                    {
-                        var baseIndent = Regex.Match(fileLinesArr[matchIdx], @"^(\s*)").Value;
-                        var oldBaseIndent = Regex.Match(oldLinesArr[0], @"^(\s*)").Value;
-
-                        foreach (var nl in newLinesArr)
-                        {
-                            if (string.IsNullOrWhiteSpace(nl))
-                            {
-                                finalNewLines.Add(nl);
-                                continue;
-                            }
-
-                            var currentOldIndent = Regex.Match(nl, @"^(\s*)").Value;
-                            string relativeIndent = currentOldIndent.Length >= oldBaseIndent.Length
-                                ? currentOldIndent.Substring(oldBaseIndent.Length)
-                                : "";
-
-                            finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
-                        }
-
-                        var rawNew = string.Join("\n", finalNewLines);
-                        if (IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
-                        {
-                            var stripped = finalNewLines
-                                .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
-                                .ToList();
-                            var fixedHtml = AgentUtilities.AutoIndentHtml(
-                                string.Join("\n", stripped), baseIndent);
-                            finalNewLines = fixedHtml.Split('\n').ToList();
-                        }
-
-                        var rawAfter = string.Join("\n", finalNewLines);
-                        if ((rawAfter.Contains('{') || rawAfter.Contains('}')) &&
-                            !IsHtmlLikeContent(rawAfter) && finalNewLines.Count > 2)
-                        {
-                            var fixedBraces = AgentUtilities.AutoIndentFromFile(
-                                string.Join("\n", finalNewLines), baseIndent,
-                                fileLinesArr.ToArray(), matchIdx);
-                            finalNewLines = fixedBraces.Split('\n').ToList();
-                        }
-                    }
-
-                    fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
-                    fileLinesArr.InsertRange(matchIdx, finalNewLines);
-
-                    newContent = string.Join("\n", fileLinesArr);
+                    newContent = htmlResult.newContent;
                     replaced = true;
                     matchError = null;
                     snippet = null;
+                    bypassVerify = true;
+                }
+            }
+
+            if (!replaced)
+            {
+                if (!string.IsNullOrWhiteSpace(oldStr) && step.LineNumber > 0 && !fullFile && !fromFormatC)
+                {
+                    var targetSection = AgentUtilities.ExtractVerbatimTargetSection(
+                        fileContent, step.Change ?? "", 10, centerLine: step.LineNumber);
+                    if (!string.IsNullOrWhiteSpace(targetSection))
+                    {
+                        var targetLines = new HashSet<string>(targetSection.Split('\n')
+                            .Select(l => l.Trim()).Where(l => l.Length >= 8));
+                        var oldContentLines = oldStr.Split('\n')
+                            .Select(l => l.Trim()).Where(l => l.Length >= 8 && l != "}")
+                            .ToList();
+                        if (oldContentLines.Count > 0 && !oldContentLines.Any(l => targetLines.Contains(l)))
+                        {
+                            var err = "WRONG SECTION: None of the oldString lines appear inside the ⚡ ACTUAL TARGET SECTION. " +
+                                      "Your oldString lines must be a subset of the target section shown in the prompt.";
+                            await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                            history.Add((oldStr!, newStr ?? "", err));
+                            continue;
+                        }
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+                {
+                    var oldLinesCount = oldStr!.Split('\n').Length;
+                    var oldTrimmed = oldStr.TrimStart();
+
+                    if (oldLinesCount > 3)
+                    {
+                        var err = $"DELETION SIZE LIMIT: oldString is {oldLinesCount} lines long. When newString is empty (deletion), oldString MUST be 1-3 lines maximum. Output ONLY the exact element being deleted.";
+                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                        history.Add((oldStr!, newStr ?? "", err));
+                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                        if (stuckCount >= 2) goto RecordFailure;
+                        continue;
+                    }
+
+                    if (oldTrimmed.StartsWith("</div") || oldTrimmed.StartsWith("</label") || oldTrimmed.StartsWith("</span") ||
+                        oldTrimmed.StartsWith("<div class=\"card-tags\"") || oldTrimmed.StartsWith("<div class=\"attachments\"") ||
+                        oldTrimmed.StartsWith("<div class=\"card-actions\"") || oldTrimmed.StartsWith("<!--"))
+                    {
+                        var err = "STRUCTURAL DELETION GUARD: Refusing to delete structural HTML elements (like </div>, container openings, or comments). Output ONLY the specific <span> or <label> being removed.";
+                        await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                        history.Add((oldStr!, newStr ?? "", err));
+                        if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                        else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                        if (stuckCount >= 2) goto RecordFailure;
+                        continue;
+                    }
+                }
+
+                oldLines = oldStr?.Split('\n').Length ?? 0;
+                newLines = newStr?.Split('\n').Length ?? 0;
+                var oldPreview = oldStr is { Length: > 0 }
+                    ? string.Join("\\n", oldStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
+                    : "(empty)";
+                var newPreview = newStr is { Length: > 0 }
+                    ? string.Join("\\n", newStr.Split('\n').Take(2).Select(l => l.Length > 80 ? l[..80] + "…" : l))
+                    : "(empty)";
+                await EmitLog(emitSse, "info",
+                    $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
+                    ct: ct);
+                    
+                if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
+                {
+                    newContent = newStr;
+                    replaced = true;
+                    matchError = null;
+                    snippet = null;
+                }
+                else if (fromFormatC && !string.IsNullOrEmpty(oldStr))
+                {
+                    var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+                    var normOld = AgentUtilities.NormalizeLineEndings(oldStr);
+                    var idx = normFile.IndexOf(normOld, StringComparison.Ordinal);
+                    if (idx >= 0)
+                    {
+                        var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "");
+                        newContent = normFile[..idx] + normNew + normFile[(idx + normOld.Length)..];
+                        replaced = true;
+                    }
+                    else
+                    {
+                        replaced = false;
+                        newContent = fileContent;
+                        matchError = "FORMAT C oldString not found in file (direct match failed)";
+                    }
+                }
+                else if (!string.IsNullOrWhiteSpace(oldStr) && !fromFormatC)
+                {
+                    var normFile = AgentUtilities.NormalizeLineEndings(fileContent);
+                    var normOld = AgentUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
+                    var normNew = AgentUtilities.NormalizeLineEndings(newStr ?? "").Trim('\n', '\r');
+
+                    var fileLinesArr = normFile.Split('\n').ToList();
+                    var oldLinesArr = normOld.Split('\n').ToList();
+                    var newLinesArr = string.IsNullOrWhiteSpace(normNew)
+                        ? new List<string>()
+                        : normNew.Split('\n').ToList();
+
+                    int matchIdx = -1;
+                    var targetLineIdx = step.LineNumber > 0 ? step.LineNumber - 1 : -1;
+
+                    var allMatches = new List<int>();
+                    for (int i = 0; i <= fileLinesArr.Count - oldLinesArr.Count; i++)
+                    {
+                        bool match = true;
+                        for (int j = 0; j < oldLinesArr.Count; j++)
+                        {
+                            var fileLine = fileLinesArr[i + j].Trim();
+                            var oldLine = oldLinesArr[j].Trim();
+
+                            if (fileLine == oldLine) continue;
+                            if (Regex.Replace(fileLine, @"\s+", "") == Regex.Replace(oldLine, @"\s+", "")) continue;
+                            if (string.Equals(fileLine, oldLine, StringComparison.OrdinalIgnoreCase)) continue;
+                            if (string.Equals(Regex.Replace(fileLine, @"\s+", ""), Regex.Replace(oldLine, @"\s+", ""), StringComparison.OrdinalIgnoreCase)) continue;
+
+                            match = false;
+                            break;
+                        }
+                        if (match) allMatches.Add(i);
+                    }
+
+                    if (allMatches.Count == 1)
+                    {
+                        matchIdx = allMatches[0];
+                    }
+                    else if (allMatches.Count > 1)
+                    {
+                        var keywords = AgentUtilities.ExtractDisambiguationKeywords(step.Change);
+                        if (keywords.Count > 0)
+                        {
+                            var bestKwScore = -1;
+                            foreach (var mi in allMatches)
+                            {
+                                var ctxStart = Math.Max(0, mi - 3);
+                                var ctxLines = fileLinesArr
+                                    .Skip(ctxStart)
+                                    .Take(mi - ctxStart + oldLinesArr.Count)
+                                    .ToList();
+                                var ctx = string.Join("\n", ctxLines).ToLowerInvariant();
+                                var score = keywords.Count(k => ctx.Contains(k));
+                                if (score > bestKwScore) { bestKwScore = score; matchIdx = mi; }
+                            }
+                        }
+
+                        if (matchIdx < 0 && targetLineIdx >= 0)
+                        {
+                            var bestDist = int.MaxValue;
+                            foreach (var mi in allMatches)
+                            {
+                                var dist = Math.Abs(mi - targetLineIdx);
+                                if (dist < bestDist) { bestDist = dist; matchIdx = mi; }
+                            }
+                        }
+
+                        if (matchIdx < 0) matchIdx = allMatches[0];
+                    }
+
+                    if (matchIdx >= 0)
+                    {
+                        var exactOldLines = new List<string>();
+                        for (var j = matchIdx; j < matchIdx + oldLinesArr.Count; j++)
+                        {
+                            exactOldLines.Add(fileLinesArr[j]);
+                        }
+                        var exactOldStr = string.Join("\n", exactOldLines);
+
+                        if (exactOldStr != normOld)
+                        {
+                            oldStr = exactOldStr;
+                            normOld = AgentUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
+                            oldLinesArr = normOld.Split('\n').ToList();
+                        }
+
+                        var finalNewLines = new List<string>();
+                        if (newLinesArr.Count > 0)
+                        {
+                            var baseIndent = Regex.Match(fileLinesArr[matchIdx], @"^(\s*)").Value;
+                            var oldBaseIndent = Regex.Match(oldLinesArr[0], @"^(\s*)").Value;
+
+                            foreach (var nl in newLinesArr)
+                            {
+                                if (string.IsNullOrWhiteSpace(nl))
+                                {
+                                    finalNewLines.Add(nl);
+                                    continue;
+                                }
+
+                                var currentOldIndent = Regex.Match(nl, @"^(\s*)").Value;
+                                string relativeIndent = currentOldIndent.Length >= oldBaseIndent.Length
+                                    ? currentOldIndent.Substring(oldBaseIndent.Length)
+                                    : "";
+
+                                finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
+                            }
+
+                            var rawNew = string.Join("\n", finalNewLines);
+                            if (IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
+                            {
+                                var stripped = finalNewLines
+                                    .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
+                                    .ToList();
+                                var fixedHtml = AgentUtilities.AutoIndentHtml(
+                                    string.Join("\n", stripped), baseIndent);
+                                finalNewLines = fixedHtml.Split('\n').ToList();
+                            }
+
+                            var rawAfter = string.Join("\n", finalNewLines);
+                            if ((rawAfter.Contains('{') || rawAfter.Contains('}')) &&
+                                !IsHtmlLikeContent(rawAfter) && finalNewLines.Count > 2)
+                            {
+                                var fixedBraces = AgentUtilities.AutoIndentFromFile(
+                                    string.Join("\n", finalNewLines), baseIndent,
+                                    fileLinesArr.ToArray(), matchIdx);
+                                finalNewLines = fixedBraces.Split('\n').ToList();
+                            }
+                        }
+
+                        fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
+                        fileLinesArr.InsertRange(matchIdx, finalNewLines);
+
+                        newContent = string.Join("\n", fileLinesArr);
+                        replaced = true;
+                        matchError = null;
+                        snippet = null;
+                    }
+                    else
+                    {
+                        var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
+                        replaced = r; newContent = nc; matchError = me; snippet = sn;
+                    }
                 }
                 else
                 {
@@ -4257,11 +4353,23 @@ emitSse, ct);
                     replaced = r; newContent = nc; matchError = me; snippet = sn;
                 }
             }
-            else
+
+
+            if (!replaced && !fromFormatC && !string.IsNullOrWhiteSpace(newStr) &&
+                HtmlDomEditor.IsHtmlDomFile(relPath) && newStr.Length > 100)
             {
-                var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
-                replaced = r; newContent = nc; matchError = me; snippet = sn;
+                var htmlResult = HtmlDomEditor.InsertHtmlViaDom(
+                    fileContent, step.Change ?? "", newStr);
+                if (htmlResult.success)
+                {
+                    newContent = htmlResult.newContent;
+                    replaced = true;
+                    matchError = null;
+                    snippet = null;
+                    oldStr = string.Empty;
+                }
             }
+
 
             if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
                             !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
@@ -4330,9 +4438,10 @@ emitSse, ct);
                 if (stuckCount >= 2) goto RecordFailure;
                 continue;
             }
+
             if (!fromFormatC &&
                 !string.IsNullOrWhiteSpace(oldStr) && !string.IsNullOrWhiteSpace(newStr) &&
-                oldStr.Length > newStr.Length * 4 &&
+                oldStr!.Length > newStr!.Length * 4 &&
                 !oldStr.TrimStart().StartsWith('}') &&
                 oldStr.Length > 200)
             {
@@ -4341,7 +4450,7 @@ emitSse, ct);
                     "Use insertion pattern: oldString = the 1-2 anchor lines right BEFORE where the new code goes, " +
                     "newString = anchor lines (unchanged) + your new code after them.";
                 await EmitLog(emitSse, "warn", err, new { step }, ct: ct);
-                history.Add((oldStr, newStr, err));
+                history.Add((oldStr, newStr ?? "", err));
                 continue;
             }
 
@@ -4698,12 +4807,13 @@ emitSse, ct);
                 }
             }
 
-            var (approved, verifyReason, _) =
-                (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
-                ? (true, "Bypassed verify for empty file insertion", 100)
-                : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
+                var (approved, verifyReason, _) =
+                    bypassVerify ? (true, "Bypassed verify for DOM insertion", 100) :
+                    (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
+                    ? (true, "Bypassed verify for empty file insertion", 100)
+                    : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
 
-            if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
+                if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
                 var correctedContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
                 if (correctedContent != newContent)
@@ -4807,7 +4917,7 @@ emitSse, ct);
                 newContent = AgentUtilities.AutoFixCssWhitespace(newContent);
             }
 
-            preEditContent = fileContent;
+            preEditContent ??= fileContent;
             await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
 
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))

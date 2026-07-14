@@ -468,8 +468,8 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var payload = JsonSerializer.Serialize(new { dto });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/addbenchmark")
+            var payload = JsonSerializer.Serialize(dto);
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/weaver/addbenchmark")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -488,6 +488,61 @@ public class BughostedController : ControllerBase
             Console.WriteLine($"Error sending benchmark: {ex.Message}");
             return StatusCode(500, new { error = "Internal server error while sending benchmark" });
         }
+    }
+
+    [HttpGet("getbenchmarks")]
+    public async Task<IActionResult> GetBenchmarks([FromQuery] string clientId)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
+        var cfg = await _configFile.LoadConfigAsync();
+        var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var httpReq = new HttpRequestMessage(HttpMethod.Get,
+                url + $"/weaver/getbenchmarks?token={Uri.EscapeDataString(session.Token)}");
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+
+            if (!httpRes.IsSuccessStatusCode)
+                return BadRequest(new { error = "Failed to fetch benchmarks", detail = body });
+
+            var rawList = JsonSerializer.Deserialize<List<JsonElement>>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var mapped = rawList?.Select(b => new Dictionary<string, object?>
+            {
+                ["timestamp"] = b.TryGetProperty("date", out var d) ? d.GetString() : null,
+                ["level"] = b.TryGetProperty("benchmark", out var l) && int.TryParse(l.GetString(), out var lv) ? lv : 0,
+                ["stepsCompleted"] = ParseSteps(b, 0),
+                ["totalSteps"] = ParseSteps(b, 1),
+                ["scorePercent"] = b.TryGetProperty("score", out var sc) && double.TryParse(sc.GetString(), out var sp) ? sp : 0.0,
+                ["status"] = b.TryGetProperty("status", out var st) ? st.GetString() : "",
+                ["durationMs"] = b.TryGetProperty("duration", out var du) && double.TryParse(du.GetString(), out var dm) ? dm : 0.0,
+                ["modelUsed"] = b.TryGetProperty("model", out var mo) ? mo.GetString() : "",
+                ["os"] = b.TryGetProperty("os", out var os) ? os.GetString() : "",
+                ["cpu"] = b.TryGetProperty("cpu", out var cpu) ? cpu.GetString() : "",
+                ["ram"] = b.TryGetProperty("ram", out var ram) ? ram.GetString() : "",
+                ["gpu"] = b.TryGetProperty("gpu", out var gpu) ? gpu.GetString() : "",
+                ["_source"] = "server"
+            }).ToList();
+
+            return Ok(mapped ?? new List<Dictionary<string, object?>>());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error fetching benchmarks: {ex.Message}");
+            return StatusCode(500, new { error = "Internal server error while fetching benchmarks" });
+        }
+    }
+
+    private static int ParseSteps(JsonElement b, int index)
+    {
+        if (!b.TryGetProperty("steps", out var steps) || steps.ValueKind != JsonValueKind.String)
+            return 0;
+        var parts = steps.GetString()?.Split('/');
+        if (parts == null || parts.Length != 2) return 0;
+        return int.TryParse(parts[index], out var v) ? v : 0;
     }
 
     [HttpPost("commands/ack")]

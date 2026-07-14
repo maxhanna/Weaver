@@ -4166,7 +4166,63 @@ public static class AgentUtilities
 
         return (false, fileContent, "oldString not found verbatim in file", null);
     }
+    public static string ExtractFirstJsonObject(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+        var start = text.IndexOf('{');
+        if (start < 0) return text;
 
+        var depth = 0;
+        var inString = false;
+        var escape = false;
+
+        for (var i = start; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (escape) { escape = false; continue; }
+            if (c == '\\' && inString) { escape = true; continue; }
+            if (c == '"') { inString = !inString; continue; }
+            if (inString) continue;
+
+            if (c == '{') depth++;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0) return text[start..(i + 1)];
+            }
+        }
+        return text[start..];
+    }
+
+    public static string FixAngularAttributeCasing(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return content;
+
+        // Angular structural directives
+        content = Regex.Replace(content, @"\*ngif\b", "*ngIf", RegexOptions.IgnoreCase);
+        content = Regex.Replace(content, @"\*ngfor\b", "*ngFor", RegexOptions.IgnoreCase);
+        content = Regex.Replace(content, @"\*ngswitch\b", "*ngSwitch", RegexOptions.IgnoreCase);
+        content = Regex.Replace(content, @"\*ngswitchcase\b", "*ngSwitchCase", RegexOptions.IgnoreCase);
+        content = Regex.Replace(content, @"\*ngswitchdefault\b", "*ngSwitchDefault", RegexOptions.IgnoreCase);
+
+        // Common Angular input bindings — restore camelCase
+        var camelCaseAttrs = new[] {
+        "ngClass", "ngStyle", "ngModel", "ngModelChange",
+        "inputtedParentRef", "onlySearch", "hideStatus", "displaySocialResults",
+        "urlSelectedEvent", "showTitle", "hasMenu", "showMenu", "hasClose", "showClose",
+        "menuClicked", "closeClicked", "displayMiniTag", "pageSizeDropdown"
+    };
+
+        foreach (var attr in camelCaseAttrs)
+        {
+            var pattern = $@"(\[|\(\(|\(\[|\(|#){Regex.Escape(attr)}(\]|\)\)|\]|\))";
+            content = Regex.Replace(content, pattern,
+                m => m.Groups[1].Value + attr + m.Groups[2].Value,
+                RegexOptions.IgnoreCase);
+        }
+
+        return content;
+    }
     public static string StripFullFileFence(string value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;

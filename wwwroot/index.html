@@ -1155,6 +1155,14 @@
         <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
           No benchmark scores yet. Run a benchmark above.
         </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <strong style="font-size:13px;">Scores</strong>
+          <div style="display:flex;gap:4px;">
+            <button ng-click="vm.fetchBenchmarksFromServer()" class="small"
+              ng-disabled="!vm.bughostedClientId || vm.fetchingBenchmarks"
+              style="font-size:11px;">{{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}</button>
+          </div>
+        </div>
         <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
           <thead>
             <tr style="border-bottom:1px solid var(--border);">

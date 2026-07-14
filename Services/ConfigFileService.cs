@@ -122,6 +122,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = EncryptPassword(acct.password);
         cfg.emailPassword = EncryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = EncryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = EncryptPassword(cfg.bughostedPassword);
     }
 
@@ -130,6 +131,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = DecryptPassword(acct.password);
         cfg.emailPassword = DecryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = DecryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = DecryptPassword(cfg.bughostedPassword);
     }
 

@@ -258,9 +258,11 @@ partial class AgentController
     "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
     "   unrelated files.\n" +
     "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
-    "10. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
+     "10. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
     "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
-    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n";
+    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
+    "11. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
+    "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,

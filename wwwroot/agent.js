@@ -78,7 +78,7 @@ angular.module('kanbanApp')
                 ];
 
                 // Benchmarks State
-                vm.benchmarkScores = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {};
+                vm.benchmarkScores = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -457,16 +457,16 @@ angular.module('kanbanApp')
                         ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
                         Date: s.date,
-                        Benchmark: s.level,
-                        Steps: s.stepsCompleted + "/" + s.totalSteps,
-                        Score: s.scorePercent || '0',
-                        Status: s.status || '',
-                        Duration: s.durationMs.toString() || '0',
-                        Model: s.modelUsed || '',
-                        OS: vm.systemInfoCustom.os || vm.systemInfoDetected.os || '',
-                        CPU: vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '',
-                        RAM: vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || null,
-                        GPU: vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || ''
+                        Benchmark: String(s.level ?? ''),
+                        Steps: String(s.stepsCompleted ?? '') + "/" + String(s.totalSteps ?? ''),
+                        Score: String(s.scorePercent ?? '0'),
+                        Status: String(s.status ?? ''),
+                        Duration: s.durationMs ? String(s.durationMs) : '0',
+                        Model: String(s.modelUsed ?? ''),
+                        OS: String(vm.systemInfoCustom.os || vm.systemInfoDetected.os || ''),
+                        CPU: String(vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || ''),
+                        RAM: String(vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || ''),
+                        GPU: String(vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '')
                     };
 
                     $http.post('/api/bughosted/addbenchmark', benchmarkDto)
@@ -481,6 +481,22 @@ angular.module('kanbanApp')
                             } else {
                                 alert('Failed to send benchmark due to an unknown error.');
                             }
+                        });
+                };
+                vm.fetchBenchmarksFromServer = function () {
+                    if (!vm.bughostedClientId) { alert('Not connected to BugHosted. Login first.'); return; }
+                    vm.fetchingBenchmarks = true;
+                    $http.get('/api/bughosted/benchmarks?token=' + encodeURIComponent(vm.bughostedClientId))
+                        .then(function (resp) {
+                            console.log(resp);
+                            vm.benchmarkScores = resp.data || [];
+                            vm.fetchingBenchmarks = false;
+                        })
+                        .catch(function (error) {
+                            vm.fetchingBenchmarks = false;
+                            console.error('Error fetching benchmarks:', error);
+                            var msg = error.data && (error.data.detail || error.data.error || error.data.title) || error.message || 'Unknown error';
+                            alert('Failed to fetch benchmarks:\n' + msg);
                         });
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };

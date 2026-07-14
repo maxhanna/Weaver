@@ -120,6 +120,10 @@ angular.module('kanbanApp')
                             if (vm.emailAccounts.length === 0 && (cfg.emailUsername || cfg.emailImapServer)) {
                                 vm.emailAccounts.push({ imapServer: cfg.emailImapServer || '', imapPort: cfg.emailImapPort || 993, useSsl: cfg.emailUseSsl !== false, username: cfg.emailUsername || '', password: cfg.emailPassword || '', label: '', showAppPasswordInstructions: false, testing: false, testResult: null });
                             }
+                            vm.bughostedUrl = cfg.bughostedUrl || '';
+                            vm.bughostedUsername = cfg.bughostedUsername || '';
+                            vm.bughostedPassword = cfg.bughostedPassword || '';
+                            vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
                         } catch (e) { console.log("Loading config error", e); }
                     }, function () {
                         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
@@ -144,6 +148,10 @@ angular.module('kanbanApp')
                         cfg.buildOutputTailChars = vm.buildOutputTailChars || 8000;
                         cfg.defaultMaxTokens = vm.defaultMaxTokens || 2048;
                         cfg.emailAccounts = vm.emailAccounts.map(function (a) { return { imapServer: a.imapServer, imapPort: a.imapPort, useSsl: a.useSsl, username: a.username, password: a.password, label: a.label }; });
+                        cfg.bughostedUrl = vm.bughostedUrl || '';
+                        cfg.bughostedUsername = vm.bughostedUsername || '';
+                        cfg.bughostedPassword = vm.bughostedPassword || '';
+                        cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
                         return $http.post('/api/config/save', cfg);
                     }).then(function () {
                         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
