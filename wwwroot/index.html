@@ -1145,23 +1145,61 @@
               </div>
             </div>
           </div>
-          <div ng-if="!vm.benchmarkPlans || vm.benchmarkPlans.length === 0" class="text-sm muted"
+          <div ng-if="vm.bughostedClientId && (!vm.benchmarkPlans || vm.benchmarkPlans.length === 0)" class="text-sm muted"
             style="padding:8px 0;">
             Loading benchmark plans...
           </div>
           <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
             {{vm.benchmarkLevel}} running...</div>
         </div>
-        <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
-          No benchmark scores yet. Run a benchmark above.
+        <!-- Server Benchmarks (fetched) -->
+        <div ng-if="vm.serverBenchmarks.length > 0" style="margin-bottom:16px;">
+          <strong style="font-size:13px;">Server Benchmarks</strong>
+          <table style="width:100%;border-collapse:collapse;margin-top:4px;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border);">
+                <th style="text-align:left;padding:4px 8px;">Date</th>
+                <th style="text-align:left;padding:4px 8px;">Benchmark</th>
+                <th style="text-align:left;padding:4px 8px;">Steps</th>
+                <th style="text-align:left;padding:4px 8px;">Score</th>
+                <th style="text-align:left;padding:4px 8px;">Status</th>
+                <th style="text-align:left;padding:4px 8px;">Duration</th>
+                <th style="text-align:left;padding:4px 8px;">Model</th>
+                <th style="text-align:left;padding:4px 8px;">OS</th>
+                <th style="text-align:left;padding:4px 8px;">CPU</th>
+                <th style="text-align:left;padding:4px 8px;">RAM</th>
+                <th style="text-align:left;padding:4px 8px;">GPU</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="s in vm.serverBenchmarks" style="border-bottom:1px solid var(--border);">
+                <td style="padding:4px 8px;font-size:12px;">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</td>
+                <td style="padding:4px 8px;">{{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}}</td>
+                <td style="padding:4px 8px;">{{s.stepsCompleted}}/{{s.totalSteps}}</td>
+                <td style="padding:4px 8px;">{{s.scorePercent != null ? (s.scorePercent.toFixed(1) + '%') : '—'}}</td>
+                <td style="padding:4px 8px;">{{s.status || '—'}}</td>
+                <td style="padding:4px 8px;font-size:11px;">{{vm.formatBenchmarkDuration(s.durationMs)}}</td>
+                <td style="padding:4px 8px;font-size:11px;" title="{{s.modelUsed}}">{{(s.modelUsed || '') | limitTo:20}}</td>
+                <td style="padding:4px 8px;font-size:11px;">{{s.os || '—'}}</td>
+                <td style="padding:4px 8px;font-size:11px;" title="{{s.cpu}}">{{(s.cpu || '') | limitTo:20}}</td>
+                <td style="padding:4px 8px;font-size:11px;">{{s.ram || '—'}}</td>
+                <td style="padding:4px 8px;font-size:11px;" title="{{s.gpu}}">{{(s.gpu || '') | limitTo:20}}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
+
+        <!-- Local Scores -->
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <strong style="font-size:13px;">Scores</strong>
+          <strong style="font-size:13px;">Local Scores</strong>
           <div style="display:flex;gap:4px;">
-            <button ng-click="vm.fetchBenchmarksFromServer()" class="small"
-              ng-disabled="!vm.bughostedClientId || vm.fetchingBenchmarks"
-              style="font-size:11px;">{{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}</button>
+            <button ng-click="vm.fetchBenchmarksFromServer()" class="small" ng-disabled="vm.fetchingBenchmarks" style="font-size:11px;">
+              {{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}
+            </button>
           </div>
+        </div>
+        <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
+          No local benchmark scores yet. Run a benchmark above.
         </div>
         <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
           <thead>

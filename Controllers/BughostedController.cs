@@ -491,9 +491,9 @@ public class BughostedController : ControllerBase
     }
 
     [HttpGet("benchmarks")]
-    public async Task<IActionResult> GetBenchmarks([FromQuery] string clientId)
+    public async Task<IActionResult> GetBenchmarks([FromQuery] string token)
     {
-        if (string.IsNullOrWhiteSpace(clientId) || !_sessions.TryGetValue(clientId, out var session))
+        if (string.IsNullOrWhiteSpace(token) || !_sessions.TryGetValue(token, out var session))
             return Unauthorized(new { error = "Not logged in" });
 
         var cfg = await _configFile.LoadConfigAsync();
@@ -509,21 +509,22 @@ public class BughostedController : ControllerBase
             if (!httpRes.IsSuccessStatusCode)
                 return BadRequest(new { error = "Failed to fetch benchmarks", detail = body });
 
-            var rawList = JsonSerializer.Deserialize<List<JsonElement>>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var rawList = JsonSerializer.Deserialize<List<Dictionary<string, JsonElement>>>(body, opts);
             var mapped = rawList?.Select(b => new Dictionary<string, object?>
             {
-                ["timestamp"] = b.TryGetProperty("date", out var d) ? d.GetString() : null,
-                ["level"] = b.TryGetProperty("benchmark", out var l) && int.TryParse(l.GetString(), out var lv) ? lv : 0,
-                ["stepsCompleted"] = ParseSteps(b, 0),
-                ["totalSteps"] = ParseSteps(b, 1),
-                ["scorePercent"] = b.TryGetProperty("score", out var sc) && double.TryParse(sc.GetString(), out var sp) ? sp : 0.0,
-                ["status"] = b.TryGetProperty("status", out var st) ? st.GetString() : "",
-                ["durationMs"] = b.TryGetProperty("duration", out var du) && double.TryParse(du.GetString(), out var dm) ? dm : 0.0,
-                ["modelUsed"] = b.TryGetProperty("model", out var mo) ? mo.GetString() : "",
-                ["os"] = b.TryGetProperty("os", out var os) ? os.GetString() : "",
-                ["cpu"] = b.TryGetProperty("cpu", out var cpu) ? cpu.GetString() : "",
-                ["ram"] = b.TryGetProperty("ram", out var ram) ? ram.GetString() : "",
-                ["gpu"] = b.TryGetProperty("gpu", out var gpu) ? gpu.GetString() : "",
+                ["timestamp"] = b.TryGetValue("date", out var d) ? JsonString(d) : null,
+                ["level"] = b.TryGetValue("benchmark", out var l) ? JsonInt(l) : 0,
+                ["stepsCompleted"] = b.TryGetValue("steps", out var sc) ? JsonStepsPart(sc, 0) : 0,
+                ["totalSteps"] = b.TryGetValue("steps", out var st) ? JsonStepsPart(st, 1) : 0,
+                ["scorePercent"] = b.TryGetValue("score", out var so) ? JsonDouble(so) : 0.0,
+                ["status"] = b.TryGetValue("status", out var su) ? JsonString(su) : "",
+                ["durationMs"] = b.TryGetValue("duration", out var du) ? JsonDouble(du) : 0.0,
+                ["modelUsed"] = b.TryGetValue("model", out var mo) ? JsonString(mo) : "",
+                ["os"] = b.TryGetValue("os", out var os) ? JsonString(os) : "",
+                ["cpu"] = b.TryGetValue("cpu", out var cpu) ? JsonString(cpu) : "",
+                ["ram"] = b.TryGetValue("ram", out var ram) ? JsonString(ram) : "",
+                ["gpu"] = b.TryGetValue("gpu", out var gpu) ? JsonString(gpu) : "",
                 ["_source"] = "server"
             }).ToList();
 
@@ -531,16 +532,45 @@ public class BughostedController : ControllerBase
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error fetching benchmarks: {ex.Message}");
-            return StatusCode(500, new { error = "Internal server error while fetching benchmarks" });
+            var fullError = ex.ToString();
+            Console.WriteLine("Error fetching benchmarks:");
+            Console.WriteLine(fullError);
+            return StatusCode(500, new
+            {
+                error = "Internal server error while fetching benchmarks",
+                detail = fullError
+            });
         }
     }
 
-    private static int ParseSteps(JsonElement b, int index)
+    private static string JsonString(JsonElement el) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString() ?? "",
+            JsonValueKind.Number => el.GetRawText(),
+            _ => ""
+        };
+
+    private static int JsonInt(JsonElement el, int fallback = 0) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.Number => el.TryGetInt32(out var n) ? n : (int)el.GetDouble(),
+            JsonValueKind.String => int.TryParse(el.GetString(), out var n) ? n : fallback,
+            _ => fallback
+        };
+
+    private static double JsonDouble(JsonElement el, double fallback = 0.0) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.Number => el.TryGetDouble(out var n) ? n : fallback,
+            JsonValueKind.String => double.TryParse(el.GetString(), out var n) ? n : fallback,
+            _ => fallback
+        };
+
+    private static int JsonStepsPart(JsonElement el, int index)
     {
-        if (!b.TryGetProperty("steps", out var steps) || steps.ValueKind != JsonValueKind.String)
-            return 0;
-        var parts = steps.GetString()?.Split('/');
+        if (el.ValueKind != JsonValueKind.String) return 0;
+        var parts = el.GetString()?.Split('/');
         if (parts == null || parts.Length != 2) return 0;
         return int.TryParse(parts[index], out var v) ? v : 0;
     }

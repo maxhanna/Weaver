@@ -78,7 +78,7 @@ angular.module('kanbanApp')
                 ];
 
                 // Benchmarks State
-                vm.benchmarkScores = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
+                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false;
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -484,12 +484,14 @@ angular.module('kanbanApp')
                         });
                 };
                 vm.fetchBenchmarksFromServer = function () {
-                    if (!vm.bughostedClientId) { alert('Not connected to BugHosted. Login first.'); return; }
+                    if (!vm.bughostedClientId) { 
+                        alert('Not connected to BugHosted. Login first.'); 
+                        return; 
+                    }
                     vm.fetchingBenchmarks = true;
                     $http.get('/api/bughosted/benchmarks?token=' + encodeURIComponent(vm.bughostedClientId))
                         .then(function (resp) {
-                            console.log(resp);
-                            vm.benchmarkScores = resp.data || [];
+                            vm.serverBenchmarks = resp.data || [];
                             vm.fetchingBenchmarks = false;
                         })
                         .catch(function (error) {
