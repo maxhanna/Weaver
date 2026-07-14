@@ -873,7 +873,7 @@ public partial class AgentController : ControllerBase
                     + "use FORMAT C (targetType/targetName/newCode) for replacing ENTIRE methods. "
                     + "For SMALL changes (1-5 lines), use oldString/newString even for code files — copy lines verbatim from the excerpt above. "
                     + "NEVER rewrite inline SQL queries — preserve them exactly as-is.");
-                sb.AppendLine("For ALL other file types: use oldString/newString — FORMAT C does not apply.");
+                sb.AppendLine("For ALL other file types (except HTML): use oldString/newString.");
             }
             else
             {
@@ -897,7 +897,22 @@ public partial class AgentController : ControllerBase
                 @"\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
                 RegexOptions.Multiline | RegexOptions.IgnoreCase));
 
-        if (isNewMethodInsertion)
+        if (HtmlDomEditor.IsHtmlDomFile(relPath))
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠ HTML FILE — FORMAT D is REQUIRED. This is the ONLY accepted format.");
+            sb.AppendLine("  Three modes:");
+            sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
+            sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
+            sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"newCode\": [...]} — INSERT newCode BEFORE the matched code block (no insertAfter/replace field).");
+            sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
+                          "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
+            sb.AppendLine("  CRITICAL: newCode must contain ONLY the new HTML to insert. " +
+                          "Do NOT include ANY </div> closing tags — not even from parent elements. " +
+                          "The system does NOT add them automatically. newCode is inserted as-is.");
+            sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newString format.");
+        }
+        else if (isNewMethodInsertion)
         {
             sb.AppendLine();
             sb.AppendLine("⚠ NEW METHOD INSERTION — You MUST use FORMAT C with insertAfter:true.");
@@ -914,7 +929,11 @@ public partial class AgentController : ControllerBase
                           "Include the line above/below for anchor context, repeat them unchanged in newString.");
             sb.AppendLine("For FULL method/class replacements (entire method body rewrite): use FORMAT C (targetType/targetName/newCode) " +
                           "with unchanged signature and preserve all inline SQL verbatim.");
-            sb.AppendLine("For HTML, CSS, JSON, and other markup/data files: use oldString/newString — those files don't have methods/classes for FORMAT C.");
+            sb.AppendLine("For HTML files: use FORMAT D (targetType=\"html\", targetName=CODE BLOCK from the file, insertAfter=true/false, newCode=[...]). " +
+                          "targetName is a code block copied verbatim from the file (can be multi-line). " +
+                          "For insertAfter: the block is found and newCode is inserted after it. " +
+                          "For replace: the block is replaced with newCode. " +
+                          "For CSS, JSON, and other data files: use oldString/newString.");
             sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
             sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
                           "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode. " +
@@ -924,9 +943,6 @@ public partial class AgentController : ControllerBase
                           "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
                           "Example: if adding `foo: string` and the last existing line before the closing `}` is `bar: number`, " +
                           "oldString = the line containing `bar` (with exact indentation), newString = that line + newline + your new `foo` line.");
-            sb.AppendLine("To INSERT a new HTML element/block (or move an existing one): oldString MUST be the 1-2 lines IMMEDIATELY BEFORE the insertion point. " +
-                          "newString MUST be those exact same anchor lines PLUS the new element(s) appended after them. " +
-                          "CRITICAL: The new element MUST NOT be present in oldString. If oldString and newString are identical, the edit is a no-op and will fail.");
             sb.AppendLine("To REPLACE an entire class: use FORMAT C (targetType=\"class\", targetName=\"ClassName\") with newCode containing the FULL class declaration.");
             sb.AppendLine("To APPEND to the end of the file: oldString = last 2-3 closing braces.");
         }
@@ -1245,10 +1261,16 @@ public partial class AgentController : ControllerBase
             }
         }
 
-        if (HtmlDomEditor.IsHtmlDomFile(relPath) && fileContent.Contains("<!-- WEAVER_INSERT:0 -->", StringComparison.Ordinal))
+        if (HtmlDomEditor.IsHtmlDomFile(relPath))
         {
-            sb.AppendLine("⚠ HTML INSERTION MARKER found in the file. You MUST set `oldString` to exactly `<!-- WEAVER_INSERT:0 -->` " +
-                          "and set `newString` to the new HTML to insert. Do NOT remove the marker from the file.");
+            sb.AppendLine("⚠ HTML FILE — Use FORMAT D: targetType=\"html\", targetName=CODE BLOCK, " +
+                          "insertAfter=true/false, newCode=[your HTML lines]. " +
+                          "CRITICAL: targetName is a CODE BLOCK copied verbatim from the file. " +
+                          "It CAN be multi-line. Copy the exact lines you want to replace or insert after. " +
+                          "For insertAfter: the targetName block is found, and newCode is inserted AFTER that block. " +
+                          "For replace: the targetName block is replaced entirely with newCode. " +
+                          "CRITICAL: newCode must contain ONLY the new HTML to insert — no parent closing tags. " +
+                          "Do NOT use oldString/newString for HTML insertion — use FORMAT D.");
         }
 
         sb.AppendLine();
@@ -1455,6 +1477,53 @@ public partial class AgentController : ControllerBase
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
 
                     var insertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl) && iaEl.GetBoolean();
+                    var replaceSection = jRoot.TryGetProperty("replace", out var rpEl) && rpEl.GetBoolean();
+
+                    // FORMAT D: handle replace, insertAfter, insertBefore for HTML
+                    if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!System.IO.File.Exists(fullPath))
+                            return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
+
+                        var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+
+                        // Defensive: strip any leading </div> lines from newCode (LLM sometimes includes parent closing tags)
+                        var cleanNewCode = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
+                        if (cleanNewCode != newCodeStr)
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
+                            newCodeStr = cleanNewCode;
+                        }
+
+                        var (matchedBlock, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName);
+                        if (matchedBlock == null)
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"FORMAT D: targetName block not found — {htmlErr}", ct: ct);
+                            return (null, null, false, null, false,
+                                $"FORMAT D failed: targetName block not found in {relPath}. " +
+                                $"Copy the exact code block from the file as targetName.", false);
+                        }
+
+                        if (replaceSection)
+                        {
+                            // REPLACE: swap the matched block with newCode
+                            return (matchedBlock, newCodeStr, false, null, false, null, true);
+                        }
+                        else if (insertAfter)
+                        {
+                            // insertAfter: place newCode right after the matched block
+                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
+                        }
+                        else
+                        {
+                            // insertBefore: place newCode right before the matched block
+                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
+                        }
+                    }
 
                     if (insertAfter)
                     {
@@ -3849,7 +3918,7 @@ emitSse, ct);
                     $"Corrected step.LineNumber from planner guess to resolved line {resolvedLine} via text matching", ct: ct);
             }
 
-            if (resolvedLine > 0 && string.IsNullOrWhiteSpace(planOldStr))
+            if (resolvedLine > 0 && string.IsNullOrWhiteSpace(planOldStr) && !HtmlDomEditor.IsHtmlDomFile(relPath))
             {
                 var preExtracted = AgentUtilities.ExtractVerbatimTargetSection(
                     preExtractContent, step.Change ?? "", contextLines: 3, centerLine: resolvedLine);
@@ -3868,30 +3937,15 @@ emitSse, ct);
                     }
                 }
             }
-        }
+            }
 
-        if (System.IO.File.Exists(fullPath) && HtmlDomEditor.IsHtmlDomFile(relPath))
+        // For HTML files, clear any plan-provided oldString — FORMAT D must be used instead
+        if (HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(planOldStr))
         {
-            try
-            {
-                var rawHtml = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                if (!rawHtml.Contains("<!-- WEAVER_INSERT:", StringComparison.Ordinal))
-                {
-                    var result = HtmlDomEditor.InjectMarker(rawHtml, step.Change ?? "");
-                    if (result.success)
-                    {
-                        preEditContent = rawHtml;
-                        await System.IO.File.WriteAllTextAsync(fullPath, result.content, Encoding.UTF8, ct);
-                        await EmitLog(emitSse, "info",
-                            $"Inserted HTML comment marker for {relPath}", ct: ct);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                await EmitLog(emitSse, "warn",
-                    $"HTML marker injection failed for {relPath}: {ex.Message} — falling through to normal flow", ct: ct);
-            }
+            planOldStr = null;
+            step.OldString = null;
+            await EmitLog(emitSse, "info",
+                $"Cleared plan oldString for HTML file — FORMAT D will be used for {relPath}", ct: ct);
         }
 
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
@@ -3943,6 +3997,15 @@ emitSse, ct);
                     var newLen = newStr?.Length ?? 0;
                     await EmitLog(emitSse, "info",
                         $"  LLM produced: format={fmt}, old={oldLen}ch, new={newLen}ch", ct: ct);
+
+                    // Reject oldString/newString for HTML files — FORMAT D is required
+                    if (!fromFormatC && !alreadyDone && HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(newStr))
+                    {
+                        var err = "HTML files: use FORMAT D (targetType=\"html\", targetName, insertAfter, newCode). Do NOT use oldString/newString.";
+                        await EmitLog(emitSse, "warn", $"HTML edit rejected — {err}", ct: ct);
+                        history.Add((oldStr ?? "", newStr ?? "", err));
+                        continue;
+                    }
                 }
             }
 
@@ -4092,24 +4155,6 @@ emitSse, ct);
             bool bypassVerify = false;
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
-
-            // DOM Marker Fallback: If the file contains the injection marker, bypass standard matching
-            if (fileContent.Contains("<!-- WEAVER_INSERT:0 -->", StringComparison.Ordinal) &&
-                HtmlDomEditor.IsHtmlDomFile(relPath) &&
-                !string.IsNullOrWhiteSpace(newStr) &&
-                !fromFormatC)
-            {
-                var htmlResult = HtmlDomEditor.InsertHtmlViaDom(
-                    fileContent, step.Change ?? "", newStr);
-                if (htmlResult.success)
-                {
-                    newContent = htmlResult.newContent;
-                    replaced = true;
-                    matchError = null;
-                    snippet = null;
-                    bypassVerify = true;
-                }
-            }
 
             if (!replaced)
             {
@@ -4353,23 +4398,6 @@ emitSse, ct);
                     replaced = r; newContent = nc; matchError = me; snippet = sn;
                 }
             }
-
-
-            if (!replaced && !fromFormatC && !string.IsNullOrWhiteSpace(newStr) &&
-                HtmlDomEditor.IsHtmlDomFile(relPath) && newStr.Length > 100)
-            {
-                var htmlResult = HtmlDomEditor.InsertHtmlViaDom(
-                    fileContent, step.Change ?? "", newStr);
-                if (htmlResult.success)
-                {
-                    newContent = htmlResult.newContent;
-                    replaced = true;
-                    matchError = null;
-                    snippet = null;
-                    oldStr = string.Empty;
-                }
-            }
-
 
             if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
                             !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
@@ -6475,11 +6503,14 @@ emitSse, ct);
             "  0-39:   Broken — signature change, deleted functionality, invented symbols\n\n" +
             "DECISION RULES:\n" +
             " * Return \"keep\" if the edit correctly implements the step. Score 85+.\n" +
-            " * Set \"needsExtraStep\": true if the edit is CORRECT but references a method/property " +
-            "that doesn't exist in any file yet and needs to be added in a follow-up step (e.g. the HTML " +
-            "adds a button with ng-click=\"vm.foo()\" but vm.foo() doesn't exist in the .js/.ts file). " +
-            "When needsExtraStep is true, ALWAYS also include the missing method name in parentheses " +
-            "in the reason, e.g. 'added button with ng-click calling missing method (vm.clearAll).'\n" +
+             " * Set \"needsExtraStep\": true if the edit is CORRECT but references a method/property " +
+             "that doesn't exist in any file yet and needs to be added in a follow-up step (e.g. the HTML " +
+             "adds a button with ng-click=\"vm.foo()\" but vm.foo() doesn't exist in the .js/.ts file). " +
+             "IMPORTANT: Do NOT flag built-in DOM/event APIs like $event.preventDefault(), " +
+             "$event.stopPropagation(), console.log(), etc. — these are native JavaScript/DOM " +
+             "methods that do NOT need component-level implementations.\n" +
+             "When needsExtraStep is true, ALWAYS also include the missing method name in parentheses " +
+             "in the reason, e.g. 'added button with ng-click calling missing method (vm.clearAll).'\n" +
             " * If needsExtraStep is true AND the edit is otherwise correct, set decision to \"keep\" " +
             "(do NOT abandon — the system will auto-generate the follow-up step).\n" +
             " * Return \"abandon\" if ANY of these are true:\n" +
@@ -8766,75 +8797,88 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                 if (!string.IsNullOrWhiteSpace(missingSymbol))
                 {
-                    var autoStep = new PlanStep
+                    // Skip known built-in DOM/event/JS APIs that don't need component methods
+                    var knownBuiltIns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                     {
-                        File = extraFile!,
-                        Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
-                                 $"Verifier reason: {extraReason}",
-                        Priority = 1,
-                        LineNumber = 0
+                        "preventDefault", "stopPropagation", "console", "event", "$event"
                     };
-
-                    // Validate it's not a duplicate
-                    var isDup = planSoFar.Any(s =>
-                        string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
-                        TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
-
-                    if (!isDup)
+                    if (knownBuiltIns.Contains(missingSymbol))
                     {
-                        planSoFar.Add(autoStep);
-
-                        await EmitLog(emitSse, "info",
-                            $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
-                            $"[{autoStep.File}] {missingSymbol}()", ct: ct);
-
-                        if (emitSse)
-                            await SendSse(Response, "plan", new
-                            {
-                                thinking = thinkingLog.ToString(),
-                                summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
-                                items = planSoFar,
-                                incremental = true
-                            }, ct);
-
-                        await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                            summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
-
-                        // Execute directly — no planner round-trip
-                        var autoPlan = new AgentPlan
+                        await EmitLog(emitSse, "warn",
+                            $"Skipping verifier auto-step for built-in API: {missingSymbol}", ct: ct);
+                    }
+                    else
+                    {
+                        var autoStep = new PlanStep
                         {
-                            Plan = new List<PlanStep> { autoStep },
-                            Summary = autoStep.Change,
-                            Score = 90
+                            File = extraFile!,
+                            Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
+                                     $"Verifier reason: {extraReason}",
+                            Priority = 1,
+                            LineNumber = 0
                         };
-                        var autoBeforeCount = allResults.Count;
 
-                        try
+                        // Validate it's not a duplicate
+                        var isDup = planSoFar.Any(s =>
+                            string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
+                            TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
+
+                        if (!isDup)
                         {
-                            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
-                                steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                                replanBudget: new[] { 0 });
+                            planSoFar.Add(autoStep);
+
+                            await EmitLog(emitSse, "info",
+                                $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
+                                $"[{autoStep.File}] {missingSymbol}()", ct: ct);
+
+                            if (emitSse)
+                                await SendSse(Response, "plan", new
+                                {
+                                    thinking = thinkingLog.ToString(),
+                                    summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
+                                    items = planSoFar,
+                                    incremental = true
+                                }, ct);
+
+                            await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                                summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
+
+                            // Execute directly — no planner round-trip
+                            var autoPlan = new AgentPlan
+                            {
+                                Plan = new List<PlanStep> { autoStep },
+                                Summary = autoStep.Change,
+                                Score = 90
+                            };
+                            var autoBeforeCount = allResults.Count;
+
+                            try
+                            {
+                                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
+                                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                                    replanBudget: new[] { 0 });
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                await EmitLog(emitSse, "error",
+                                    $"⛔ Auto-step from verifier threw: {ex.Message}", ct: ct);
+                            }
+
+                            // Refresh discovery context with the auto-step's changes
+                            var autoResults = allResults.Skip(autoBeforeCount)
+                                .OfType<Dictionary<string, object?>>()
+                                .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                                .Select(r => r.GetValueOrDefault("path")?.ToString())
+                                .Where(p => !string.IsNullOrWhiteSpace(p))
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+
+                            foreach (var touched in autoResults)
+                                discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+
+                            // Continue to next turn — the planner will be invoked only if no further needsExtraStep
+                            continue;
                         }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            await EmitLog(emitSse, "error",
-                                $"⛔ Auto-step from verifier threw: {ex.Message}", ct: ct);
-                        }
-
-                        // Refresh discovery context with the auto-step's changes
-                        var autoResults = allResults.Skip(autoBeforeCount)
-                            .OfType<Dictionary<string, object?>>()
-                            .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
-                            .Select(r => r.GetValueOrDefault("path")?.ToString())
-                            .Where(p => !string.IsNullOrWhiteSpace(p))
-                            .Distinct(StringComparer.OrdinalIgnoreCase)
-                            .ToList();
-
-                        foreach (var touched in autoResults)
-                            discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
-
-                        // Continue to next turn — the planner will be invoked only if no further needsExtraStep
-                        continue;
                     }
                 }
             }
