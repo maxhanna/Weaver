@@ -340,7 +340,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.toggleCardReady = function (card) {
         try {
           card.ready = !card.ready;
-          if (card.ready && vm.activeCardIds.size === 0) {
+          if (card.ready && !vm.streamingActive) {
             vm.startCard(card);
           }
         }
