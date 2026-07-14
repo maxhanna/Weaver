@@ -427,13 +427,16 @@ public partial class AgentController : ControllerBase
 
         return new string(' ', AgentUtilities.DetectIndentWidth(source));
     }
-    private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null)
+    private static string AutoIndentCode(string oldSource, string newCode, string? filePath = null, string? explicitBaseIndent = null)
     {
-        var oldLines = oldSource.Split('\n');
-        var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-        if (firstRealLine == null) return newCode;
-
-        var baseIndent = Regex.Match(firstRealLine, @"^(\s*)").Value;
+        var baseIndent = explicitBaseIndent;
+        if (baseIndent == null)
+        {
+            var oldLines = oldSource.Split('\n');
+            var firstRealLine = oldLines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+            if (firstRealLine == null) return newCode;
+            baseIndent = Regex.Match(firstRealLine, @"^(\s*)").Value;
+        }
         if (string.IsNullOrEmpty(baseIndent)) return newCode;
         var baseIndentLen = baseIndent.Length;
 
@@ -906,11 +909,17 @@ public partial class AgentController : ControllerBase
             sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
             sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"newCode\": [...]} — INSERT newCode BEFORE the matched code block (no insertAfter/replace field).");
             sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
-                          "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
+                             "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
             sb.AppendLine("  CRITICAL: newCode must contain ONLY the new HTML to insert. " +
-                          "Do NOT include ANY </div> closing tags — not even from parent elements. " +
-                          "The system does NOT add them automatically. newCode is inserted as-is.");
+                            "Do NOT include ANY </div> closing tags — not even from parent elements. " +
+                            "The system does NOT add them automatically. newCode is inserted as-is.");
             sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newString format.");
+            sb.AppendLine("  ANCHOR SELECTION: prefer the SHORTEST unique line as targetName — a heading, " +
+                            "a plain-text label (e.g. '<div class=\"groupDomainTitle\">YouTube Results</div>'), " +
+                            "or a closing tag right before your insertion point. " +
+                            "AVOID copying attribute-heavy divs (multiple [brackets], (parens), Angular pipes, or " +
+                            "ternaries like `?0.5 :1`) as targetName — reproducing their exact internal spacing " +
+                            "verbatim is unreliable and causes anchor-not-found errors.");
         }
         else if (isNewMethodInsertion)
         {
@@ -1488,15 +1497,24 @@ public partial class AgentController : ControllerBase
                         var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
 
                         // Defensive: strip any leading </div> lines from newCode (LLM sometimes includes parent closing tags)
-                        var cleanNewCode = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
-                        if (cleanNewCode != newCodeStr)
+                        var rawNewCode = newCodeStr;
+                        newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
+                        if (newCodeStr != rawNewCode)
                         {
                             await EmitLog(emitSse, "warn",
                                 $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
-                            newCodeStr = cleanNewCode;
                         }
 
-                        var (matchedBlock, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName);
+                        // Reject newCode that after stripping contains no real content (only closing tags)
+                        if (string.IsNullOrWhiteSpace(newCodeStr) || !newCodeStr.Contains('<', StringComparison.Ordinal))
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"FORMAT D rejected: newCode contains no HTML opening tags — retry", ct: ct);
+                            return (null, null, false, null, false,
+                                $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
+                        }
+
+                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber);
                         if (matchedBlock == null)
                         {
                             await EmitLog(emitSse, "warn",
@@ -1506,21 +1524,19 @@ public partial class AgentController : ControllerBase
                                 $"Copy the exact code block from the file as targetName.", false);
                         }
 
+                        var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
+                        var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
+
                         if (replaceSection)
                         {
-                            // REPLACE: swap the matched block with newCode
                             return (matchedBlock, newCodeStr, false, null, false, null, true);
                         }
                         else if (insertAfter)
                         {
-                            // insertAfter: place newCode right after the matched block
-                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
                             return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
                         }
                         else
                         {
-                            // insertBefore: place newCode right before the matched block
-                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
                             return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
                         }
                     }
