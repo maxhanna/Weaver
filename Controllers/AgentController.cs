@@ -6627,8 +6627,10 @@ emitSse, ct);
             "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
             "  Code should have consecutive lines within a block, with at most one blank line " +
             "  between logical sections.\n" +
-            " * DO NOT SUGGEST MOVING CODE: Do not flag issues that require moving code blocks, reordering DOM, or restructuring files. " +
-            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n" +
+            " * IGNORE TRIVIAL CASING & NAMING: Do not flag variable casing differences (e.g., 'isSearchingImdb' vs 'isSearchingIMDB') or minor naming inconsistencies. " +
+            "  Assume the system handles these. Only flag completely missing functionality or critical syntax errors.\n" +
+            " * MISSING METHODS ARE NOT BUGS: If the HTML references a method like showMoreReddit() that doesn't exist yet, DO NOT ABANDON. " +
+            "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n" +
             " * DO NOT SECOND-GUESS STRUCTURE: Do not flag nesting, sibling placement, or container wrapping issues. " +
             "  Do not invent issues just to find something to do. If the requested feature is present and functional, KEEP the edit.\n";
 
