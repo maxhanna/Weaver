@@ -11,17 +11,8 @@ public static class HtmlDomEditor
         return ext is ".html" or ".htm" or ".cshtml" or ".razor";
     }
 
-    /// <summary>
-    /// FORMAT D: Finds targetName (a code block) in the content and returns the matched text
-    /// plus its start position. The matched block is expanded to include the full indentation
-    /// of the first line so that AutoIndentCode can detect the correct indent level.
-    ///
-    /// CRITICAL: It also expands FORWARD to include the balanced closing tags of any opening
-    /// tags found in the targetName. This ensures that `insertAfter` places the new code
-    /// AFTER the entire HTML element, rather than injecting it inside the element.
-    /// </summary>
     public static (string? matchedBlock, int matchIndex, string? error) ResolveHtmlAnchor(
-        string content, string targetName, string? stepChange = null, int centerLine = 0)
+    string content, string targetName, string? stepChange = null, int centerLine = 0, bool expandToClosingTags = true)
     {
         if (string.IsNullOrWhiteSpace(content))
             return (null, -1, "Empty content");
@@ -39,12 +30,15 @@ public static class HtmlDomEditor
         var adjustedStart = lineStart;
         var initialEndIndex = adjustedStart + (matchInfo.index - lineStart) + matchInfo.length;
 
-        // Expand forward to balanced closing tags
-        var (finalEndIndex, success) = ExpandToClosingTags(content, adjustedStart, initialEndIndex);
-        if (!success)
+        // Expand forward to balanced closing tags ONLY if requested (for insertAfter)
+        var finalEndIndex = initialEndIndex;
+        if (expandToClosingTags)
         {
-            // If expansion fails (e.g., malformed HTML), fall back to the initial match length
-            finalEndIndex = initialEndIndex;
+            var (expandedEndIndex, success) = ExpandToClosingTags(content, adjustedStart, initialEndIndex);
+            if (success)
+            {
+                finalEndIndex = expandedEndIndex;
+            }
         }
 
         var adjustedLength = finalEndIndex - adjustedStart;

@@ -1559,7 +1559,8 @@ public partial class AgentController : ControllerBase
                                 $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
                         }
 
-                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber);
+                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection);
+                        
                         if (matchedBlock == null)
                         {
                             await EmitLog(emitSse, "warn",
@@ -6627,7 +6628,9 @@ emitSse, ct);
             "  Code should have consecutive lines within a block, with at most one blank line " +
             "  between logical sections.\n" +
             " * DO NOT SUGGEST MOVING CODE: Do not flag issues that require moving code blocks, reordering DOM, or restructuring files. " +
-            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n";
+            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n" +
+            " * DO NOT SECOND-GUESS STRUCTURE: Do not flag nesting, sibling placement, or container wrapping issues. " +
+            "  Do not invent issues just to find something to do. If the requested feature is present and functional, KEEP the edit.\n";
 
         var userMsg =
             $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
