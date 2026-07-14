@@ -4166,6 +4166,41 @@ public static class AgentUtilities
 
         return (false, fileContent, "oldString not found verbatim in file", null);
     }
+    public static List<string> ExtractAllJsonObjects(string text)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(text)) return result;
+
+        var start = text.IndexOf('{');
+        while (start >= 0)
+        {
+            var depth = 0;
+            var inString = false;
+            var escape = false;
+            for (var i = start; i < text.Length; i++)
+            {
+                var c = text[i];
+                if (escape) { escape = false; continue; }
+                if (c == '\\' && inString) { escape = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        result.Add(text.Substring(start, i - start + 1));
+                        start = text.IndexOf('{', i + 1);
+                        break;
+                    }
+                }
+            }
+            if (depth > 0) break; // Truncated JSON
+        }
+        return result;
+    }
     public static string ExtractFirstJsonObject(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;

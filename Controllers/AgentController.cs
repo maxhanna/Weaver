@@ -768,10 +768,22 @@ public partial class AgentController : ControllerBase
             }
         }
         else if (ext is ".ts" or ".tsx" or ".js" or ".jsx")
+        {
             sb.AppendLine("⚠ TS/JS FILE: preserve ALL indentation exactly — " +
                           "methods inside a class body MUST be indented, nested blocks " +
                           "must be indented relative to their parent. Copy the leading " +
                           "whitespace from oldString character-for-character into newString.");
+
+            var changeLowerTs = (step.Change ?? "").ToLowerInvariant();
+            if (changeLowerTs.Contains("method") || changeLowerTs.Contains("handler") || changeLowerTs.Contains("function"))
+            {
+                sb.AppendLine("⚠ CRITICAL: The CHANGE REQUIRED asks to add a method/handler/function. " +
+                              "Your `newString` MUST include the FULL method declaration (e.g., `methodName() { ... }`) " +
+                              "in addition to any property changes. Do NOT only update properties and forget the method. " +
+                              "If you are only adding a method, you can also use FORMAT C with insertAfter:true.");
+            }
+        }
+
         var changeLowerForFormat = (step.Change ?? "").ToLowerInvariant();
         if (ext == ".cs")
         {
@@ -1253,7 +1265,7 @@ public partial class AgentController : ControllerBase
                 sb.AppendLine();
             }
         }
- 
+
         if (ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte" && !string.IsNullOrWhiteSpace(fileContent))
         {
             var markers = Regex.Matches(fileContent, @"<!--\s*([^>]{3,80}?)\s*-->|<div[^>]*groupDomainTitle[^>]*>\s*([^<]+?)\s*</div>");
@@ -1362,17 +1374,50 @@ public partial class AgentController : ControllerBase
 
         try
         {
-            var cleaned = raw.Trim();
-            if (cleaned.StartsWith("```"))
+            var rawTrimmed = raw.Trim();
+            if (rawTrimmed.StartsWith("```"))
             {
-                var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
-                if (m.Success) cleaned = m.Groups[1].Value.Trim();
+                var m = Regex.Match(rawTrimmed, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
+                if (m.Success) rawTrimmed = m.Groups[1].Value.Trim();
             }
- 
-            cleaned = ExtractFirstJsonObject(cleaned);
-            cleaned = RepairJsonNewlines(cleaned);
 
-            using var jDoc = JsonDocument.Parse(cleaned);
+            // The LLM might emit multiple JSON objects (e.g. plan JSON followed by edit JSON).
+            // We need to find the one that contains edit fields.
+            var jsonCandidates = ExtractAllJsonObjects(rawTrimmed);
+            string? cleaned = null;
+            JsonDocument? jDoc = null;
+
+            foreach (var candidate in jsonCandidates)
+            {
+                var c = RepairJsonNewlines(candidate);
+                // Fix LLM string concatenation hallucinations inside JSON arrays (e.g. "string1" + "string2")
+                c = Regex.Replace(c, @"""\s*\+\s*""", "");
+
+                try
+                {
+                    var doc = JsonDocument.Parse(c);
+                    if (doc.RootElement.TryGetProperty("targetType", out _) ||
+                        doc.RootElement.TryGetProperty("oldString", out _) ||
+                        doc.RootElement.TryGetProperty("fullFile", out _) ||
+                        doc.RootElement.TryGetProperty("alreadyDone", out _))
+                    {
+                        jDoc = doc;
+                        cleaned = c;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (jDoc == null)
+            {
+                // Fallback to first object if no edit fields found
+                cleaned = ExtractFirstJsonObject(rawTrimmed);
+                cleaned = RepairJsonNewlines(cleaned);
+                cleaned = Regex.Replace(cleaned, @"""\s*\+\s*""", "");
+                jDoc = JsonDocument.Parse(cleaned);
+            }
+
             var jRoot = jDoc.RootElement;
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
             {
@@ -1821,7 +1866,7 @@ public partial class AgentController : ControllerBase
                     {
                         newStr = AgentUtilities.StripSpuriousBlankLines(newStr);
                     }
-                    
+
                     if (cleanedNewStr != newStr)
                     {
                         newStr = cleanedNewStr;
@@ -1979,15 +2024,14 @@ public partial class AgentController : ControllerBase
                 return (oldStr, newStr ?? "", false, null, false, null, false);
             }
 
-
             var ttMatch = Regex.Match(raw,
                 @"""targetType""\s*:\s*""(\w+)""", RegexOptions.IgnoreCase);
             var tnMatch = Regex.Match(raw,
-                @"""targetName""\s*:\s*""([^""]+)""", RegexOptions.IgnoreCase);
+               @"""targetName""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.IgnoreCase);
             if (ttMatch.Success && tnMatch.Success)
             {
                 var tt = ttMatch.Groups[1].Value;
-                var tn = tnMatch.Groups[1].Value;
+                var tn = AgentUtilities.UnescapeJsonString(tnMatch.Groups[1].Value); // UNESCAPE
                 var ncIdx = raw.IndexOf("\"newCode\"", StringComparison.OrdinalIgnoreCase);
                 if (ncIdx >= 0)
                 {
@@ -2002,7 +2046,20 @@ public partial class AgentController : ControllerBase
                         for (var i = 0; i < afterKey.Length; i++)
                         {
                             if (afterKey[i] == '[') depth++;
-                            else if (afterKey[i] == ']') { depth--; if (depth == 0) { var lines = ExtractQuotedStrings(afterKey[1..i]); if (lines.Count > 0) newCodeStr = string.Join("\n", lines); break; } }
+                            else if (afterKey[i] == ']')
+                            {
+                                depth--; if (depth == 0)
+                                {
+                                    var lines = ExtractQuotedStrings(afterKey[1..i]);
+                                    if (lines.Count > 0)
+                                    {
+                                        // UNESCAPE each line
+                                        lines = lines.Select(l => AgentUtilities.UnescapeJsonString(l)).ToList();
+                                        newCodeStr = string.Join("\n", lines);
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                     else if (afterKey.StartsWith("\""))
@@ -2018,11 +2075,58 @@ public partial class AgentController : ControllerBase
                                 { newCodeStr = content[..i]; break; }
                             }
                         }
+                        if (newCodeStr != null) newCodeStr = AgentUtilities.UnescapeJsonString(newCodeStr); // UNESCAPE
                     }
 
                     if (!string.IsNullOrWhiteSpace(tt) && !string.IsNullOrWhiteSpace(tn) && newCodeStr != null)
                     {
+                        // Fix LLM string concatenation hallucinations inside JSON arrays
+                        newCodeStr = Regex.Replace(newCodeStr, @"""\s*\+\s*""", "");
+
                         var insertAfter = Regex.Match(raw, @"""insertAfter""\s*:\s*true", RegexOptions.IgnoreCase).Success;
+                        var replaceSection = Regex.Match(raw, @"""replace""\s*:\s*true", RegexOptions.IgnoreCase).Success;
+
+                        // FORMAT D: handle replace, insertAfter, insertBefore for HTML
+                        if (string.Equals(tt, "html", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!System.IO.File.Exists(fullPath))
+                                return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
+
+                            var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+
+                            newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
+
+                            if (string.IsNullOrWhiteSpace(newCodeStr) || !newCodeStr.Contains('<', StringComparison.Ordinal))
+                            {
+                                return (null, null, false, null, false,
+                                    $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
+                            }
+
+                            var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, tn, step.Change, step.LineNumber);
+                            if (matchedBlock == null)
+                            {
+                                return (null, null, false, null, false,
+                                    $"FORMAT D failed: targetName block not found in {relPath}. " +
+                                    $"Copy the exact code block from the file as targetName.", false);
+                            }
+
+                            var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
+                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
+
+                            if (replaceSection)
+                            {
+                                return (matchedBlock, newCodeStr, false, null, false, null, true);
+                            }
+                            else if (insertAfter)
+                            {
+                                return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
+                            }
+                            else
+                            {
+                                return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
+                            }
+                        }
+
                         if (insertAfter)
                         {
                             var (fullStr, astErr) = AstResolveEdit(fullPath, tt, tn, returnTail: false);
@@ -3745,7 +3849,7 @@ public partial class AgentController : ControllerBase
         int replanDepth = 0)
     {
         var relPath = step.File.Replace('\\', '/');
-        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar))); 
+        var fullPath = Path.GetFullPath(Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
         bool stepNeedsExtraStep = false;
         string? stepExtraStepReason = null;
         string? stepExtraStepFile = relPath;
@@ -3953,7 +4057,7 @@ emitSse, ct);
                     }
                 }
             }
-            }
+        }
 
         // For HTML files, clear any plan-provided oldString — FORMAT D must be used instead
         if (HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(planOldStr))
@@ -4113,53 +4217,7 @@ emitSse, ct);
                     fullContent, step, fullPath, relPath,
                     projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
                 return stepIndex;
-            }
-
-            if (!fullFile && !string.IsNullOrWhiteSpace(newStr) &&
-                (relPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
-                 relPath.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase) ||
-                 relPath.EndsWith(".razor", StringComparison.OrdinalIgnoreCase)))
-            {
-                var tsRelPath = Path.ChangeExtension(relPath, ".ts");
-                var tsFullPath = Path.GetFullPath(Path.Combine(projectRoot, tsRelPath.Replace('/', Path.DirectorySeparatorChar)));
-                if (System.IO.File.Exists(tsFullPath))
-                {
-                    var tsContent = await System.IO.File.ReadAllTextAsync(tsFullPath, Encoding.UTF8, ct);
-                    var bindingRegex = new Regex(@"\((?:click|input|change|ngModelChange|submit|focus|blur)\)=""(\w+)\(");
-                    var matches = bindingRegex.Matches(newStr);
-                    var missingMethods = new List<string>();
-                    foreach (Match m in matches)
-                    {
-                        var methodName = m.Groups[1].Value;
-                        if (!string.IsNullOrWhiteSpace(methodName) &&
-                            !tsContent.Contains($"{methodName}(") &&
-                            !tsContent.Contains($"{methodName} =") &&
-                            !tsContent.Contains($"{methodName}:"))
-                        {
-                            missingMethods.Add(methodName);
-                        }
-                    }
-                    if (missingMethods.Count > 0)
-                    {
-                        await EmitLog(emitSse, "warn",
-                            $"⚠ HTML edit references methods [{string.Join(", ", missingMethods.Distinct())}] that do not exist in {tsRelPath}. " +
-                            "Auto-injecting empty stubs to prevent build breakage. These should be implemented in a follow-up step.", ct: ct);
-
-                        var stubs = new StringBuilder();
-                        foreach (var methodName in missingMethods.Distinct())
-                        {
-                            stubs.AppendLine($"  {methodName}() {{ }}");
-                        }
-
-                        var lastBrace = tsContent.LastIndexOf('}');
-                        if (lastBrace > 0)
-                        {
-                            var newTsContent = tsContent.Substring(0, lastBrace) + stubs.ToString() + "\n" + tsContent.Substring(lastBrace);
-                            await System.IO.File.WriteAllTextAsync(tsFullPath, newTsContent, Encoding.UTF8, ct);
-                        }
-                    }
-                }
-            }
+            } 
 
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
@@ -4176,22 +4234,25 @@ emitSse, ct);
             {
                 if (!string.IsNullOrWhiteSpace(oldStr) && step.LineNumber > 0 && !fullFile && !fromFormatC)
                 {
-                    var targetSection = AgentUtilities.ExtractVerbatimTargetSection(
-                        fileContent, step.Change ?? "", 10, centerLine: step.LineNumber);
-                    if (!string.IsNullOrWhiteSpace(targetSection))
+                    int occurrences = Regex.Matches(fileContent, Regex.Escape(oldStr), RegexOptions.IgnoreCase).Count;
+                    if (occurrences > 1)
                     {
-                        var targetLines = new HashSet<string>(targetSection.Split('\n')
-                            .Select(l => l.Trim()).Where(l => l.Length >= 8));
-                        var oldContentLines = oldStr.Split('\n')
-                            .Select(l => l.Trim()).Where(l => l.Length >= 8 && l != "}")
-                            .ToList();
-                        if (oldContentLines.Count > 0 && !oldContentLines.Any(l => targetLines.Contains(l)))
+                        var targetSection = AgentUtilities.ExtractVerbatimTargetSection(
+                            fileContent, step.Change ?? "", 30, centerLine: step.LineNumber);
+                        if (!string.IsNullOrWhiteSpace(targetSection))
                         {
-                            var err = "WRONG SECTION: None of the oldString lines appear inside the ⚡ ACTUAL TARGET SECTION. " +
-                                      "Your oldString lines must be a subset of the target section shown in the prompt.";
-                            await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                            history.Add((oldStr!, newStr ?? "", err));
-                            continue;
+                            var targetLines = new HashSet<string>(targetSection.Split('\n')
+                                .Select(l => l.Trim()).Where(l => l.Length >= 8));
+                            var oldContentLines = oldStr.Split('\n')
+                                .Select(l => l.Trim()).Where(l => l.Length >= 8 && l != "}").ToList();
+                            if (oldContentLines.Count > 0 && !oldContentLines.Any(l => targetLines.Contains(l)))
+                            {
+                                var err = "WRONG SECTION: None of the oldString lines appear inside the ⚡ ACTUAL TARGET SECTION. " +
+                                          "Your oldString lines must be a subset of the target section shown in the prompt.";
+                                await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                                history.Add((oldStr!, newStr ?? "", err));
+                                continue;
+                            }
                         }
                     }
                 }
@@ -4237,7 +4298,7 @@ emitSse, ct);
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
-                    
+
                 if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
                 {
                     newContent = newStr;
@@ -4505,11 +4566,11 @@ emitSse, ct);
 
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentUtilities.DetectExcessiveBlankLines(newStr!); 
+                    wipeReason = AgentUtilities.DetectExcessiveBlankLines(newStr!);
                 }
 
                 if (wipeReason == null)
-                { 
+                {
                     wipeReason = AgentUtilities.DetectDuplicatePropertyAddition(oldStr!, newStr!);
                 }
 
@@ -4851,13 +4912,16 @@ emitSse, ct);
                 }
             }
 
-                var (approved, verifyReason, _) =
-                    bypassVerify ? (true, "Bypassed verify for DOM insertion", 100) :
-                    (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
-                    ? (true, "Bypassed verify for empty file insertion", 100)
-                    : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
+            bool bypassVerifyForAppend = !string.IsNullOrWhiteSpace(newStr) &&
+                                                 AgentUtilities.NormalizeLineEndings(newContent).Contains(AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal);
 
-                if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
+            var (approved, verifyReason, _) =
+                bypassVerify || bypassVerifyForAppend ? (true, "Bypassed verify for successful append/insertion", 100) :
+                (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent))
+                ? (true, "Bypassed verify for empty file insertion", 100)
+                : VerifyEdit(oldStr!, newStr ?? "", fileContent, newContent, fromFormatC);
+
+            if (!approved && verifyReason.Contains("SQL whitespace collapsed", StringComparison.OrdinalIgnoreCase))
             {
                 var correctedContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
                 if (correctedContent != newContent)
@@ -5247,7 +5311,7 @@ emitSse, ct);
                     await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                 }
             }
-            
+
         AfterSelfHeal:
             if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
             {
@@ -5519,8 +5583,8 @@ emitSse, ct);
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
             result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
-            result["needsExtraStep"] = stepNeedsExtraStep;            
-            result["extraStepReason"] = stepExtraStepReason;           
+            result["needsExtraStep"] = stepNeedsExtraStep;
+            result["extraStepReason"] = stepExtraStepReason;
             result["extraStepFile"] = stepExtraStepFile;
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
@@ -6469,8 +6533,7 @@ emitSse, ct);
             ? postEditContent.Length < 4000
                 ? postEditContent
                 : string.Join("\n", postLines[
-                    Math.Max(0, anchorIdx - 25)..
-                    Math.Min(postLines.Length, anchorIdx + 26)])
+                    Math.Max(0, anchorIdx - 25)..Math.Min(postLines.Length, anchorIdx + 26)])
             : "(anchor not found in post-edit file)";
 
         var priorBlock = new StringBuilder();
@@ -6562,7 +6625,9 @@ emitSse, ct);
             " * BLANK LINE SPAM: If the newString has a blank line between nearly every code line " +
             "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
             "  Code should have consecutive lines within a block, with at most one blank line " +
-            "  between logical sections.\n";
+            "  between logical sections.\n" +
+            " * DO NOT SUGGEST MOVING CODE: Do not flag issues that require moving code blocks, reordering DOM, or restructuring files. " +
+            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n";
 
         var userMsg =
             $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
@@ -8070,8 +8135,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (normNew == normExisting || CalculateChangeSimilarity(normNew, normExisting) >= 0.82)
                 return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
         }
-
         var changeLower = step.Change.ToLowerInvariant();
+
+        var rejectedActions = new[] { "move ", "reorder ", "restructure ", "refactor " };
+        if (rejectedActions.Any(v => changeLower.StartsWith(v)))
+        {
+            return (false, $"Step rejected — '{changeLower.Split(' ')[0]}' is a structural change that should be decided by the user, not auto-planned. " +
+                            "If the task is functionally complete, return planComplete=true.");
+        }
 
         var researchVerbs = new[] { "locate", "find", "examine", "understand", "read", "explore", "look at", "inspect", "review", "check", "see", "search" };
         if (researchVerbs.Any(v => changeLower.StartsWith(v)))
@@ -8556,7 +8627,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
                 continue;
             }
-            
+
             if (proposal.Step.File != null && planSoFar.Count > 0)
             {
                 // ── STEP IMMUTABILITY: Once a step is DONE, it cannot be revised or repeated ──
@@ -11036,32 +11107,42 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         }
 
-        var (taskComplete, verificationDetails) = await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+        var (taskComplete, verificationDetails, verificationIssues) =
+             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
-            if (stepTruthCompleted)
+            // Only trust "all steps done" over the verifier when the verifier gave NO concrete,
+            // actionable issues — i.e. it's a vague/stale complaint. If it named specific missing
+            // symbols (as it did here: imdbResults, imdbDisplayLimit, showMoreImdb), that is real
+            // signal and must flow into the repair loop below, not get silently discarded.
+            if (stepTruthCompleted && verificationIssues.Count == 0)
             {
                 await EmitLog(emitSse, "warn",
-                    $"Post-execution verification says task is incomplete despite all steps having status 'done'. " +
-                    $"Verifier details: {verificationDetails}. Re-running verifier to check for race/staleness...", ct: ct);
+                    $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
+                    $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
 
-                var (reverifyComplete, reverifyDetails) = await PostExecuteVerify(
-                    prompt, projectRoot, emitSse, allSteps, ct);
+                var (reverifyComplete, reverifyDetails, reverifyIssues) =
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+
                 if (reverifyComplete)
                 {
-                    await EmitLog(emitSse, "info",
-                        "Re-verification passed — trusting verifier on retry.", ct: ct);
+                    await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
                     taskComplete = true;
                     verificationDetails = reverifyDetails;
                 }
-                else
+                else if (reverifyIssues.Count == 0)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"Re-verification still says incomplete: {reverifyDetails}. " +
-                        $"All steps are done — trusting step truth over verifier.", ct: ct);
+                        $"Re-verification still vague with no concrete issues — trusting step truth. ({reverifyDetails})", ct: ct);
                     taskComplete = true;
-                    verificationDetails = reverifyDetails + " (overridden: all steps completed successfully despite verifier concerns)";
+                    verificationDetails = reverifyDetails + " (overridden: all steps completed, verifier gave no actionable issues)";
+                }
+                else
+                {
+                    verificationDetails = reverifyDetails;
+                    verificationIssues = reverifyIssues;
                 }
             }
         }
@@ -11077,74 +11158,128 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            await EmitLog(emitSse, "warn", $"Post-execution verification: {verificationDetails}. Re-planning...", ct: ct);
+            const int MaxPostVerifyRepairIterations = 6;
+            var repairIteration = 0;
+            var exhaustedWithNoSteps = false;
 
-            var allFailures = allSteps.OfType<Dictionary<string, object?>>()
-                .Where(s => s.GetValueOrDefault("status")?.ToString() is "error" or "verify-abandoned")
-                .ToList();
-
-
-            var failureContextForReplan = new StringBuilder();
-            foreach (var f in allFailures)
+            while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
             {
-                var path = f.GetValueOrDefault("path")?.ToString() ?? "?";
-                var reason = f.GetValueOrDefault("reason")?.ToString() ?? f.GetValueOrDefault("error")?.ToString() ?? "";
-                var bestScore = f.GetValueOrDefault("bestScore");
-                var failureCtx = f.GetValueOrDefault("failureContext")?.ToString();
+                repairIteration++;
 
-                failureContextForReplan.AppendLine($"FAILED: {path} — {reason}");
-                if (bestScore != null)
-                    failureContextForReplan.AppendLine($"  Best score: {bestScore}/100");
-                if (failureCtx != null)
-                    failureContextForReplan.AppendLine($"  Context: {TruncateForLlm(failureCtx, 1000)}");
-                failureContextForReplan.AppendLine();
-            }
+                await EmitLog(emitSse, "warn",
+                    $"Post-execution verification incomplete (repair pass {repairIteration}/{MaxPostVerifyRepairIterations}): " +
+                    $"{verificationDetails}", ct: ct);
 
-            var enhancedSteering = (steeringContext ?? "") +
-                "\n\n## PRIOR FAILURES — avoid repeating these approaches ##\n" +
-                failureContextForReplan.ToString();
+                var allFailures = allSteps.OfType<Dictionary<string, object?>>()
+                    .Where(s => s.GetValueOrDefault("status")?.ToString() is "error" or "verify-abandoned")
+                    .ToList();
 
-            var replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
-                enhancedSteering, projectRoot, emitSse, ct,
-                attachedFiles: attachedFiles,
-                qualityCheckReason: verificationDetails + "\n\nPrior failures:\n" + failureContextForReplan.ToString());
+                var failureContextForReplan = new StringBuilder();
+                foreach (var f in allFailures)
+                {
+                    var path = f.GetValueOrDefault("path")?.ToString() ?? "?";
+                    var reason = f.GetValueOrDefault("reason")?.ToString() ?? f.GetValueOrDefault("error")?.ToString() ?? "";
+                    var bestScore = f.GetValueOrDefault("bestScore");
+                    var failureCtx = f.GetValueOrDefault("failureContext")?.ToString();
 
-            if (replanSteps != null && replanSteps.Count > 0 && plan != null)
-            {
+                    failureContextForReplan.AppendLine($"FAILED: {path} — {reason}");
+                    if (bestScore != null)
+                        failureContextForReplan.AppendLine($"  Best score: {bestScore}/100");
+                    if (failureCtx != null)
+                        failureContextForReplan.AppendLine($"  Context: {TruncateForLlm(failureCtx, 1000)}");
+                    failureContextForReplan.AppendLine();
+                }
+
+                // Feed only the FIRST unresolved issue as the immediate target, listing the rest
+                // as deferred, so the planner produces ONE atomic step per pass — e.g.
+                // pass 1: declare `imdbResults`, pass 2: declare `imdbDisplayLimit`,
+                // pass 3: implement `showMoreImdb()`, etc.
+                var qualityCheckReason = new StringBuilder();
+                if (verificationIssues.Count > 0)
+                {
+                    qualityCheckReason.AppendLine($"NEXT ISSUE TO FIX (address ONLY this one): {verificationIssues[0]}");
+                    if (verificationIssues.Count > 1)
+                    {
+                        qualityCheckReason.AppendLine();
+                        qualityCheckReason.AppendLine("Other known issues — do NOT address these yet, one atomic step at a time:");
+                        foreach (var later in verificationIssues.Skip(1))
+                            qualityCheckReason.AppendLine($"  - {later}");
+                    }
+                }
+                else
+                {
+                    qualityCheckReason.AppendLine(verificationDetails);
+                }
+
+                var enhancedSteering = (steeringContext ?? "") +
+                    "\n\n## PRIOR FAILURES — avoid repeating these approaches ##\n" +
+                    failureContextForReplan.ToString();
+
+                var replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                    enhancedSteering, projectRoot, emitSse, ct,
+                    attachedFiles: attachedFiles,
+                    qualityCheckReason: qualityCheckReason.ToString());
+
+                if (replanSteps == null || replanSteps.Count == 0)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Repair pass {repairIteration}: replanner returned no steps for issue " +
+                        $"\"{(verificationIssues.Count > 0 ? verificationIssues[0] : verificationDetails)}\" — stopping repair loop.", ct: ct);
+                    exhaustedWithNoSteps = true;
+                    break;
+                }
+
+                // Enforce ONE atomic step per repair pass even if the LLM returned more.
+                var singleStep = replanSteps[0];
                 var originalStepCount = plan?.Plan?.Count ?? 0;
                 plan = MergePlans(plan ?? new AgentPlan(),
-                    new AgentPlan { Plan = replanSteps, Summary = "Re-plan: added steps", Score = 0 });
+                    new AgentPlan { Plan = new List<PlanStep> { singleStep }, Summary = "Repair: " + singleStep.Change, Score = 0 });
 
                 if (plan?.Plan?.Count > 0)
                     plan.Plan = await PruneIrrelevantPlanStepsAsync(plan.Plan, projectRoot, ct);
 
                 if (emitSse && plan != null)
-                {
                     await SendSse(Response, "plan",
-                        new { thinking = plan.Thinking, summary = "Re-plan: added steps", items = plan.Plan }, ct);
-                }
+                        new { thinking = plan.Thinking, summary = "Repair: " + singleStep.Change, items = plan.Plan }, ct);
 
                 if (plan != null)
-                {
                     await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
-                        summary: plan.Summary ?? "Re-plan: added steps", score: plan.Score, append: false);
-                }
+                        summary: plan.Summary ?? ("Repair: " + singleStep.Change), score: plan.Score, append: false);
 
                 var mergedDone = new HashSet<int>();
-                for (var i = 0; i < originalStepCount && i < plan?.Plan?.Count; i++)
-                { mergedDone.Add(i); }
+                for (var i = 0; i < originalStepCount && i < (plan?.Plan?.Count ?? 0); i++)
+                    mergedDone.Add(i);
+
                 if (plan != null)
                 {
                     await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                         completedStepIndices: mergedDone, cardId: cardId);
                 }
-            }
-            else
-            {
 
+                var (reVerified, reDetails, reIssues) =
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+                taskComplete = reVerified;
+                verificationDetails = reDetails;
+                verificationIssues = reIssues;
+
+                if (taskComplete)
+                    await EmitLog(emitSse, "success", $"Repair pass {repairIteration}: verification now complete.", ct: ct);
+            }
+
+            if (taskComplete)
+            {
+                allSteps.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "verified_complete",
+                    ["status"] = "done",
+                    ["reason"] = verificationDetails
+                });
+            }
+            else if (exhaustedWithNoSteps)
+            {
                 await EmitLog(emitSse, "warn",
-                    "Re-plan returned no steps. Reverting changes and generating a fresh plan with verification feedback...", ct: ct);
+                    "Reverting changes and generating a fresh plan with verification feedback (no repair steps were proposed)...", ct: ct);
 
                 foreach (var kvp in fileBackups)
                 {
@@ -11158,14 +11293,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     catch { }
                 }
 
-
                 var freshPlanSteering = "A previous attempt to complete this task failed verification with the following issues:\n" +
-                                         $"{verificationDetails}\n\n";
-                if (allFailures.Count > 0)
-                {
-                    freshPlanSteering += "Prior execution failures:\n" + failureContextForReplan.ToString() + "\n";
-                }
-                freshPlanSteering += "The previous changes have been REVERTED. You MUST generate a completely new plan that addresses these issues and correctly completes the task. Do NOT repeat the mistakes of the previous attempt.";
+                                         $"{verificationDetails}\n\n" +
+                                         "The previous changes have been REVERTED. You MUST generate a completely new plan " +
+                                         "that addresses these issues and correctly completes the task. Do NOT repeat the mistakes of the previous attempt.";
 
                 var (freshPlan, _) = await RunPlanningConvergenceLoop(
                     prompt, discoveryContext, projectRoot, emitSse, ct, freshPlanSteering);
@@ -11173,7 +11304,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 if (freshPlan != null && freshPlan.Plan.Count > 0)
                 {
                     plan = freshPlan;
-
                     await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan, ct, allSteps,
                         steeringContext: freshPlanSteering, attachedFiles: attachedFiles, cardId: cardId);
                 }
@@ -11182,6 +11312,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await EmitLog(emitSse, "warn",
                         "Fresh plan generation failed — stopping with verification gaps unresolved.", ct: ct);
                 }
+            }
+            else
+            {
+                await EmitLog(emitSse, "warn",
+                    $"Repair budget exhausted ({MaxPostVerifyRepairIterations} passes) — stopping with remaining issues: " +
+                    $"{string.Join("; ", verificationIssues)}", ct: ct);
             }
         }
 
@@ -11312,7 +11448,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return enriched.ToString();
     }
 
-    private async Task<(bool complete, string details)> PostExecuteVerify(
+    private async Task<(bool complete, string details, List<string> issues)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct)
     {
@@ -11338,7 +11474,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .ToList();
             if (exploredPaths.Count == 0)
             {
-                return (true, "");
+                return (true, "", new List<string>());
             }
 
             modifiedPaths = exploredPaths;
@@ -11449,7 +11585,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
-            return (true, "");
+            return (true, "", new List<string>());
         }
 
         try
@@ -11467,18 +11603,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 var isComplete = completeEl.GetBoolean();
                 var reason = doc.RootElement.TryGetProperty("reason", out var rEl) ? rEl.GetString() : "";
-                var issues = doc.RootElement.TryGetProperty("issues", out var iEl) && iEl.ValueKind == JsonValueKind.Array
-                    ? string.Join("; ", iEl.EnumerateArray().Select(e => e.GetString() ?? ""))
-                    : "";
-                var details = reason + (string.IsNullOrWhiteSpace(issues) ? "" : $"\nIssues: {issues}");
+                var issuesList = new List<string>();
+                if (doc.RootElement.TryGetProperty("issues", out var iEl) && iEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var issueEl in iEl.EnumerateArray())
+                    {
+                        var issueText = issueEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(issueText)) issuesList.Add(issueText);
+                    }
+                }
+                var issuesJoined = string.Join("; ", issuesList);
+                var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
                 await EmitLog(emitSse, isComplete ? "info" : "warn",
-                    $"Verification: complete={isComplete}, reason={reason}{(string.IsNullOrWhiteSpace(issues) ? "" : $", issues=[{issues}]")}", ct: ct);
-                return (isComplete, details);
+                    $"Verification: complete={isComplete}, reason={reason}{(string.IsNullOrWhiteSpace(issuesJoined) ? "" : $", issues=[{issuesJoined}]")}", ct: ct);
+                return (isComplete, details, issuesList);
             }
         }
         catch { }
 
-        return (true, "");
+        return (true, "", new List<string>());
     }
 
 
@@ -14530,7 +14673,7 @@ Respond with JSON only:
         result["diffPreview"] = AgentUtilities.BuildDiffPreview(oldStr, newStr);
         result["oldLines"] = (oldStr ?? "").Split('\n');
         result["newLines"] = (newStr ?? "").Split('\n');
-    } 
+    }
 
     private async Task<string> EnrichWithTypeChain(
         string projectRoot,

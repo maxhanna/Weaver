@@ -16,10 +16,9 @@ public static class HtmlDomEditor
     /// plus its start position. The matched block is expanded to include the full indentation
     /// of the first line so that AutoIndentCode can detect the correct indent level.
     ///
-    /// Optional stepChange/centerLine let the caller disambiguate between multiple candidate
-    /// matches (e.g. the same-looking wrapper div appearing in several sections of the file) by
-    /// keyword overlap and line proximity, the same way TryReplaceSafe already does for
-    /// oldString/newString edits.
+    /// CRITICAL: It also expands FORWARD to include the balanced closing tags of any opening
+    /// tags found in the targetName. This ensures that `insertAfter` places the new code
+    /// AFTER the entire HTML element, rather than injecting it inside the element.
     /// </summary>
     public static (string? matchedBlock, int matchIndex, string? error) ResolveHtmlAnchor(
         string content, string targetName, string? stepChange = null, int centerLine = 0)
@@ -38,10 +37,101 @@ public static class HtmlDomEditor
         lineStart = lineStart < 0 ? 0 : lineStart + 1;
 
         var adjustedStart = lineStart;
-        var adjustedLength = (matchInfo.index - lineStart) + matchInfo.length;
+        var initialEndIndex = adjustedStart + (matchInfo.index - lineStart) + matchInfo.length;
 
+        // Expand forward to balanced closing tags
+        var (finalEndIndex, success) = ExpandToClosingTags(content, adjustedStart, initialEndIndex);
+        if (!success)
+        {
+            // If expansion fails (e.g., malformed HTML), fall back to the initial match length
+            finalEndIndex = initialEndIndex;
+        }
+
+        var adjustedLength = finalEndIndex - adjustedStart;
         var matched = content.Substring(adjustedStart, adjustedLength);
-        return (matched, matchInfo.index, null);
+        return (matched, adjustedStart, null);
+    }
+
+    /// <summary>
+    /// Scans from startIndex to initialEndIndex to count opening tags, then continues scanning
+    /// until all opening tags have been balanced by closing tags. Returns the absolute end index.
+    /// </summary>
+    private static (int endIndex, bool success) ExpandToClosingTags(string content, int startIndex, int initialEndIndex)
+    {
+        var stack = new Stack<string>();
+        var voidElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr" };
+
+        int i = startIndex;
+        while (i < initialEndIndex || stack.Count > 0)
+        {
+            if (i >= content.Length) return (initialEndIndex, false); // Ran out of content
+
+            int nextTagStart = content.IndexOf('<', i);
+            if (nextTagStart < 0) return (initialEndIndex, false);
+
+            // Ignore < inside strings or invalid tags
+            if (nextTagStart + 1 < content.Length)
+            {
+                char nextChar = content[nextTagStart + 1];
+                if (!char.IsLetter(nextChar) && nextChar != '/' && nextChar != '!')
+                {
+                    i = nextTagStart + 1;
+                    continue;
+                }
+            }
+            else
+            {
+                return (initialEndIndex, false);
+            }
+
+            // Check if it's a closing tag
+            if (content[nextTagStart + 1] == '/')
+            {
+                int closeEnd = content.IndexOf('>', nextTagStart);
+                if (closeEnd < 0) return (initialEndIndex, false);
+
+                var tagName = content.Substring(nextTagStart + 2, closeEnd - (nextTagStart + 2)).Trim();
+                if (stack.Count > 0 && stack.Peek() == tagName)
+                {
+                    stack.Pop();
+                }
+                i = closeEnd + 1;
+            }
+            else if (nextTagStart + 3 < content.Length && content.Substring(nextTagStart, 4) == "<!--")
+            {
+                // Skip HTML comments
+                int commentEnd = content.IndexOf("-->", nextTagStart);
+                if (commentEnd < 0) return (initialEndIndex, false);
+                i = commentEnd + 3;
+            }
+            else
+            {
+                // It's an opening tag
+                int openEnd = content.IndexOf('>', nextTagStart);
+                if (openEnd < 0) return (initialEndIndex, false);
+
+                var tagContent = content.Substring(nextTagStart + 1, openEnd - (nextTagStart + 1));
+                var tagNameMatch = Regex.Match(tagContent, @"^([a-zA-Z0-9-]+)");
+                if (!tagNameMatch.Success)
+                {
+                    i = openEnd + 1;
+                    continue;
+                }
+
+                var tagName = tagNameMatch.Groups[1].Value;
+                bool isSelfClosing = tagContent.EndsWith("/") || voidElements.Contains(tagName);
+
+                if (!isSelfClosing)
+                {
+                    stack.Push(tagName);
+                }
+                i = openEnd + 1;
+            }
+        }
+
+        // i is now the character immediately after the final closing tag
+        return (i, true);
     }
 
     /// <summary>
