@@ -595,15 +595,16 @@ public partial class AgentController : ControllerBase
     private async Task<(string? oldStr, string? newStr, bool fullFile,
       string? fullContent, bool alreadyDone, string? error, bool fromFormatC)>
       ResolveEditForStep(PlanStep step, string projectRoot, bool emitSse,
-          CancellationToken ct,
-          List<(string old, string @new, string error)>? history = null,
-          string? explorationContext = null,
-          string? targetSymbol = null,
-          string? originalPrompt = null,
-          string? preservationDirective = null,
-          AgentPlan? fullPlan = null,
-          int planItemIndex = -1,
-          string? filteredEditKnowledge = null)
+        CancellationToken ct,
+        List<(string old, string @new, string error)>? history = null,
+        string? explorationContext = null,
+        string? targetSymbol = null,
+        string? originalPrompt = null,
+        string? preservationDirective = null,
+        AgentPlan? fullPlan = null,
+        int planItemIndex = -1,
+        string? filteredEditKnowledge = null,
+        string? causalContext = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -617,6 +618,11 @@ public partial class AgentController : ControllerBase
 
 
         var sb = new StringBuilder();
+
+        if (!string.IsNullOrWhiteSpace(causalContext))
+        {
+            sb.AppendLine(causalContext);
+        }
 
         if (!string.IsNullOrWhiteSpace(originalPrompt))
         {
@@ -4076,6 +4082,13 @@ emitSse, ct);
                 $"Cleared plan oldString for HTML file — FORMAT D will be used for {relPath}", ct: ct);
         }
 
+        string? causalContext = null;
+        if (System.IO.File.Exists(fullPath))
+        {
+            var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            causalContext = await RunCausalReasoningAsync(prompt ?? step.Change ?? "", relPath, preExtractContent, emitSse, ct);
+        } 
+
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             string? oldStr = null, newStr = null, resolveError = null;
@@ -4103,20 +4116,24 @@ emitSse, ct);
             else
             {
                 if (attempt > 0)
+                {
                     await EmitLog(emitSse, "warn",
                         $"Resolve retry {attempt + 1} for {relPath}",
                         new { step, projectRoot }, ct: ct);
+                }
+                    
 
                 (oldStr, newStr, fullFile, fullContent, alreadyDone, resolveError, fromFormatC) =
-  await ResolveEditForStep(
-      step, projectRoot, emitSse, ct, history,
-      explorationContext: explorationContext,
-      targetSymbol: exploration.TargetSymbol,
-      originalPrompt: prompt,
-      preservationDirective: preservationDirective,
-      fullPlan: plan,
-      planItemIndex: planItemIndex,
-      filteredEditKnowledge: filteredEditKnowledge);
+                    await ResolveEditForStep(
+                        step, projectRoot, emitSse, ct, history,
+                        explorationContext: explorationContext,
+                        targetSymbol: exploration.TargetSymbol,
+                        originalPrompt: prompt,
+                        preservationDirective: preservationDirective,
+                        fullPlan: plan,
+                        planItemIndex: planItemIndex,
+                        filteredEditKnowledge: filteredEditKnowledge,
+                        causalContext: causalContext);
 
                 if (resolveError == null)
                 {
@@ -5339,7 +5356,9 @@ emitSse, ct);
                             : null,
                         explorationContext: explorationContext,
                         fullPlan: plan,
-                        currentStepIndex: planItemIndex);
+                        currentStepIndex: planItemIndex,
+                        causalContext: causalContext);
+                        
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
@@ -6507,19 +6526,11 @@ emitSse, ct);
 
 
     private async Task<(string decision, string reason, int score, bool needsExtraStep)> LlmVerifyEditStepAsync(
-    string relPath,
-    string originalPrompt,
-    string stepChange,
-    string oldStr,
-    string newStr,
-    string preEditContent,
-    string postEditContent,
-    bool emitSse,
-    CancellationToken ct,
-    List<(int score, string reason, string failedNew)>? priorAttempts = null,
-    string? explorationContext = null,
-    AgentPlan? fullPlan = null,
-    int currentStepIndex = -1)
+        string relPath, string originalPrompt, string stepChange, string oldStr, string newStr,
+        string preEditContent, string postEditContent, bool emitSse, CancellationToken ct,
+        List<(int score, string reason, string failedNew)>? priorAttempts = null,
+        string? explorationContext = null, AgentPlan? fullPlan = null,
+        int currentStepIndex = -1, string? causalContext = null)
     {
         var anchor = newStr.Split('\n')
             .Select(l => l.Trim())
@@ -6577,7 +6588,8 @@ emitSse, ct);
 
         var sysPrompt = BuildVerifyEditUserPrompt();
         var userMsg =
-            $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
+            $"### TASK PROMPT ###\n{originalPrompt}\n\n" + 
+            (string.IsNullOrWhiteSpace(causalContext) ? "" : causalContext + "\n\n") +
             $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
             $"### FILE ###\n{relPath}\n\n" +
             (string.IsNullOrWhiteSpace(explorationContext) ? "" : $"### RELATED SERVICE/MODEL CONTEXT ###\n{explorationContext}\n\n") +
@@ -11105,7 +11117,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            const int MaxPostVerifyRepairIterations = 6;
+            const int MaxPostVerifyRepairIterations = 0; // No repair passes — stop after first successful edit; post-execution repair loop caused catastrophic over-editing in HTML templates
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
 

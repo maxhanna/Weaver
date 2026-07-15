@@ -4201,6 +4201,57 @@ public static class AgentUtilities
         }
         return result;
     }
+
+    public static string ExtractMethodBodiesByKeywords(string content, string taskDesc)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return "";
+        var keywords = ExtractMeaningfulKeywords(taskDesc.ToLowerInvariant());
+        var lines = content.Split('\n');
+        var methods = new List<(string body, int score)>();
+        var currentMethod = new List<string>();
+        var inMethod = false;
+        var braceDepth = 0;
+        var methodScore = 0;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.Trim();
+
+            // Detect method/function signatures across C#, TS, JS, Python, etc.
+            if (!inMethod && Regex.IsMatch(trimmed, @"^\s*(public|private|protected|internal|static|async|export|function|def|func|void|task|override|virtual)\b.*\w+\s*\(", RegexOptions.IgnoreCase))
+            {
+                inMethod = true;
+                braceDepth = line.Count(c => c == '{') - line.Count(c => c == '}');
+                currentMethod.Clear();
+                currentMethod.Add(line);
+                methodScore = keywords.Count(k => line.Contains(k, StringComparison.OrdinalIgnoreCase)) * 5;
+                continue;
+            }
+
+            if (inMethod)
+            {
+                currentMethod.Add(line);
+                braceDepth += line.Count(c => c == '{') - line.Count(c => c == '}');
+                methodScore += keywords.Count(k => line.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+                if (braceDepth <= 0)
+                {
+                    inMethod = false;
+                    var body = string.Join("\n", currentMethod);
+                    // Include if it has keywords, or if it's a reasonably sized method (to provide context)
+                    if (methodScore > 0 || (currentMethod.Count > 3 && currentMethod.Count < 60))
+                    {
+                        methods.Add((body, methodScore));
+                    }
+                }
+            }
+        }
+
+        // Sort by score, take top 8 methods to stay within small context limits
+        var topMethods = methods.OrderByDescending(m => m.score).Take(8).Select(m => m.body).ToList();
+        return string.Join("\n\n---\n\n", topMethods);
+    }
     public static string ExtractFirstJsonObject(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;

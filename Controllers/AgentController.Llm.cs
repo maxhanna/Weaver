@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Weaver.Services;
 
 namespace Weaver.Controllers;
 
@@ -177,7 +178,50 @@ partial class AgentController
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
         catch (Exception ex) { return ("", null, ex.Message); }
     }
+    private async Task<string> RunCausalReasoningAsync(string taskDesc, string relPath, string fileContent, bool emitSse, CancellationToken ct)
+    {
+        var extractedCode = AgentUtilities.ExtractMethodBodiesByKeywords(fileContent, taskDesc);
+        if (string.IsNullOrWhiteSpace(extractedCode)) return string.Empty;
 
+        var sysPrompt = "You are an expert software debugger. " +
+                        "Given a bug report and code excerpts, trace the execution flow to identify the ROOT CAUSE. " +
+                        "Small details matter: check if callbacks are missed, state isn't updated, or variables are out of sync. " +
+                        "Do NOT write the fix. Output ONLY JSON: " +
+                        "{\"rootCause\": \"detailed explanation\", \"affectedMethods\": [\"method1\", \"method2\"]}";
+
+        var userPrompt = $"### BUG REPORT / TASK ###\n{taskDesc}\n\n" +
+                         $"### FILE: {relPath} ###\n" +
+                         $"### RELEVANT CODE EXCERPTS ###\n{extractedCode}\n\n" +
+                         "Trace the logic. What is the exact root cause of the issue, and which methods are affected?";
+
+        try
+        {
+            var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt, emitSse, ct, requestTimeout: TimeSpan.FromSeconds(45), maxTokens: 500);
+            if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            var rootCause = doc.RootElement.TryGetProperty("rootCause", out var rc) ? rc.GetString() : "Failed to parse root cause.";
+            var affected = new List<string>();
+            if (doc.RootElement.TryGetProperty("affectedMethods", out var am) && am.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in am.EnumerateArray())
+                    if (item.ValueKind == JsonValueKind.String) affected.Add(item.GetString() ?? "");
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("### ⚠️ CAUSAL REASONING ANALYSIS (CRITICAL — READ BEFORE EDITING) ###");
+            sb.AppendLine($"Root Cause Identified: {rootCause}");
+            sb.AppendLine($"Affected Methods: {string.Join(", ", affected)}");
+            sb.AppendLine("Your edit MUST address the root cause above and ensure the affected methods do not break.");
+            sb.AppendLine();
+            return sb.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
     private static bool LooksLikeMethodDeclaration(string line)
     {
         if (string.IsNullOrWhiteSpace(line)) return false;
