@@ -329,12 +329,14 @@ partial class AgentController
     "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. " +
     "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
     "   unrelated files.\n" +
-    "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
-     "10. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
-    "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
-    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
-    "11. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
-    "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
+     "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
+     "10. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
+     "Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n" +
+     "12. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
+     "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
+     "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
+     "13. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
+     "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -657,7 +659,52 @@ partial class AgentController
         }
         return sb.ToString();
     }
+    /// <summary>
+    /// Turns the user's prompt into a short list of literal, individually-checkable requirements
+    /// once per task. This gets appended to `prompt` so every downstream LLM call (step verify,
+    /// planComplete check, PostExecuteVerify, replanning) checks explicit items instead of forming
+    /// one holistic "is this done" opinion — which is unreliable for small models, especially for
+    /// adjectives ("funny") and integration requirements ("must replace the existing X") that a
+    /// shallow pattern match will happily wave through.
+    /// </summary>
+    private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct)
+    {
+        var sys =
+            "You extract a short checklist of literal, testable requirements from a coding task. " +
+            "Output ONLY JSON: {\"requirements\": [\"...\", \"...\"]}. 3-6 items max. " +
+            "Each item must be objectively checkable, not vague ('good code'), and must preserve the " +
+            "task's specific wording (tone, style, exact behavior). " +
+            "CRITICAL: if the task implies content must have a specific quality (funny, concise, matches " +
+            "brand voice, etc.), that is a requirement. If the task implies the change must be VISIBLE/USED/" +
+            "WIRED UP — not just exist as new code — that is always a requirement, even if not stated explicitly, " +
+            "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
 
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, TimeSpan.FromSeconds(20), maxTokens: 400);
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+
+        try
+        {
+            var cleaned = ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            if (!doc.RootElement.TryGetProperty("requirements", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return "";
+
+            var items = arr.EnumerateArray()
+                .Select(e => e.GetString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Take(6)
+                .ToList();
+            if (items.Count == 0) return "";
+
+            var sb = new StringBuilder();
+            sb.AppendLine("### EXPLICIT REQUIREMENTS CHECKLIST ###");
+            sb.AppendLine("Verify EACH item individually against the actual code/content. A task is only complete " +
+                           "if EVERY item below is satisfied — do not form one overall impression.");
+            for (var i = 0; i < items.Count; i++) sb.AppendLine($"  {i + 1}. {items[i]}");
+            return sb.ToString();
+        }
+        catch { return ""; }
+    }
     private static string PreviewForPrompt(string value, int maxChars) =>
         value.Length <= maxChars ? value : value[..maxChars] + "\n[truncated]";
 

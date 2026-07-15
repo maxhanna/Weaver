@@ -178,6 +178,87 @@ partial class AgentController
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
         catch (Exception ex) { return ("", null, ex.Message); }
     }
+    private static string? ExtractNewlyAddedMethodName(string? stepChange, string? newStr)
+    {
+        if (string.IsNullOrWhiteSpace(stepChange)) return null;
+        var isAddition = Regex.IsMatch(stepChange,
+            @"\b(add|create|insert|implement|define)\b.{0,40}\b(method|function)\b", RegexOptions.IgnoreCase);
+        if (!isAddition) return null;
+
+        if (!string.IsNullOrWhiteSpace(newStr))
+        {
+            var m = AgentUtilities.MethodDeclRegex.Match(newStr);
+            if (m.Success) return m.Groups[1].Value;
+
+            var tsMatch = Regex.Match(newStr,
+                @"\b(?:private|public|protected)?\s*(?:async\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{");
+            if (tsMatch.Success) return tsMatch.Groups[1].Value;
+        }
+
+        var dm = Regex.Match(stepChange, @"(?:method|function)\s+'?([A-Za-z_]\w*)'?", RegexOptions.IgnoreCase);
+        if (dm.Success) return dm.Groups[1].Value;
+        dm = Regex.Match(stepChange, @"\b([A-Za-z_]\w*)\s*\(\s*\)", RegexOptions.IgnoreCase);
+        return dm.Success ? dm.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Deterministic (non-LLM) check: does a call to this newly-added method exist ANYWHERE
+    /// in the project outside its own declaration? No LLM opinion needed — grep either finds
+    /// a call site or it doesn't. This is what catches "added but never wired up," which an
+    /// LLM step-verifier reliably misses because it's judging the step in isolation.
+    /// </summary>
+    private async Task<(bool wired, string? reason)> CheckNewMethodIsWiredUpAsync(
+        string methodName, string relPath, string projectRoot, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(methodName) || methodName.Length < 3) return (true, null);
+
+        var ext = Path.GetExtension(relPath).ToLowerInvariant();
+        var searchPatterns = ext switch
+        {
+            ".ts" or ".tsx" => new[] { "*.ts", "*.tsx", "*.html" },
+            ".cs" => new[] { "*.cs" },
+            ".js" or ".jsx" => new[] { "*.js", "*.jsx", "*.html" },
+            _ => new[] { "*" + ext }
+        };
+
+        var callPattern = new Regex($@"\b{Regex.Escape(methodName)}\s*\(", RegexOptions.Compiled);
+        var declLinePattern = new Regex(
+            $@"\b(?:private|public|protected|internal|static|async|get|set)\b[^\n]*\b{Regex.Escape(methodName)}\s*\(",
+            RegexOptions.Compiled);
+
+        foreach (var pattern in searchPatterns)
+        {
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(projectRoot, pattern, SearchOption.AllDirectories)
+                    .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\")
+                             && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\") && !f.Contains("\\dist\\"));
+            }
+            catch { continue; }
+
+            foreach (var file in files)
+            {
+                string content;
+                try { content = await System.IO.File.ReadAllTextAsync(file, Encoding.UTF8, ct); }
+                catch { continue; }
+
+                foreach (Match m in callPattern.Matches(content))
+                {
+                    var lineStart = content.LastIndexOf('\n', Math.Max(0, m.Index - 1)) + 1;
+                    var lineEndIdx = content.IndexOf('\n', m.Index);
+                    var line = content[lineStart..(lineEndIdx < 0 ? content.Length : lineEndIdx)];
+                    if (declLinePattern.IsMatch(line)) continue; // this hit is the declaration itself
+                    return (true, null); // found a real call site
+                }
+            }
+        }
+
+        return (false,
+            $"Method '{methodName}' was just added to {relPath} but has ZERO call sites anywhere else in the " +
+            "project — only its own declaration exists. It needs to be wired up (called from wherever the " +
+            "feature it implements is supposed to run).");
+    }
     private async Task<string> RunCausalReasoningAsync(string taskDesc, string relPath, string fileContent, bool emitSse, CancellationToken ct)
     {
         var extractedCode = AgentUtilities.ExtractMethodBodiesByKeywords(fileContent, taskDesc);

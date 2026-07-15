@@ -5358,7 +5358,7 @@ emitSse, ct);
                         fullPlan: plan,
                         currentStepIndex: planItemIndex,
                         causalContext: causalContext);
-                        
+
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
@@ -5607,12 +5607,39 @@ emitSse, ct);
             }, CancellationToken.None);
 
             await EmitLog(emitSse, "success", $"✓ Edited {relPath}", ct: ct);
+
+            var addedMethodName = ExtractNewlyAddedMethodName(step.Change, newStr);
+            if (!string.IsNullOrWhiteSpace(addedMethodName) && plan?.Plan != null && planItemIndex >= 0)
+            {
+                var (wired, wiringReason) = await CheckNewMethodIsWiredUpAsync(addedMethodName, relPath, projectRoot, ct);
+                if (!wired)
+                {
+                    var alreadyQueued = plan.Plan.Any(p =>
+                        (p.Change ?? "").Contains(addedMethodName, StringComparison.OrdinalIgnoreCase) &&
+                        Regex.IsMatch(p.Change ?? "", @"\b(wire|call|use|invoke|hook up|connect)\b", RegexOptions.IgnoreCase));
+                    if (!alreadyQueued)
+                    {
+                        plan.Plan.Insert(planItemIndex + 1, new PlanStep
+                        {
+                            File = relPath,
+                            Change = $"Wire up the newly added '{addedMethodName}' method — call it from wherever " +
+                                     $"in this file the feature it implements is supposed to actually run. It " +
+                                     $"currently has no call sites anywhere in the project.",
+                            Priority = 1,
+                            LineNumber = 0
+                        });
+                        await EmitLog(emitSse, "warn", $"⚠ {wiringReason}", ct: ct);
+                    }
+                }
+            }
+
             var result = new Dictionary<string, object?>();
             PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "", "");
             result["index"] = stepIndex; result["planItemIndex"] = planItemIndex;
             result["needsExtraStep"] = stepNeedsExtraStep;
             result["extraStepReason"] = stepExtraStepReason;
             result["extraStepFile"] = stepExtraStepFile;
+
             if (emitSse) await SendSse(Response, "step", result, ct);
             allResults.Add(result);
             await PersistBoardDataPlanStepAsync(cardId, planItemIndex, emitSse, ct);
@@ -8497,34 +8524,32 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
+ 
 
-        await EmitLog(emitSse, "info",
-            "Interleaved execution: propose ONE atomic step → execute it → verify → decide if another step is needed…", ct: ct);
-
-        if (emitSse)
+        if (emitSse) {
             await SendSse(Response, "plan", new
             {
                 thinking = "",
-                summary = "Executing one atomic step at a time — 0 done so far",
+                summary = "Plan atomic step → execute it → verify → decide if another step is needed… — 0 done so far",
                 items = Array.Empty<PlanStep>(),
                 incremental = true
             }, ct);
+        }
 
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
 
-            if (emitSse)
+            if (emitSse) {
                 await SendSse(Response, "phase", new { message = $"Step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
+            }
 
-            var proposal = await ProposeNextIncrementalStepAsync(
-                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
-
+            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
             if (proposal == null)
             {
                 rejectionFeedback.Add("Your previous response could not be parsed as valid JSON. " +
                     "Output ONLY the JSON object described in the system prompt.");
-                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) break;
+                if (++regenAttempts >= MAX_STEP_REGEN_ATTEMPTS) { break; }
                 continue;
             }
 
@@ -10336,13 +10361,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
                         if (newSteps?.Count > 0)
                         {
-                            plan = MergePlans(plan ?? new AgentPlan(), new AgentPlan { Plan = newSteps });
-                            var existingChanges = plan!.Plan
-                                .Select(p => NormalizeChangeForDedup(p.Change))
+                            // IMPORTANT: build the "already exists" set BEFORE merging, and key it on
+                            // (File, Change) — not Change alone — so a fix to method X in file A is never
+                            // confused with a fix to a similarly-worded step in file B. Computing this set
+                            // from plan.Plan AFTER MergePlans (the old code) meant the just-merged steps
+                            // matched themselves and every replan was silently discarded.
+                            var preMergeKeys = (plan?.Plan ?? new List<PlanStep>())
+                                .Select(p => $"{p.File}|{NormalizeChangeForDedup(p.Change)}")
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                             var filteredNewSteps = newSteps
-                                .Where(s => !existingChanges.Contains(NormalizeChangeForDedup(s.Change)))
+                                .Where(s => !preMergeKeys.Contains($"{s.File}|{NormalizeChangeForDedup(s.Change)}"))
                                 .ToList();
 
                             if (filteredNewSteps.Count == 0)
@@ -10364,7 +10393,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                     new { thinking = plan.Thinking, summary = "Replan: added steps", items = plan.Plan }, ct);
                             await PersistBoardDataPlanAsync(cardId, plan.Plan, emitSse, ct,
                                 summary: plan.Summary ?? "Replan: added steps", score: plan.Score);
-
 
                             var mergedDone = new HashSet<int>();
                             for (var i = 0; i < plan.Plan.Count; i++)
@@ -10391,17 +10419,14 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         else
                         {
-                            await EmitLog(emitSse, "warn", "No additional steps needed — stopping.", ct: ct);
-                            complete = plan?.Plan?.Select((p, i) =>
-                            {
-                                var result = allSteps.OfType<Dictionary<string, object?>>()
-                                    .LastOrDefault(s =>
-                                        s.TryGetValue("planItemIndex", out var pIdxObj) &&
-                                        pIdxObj is int pIdx &&
-                                        pIdx == i &&
-                                        s.GetValueOrDefault("type")?.ToString() is "edit" or "create" or "rename");
-                                return result != null && result.GetValueOrDefault("status")?.ToString() is "done" or "modified" or "created" or "skipped";
-                            }).All(x => x) ?? true;
+                            // `complete` is already false here (that's why we entered this branch).
+                            // Do NOT recompute it from raw step-status — every original step can be
+                            // technically "done" while still failing the quality bar. Recomputing
+                            // "all steps done" silently discarded a known negative verdict, which is
+                            // exactly what sent an unfunny, unwired welcome-message step to Done.
+                            await EmitLog(emitSse, "warn",
+                                "No additional replan steps found, and the quality check still reports issues — " +
+                                "leaving task INCOMPLETE for review rather than silently marking it done.", ct: ct);
                         }
                     }
                 }
@@ -10697,6 +10722,13 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         var (discoveryContext, ds) = await RunBootstrapDiscovery(prompt, projectRoot, emitSse, attachedFiles, ct);
         allSteps.AddRange(ds);
+
+        var requirementChecklist = await BuildRequirementChecklistAsync(prompt, ct);
+        if (!string.IsNullOrWhiteSpace(requirementChecklist))
+        { 
+            prompt = prompt + "\n\n" + requirementChecklist;
+            await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
+        }
 
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
@@ -11605,6 +11637,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
         var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
             steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
+
+        // Reject _create_file steps injected after code edits have already been done
+        if (moreSteps != null && moreSteps.Count > 0)
+        {
+            var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
+                .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit");
+            if (anyEditsDone)
+            {
+                var createSteps = moreSteps.Where(s => "_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (createSteps.Count > 0)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Rejecting {createSteps.Count} _create_file step(s) injected after code edits already started — " +
+                        $"file creation must happen first. ({string.Join("; ", createSteps.Select(s => s.Change))})", ct: ct);
+                    moreSteps = moreSteps.Where(s => !"_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
+                }
+            }
+        }
+
         if (moreSteps != null && moreSteps.Count > 0)
         {
             replanBudget[0]--;
@@ -11612,7 +11663,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse)
                 await SendSse(Response, "plan",
                     new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
-            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct,
+            await PersistBoardDataPlanStepAsync(cardId, planItems, emitSse, ct,
                 summary: $"Added {moreSteps.Count} step(s)", score: 0);
         }
         return planItems;
@@ -11890,8 +11941,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var newSteps = await CheckpointReplan(prompt, discoveryContext, remaining, allResults, projectRoot, emitSse, ct, steeringContext);
                     if (newSteps?.Count > 0)
                     {
-                        planItems = MergePlanSteps(planItems, newSteps);
-                        if (emitSse) await SendSse(Response, "plan", new { summary = $"Phase {checkpointCount + 1}", items = planItems }, ct);
+                        // Reject _create_file steps injected after edits already started
+                        var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
+                            .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit");
+                        if (anyEditsDone)
+                        {
+                            var createSteps = newSteps.Where(s => "_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
+                            if (createSteps.Count > 0)
+                            {
+                                await EmitLog(emitSse, "warn",
+                                    $"Checkpoint replan: rejecting {createSteps.Count} _create_file step(s) after edits already started. " +
+                                    $"({string.Join("; ", createSteps.Select(s => s.Change))})", ct: ct);
+                                newSteps = newSteps.Where(s => !"_create_file".Equals(s.File, StringComparison.OrdinalIgnoreCase)).ToList();
+                            }
+                        }
+                        if (newSteps.Count > 0)
+                        {
+                            planItems = MergePlanSteps(planItems, newSteps);
+                            if (emitSse) await SendSse(Response, "plan", new { summary = $"Phase {checkpointCount + 1}", items = planItems }, ct);
+                        }
                     }
                 }
                 continue;

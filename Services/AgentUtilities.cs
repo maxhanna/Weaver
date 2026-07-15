@@ -4252,6 +4252,7 @@ public static class AgentUtilities
         var topMethods = methods.OrderByDescending(m => m.score).Take(8).Select(m => m.body).ToList();
         return string.Join("\n\n---\n\n", topMethods);
     }
+    
     public static string ExtractFirstJsonObject(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return text;
