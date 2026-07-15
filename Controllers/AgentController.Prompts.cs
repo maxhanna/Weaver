@@ -158,7 +158,9 @@ partial class AgentController
             " * IGNORE TRIVIAL CASING & NAMING: Do not flag variable casing differences (e.g., 'isSearchingImdb' vs 'isSearchingIMDB') or minor naming inconsistencies. " +
             "  Assume the system handles these. Only flag completely missing functionality or critical syntax errors.\n" +
             " * MISSING METHODS ARE NOT BUGS: If the HTML references a method like showMoreReddit() that doesn't exist yet, DO NOT ABANDON. " +
-            "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n"; 
+            "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n" +
+            " * SYNTAX ERRORS ARE FATAL: If the edit has malformed HTML (e.g., `({ {x}}`), mismatched braces, or incorrect Angular syntax in the NEW code itself, ABANDON immediately. " +
+            "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n";
 
     private static string BuildStepExplorationSystemPrompt() =>
         "You are a senior codebase navigation agent. Before a code change is applied, " +

@@ -1559,6 +1559,13 @@ public partial class AgentController : ControllerBase
                                 $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
                         }
 
+                        // Check if the newCode already exists in the file to prevent duplication
+                        if (sourceText.Contains(newCodeStr, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
+                            return (null, null, false, null, true, null, false); // alreadyDone = true
+                        }
+
                         var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, !replaceSection);
                         
                         if (matchedBlock == null)
@@ -5314,7 +5321,7 @@ emitSse, ct);
             }
 
         AfterSelfHeal:
-            if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent) && !fromFormatC)
+            if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(preEditContent))
             {
                 const int VerificationRounds = 3;
                 var decisions = new List<string>();
