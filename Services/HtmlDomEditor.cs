@@ -12,7 +12,8 @@ public static class HtmlDomEditor
     }
 
     public static (string? matchedBlock, int matchIndex, string? error) ResolveHtmlAnchor(
-    string content, string targetName, string? stepChange = null, int centerLine = 0, bool expandToClosingTags = true)
+    string content, string targetName, string? stepChange = null, int centerLine = 0,
+    bool expandToClosingTags = true, bool expandToLineStart = true)
     {
         if (string.IsNullOrWhiteSpace(content))
             return (null, -1, "Empty content");
@@ -23,12 +24,16 @@ public static class HtmlDomEditor
         if (matchInfo.index < 0)
             return (null, -1, "Target not found in file");
 
-        // Expand backward to start of line to capture indentation
-        var lineStart = content.LastIndexOf('\n', matchInfo.index);
-        lineStart = lineStart < 0 ? 0 : lineStart + 1;
+        var adjustedStart = matchInfo.index;
+        // Expand backward to start of line to capture indentation (skip for replace — exact match only)
+        if (expandToLineStart)
+        {
+            var lineStart = content.LastIndexOf('\n', matchInfo.index);
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            adjustedStart = lineStart;
+        }
 
-        var adjustedStart = lineStart;
-        var initialEndIndex = adjustedStart + (matchInfo.index - lineStart) + matchInfo.length;
+        var initialEndIndex = adjustedStart + (matchInfo.index - adjustedStart) + matchInfo.length;
 
         // Expand forward to balanced closing tags ONLY if requested (for insertAfter)
         var finalEndIndex = initialEndIndex;

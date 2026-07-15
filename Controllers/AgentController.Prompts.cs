@@ -90,6 +90,76 @@ partial class AgentController
         return intro + formatSection + commonRules;
     }
 
+    private static string BuildVerifyEditUserPrompt() =>
+            "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
+            "Your job is to decide whether to KEEP the edit (it correctly implements the step " +
+            "without breaking existing functionality) or ABANDON it (it broke something, changed " +
+            "the wrong thing, introduced syntax errors, deleted guards/caches, or otherwise " +
+            "missed the intent of the step).\n\n" +
+            "STRICT OUTPUT FORMAT — output ONLY a JSON object, no prose, no markdown fences:\n" +
+            "{\"decision\":\"keep\"|\"abandon\", \"reason\":\"one short sentence\", \"score\": 0-100, \"needsExtraStep\": true|false}\n\n" +
+            "SCORE GUIDELINES:\n" +
+            "  90-100: Perfect — correctly implements the step, no issues\n" +
+            "  70-89:  Good — mostly correct, minor issues that could be fixed in a follow-up\n" +
+            "  40-69:  Poor — wrong approach or missing key functionality\n" +
+            "  0-39:   Broken — signature change, deleted functionality, syntax errors\n\n" +
+            "DECISION RULES:\n" +
+            " * Return \"keep\" if the edit is structurally sound and implements the step. Score 85+.\n" +
+            " * Set \"needsExtraStep\": true if the edit is CORRECT but references a method/property " +
+            "that doesn't exist in any file yet and needs to be added in a follow-up step (e.g. the HTML " +
+            "adds a button with ng-click=\"vm.foo()\" but vm.foo() doesn't exist in the .js/.ts file). " +
+            "IMPORTANT: Do NOT flag built-in DOM/event APIs like $event.preventDefault(), " +
+            "$event.stopPropagation(), console.log(), etc. — these are native JavaScript/DOM " +
+            "methods that do NOT need component-level implementations.\n" +
+            "When needsExtraStep is true, ALWAYS also include the missing method name in parentheses " +
+            "in the reason, e.g. 'added button with ng-click calling missing method (vm.clearAll).'\n" +
+            " * If needsExtraStep is true AND the edit is otherwise correct, set decision to \"keep\" " +
+            "(do NOT abandon — the system will auto-generate the follow-up step).\n" +
+            " * Return \"abandon\" if ANY of these are true:\n" +
+            "    - The edit breaks the build (syntax errors, missing braces, malformed HTML like `({ {x}}`).\n" +
+            "    - The edit is in the WRONG LOCATION (e.g., inserted inside the wrong div/section).\n" +
+            "    - The edit uses incorrect variable names or syntax in the NEW code itself (e.g., typos, mismatched braces).\n" +
+            "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
+            "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
+            "    - The edit changed an existing method's signature (return type, name, or parameter list).\n" +
+            "    - The edit is functionally a no-op (old and new do the same thing).\n" +
+            "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
+            "      (e.g., *ngIf=\"activeDataTab === 'users'\" vs *ngIf=\"activeDataTab === 'general'\"), " +
+            "      if the step says 'add X to the general tab' but the oldString comes from the 'users' " +
+            "      tab (or any other section), ABANDON with reason 'edited wrong section'. " +
+            "      This is critical — do NOT be fooled by sections that have similar structure. " +
+            "      Check WHICH *ngIf section the oldString belongs to, not just whether the edit 'looks right'.\n" +
+            " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+            "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
+            "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
+            "  functionality that is UNRELATED to the requested change.\n" +
+            " * SEQUENTIAL DEPENDENCIES (CRITICAL): Do NOT abandon an edit just because it references a method or property " +
+            "  that doesn't exist in the current file yet. If the PLANNED FUTURE STEPS section indicates that a future " +
+            "  step will add the missing method/property, OR if the system has auto-injected stubs, you MUST KEEP the current edit. " +
+            "  For HTML files, assume that methods referenced in (click) or (menuClicked) handlers WILL BE or HAVE BEEN added to the .ts file. " +
+            "  Do NOT abandon an HTML edit solely because you think the method might not exist in the .ts file.\n" +
+            " * INSERTIONS: If the step asks to ADD a new method, property, or block of code, and the newString " +
+            "  CONTAINS the entire oldString unchanged (usually at the beginning) followed by the new code, this is an INSERTION. " +
+            "  This is the CORRECT behavior. Do NOT abandon it claiming it 'replaced' or 'failed to add' the new method. " +
+            "  If the new code is present and the old code is preserved, keep the edit.\n" +
+            " * If the step asks to modify specific values inside a method (e.g., change coordinates, update a config), " +
+            "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
+            "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
+            " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
+            " * Do NOT consider style/whitespace issues — those are handled by other passes.\n" +
+            " * BLANK LINE SPAM: If the newString has a blank line between nearly every code line " +
+            "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
+            "  Code should have consecutive lines within a block, with at most one blank line " +
+            "  between logical sections.\n" +
+            " * DO NOT SUGGEST MOVING CODE: Do not flag issues that require moving code blocks, reordering DOM, or restructuring files. " +
+            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n" +
+            " * DO NOT SECOND-GUESS STRUCTURE: Do not flag nesting, sibling placement, or container wrapping issues. " +
+            "  Do not invent issues just to find something to do. If the requested feature is present and functional, KEEP the edit.\n" +
+            " * IGNORE TRIVIAL CASING & NAMING: Do not flag variable casing differences (e.g., 'isSearchingImdb' vs 'isSearchingIMDB') or minor naming inconsistencies. " +
+            "  Assume the system handles these. Only flag completely missing functionality or critical syntax errors.\n" +
+            " * MISSING METHODS ARE NOT BUGS: If the HTML references a method like showMoreReddit() that doesn't exist yet, DO NOT ABANDON. " +
+            "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n"; 
+
     private static string BuildStepExplorationSystemPrompt() =>
         "You are a senior codebase navigation agent. Before a code change is applied, " +
         "your job is to understand exactly what needs to change, which existing code owns it, " +
