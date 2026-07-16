@@ -304,7 +304,7 @@ partial class AgentController
     "  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n" +
     "  \"step\": {\n" +
     "    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
-    "    \"change\": \"precise, atomic description of ONLY this step's change\",\n" +
+    "    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n" +
     "    \"line\": 42,\n" +
     "    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n" +
     "  },\n" +
@@ -531,7 +531,12 @@ partial class AgentController
         "   BAD (too vague): \"Fix the dashboard\"\n" +
         "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
         "   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n" +
-        "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
+         "9. CRITICAL: Each step's change field MUST include the exact method/function/variable name being changed (e.g., \"getTimedGreetingMessage\", \"renderCards\", \"constructor\"). " +
+             "The execution pipeline uses this name to locate the correct code position in the file. " +
+             "If the change description lacks a code identifier, the system cannot find the target location. " +
+             "Also describe the old behavior and the new behavior.\n" +
+             "   BAD (missing method name): \"Add additional specific hour-based greetings to cover early morning, late night, and midnight periods\"\n" +
+             "   GOOD (includes method name): \"Add early morning, late night, and midnight greeting branches to getTimedGreetingMessage()\"\n" +
         "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
         "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
@@ -662,14 +667,7 @@ partial class AgentController
         }
         return sb.ToString();
     }
-    /// <summary>
-    /// Turns the user's prompt into a short list of literal, individually-checkable requirements
-    /// once per task. This gets appended to `prompt` so every downstream LLM call (step verify,
-    /// planComplete check, PostExecuteVerify, replanning) checks explicit items instead of forming
-    /// one holistic "is this done" opinion — which is unreliable for small models, especially for
-    /// adjectives ("funny") and integration requirements ("must replace the existing X") that a
-    /// shallow pattern match will happily wave through.
-    /// </summary>
+     
     private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct)
     {
         var sys =
@@ -682,7 +680,7 @@ partial class AgentController
             "WIRED UP — not just exist as new code — that is always a requirement, even if not stated explicitly, " +
             "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
 
-        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, TimeSpan.FromSeconds(20), maxTokens: 400);
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 400);
         if (string.IsNullOrWhiteSpace(raw)) return "";
 
         try

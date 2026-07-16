@@ -604,7 +604,8 @@ public partial class AgentController : ControllerBase
         AgentPlan? fullPlan = null,
         int planItemIndex = -1,
         string? filteredEditKnowledge = null,
-        string? causalContext = null)
+        string? causalContext = null,
+        string? forcedOldString = null)
     {
         var cfg5 = await LoadConfigAsync();
         var relPath = step.File.Replace('\\', '/');
@@ -905,6 +906,20 @@ public partial class AgentController : ControllerBase
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(forcedOldString))
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠ PREDETERMINED OLDSTRING (use THIS exactly):");
+            sb.AppendLine("```");
+            sb.AppendLine(forcedOldString);
+            sb.AppendLine("```");
+            sb.AppendLine("The oldString above was AST-resolved from the file — it is the EXACT target method/function source.");
+            sb.AppendLine("You MUST use this EXACT string as your `oldString` in the edit. Do NOT try to match partial code.");
+            sb.AppendLine("Only provide `newString` — the replacement for this entire block. " +
+                          "If replacing a method, newString MUST include a complete method declaration (signature + body).");
+            sb.AppendLine();
+        }
+
         sb.AppendLine();
         var isNewMethodInsertion = !string.IsNullOrWhiteSpace(step.Change) &&
             langSupportsFormatC && (
@@ -961,10 +976,13 @@ public partial class AgentController : ControllerBase
                           "For insertAfter: the block is found and newCode is inserted after it. " +
                           "For replace: the block is replaced with newCode. " +
                           "For CSS, JSON, and other data files: use oldString/newString.");
-            sb.AppendLine("To ADD a new method/CONSTRUCTOR: use insertAfter:true with targetType=\"method\" and targetName of an existing method.");
-            sb.AppendLine("To REPLACE a method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") without insertAfter. " +
+            sb.AppendLine("▌ METHOD EDITS — CHOOSE THE RIGHT MODE:");
+            sb.AppendLine("  • To ADD a NEW method (does not exist yet): use insertAfter:true with targetType=\"method\" and targetName of an EXISTING method.");
+            sb.AppendLine("  • To REPLACE an entire EXISTING method: use FORMAT C (targetType=\"method\", targetName=\"MethodName\") WITHOUT insertAfter. " +
                           "PRESERVE the existing attributes, return type, name, and parameters verbatim in newCode. " +
                           "PRESERVE all existing inline SQL queries verbatim — never rewrite them.");
+            sb.AppendLine("  • To MODIFY code WITHIN an existing method (add/change a few lines): use oldString/newString.");
+            sb.AppendLine("  ⚠ NEVER use insertAfter:true when the method ALREADY EXISTS — that creates a DUPLICATE method, causing compilation errors.");
             sb.AppendLine("To ADD a PROPERTY/FIELD: NEVER use targetType=\"class\". Instead, use oldString/newString. " +
                           "Set oldString to the LAST 1-2 EXISTING property/method declarations at the end of the class body " +
                           "(copy them VERBATIM from the file), and set newString to those lines followed by your new line(s). " +
@@ -1772,13 +1790,34 @@ public partial class AgentController : ControllerBase
                             if (string.Equals(targetType, "method", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(targetType, "function", StringComparison.OrdinalIgnoreCase))
                             {
-                                var newMethodMatch = MethodDeclRegex.Match(newCodeStr);
-                                if (newMethodMatch.Success)
+                                var isTypeScript = string.Equals(ext, ".ts", StringComparison.OrdinalIgnoreCase) ||
+                                                   string.Equals(ext, ".tsx", StringComparison.OrdinalIgnoreCase) ||
+                                                   string.Equals(ext, ".js", StringComparison.OrdinalIgnoreCase) ||
+                                                   string.Equals(ext, ".jsx", StringComparison.OrdinalIgnoreCase);
+
+                                // For TS/JS, the C#-targeted MethodDeclRegex incorrectly matches
+                                // expressions like `new Date()` — treat as no match to rely on
+                                // the hasOwnSignature heuristic below.
+                                Match? newMethodMatch = null;
+                                if (!isTypeScript)
+                                    newMethodMatch = MethodDeclRegex.Match(newCodeStr);
+                                if (newMethodMatch?.Success == true)
                                 {
                                     var newMethodName = newMethodMatch.Groups[1].Value;
                                     if (!string.IsNullOrWhiteSpace(newMethodName) &&
                                         !string.Equals(newMethodName, targetName, StringComparison.Ordinal))
                                     {
+                                        // When insertAfter is false, the LLM intends to REPLACE the target method.
+                                        // If the newCode names a different method, it's an error — they should use
+                                        // insertAfter:true for additions, or match the target name for replacements.
+                                        if (!insertAfter)
+                                        {
+                                            return (null, null, false, null, false,
+                                                $"METHOD NAME MISMATCH — targetName is '{targetName}' but newCode declares '{newMethodName}'. " +
+                                                $"To replace '{targetName}', newCode MUST declare the SAME method name. " +
+                                                $"To ADD '{newMethodName}' as a new method, use insertAfter:true.", false);
+                                        }
+
                                         var oldFirstRealLine = astOldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
                                         var methodBaseIndent = oldFirstRealLine != null
                                             ? Regex.Match(oldFirstRealLine, @"^(\s*)").Groups[1].Value
@@ -1809,6 +1848,34 @@ public partial class AgentController : ControllerBase
 
                                         newStr = astOldStr + "\n\n" + indentedNew;
                                         return (astOldStr, newStr, false, null, false, null, true);
+                                    }
+                                }
+
+                                // If newCode is body-only (no method/function declaration) when replacing,
+                                // wrap it with the old method's signature to avoid erasing the declaration
+                                if (newMethodMatch?.Success != true)
+                                {
+                                    var hasOwnSignature = newCodeStr.TrimStart().StartsWith(targetName + "(", StringComparison.Ordinal) ||
+                                                          newCodeStr.Contains("\n" + targetName + "(", StringComparison.Ordinal) ||
+                                                          newCodeStr.Contains("\n" + targetName + "<", StringComparison.Ordinal);
+                                    if (!hasOwnSignature)
+                                    {
+                                        var openBracePos = astOldStr.IndexOf('{');
+                                        var closeBracePos = astOldStr.LastIndexOf('}');
+                                        if (openBracePos > 0 && closeBracePos > openBracePos)
+                                        {
+                                            var signature = astOldStr[..openBracePos].TrimEnd();
+                                            var oldBody = astOldStr[(openBracePos + 1)..closeBracePos];
+                                            var bodyIndent = "";
+                                            foreach (var line in oldBody.Split('\n'))
+                                                if (!string.IsNullOrWhiteSpace(line)) { bodyIndent = Regex.Match(line, @"^(\s*)").Value; break; }
+                                            if (string.IsNullOrEmpty(bodyIndent))
+                                                bodyIndent = DetectIndentUnit(astOldStr) + DetectIndentUnit(astOldStr);
+
+                                            var reindented = AutoIndentCode(bodyIndent + "x", newCodeStr.TrimStart(), relPath, explicitBaseIndent: bodyIndent);
+                                            var closingIndent = Regex.Match(signature, @"^(\s*)").Value;
+                                            newCodeStr = signature + " {\n" + reindented + "\n" + closingIndent + "}";
+                                        }
                                     }
                                 }
                             }
@@ -1855,6 +1922,10 @@ public partial class AgentController : ControllerBase
 
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
+
+                // When forcedOldString is set, ALWAYS use it — the LLM was told to only provide newString
+                if (!string.IsNullOrWhiteSpace(forcedOldString))
+                    oldStr = forcedOldString;
 
                 if (!string.IsNullOrWhiteSpace(oldStr))
                     oldStr = FixAngularAttributeCasing(oldStr);
@@ -1958,7 +2029,8 @@ public partial class AgentController : ControllerBase
                 }
 
 
-                if (!string.IsNullOrWhiteSpace(oldStr) && oldStr.Split('\n').Length > 15)
+                // Skip the line-length limit when forcedOldString is set (AST-resolved method source)
+                if (string.IsNullOrWhiteSpace(forcedOldString) && !string.IsNullOrWhiteSpace(oldStr) && oldStr.Split('\n').Length > 15)
                 {
                     return (null, null, false, null, false,
                         $"oldString is {oldStr.Split('\n').Length} lines long — STRICT MAXIMUM IS 10 LINES. " +
@@ -4043,32 +4115,111 @@ emitSse, ct);
         if (System.IO.File.Exists(fullPath))
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            var resolvedLine = AgentUtilities.ResolveTargetLineNumber(
-                preExtractContent, step.Change ?? "", exploration.TargetSymbol,
-                plannerLineNumber: step.LineNumber);
-            if (resolvedLine > 0)
-            {
-                step.LineNumber = resolvedLine;
-                await EmitLog(emitSse, "info",
-                    $"Corrected step.LineNumber from planner guess to resolved line {resolvedLine} via text matching", ct: ct);
-            }
 
-            if (resolvedLine > 0 && string.IsNullOrWhiteSpace(planOldStr) && !HtmlDomEditor.IsHtmlDomFile(relPath))
+            // Phase 1: AST-based resolution (for TS/JS files with known targetSymbol)
+            // Skips fragile line number guessing by finding the exact method source from the syntax tree
+            if (string.IsNullOrWhiteSpace(planOldStr) &&
+                AstCodeEditorService.IsSupportedExtension(fileExt))
             {
-                var preExtracted = AgentUtilities.ExtractVerbatimTargetSection(
-                    preExtractContent, step.Change ?? "", contextLines: 3, centerLine: resolvedLine);
-                if (!string.IsNullOrWhiteSpace(preExtracted))
+                if (!string.IsNullOrWhiteSpace(exploration.TargetSymbol))
                 {
-                    var preLines = preExtracted.Split('\n').ToList();
-                    while (preLines.Count > 0 && Regex.IsMatch(preLines[0].TrimEnd(), @"^}$"))
-                        preLines.RemoveAt(0);
-                    if (preLines.Count > 0 && preLines.Count <= 7)
+                    var (astOldStr, astStartLine, astErr) = AstCodeEditorService.FindFunctionSource(
+                        preExtractContent, exploration.TargetSymbol, fileExt);
+                    if (astOldStr != null && astStartLine > 0)
                     {
-                        var joined = string.Join("\n", preLines);
-                        step.OldString = joined;
-                        planOldStr = joined;
+                        step.LineNumber = astStartLine;
+                        step.OldString = astOldStr;
+                        planOldStr = astOldStr;
                         await EmitLog(emitSse, "info",
-                            $"Pre-extracted {preLines.Count} lines from resolved line {resolvedLine} as oldString anchor (stripped leading '}}')", ct: ct);
+                            $"AST-resolved '{exploration.TargetSymbol}' at line {astStartLine} — using exact method source as oldString", ct: ct);
+                    }
+                    else
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"AST could not find '{exploration.TargetSymbol}': {astErr}", ct: ct);
+                    }
+                }
+                else
+                {
+                    // No target symbol in step description — scan all functions and match against description keywords
+                    var allFuncs = AstCodeEditorService.FindAllFunctions(preExtractContent, fileExt);
+                    if (allFuncs.Count > 0)
+                    {
+                        var changeWords = (step.Change ?? "")
+                            .ToLowerInvariant()
+                            .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';', '!', '?' },
+                                   StringSplitOptions.RemoveEmptyEntries)
+                            .Where(w => w.Length > 2 && !AgentUtilities.notTableWords.Contains(w))
+                            .ToHashSet();
+
+                        (string name, string source, int startLine)? funcBest = null;
+                        var funcBestScore = 0;
+
+                        Func<string, string> stem = w =>
+                        {
+                            if (w.EndsWith("ies")) return w[..^3] + "y";
+                            if (w.EndsWith("ves")) return w[..^3] + "f";
+                            if (w.EndsWith("es")) return w[..^2];
+                            if (w.EndsWith("s") && !w.EndsWith("ss")) return w[..^1];
+                            if (w.EndsWith("ing")) return w[..^3];
+                            if (w.EndsWith("ed")) return w[..^2];
+                            if (w.EndsWith("ly")) return w[..^2];
+                            if (w.EndsWith("er")) return w[..^2];
+                            if (w.EndsWith("est")) return w[..^3];
+                            return w;
+                        };
+
+                        foreach (var func in allFuncs)
+                        {
+                            var score = 0;
+                            var funcLower = func.name.ToLowerInvariant();
+                            var funcStem = stem(funcLower);
+
+                            // CamelCase tokens (getTimedGreetingMessage → get, timed, greeting, message)
+                            var tokens = System.Text.RegularExpressions.Regex
+                                .Matches(func.name, @"[a-z]+|[A-Z][a-z]*")
+                                .Select(m => m.Value.ToLowerInvariant())
+                                .ToHashSet();
+
+                            foreach (var cw in changeWords)
+                            {
+                                var cwStem = stem(cw);
+
+                                // Direct match or stem match
+                                if (funcLower == cw || funcStem == cwStem)
+                                    score += 10;
+
+                                // Token match (stemmed)
+                                if (tokens.Contains(cw) || tokens.Contains(cwStem))
+                                    score += 5;
+
+                                // Substring match (e.g., "greet" in "getTimedGreetingMessage")
+                                if (funcLower.Contains(cw) || funcLower.Contains(cwStem) ||
+                                    cw.Contains(funcLower) || cw.Contains(funcStem))
+                                    if (cw.Length >= 4 || cwStem.Length >= 4)
+                                        score += 3;
+                            }
+
+                            if (score > funcBestScore)
+                            {
+                                funcBestScore = score;
+                                funcBest = func;
+                            }
+                        }
+
+                        if (funcBest != null && funcBestScore >= 3)
+                        {
+                            step.LineNumber = funcBest.Value.startLine;
+                            step.OldString = funcBest.Value.source;
+                            planOldStr = funcBest.Value.source;
+                            await EmitLog(emitSse, "info",
+                                $"AST inferred target '{funcBest.Value.name}' at line {funcBest.Value.startLine} from step description (score {funcBestScore}) — using method source as oldString", ct: ct);
+                        }
+                        else
+                        {
+                            await EmitLog(emitSse, "info",
+                                $"AST scanned {allFuncs.Count} function(s) but could not match any to step description", ct: ct);
+                        }
                     }
                 }
             }
@@ -4103,8 +4254,46 @@ emitSse, ct);
                 if (string.IsNullOrWhiteSpace(planNewStr))
                 {
                     await EmitLog(emitSse, "info",
-                        $"Plan-provided oldString is set but newString is empty — falling through to LLM resolve", ct: ct);
-                    continue;
+                        $"AST-resolved oldString is set — making focused LLM call for replacement code only", ct: ct);
+
+                    // Make a focused LLM call that ONLY asks for the new replacement code,
+                    // bypassing ResolveEditForStep entirely to avoid format-confusion issues.
+                    var replacePrompt = new StringBuilder();
+                    replacePrompt.AppendLine("You are replacing the following method/function in the file. Output ONLY the replacement code — no JSON wrapper, no explanation, no markdown.");
+                    replacePrompt.AppendLine();
+                    replacePrompt.AppendLine("CURRENT METHOD SOURCE (to be replaced):");
+                    replacePrompt.AppendLine(planOldStr);
+                    replacePrompt.AppendLine();
+                    replacePrompt.AppendLine("CHANGE REQUIRED: " + (step.Change ?? ""));
+                    replacePrompt.AppendLine();
+                    replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
+                    replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
+
+                    var (rawReplacement, _, replaceError) = await CallLlmRaw(
+                        "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation.",
+                        replacePrompt.ToString(), ct,
+                        requestTimeout: TimeSpan.FromMinutes(5),
+                        maxTokens: 2048);
+
+                    if (!string.IsNullOrWhiteSpace(replaceError) || string.IsNullOrWhiteSpace(rawReplacement) || rawReplacement.Length < 10)
+                    {
+                        resolveError = replaceError ?? "LLM returned empty replacement";
+                        await EmitLog(emitSse, "warn",
+                            $"Focused replacement call failed: {resolveError}", ct: ct);
+                    }
+                    else
+                    {
+                        var cleaned = rawReplacement.Trim();
+                        // Strip code fences if the model wrapped output anyway
+                        cleaned = Regex.Replace(cleaned, @"^```[a-zA-Z]*\s*", "");
+                        cleaned = Regex.Replace(cleaned, @"\s*```$", "");
+
+                        oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
+                        newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
+                        fromFormatC = true;
+                        await EmitLog(emitSse, "info",
+                            $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
+                    }
                 }
                 else
                 {
@@ -4827,11 +5016,11 @@ emitSse, ct);
                 }
             }
 
-            var firstOldLine = oldStr?.TrimStart().Split('\n', '\r')
+            var firstOldLineTrimmed = oldStr?.TrimStart().Split('\n', '\r')
                 .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-            if (firstOldLine?.TrimStart().StartsWith('}') == true)
+            if (firstOldLineTrimmed?.TrimStart() is "}" or "})" or "};")
             {
-                var err = $"oldString starts with '}}' — it includes the previous method's closing brace. " +
+                var err = $"oldString starts with a standalone '}}' (just a closing brace) — it includes the previous method's closing brace. " +
                     "Set oldString to start AT the target method declaration, not before it.";
                 await EmitLog(emitSse, "warn",
                     $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);

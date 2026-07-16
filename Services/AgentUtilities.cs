@@ -3098,11 +3098,13 @@ public static class AgentUtilities
                 "⚠ TS FILE: preserve ALL indentation exactly. Methods inside a class MUST be indented. " +
                 "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
                 "and after commas in arrays/objects. " +
-                "You can use FORMAT C (targetType='method', targetName='name') for full method replacements. " +
-                "For small targeted edits (< 10 lines) prefer oldString/newString." +
-                " Do NOT use targetType='class' — class REPLACE is blocked for .ts files. " +
-                "Use insertAfter:true with targetType='method' to add methods, " +
-                "or oldString/newString to add properties."),
+                "EDIT MODE DECISION GUIDE:\n" +
+                "  • To MODIFY code within an existing method (change/add a few lines): use oldString/newString.\n" +
+                "  • To REPLACE an entire existing method body: use FORMAT C (targetType='method', targetName='name') WITHOUT insertAfter.\n" +
+                "  • To ADD a NEW method that does NOT exist in the file: use FORMAT C with insertAfter:true (targetType='method', targetName=existing method name).\n" +
+                "  • To add properties/fields: use oldString/newString.\n" +
+                "  • Do NOT use insertAfter:true when the method ALREADY EXISTS — that creates a DUPLICATE." + 
+                " Do NOT use targetType='class' — class REPLACE is blocked for .ts files."),
             ".js" or ".jsx" => ("brace", true,
                 "⚠ JS FILE: preserve ALL indentation exactly. " +
                 "Preserve inline formatting: keep a space after colons in object literals ({key: value}) " +
@@ -3311,6 +3313,50 @@ public static class AgentUtilities
         if (string.IsNullOrEmpty(s)) return s ?? "";
         return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t");
     }
+    private static bool LooksLikeCodeIdentifier(string word)
+    {
+        if (string.IsNullOrWhiteSpace(word) || word.Length < 2) return false;
+        // PascalCase or camelCase with uppercase transitions
+        if (word.Any(char.IsUpper)) return true;
+        // Single-word lowercase like "login", "render", "parse" — accept if > 2 chars and not a common English word
+        return word.Length >= 3 && !CommonEnglishWords.Contains(word);
+    }
+    private static readonly HashSet<string> CommonEnglishWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was", "one", "our", "out",
+        "has", "have", "him", "his", "how", "its", "may", "per", "say", "she", "two", "way", "who", "why", "yes",
+        "about", "above", "after", "again", "below", "between", "could", "every", "first", "following",
+        "going", "great", "half", "hand", "head", "home", "house", "hours", "just", "keep", "kind", "know",
+        "large", "last", "leave", "left", "less", "life", "line", "list", "long", "look", "love", "made",
+        "make", "many", "might", "more", "most", "much", "must", "name", "need", "never", "next", "number",
+        "often", "once", "only", "open", "order", "other", "over", "own", "part", "place", "play",
+        "point", "power", "press", "price", "print", "process", "product", "project",
+        "public", "purpose", "quality", "question", "quick", "quite", "race", "range", "rate", "rather",
+        "reach", "read", "ready", "real", "reason", "record", "region", "report", "result",
+        "return", "right", "rise", "risk", "road", "role", "room", "rule", "run", "safe", "sale",
+        "same", "save", "scale", "school", "science", "score", "screen", "search",
+        "season", "second", "section", "security", "select", "sense", "series", "serious", "service",
+        "session", "set", "seven", "several", "short", "show", "side", "sign", "significant", "similar",
+        "simple", "since", "single", "site", "situation", "six", "size", "skill", "small", "social",
+        "society", "some", "sort", "sound", "source", "south", "space", "speak", "special", "specific",
+        "spend", "sport", "spring", "staff", "stage", "stand", "standard", "start", "state", "step",
+        "still", "stock", "stop", "store", "story", "straight", "strategy", "street", "strength",
+        "strong", "structure", "student", "study", "subject", "success", "such", "sudden", "suggest",
+        "summer", "support", "sure", "surface", "system", "table", "take", "talk", "task", "teach",
+        "team", "technology", "tell", "term", "test", "than", "thank", "that", "their", "them",
+        "themselves", "then", "there", "these", "they", "thing", "think", "third", "this",
+        "those", "though", "thought", "three", "through", "throughout", "throw", "thus", "time",
+        "together", "top", "total", "touch", "toward", "town", "trade", "train", "travel",
+        "trouble", "true", "trust", "truth", "try", "turn", "type", "under", "understand", "unit",
+        "until", "upon", "use", "usual", "value", "various", "very", "view", "visit", "voice",
+        "wait", "walk", "wall", "want", "war", "watch", "water", "way", "wear", "week", "weight",
+        "well", "west", "western", "what", "whatever", "when", "where", "whether", "which", "while",
+        "white", "who", "whole", "whom", "whose", "why", "wide", "will", "win", "wind", "window",
+        "wish", "within", "without", "woman", "wonder", "word", "work", "worker", "world", "worry",
+        "would", "write", "writer", "wrong", "year", "young", "your", "yourself",
+        "before", "during", "including", "according", "regarding", "following", "existing",
+        "current", "previous", "various", "different", "another", "example", "purpose", "result"
+    };
     public static string? ExtractTargetSymbolFromChange(string change)
     {
         if (string.IsNullOrWhiteSpace(change)) return null;
@@ -3322,7 +3368,7 @@ public static class AgentUtilities
         if (m.Success) return m.Groups[1].Value;
 
         m = Regex.Match(change, @"\bmethod\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
-        if (m.Success) return m.Groups[1].Value;
+        if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
 
         m = Regex.Match(change, @"\b(?:in|inside)\s+(?:the\s+)?([A-Z]\w+)\b");
         if (m.Success) return m.Groups[1].Value;
@@ -3338,7 +3384,7 @@ public static class AgentUtilities
 
         // "method symbol" or "function symbol" pattern
         m = Regex.Match(change, @"\b(?:method|function)\s+([A-Za-z_]\w*)\b", RegexOptions.IgnoreCase);
-        if (m.Success) return m.Groups[1].Value;
+        if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
 
         return null;
     }
@@ -5063,7 +5109,7 @@ public static class AgentUtilities
 
         if (plannerLineNumber > 0 && plannerLineNumber <= lines.Length)
         {
-            candidates.Add((plannerLineNumber, 1));
+            candidates.Add((plannerLineNumber, 50));
         }
 
         if (candidates.Count == 0)
