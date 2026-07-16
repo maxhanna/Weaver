@@ -3209,13 +3209,14 @@ public partial class AgentController : ControllerBase
 
         await PersistStepStatusAsync(cardId, planItemIndex, "exploring", emitSse, ct);
 
+        var fileContent = string.Empty;
         if (System.IO.File.Exists(fullPath) &&
             AgentUtilities.IsPathUnderRoot(fullPath, projectRoot))
         {
-            var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            var excerpt = content.Length > 5_000
-                ? AgentUtilities.ExtractRelevantExcerpt(content, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
-                : content;
+            fileContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+            var excerpt = fileContent.Length > 5_000
+                ? AgentUtilities.ExtractRelevantExcerpt(fileContent, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
+                : fileContent;
 
             var ext = Path.GetExtension(relPath).ToLowerInvariant();
             if (string.IsNullOrWhiteSpace(targetSymbol) && AstCodeEditorService.IsSupportedExtension(ext))
@@ -3224,7 +3225,7 @@ public partial class AgentController : ControllerBase
                     .Where(w => w.Length >= 4)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                var allFuncs = AstCodeEditorService.FindAllFunctions(content, ext);
+                var allFuncs = AstCodeEditorService.FindAllFunctions(fileContent, ext);
                 (string name, string source, int startLine)? funcBest = null;
                 var funcBestScore = 0;
 
@@ -3281,18 +3282,18 @@ public partial class AgentController : ControllerBase
 
             if (!string.IsNullOrWhiteSpace(targetSymbol))
             {
-                var symbolMatches = Regex.Matches(content, $@"\b{Regex.Escape(targetSymbol)}\b");
+                var symbolMatches = Regex.Matches(fileContent, $@"\b{Regex.Escape(targetSymbol)}\b");
                 if (symbolMatches.Count > 0)
                 {
-                    var matchLine = content[..symbolMatches[0].Index].Count(c => c == '\n') + 1;
+                    var matchLine = fileContent[..symbolMatches[0].Index].Count(c => c == '\n') + 1;
                     var startLine = Math.Max(1, matchLine - 20);
-                    var endLine = Math.Min(content.Split('\n').Length, matchLine + 40);
-                    var lines = content.Split('\n');
+                    var endLine = Math.Min(fileContent.Split('\n').Length, matchLine + 40);
+                    var lines = fileContent.Split('\n');
                     excerpt = string.Join("\n", lines.Skip(startLine - 1).Take(endLine - startLine + 1));
                 }
             }
 
-            ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
+            ctx.AppendLine($"### TARGET FILE: {relPath}  ({fileContent.Length:N0} chars total)");
             ctx.AppendLine("```");
             ctx.AppendLine(excerpt);
             ctx.AppendLine("```");
@@ -3314,9 +3315,23 @@ public partial class AgentController : ControllerBase
             var finalTargetSymbol = string.IsNullOrWhiteSpace(targetSymbol)
                 ? fallbackSymbol
                 : targetSymbol;
-            await EmitLog(emitSse, "info",
-                $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly" +
-                (finalTargetSymbol != null ? $" (target symbol: '{finalTargetSymbol}')" : ""), ct: ct);
+
+            var hasValidSymbolInFile = !string.IsNullOrWhiteSpace(finalTargetSymbol) &&
+                Regex.IsMatch(fileContent, $@"\b{Regex.Escape(finalTargetSymbol)}\b", RegexOptions.IgnoreCase);
+
+            if (!hasValidSymbolInFile)
+            {
+                finalTargetSymbol = null;
+                await EmitLog(emitSse, "info",
+                    "  ✓ Target file was attached by user — skipping LLM exploration and passing the full discovered context through to the resolver because no trustworthy target symbol could be validated in the file.",
+                    ct: ct);
+            }
+            else
+            {
+                await EmitLog(emitSse, "info",
+                    $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly (target symbol: '{finalTargetSymbol}')", ct: ct);
+            }
+
             return new StepExplorationResult
             {
                 EnrichedStep = step,
@@ -5179,27 +5194,6 @@ emitSse, ct);
                         newStr = AgentUtilities.AutoFixPythonStatements(newStr, relPath);
                     }
                 }
-
-                // External formatter replaces custom formatting (pipe spacing, AutoFormatEditedRegion).
-                if (CodeFormatterService.CanFormat(relPath))
-                {
-                    try
-                    {
-                        var beforeFmt = newContent;
-                        var fmtContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
-                        if (fmtContent != beforeFmt)
-                        {
-                            newContent = fmtContent;
-                            await EmitLog(emitSse, "info",
-                                $"Formatted {relPath} via external formatter", ct: ct);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        await EmitLog(emitSse, "warn",
-                            $"External formatter failed for {relPath}: {ex.Message}", ct: ct);
-                    }
-                }
             }
 
             if ((relPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
@@ -5539,29 +5533,6 @@ emitSse, ct);
                 }
             }
 
-            // Use external formatters (Prettier, Black, Roslyn) instead of custom formatting code.
-            // This replaces all of: CSS region format, AutoFormatEditedRegion, NormalizeEditIndentation,
-            // CollapseExcessiveBlankLines, and PostEditStyleFixAsync.
-            if (!string.IsNullOrWhiteSpace(newStr) && CodeFormatterService.CanFormat(relPath))
-            {
-                try
-                {
-                    var beforeFmt = newContent;
-                    newContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
-                    if (newContent != beforeFmt)
-                    {
-                        await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-                        await EmitLog(emitSse, "info",
-                            $"Formatted {relPath} via external formatter", ct: ct);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    await EmitLog(emitSse, "warn",
-                        $"External formatter failed for {relPath}: {ex.Message} — skipping", ct: ct);
-                }
-            }
-
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
             {
                 var fileLines = newContent.Split('\n');
@@ -5837,6 +5808,28 @@ emitSse, ct);
                             planItemIndex
                         }, ct);
                     }
+
+                    if (!string.IsNullOrWhiteSpace(newStr) && CodeFormatterService.CanFormat(relPath))
+                    {
+                        try
+                        {
+                            var beforeFmt = newContent;
+                            var fmtContent = await FormatAcceptedEditRegionAsync(relPath, newContent, oldStr, newStr, ct);
+                            if (fmtContent != beforeFmt)
+                            {
+                                newContent = fmtContent;
+                                await EmitLog(emitSse, "info",
+                                    $"Formatted only the accepted edit region in {relPath} via external formatter", ct: ct);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"External formatter failed for {relPath}: {ex.Message} — skipping", ct: ct);
+                        }
+                    }
+
+                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
                 }
                 else
                 {
@@ -6455,6 +6448,41 @@ emitSse, ct);
 
         var repaired = signature + Environment.NewLine + candidateTrim + Environment.NewLine + "}";
         return repaired;
+    }
+
+    private async Task<string> FormatAcceptedEditRegionAsync(string filePath, string content, string? oldString, string? newString, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(newString))
+            return content;
+
+        var normalizedContent = AgentUtilities.NormalizeLineEndings(content);
+        var normalizedNew = AgentUtilities.NormalizeLineEndings(newString).Trim('\r', '\n');
+        if (string.IsNullOrWhiteSpace(normalizedNew))
+            return content;
+
+        var regionIndex = normalizedContent.IndexOf(normalizedNew, StringComparison.Ordinal);
+        if (regionIndex < 0)
+            return content;
+
+        var contentLines = normalizedContent.Split('\n').ToList();
+        var regionLineStart = normalizedContent[..regionIndex].Count(c => c == '\n') + 1;
+        var regionLineEnd = regionLineStart + normalizedNew.Split('\n').Length - 1;
+
+        var windowStart = Math.Max(1, regionLineStart - 4);
+        var windowEnd = Math.Min(contentLines.Count, regionLineEnd + 4);
+        var windowLines = contentLines.Skip(windowStart - 1).Take(windowEnd - windowStart + 1).ToList();
+        var windowText = string.Join("\n", windowLines);
+        var formattedWindow = await CodeFormatterService.FormatAsync(filePath, windowText, ct);
+
+        if (string.Equals(formattedWindow, windowText, StringComparison.Ordinal))
+            return content;
+
+        var formattedWindowLines = formattedWindow.Split('\n').ToList();
+        var replaceStart = windowStart - 1;
+        var replaceCount = windowLines.Count;
+        contentLines.RemoveRange(replaceStart, replaceCount);
+        contentLines.InsertRange(replaceStart, formattedWindowLines);
+        return string.Join("\n", contentLines);
     }
 
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
