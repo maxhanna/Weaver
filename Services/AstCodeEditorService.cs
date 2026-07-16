@@ -4,6 +4,7 @@ namespace Weaver.Services;
 
 public static class AstCodeEditorService
 {
+    // Maps file extension -> TreeSitter grammar name (for new Language(name))
     private static readonly Dictionary<string, string> LanguageMap = new(StringComparer.OrdinalIgnoreCase)
     {
         { ".ts", "TypeScript" },
@@ -13,6 +14,188 @@ public static class AstCodeEditorService
         { ".mjs", "JavaScript" },
         { ".cjs", "JavaScript" },
         { ".cs", "c_sharp" },
+        { ".py", "python" },
+        { ".rb", "ruby" },
+        { ".go", "go" },
+        { ".rs", "rust" },
+        { ".java", "java" },
+        { ".php", "php" },
+        { ".c", "c" },
+        { ".h", "c" },
+        { ".cpp", "cpp" },
+        { ".cc", "cpp" },
+        { ".cxx", "cpp" },
+        { ".hpp", "cpp" },
+        { ".css", "css" },
+        { ".swift", "swift" },
+        { ".scala", "scala" },
+        { ".hs", "haskell" },
+        { ".jl", "julia" },
+        { ".sh", "bash" },
+        { ".bash", "bash" },
+        { ".zsh", "bash" },
+        { ".toml", "toml" },
+        { ".ql", "ql" },
+        { ".razor", "razor" },
+    };
+
+    // TreeSitter query patterns to find named declarations, grouped by grammar name.
+    // Each pattern captures @name (the declaration name) and @target (the full node).
+    private static readonly Dictionary<string, string[]> QueryPatterns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["TypeScript"] =
+        [
+            "(method_definition name: (property_identifier) @name) @target",
+            "(function_declaration name: (identifier) @name) @target",
+            "(method_signature name: (property_identifier) @name) @target",
+            "(function_signature name: (identifier) @name) @target",
+            "(generator_method name: (property_identifier) @name) @target",
+            "(generator_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (type_identifier) @name) @target",
+            "(interface_declaration name: (type_identifier) @name) @target",
+            "(enum_declaration name: (identifier) @name) @target",
+        ],
+        ["TSX"] =
+        [
+            "(method_definition name: (property_identifier) @name) @target",
+            "(function_declaration name: (identifier) @name) @target",
+            "(method_signature name: (property_identifier) @name) @target",
+            "(function_signature name: (identifier) @name) @target",
+            "(generator_method name: (property_identifier) @name) @target",
+            "(generator_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (type_identifier) @name) @target",
+            "(interface_declaration name: (type_identifier) @name) @target",
+        ],
+        ["JavaScript"] =
+        [
+            "(method_definition name: (property_identifier) @name) @target",
+            "(function_declaration name: (identifier) @name) @target",
+            "(generator_method name: (property_identifier) @name) @target",
+            "(generator_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (identifier) @name) @target",
+            "(export_statement declaration: (function_declaration name: (identifier) @name)) @target",
+        ],
+        ["c_sharp"] =
+        [
+            "(method_declaration name: (identifier) @name) @target",
+            "(local_function_statement name: (identifier) @name) @target",
+            "(constructor_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (identifier) @name) @target",
+            "(struct_declaration name: (identifier) @name) @target",
+            "(interface_declaration name: (identifier) @name) @target",
+            "(record_declaration name: (identifier) @name) @target",
+            "(enum_declaration name: (identifier) @name) @target",
+            "(property_declaration name: (identifier) @name) @target",
+        ],
+        ["python"] =
+        [
+            "(function_definition name: (identifier) @name) @target",
+            "(class_definition name: (identifier) @name) @target",
+            "(decorated_definition definition: (function_definition name: (identifier) @name)) @target",
+            "(decorated_definition definition: (class_definition name: (identifier) @name)) @target",
+        ],
+        ["ruby"] =
+        [
+            "(method name: (identifier) @name) @target",
+            "(singleton_method name: (identifier) @name) @target",
+            "(class name: (constant) @name) @target",
+            "(module name: (constant) @name) @target",
+        ],
+        ["go"] =
+        [
+            "(function_declaration name: (identifier) @name) @target",
+            "(method_declaration name: (field_identifier) @name) @target",
+            "(type_declaration (type_spec name: (type_identifier) @name)) @target",
+        ],
+        ["rust"] =
+        [
+            "(function_item name: (identifier) @name) @target",
+            "(struct_item name: (type_identifier) @name) @target",
+            "(enum_item name: (type_identifier) @name) @target",
+            "(trait_item name: (type_identifier) @name) @target",
+            "(impl_item trait: (type_identifier) @name) @target",
+            "(impl_item type: (type_identifier) @name) @target",
+            "(type_item name: (type_identifier) @name) @target",
+            "(constant_item name: (identifier) @name) @target",
+            "(static_item name: (identifier) @name) @target",
+        ],
+        ["java"] =
+        [
+            "(method_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (identifier) @name) @target",
+            "(interface_declaration name: (identifier) @name) @target",
+            "(enum_declaration name: (identifier) @name) @target",
+            "(constructor_declaration name: (identifier) @name) @target",
+            "(record_declaration name: (identifier) @name) @target",
+            "(annotation_type_declaration name: (identifier) @name) @target",
+        ],
+        ["php"] =
+        [
+            "(method_declaration name: (name) @name) @target",
+            "(function_definition name: (name) @name) @target",
+            "(class_declaration name: (name) @name) @target",
+            "(interface_declaration name: (name) @name) @target",
+            "(trait_declaration name: (name) @name) @target",
+            "(enum_declaration name: (name) @name) @target",
+        ],
+        ["c"] =
+        [
+            "(function_definition declarator: (function_declarator declarator: (identifier) @name)) @target",
+        ],
+        ["cpp"] =
+        [
+            "(function_definition declarator: (function_declarator declarator: (identifier) @name)) @target",
+            "(class_specifier name: (type_identifier) @name) @target",
+            "(struct_specifier name: (type_identifier) @name) @target",
+            "(enum_specifier name: (type_identifier) @name) @target",
+            "(template_declaration declaration: (function_definition declarator: (function_declarator declarator: (identifier) @name))) @target",
+            "(template_declaration declaration: (class_specifier name: (type_identifier) @name)) @target",
+        ],
+        ["css"] =
+        [
+            "(rule_set selectors: (selectors) @name) @target",
+        ],
+        ["swift"] =
+        [
+            "(function_declaration name: (identifier) @name) @target",
+            "(method_declaration name: (identifier) @name) @target",
+            "(class_declaration name: (identifier) @name) @target",
+            "(struct_declaration name: (identifier) @name) @target",
+            "(enum_declaration name: (identifier) @name) @target",
+            "(protocol_declaration name: (identifier) @name) @target",
+            "(extension_declaration name: (identifier) @name) @target",
+            "(constructor_declaration name: (identifier) @name) @target",
+            "(destructor_declaration name: (identifier) @name) @target",
+        ],
+        ["scala"] =
+        [
+            "(function_definition name: (identifier) @name) @target",
+            "(class_definition name: (identifier) @name) @target",
+            "(trait_definition name: (identifier) @name) @target",
+            "(object_definition name: (identifier) @name) @target",
+            "(enum_definition name: (identifier) @name) @target",
+        ],
+        ["haskell"] =
+        [
+            "(function name: (variable) @name) @target",
+            "(class name: (type) @name) @target",
+            "(instance name: (type) @name) @target",
+            "(data name: (type) @name) @target",
+            "(type name: (type) @name) @target",
+        ],
+        ["julia"] =
+        [
+            "(function_definition name: (identifier) @name) @target",
+            "(macro_definition name: (identifier) @name) @target",
+            "(struct_definition name: (identifier) @name) @target",
+            "(abstract_definition name: (identifier) @name) @target",
+            "(primitive_definition name: (identifier) @name) @target",
+            "(module_definition name: (identifier) @name) @target",
+        ],
+        ["bash"] =
+        [
+            "(function_definition name: (word) @name) @target",
+        ],
     };
 
     public static string[] GetSupportedExtensions() => [.. LanguageMap.Keys];
@@ -33,39 +216,16 @@ public static class AstCodeEditorService
         if (!LanguageMap.TryGetValue(fileExtension.ToLowerInvariant(), out var langName))
             return results;
 
+        var patterns = QueryPatterns.GetValueOrDefault(langName);
+        if (patterns == null || patterns.Length == 0)
+            return results;
+
         try
         {
             using var language = new Language(langName);
             using var parser = new Parser(language);
             using var tree = parser.Parse(fileContent);
             if (tree == null) return results;
-
-            var patterns = langName switch
-            {
-                "TypeScript" or "TSX" => new[]
-                {
-                    "(method_definition name: (property_identifier) @name) @target",
-                    "(function_declaration name: (identifier) @name) @target",
-                    "(method_signature name: (property_identifier) @name) @target",
-                    "(function_signature name: (identifier) @name) @target",
-                    "(generator_method name: (property_identifier) @name) @target",
-                    "(generator_declaration name: (identifier) @name) @target",
-                },
-                "JavaScript" => new[]
-                {
-                    "(method_definition name: (property_identifier) @name) @target",
-                    "(function_declaration name: (identifier) @name) @target",
-                    "(generator_method name: (property_identifier) @name) @target",
-                    "(generator_declaration name: (identifier) @name) @target",
-                },
-                "c_sharp" => new[]
-                {
-                    "(method_declaration name: (identifier) @name) @target",
-                    "(local_function_statement name: (identifier) @name) @target",
-                    "(constructor_declaration name: (identifier) @name) @target",
-                },
-                _ => []
-            };
 
             foreach (var pattern in patterns)
             {
@@ -114,6 +274,10 @@ public static class AstCodeEditorService
         if (!LanguageMap.TryGetValue(fileExtension.ToLowerInvariant(), out var langName))
             return (null, 0, $"Unsupported extension: {fileExtension}");
 
+        var patterns = QueryPatterns.GetValueOrDefault(langName);
+        if (patterns == null || patterns.Length == 0)
+            return (null, 0, $"No query patterns for {langName}");
+
         try
         {
             using var language = new Language(langName);
@@ -121,33 +285,6 @@ public static class AstCodeEditorService
             using var tree = parser.Parse(fileContent);
             if (tree == null)
                 return (null, 0, "Failed to parse file");
-
-            var patterns = langName switch
-            {
-                "TypeScript" or "TSX" => new[]
-                {
-                    "(method_definition name: (property_identifier) @name) @target",
-                    "(function_declaration name: (identifier) @name) @target",
-                    "(method_signature name: (property_identifier) @name) @target",
-                    "(function_signature name: (identifier) @name) @target",
-                    "(generator_method name: (property_identifier) @name) @target",
-                    "(generator_declaration name: (identifier) @name) @target",
-                },
-                "JavaScript" => new[]
-                {
-                    "(method_definition name: (property_identifier) @name) @target",
-                    "(function_declaration name: (identifier) @name) @target",
-                    "(generator_method name: (property_identifier) @name) @target",
-                    "(generator_declaration name: (identifier) @name) @target",
-                },
-                "c_sharp" => new[]
-                {
-                    "(method_declaration name: (identifier) @name) @target",
-                    "(local_function_statement name: (identifier) @name) @target",
-                    "(constructor_declaration name: (identifier) @name) @target",
-                },
-                _ => []
-            };
 
             foreach (var pattern in patterns)
             {
@@ -179,7 +316,7 @@ public static class AstCodeEditorService
                 }
             }
 
-            return (null, 0, $"'{targetSymbol}' not found in {fileExtension} file");
+            return (null, 0, $"'{targetSymbol}' not found in {langName} file");
         }
         catch (Exception ex)
         {

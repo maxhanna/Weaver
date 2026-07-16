@@ -4269,7 +4269,7 @@ emitSse, ct);
                     replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
                     replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
 
-                    var (rawReplacement, _, replaceError) = await CallLlmRaw(
+                    var (rawReplacement, replaceError) = await CallLlmRawText(
                         "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation.",
                         replacePrompt.ToString(), ct,
                         requestTimeout: TimeSpan.FromMinutes(5),
@@ -5055,23 +5055,25 @@ emitSse, ct);
                     }
                 }
 
-                var fixedPipeContent = Regex.Replace(newContent, @"\|\|(\d|[a-zA-Z])", "|| $1");
-                if (fixedPipeContent != newContent)
+                // External formatter replaces custom formatting (pipe spacing, AutoFormatEditedRegion).
+                if (CodeFormatterService.CanFormat(relPath))
                 {
-                    newContent = fixedPipeContent;
-                    newStr = Regex.Replace(newStr ?? "", @"\|\|(\d|[a-zA-Z])", "|| $1");
-                }
-
-                var formatted = AgentUtilities.IsWhitespaceSignificant(relPath)
-                    ? newContent
-                    : AutoFormatEditedRegion(newContent, newStr);
-
-                if (formatted != newContent)
-                {
-                    await EmitLog(emitSse, "info",
-                        $"Pre-verify format: fixed spacing in {relPath}", ct: ct);
-                    newContent = formatted;
-                    newStr = AutoFormatEditedRegion(newStr, newStr);
+                    try
+                    {
+                        var beforeFmt = newContent;
+                        var fmtContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
+                        if (fmtContent != beforeFmt)
+                        {
+                            newContent = fmtContent;
+                            await EmitLog(emitSse, "info",
+                                $"Formatted {relPath} via external formatter", ct: ct);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        await EmitLog(emitSse, "warn",
+                            $"External formatter failed for {relPath}: {ex.Message}", ct: ct);
+                    }
                 }
             }
 
@@ -5432,58 +5434,27 @@ emitSse, ct);
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(newStr) &&
-                (fileExt is ".css" or ".scss" or ".less"))
+            // Use external formatters (Prettier, Black, Roslyn) instead of custom formatting code.
+            // This replaces all of: CSS region format, AutoFormatEditedRegion, NormalizeEditIndentation,
+            // CollapseExcessiveBlankLines, and PostEditStyleFixAsync.
+            if (!string.IsNullOrWhiteSpace(newStr) && CodeFormatterService.CanFormat(relPath))
             {
-                var beforeCssFmt = newContent;
-                newContent = FormatCssEditedRegion(newContent, newStr);
-                if (newContent != beforeCssFmt)
+                try
                 {
-                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-                    await EmitLog(emitSse, "info",
-                        $"CSS region formatted: fixed property spacing/indentation in {relPath}", ct: ct);
+                    var beforeFmt = newContent;
+                    newContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
+                    if (newContent != beforeFmt)
+                    {
+                        await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
+                        await EmitLog(emitSse, "info",
+                            $"Formatted {relPath} via external formatter", ct: ct);
+                    }
                 }
-            }
-
-            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
-                (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
-                  or ".css" or ".scss" or ".less" or ".json"))
-            {
-                var beforeAutoFmt = newContent;
-                newContent = AutoFormatEditedRegion(newContent, newStr);
-                if (newContent != beforeAutoFmt)
+                catch (Exception ex)
                 {
-                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-                    await EmitLog(emitSse, "info",
-                        $"Auto-formatted edited region in {relPath} (commas/colons/semicolons/equals + closing-dedent)", ct: ct);
+                    await EmitLog(emitSse, "warn",
+                        $"External formatter failed for {relPath}: {ex.Message} — skipping", ct: ct);
                 }
-
-                var beforeIndent = newContent;
-                newContent = NormalizeEditIndentation(newContent, newStr);
-                if (newContent != beforeIndent)
-                {
-                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-                    await EmitLog(emitSse, "info",
-                        $"Normalized indentation of edited region in {relPath}", ct: ct);
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)
-            {
-                var beforeBlankFix = newContent;
-                newContent = AgentUtilities.CollapseExcessiveBlankLines(newContent, newStr);
-                if (newContent != beforeBlankFix)
-                {
-                    await System.IO.File.WriteAllTextAsync(fullPath, newContent, Encoding.UTF8, ct);
-                    await EmitLog(emitSse, "info",
-                        $"Collapsed excessive blank lines in edited region of {relPath}", ct: ct);
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC &&
-                (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".html" or ".css" or ".scss" or ".less"))
-            {
-                newContent = await PostEditStyleFixAsync(fullPath, relPath, newContent, newStr, emitSse, ct);
             }
 
             if (!string.IsNullOrWhiteSpace(newStr) && !fromFormatC)

@@ -3180,9 +3180,10 @@ public static class AgentUtilities
                 "cmdlet verb-noun naming, and parameter attribute syntax."),
 
 
-            ".py" or ".pyi" => ("indent", false,
+            ".py" or ".pyi" => ("indent", true,
                 "⚠ PYTHON FILE: indentation IS the syntax — do NOT alter indent levels. " +
-                "Use oldString/newString only. FORMAT C is NOT supported. " +
+                "FORMAT C supported: targetType='function'/'class', targetName='name'. " +
+                "For small edits prefer oldString/newString. " +
                 "Copy every leading space/tab from the file exactly into oldString and newString. " +
                 "Preserve type hints, decorators (@), and docstring quotes."),
             ".yaml" or ".yml" => ("indent", false,

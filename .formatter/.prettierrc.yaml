@@ -1,0 +1,7 @@
+﻿plugins:
+  - prettier-plugin-sql
+  - prettier-plugin-java
+  - prettier-plugin-sh
+  - prettier-plugin-toml
+  - @prettier/plugin-php
+  - @prettier/plugin-ruby
