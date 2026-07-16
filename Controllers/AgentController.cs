@@ -3189,7 +3189,7 @@ public partial class AgentController : ControllerBase
         }
 
         var refinedChange = step.Change;
-        string? targetSymbol = null;
+        string? targetSymbol = AgentUtilities.ExtractTargetSymbolFromChange(step.Change ?? "");
         string? lineRange = null;
         var confidence = 0;
         var roundsCompleted = 0;
@@ -3217,6 +3217,84 @@ public partial class AgentController : ControllerBase
                 ? AgentUtilities.ExtractRelevantExcerpt(content, step.Change ?? "", step.OldString, cfg4.fileBodyTruncationChars)
                 : content;
 
+            var ext = Path.GetExtension(relPath).ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(targetSymbol) && AstCodeEditorService.IsSupportedExtension(ext))
+            {
+                var changeWords = (step.Change ?? "")
+                    .ToLowerInvariant()
+                    .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';', '!', '?' },
+                           StringSplitOptions.RemoveEmptyEntries)
+                    .Where(w => w.Length > 2 && !AgentUtilities.notTableWords.Contains(w))
+                    .ToHashSet();
+
+                var allFuncs = AstCodeEditorService.FindAllFunctions(content, ext);
+                (string name, string source, int startLine)? funcBest = null;
+                var funcBestScore = 0;
+
+                Func<string, string> stem = w =>
+                {
+                    if (w.EndsWith("ies")) return w[..^3] + "y";
+                    if (w.EndsWith("ves")) return w[..^3] + "f";
+                    if (w.EndsWith("es")) return w[..^2];
+                    if (w.EndsWith("s") && !w.EndsWith("ss")) return w[..^1];
+                    if (w.EndsWith("ing")) return w[..^3];
+                    if (w.EndsWith("ed")) return w[..^2];
+                    if (w.EndsWith("ly")) return w[..^2];
+                    if (w.EndsWith("er")) return w[..^2];
+                    if (w.EndsWith("est")) return w[..^2];
+                    return w;
+                };
+
+                foreach (var func in allFuncs)
+                {
+                    var score = 0;
+                    var funcLower = func.name.ToLowerInvariant();
+                    var funcStem = stem(funcLower);
+                    var tokens = Regex.Matches(func.name, @"[a-z]+|[A-Z][a-z]*")
+                        .Select(m => m.Value.ToLowerInvariant())
+                        .ToHashSet();
+
+                    foreach (var cw in changeWords)
+                    {
+                        var cwStem = stem(cw);
+                        if (funcLower == cw || funcStem == cwStem)
+                            score += 10;
+                        if (tokens.Contains(cw) || tokens.Contains(cwStem))
+                            score += 5;
+                        if (funcLower.Contains(cw) || funcLower.Contains(cwStem) ||
+                            cw.Contains(funcLower) || cw.Contains(funcStem))
+                            if (cw.Length >= 4 || cwStem.Length >= 4)
+                                score += 3;
+                    }
+
+                    if (score > funcBestScore)
+                    {
+                        funcBestScore = score;
+                        funcBest = func;
+                    }
+                }
+
+                if (funcBest != null && funcBestScore >= 3)
+                {
+                    targetSymbol = funcBest.Value.name;
+                    await EmitLog(emitSse, "info",
+                        $"  🎯 Inferred target symbol '{targetSymbol}' from {relPath} using AST scoring (score {funcBestScore})", ct: ct);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(targetSymbol))
+            {
+                var symbolMatches = Regex.Matches(content, $@"\b{Regex.Escape(targetSymbol)}\b");
+                if (symbolMatches.Count > 0)
+                {
+                    var matchLine = content[..symbolMatches[0].Index].Count(c => c == '\n') + 1;
+                    var startLine = Math.Max(1, matchLine - 20);
+                    var endLine = Math.Min(content.Split('\n').Length, matchLine + 40);
+                    var lines = content.Split('\n');
+                    excerpt = string.Join("\n", lines.Skip(startLine - 1).Take(endLine - startLine + 1));
+                }
+            }
+
             ctx.AppendLine($"### TARGET FILE: {relPath}  ({content.Length:N0} chars total)");
             ctx.AppendLine("```");
             ctx.AppendLine(excerpt);
@@ -3236,16 +3314,19 @@ public partial class AgentController : ControllerBase
         if (targetWasAttached)
         {
             var fallbackSymbol = AgentUtilities.ExtractTargetSymbolFromChange(step.Change ?? "");
+            var finalTargetSymbol = string.IsNullOrWhiteSpace(targetSymbol)
+                ? fallbackSymbol
+                : targetSymbol;
             await EmitLog(emitSse, "info",
                 $"  ✓ Target file was attached by user — skipping LLM exploration, returning content directly" +
-                (fallbackSymbol != null ? $" (target symbol: '{fallbackSymbol}')" : ""), ct: ct);
+                (finalTargetSymbol != null ? $" (target symbol: '{finalTargetSymbol}')" : ""), ct: ct);
             return new StepExplorationResult
             {
                 EnrichedStep = step,
                 ExplorationContext = ctx.ToString(),
                 FilesRead = filesRead.ToList(),
                 RefinedChange = step?.Change ?? "",
-                TargetSymbol = fallbackSymbol,
+                TargetSymbol = finalTargetSymbol,
                 EstimatedLineRange = null,
                 Confidence = 100,
                 LowConfidenceWarning = null
@@ -3280,10 +3361,16 @@ public partial class AgentController : ControllerBase
             if (!string.IsNullOrWhiteSpace(parsed.RefinedChange))
             {
                 refinedChange = parsed.RefinedChange;
-                targetSymbol = parsed.TargetSymbol;
-                lineRange = parsed.LineRange;
-                confidence = parsed.Confidence;
             }
+
+            if (!string.IsNullOrWhiteSpace(parsed.TargetSymbol))
+                targetSymbol = parsed.TargetSymbol;
+
+            if (!string.IsNullOrWhiteSpace(parsed.LineRange))
+                lineRange = parsed.LineRange;
+
+            if (parsed.Confidence > 0)
+                confidence = parsed.Confidence;
 
             if (parsed.Ready || parsed.Confidence >= ConfidenceThreshold)
             {
@@ -4727,18 +4814,8 @@ emitSse, ct);
                 }
                 else
                 {
-                    var braceErr = "NEW CODE FAILED BRACE BALANCE CHECK — the replacement code itself is not brace-balanced. " +
-                        "Before re-trying, repair the replacement so every { has a matching }. " +
-                        "Common causes: missing closing brace, truncated method signature, or an incomplete block in the LLM response. " +
-                        "The file was reset to the clean pre-edit snapshot and the next attempt will start fresh.";
-                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {braceErr}", ct: ct);
-                    history.Add((oldStr ?? "", newStr ?? "", braceErr));
-                    if (!string.IsNullOrWhiteSpace(preEditContent))
-                        await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
-                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                    if (stuckCount >= 2) goto RecordFailure;
-                    continue;
+                    await EmitLog(emitSse, "warn",
+                        $"Edit attempt {attempt + 1}/{MaxAttempts} found a brace imbalance in the candidate replacement for {relPath}, but the edit will still be attempted so the post-write verifier can decide whether the write is valid.", ct: ct);
                 }
             }
 
@@ -5434,28 +5511,8 @@ emitSse, ct);
 
                         if (preBraceOk)
                         {
-                            await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
-
-                            var braceErr = $"UNBALANCED BRACES in {relPath} after edit — " +
-                                "the edit introduced unmatched braces, likely inserting code at the wrong scope level. " +
-                                "Edit REVERTED.\n" +
-                                "Common causes:\n" +
-                                "  • New method inserted inside an existing method instead of at class level\n" +
-                                "  • Missing closing braces on a newly added code block\n" +
-                                "  • Wrong insertion point — the anchor may not be where you think it is\n" +
-                                "Re-read the CHANGE REQUIRED carefully and select the correct insertion point.";
-
-                            await EmitLog(emitSse, "warn", braceErr, ct: ct);
-                            history.Add((oldStr!, newStr ?? "", braceErr));
-
-                            if (string.Equals(
-                                AgentUtilities.NormalizeLineEndings(oldStr ?? ""),
-                                AgentUtilities.NormalizeLineEndings(lastOld),
-                                StringComparison.Ordinal)) stuckCount++;
-                            else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-
-                            if (stuckCount >= 2) goto RecordFailure;
-                            continue;
+                            await EmitLog(emitSse, "warn",
+                                $"Unbalanced braces detected in {relPath} after edit — deferring to the LLM verifier to decide whether the edit should be retained or abandoned.", ct: ct);
                         }
                         else
                         {

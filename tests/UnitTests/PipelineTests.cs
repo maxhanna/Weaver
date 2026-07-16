@@ -229,6 +229,65 @@ public class PipelineTests
     }
 
     [Fact]
+    public void ParseStepExplorationResponse_MultipleJsonFragments_UsesLastCompleteObject()
+    {
+        // Arrange
+        var raw = """
+        {"ready": false, "filesToRead": ["src/app/app.component.ts"], "reasoning": "I need to see the component first"}
+        {"ready": true, "refinedChange": "Update getTimedGreetingMessage with four new time ranges", "targetSymbol": "getTimedGreetingMessage", "estimatedLineRange": "~1084-1118", "confidence": 93}
+        """;
+
+        // Act
+        var result = AgentUtilities.ParseStepExplorationResponse(raw);
+
+        // Assert
+        Assert.True(result.Ready);
+        Assert.Equal("getTimedGreetingMessage", result.TargetSymbol);
+        Assert.Contains("Update getTimedGreetingMessage", result.RefinedChange);
+        Assert.Equal(93, result.Confidence);
+    }
+
+    [Fact]
+    public void ExtractMethodBodiesByKeywords_PreservesExactTargetSymbolInVagueTask()
+    {
+        // Arrange
+        var content = """
+        class Demo {
+            login() {
+                return this.getTimedGreetingMessage(this.user?.username || '');
+            }
+
+            getTimedGreetingMessage(username: string): string {
+                const hour = new Date().getHours();
+                let greeting = '';
+
+                if (hour >= 5 && hour < 12) {
+                    greeting = `Morning, ${username}!`;
+                } else if (hour >= 12 && hour < 17) {
+                    greeting = `Afternoon, ${username}!`;
+                } else {
+                    greeting = `Night, ${username}!`;
+                }
+
+                return greeting;
+            }
+
+            cleanStoryText(text: string) {
+                return text?.replace(/\[\/?[^\]]/g, '')?.replace(/https?:\/\/[^\s]+/g, '');
+            }
+        }
+        """;
+
+        // Act
+        var result = AgentUtilities.ExtractMethodBodiesByKeywords(content, "Add more funny greeting messages to getTimedGreetingMessage");
+
+        // Assert
+        Assert.Contains("getTimedGreetingMessage", result);
+        Assert.Contains("Morning, ${username}!", result);
+        Assert.Contains("Afternoon, ${username}!", result);
+    }
+
+    [Fact]
     public void EstimateTokens_ReturnsApproximateCount()
     {
         var text = "Hello world"; // 11 chars

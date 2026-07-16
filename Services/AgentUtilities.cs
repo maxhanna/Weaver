@@ -1628,6 +1628,7 @@ public static class AgentUtilities
     {
         var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
         if (string.IsNullOrWhiteSpace(raw)) return empty;
+
         try
         {
             var cleaned = raw.Trim();
@@ -1637,51 +1638,157 @@ public static class AgentUtilities
                     RegexOptions.IgnoreCase);
                 if (m.Success) cleaned = m.Groups[1].Value.Trim();
             }
-            var fb = cleaned.IndexOf('{'); var lb = cleaned.LastIndexOf('}');
-            if (fb >= 0 && lb > fb) cleaned = cleaned[fb..(lb + 1)];
 
-            using var doc = JsonDocument.Parse(cleaned,
-                new JsonDocumentOptions { AllowTrailingCommas = true });
-            var root = doc.RootElement;
+            var parseOpts = new JsonDocumentOptions { AllowTrailingCommas = true };
 
-            if (root.ValueKind != JsonValueKind.Object) return empty;
+            var seenObjects = new List<string>();
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            var start = -1;
 
-            var ready = root.TryGetProperty("ready", out var rEl) && rEl.ValueKind == JsonValueKind.True && rEl.GetBoolean();
-
-            var files = new List<string>();
-            if (root.TryGetProperty("filesToRead", out var fArr) &&
-                fArr.ValueKind == JsonValueKind.Array)
+            for (var i = 0; i < cleaned.Length; i++)
             {
-                foreach (var f in fArr.EnumerateArray())
+                var c = cleaned[i];
+                if (inString)
                 {
-                    if (f.ValueKind == JsonValueKind.String)
+                    if (escaped)
                     {
-                        var s = f.GetString();
-                        if (!string.IsNullOrWhiteSpace(s))
-                            files.Add(s.Replace('\\', '/'));
+                        escaped = false;
+                        continue;
+                    }
+                    if (c == '\\')
+                    {
+                        escaped = true;
+                        continue;
+                    }
+                    if (c == '"') inString = false;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = true;
+                    continue;
+                }
+
+                if (c == '{')
+                {
+                    if (depth == 0) start = i;
+                    depth++;
+                    continue;
+                }
+
+                if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && start >= 0)
+                    {
+                        var candidate = cleaned[start..(i + 1)];
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(candidate, parseOpts);
+                            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                                seenObjects.Add(candidate);
+                        }
+                        catch
+                        {
+                            // Ignore incomplete or malformed fragments. They will be skipped.
+                        }
+                        start = -1;
                     }
                 }
             }
 
-            var refined = root.TryGetProperty("refinedChange", out var rcEl) && rcEl.ValueKind == JsonValueKind.String ? rcEl.GetString() : null;
-            var symbol = root.TryGetProperty("targetSymbol", out var tsEl) && tsEl.ValueKind == JsonValueKind.String ? tsEl.GetString() : null;
-            var range = root.TryGetProperty("estimatedLineRange", out var lrEl) && lrEl.ValueKind == JsonValueKind.String ? lrEl.GetString() : null;
-
-            var conf = 0;
-            if (root.TryGetProperty("confidence", out var cEl) && cEl.ValueKind == JsonValueKind.Number)
-                conf = cEl.GetInt32();
-
-            return new StepExplorationResponse
+            if (seenObjects.Count > 0)
             {
-                Ready = ready,
-                FilesToRead = files,
-                RefinedChange = refined,
-                TargetSymbol = symbol,
-                LineRange = range,
-                Confidence = conf
-            };
+                var finalCandidate = seenObjects[^1];
+                using var doc = JsonDocument.Parse(finalCandidate, parseOpts);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return empty;
+
+                var ready = root.TryGetProperty("ready", out var rEl) && rEl.ValueKind == JsonValueKind.True && rEl.GetBoolean();
+
+                var files = new List<string>();
+                if (root.TryGetProperty("filesToRead", out var fArr) &&
+                    fArr.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var f in fArr.EnumerateArray())
+                    {
+                        if (f.ValueKind == JsonValueKind.String)
+                        {
+                            var s = f.GetString();
+                            if (!string.IsNullOrWhiteSpace(s))
+                                files.Add(s.Replace('\\', '/'));
+                        }
+                    }
+                }
+
+                var refined = root.TryGetProperty("refinedChange", out var rcEl) && rcEl.ValueKind == JsonValueKind.String ? rcEl.GetString() : null;
+                var symbol = root.TryGetProperty("targetSymbol", out var tsEl) && tsEl.ValueKind == JsonValueKind.String ? tsEl.GetString() : null;
+                var range = root.TryGetProperty("estimatedLineRange", out var lrEl) && lrEl.ValueKind == JsonValueKind.String ? lrEl.GetString() : null;
+
+                var conf = 0;
+                if (root.TryGetProperty("confidence", out var cEl) && cEl.ValueKind == JsonValueKind.Number)
+                    conf = cEl.GetInt32();
+
+                return new StepExplorationResponse
+                {
+                    Ready = ready,
+                    FilesToRead = files,
+                    RefinedChange = refined,
+                    TargetSymbol = symbol,
+                    LineRange = range,
+                    Confidence = conf
+                };
+            }
+
+            var fb = cleaned.IndexOf('{');
+            var lb = cleaned.LastIndexOf('}');
+            if (fb >= 0 && lb > fb)
+            {
+                var fallbackCandidate = cleaned[fb..(lb + 1)];
+                using var fallbackDoc = JsonDocument.Parse(fallbackCandidate, parseOpts);
+                var fallbackRoot = fallbackDoc.RootElement;
+                if (fallbackRoot.ValueKind != JsonValueKind.Object) return empty;
+
+                // Fallback for a single well-formed JSON object.
+                var readyFallback = fallbackRoot.TryGetProperty("ready", out var rEl2) && rEl2.ValueKind == JsonValueKind.True && rEl2.GetBoolean();
+                var filesFallback = new List<string>();
+                if (fallbackRoot.TryGetProperty("filesToRead", out var fArr2) && fArr2.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var f in fArr2.EnumerateArray())
+                    {
+                        if (f.ValueKind == JsonValueKind.String)
+                        {
+                            var s = f.GetString();
+                            if (!string.IsNullOrWhiteSpace(s)) filesFallback.Add(s.Replace('\\', '/'));
+                        }
+                    }
+                }
+
+                var refinedFallback = fallbackRoot.TryGetProperty("refinedChange", out var rcEl2) && rcEl2.ValueKind == JsonValueKind.String ? rcEl2.GetString() : null;
+                var symbolFallback = fallbackRoot.TryGetProperty("targetSymbol", out var tsEl2) && tsEl2.ValueKind == JsonValueKind.String ? tsEl2.GetString() : null;
+                var rangeFallback = fallbackRoot.TryGetProperty("estimatedLineRange", out var lrEl2) && lrEl2.ValueKind == JsonValueKind.String ? lrEl2.GetString() : null;
+
+                var confFallback = 0;
+                if (fallbackRoot.TryGetProperty("confidence", out var cEl2) && cEl2.ValueKind == JsonValueKind.Number)
+                    confFallback = cEl2.GetInt32();
+
+                return new StepExplorationResponse
+                {
+                    Ready = readyFallback,
+                    FilesToRead = filesFallback,
+                    RefinedChange = refinedFallback,
+                    TargetSymbol = symbolFallback,
+                    LineRange = rangeFallback,
+                    Confidence = confFallback
+                };
+            }
         }
-        catch { return empty; }
+        catch { }
+
+        return empty;
     }
 
     public static bool IsSpecialMarker(string? file) => file != null && (
@@ -3374,6 +3481,9 @@ public static class AgentUtilities
         m = Regex.Match(change, @"\b(?:in|inside)\s+(?:the\s+)?([A-Z]\w+)\b");
         if (m.Success) return m.Groups[1].Value;
 
+        m = Regex.Match(change, @"\b(?:to|inside|in)\s+([A-Za-z_][A-Za-z0-9_]*)\b", RegexOptions.IgnoreCase);
+        if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
+
         // Generic camelCase with at least one uppercase transition (e.g. showNotification, getData, sendEmail)
         // Check BEFORE "symbol call" pattern to avoid matching stopwords like "with call"
         m = Regex.Match(change, @"\b([a-z][a-zA-Z0-9]{2,}(?:[A-Z][a-z0-9]+)+)\b");
@@ -4265,6 +4375,8 @@ public static class AgentUtilities
     public static string ExtractMethodBodiesByKeywords(string content, string taskDesc)
     {
         if (string.IsNullOrWhiteSpace(content)) return "";
+
+        var targetSymbol = ExtractTargetSymbolFromChange(taskDesc);
         var keywords = ExtractMeaningfulKeywords(taskDesc.ToLowerInvariant());
         var lines = content.Split('\n');
         var methods = new List<(string body, int score)>();
@@ -4272,6 +4384,7 @@ public static class AgentUtilities
         var inMethod = false;
         var braceDepth = 0;
         var methodScore = 0;
+        var methodName = "";
 
         for (int i = 0; i < lines.Length; i++)
         {
@@ -4279,13 +4392,54 @@ public static class AgentUtilities
             var trimmed = line.Trim();
 
             // Detect method/function signatures across C#, TS, JS, Python, etc.
-            if (!inMethod && Regex.IsMatch(trimmed, @"^\s*(public|private|protected|internal|static|async|export|function|def|func|void|task|override|virtual)\b.*\w+\s*\(", RegexOptions.IgnoreCase))
+            // Skip lines that are clearly expressions or assignments rather than declarations.
+            if (trimmed.Contains('=') || trimmed.Contains("=>"))
+            {
+                if (inMethod)
+                {
+                    currentMethod.Add(line);
+                    braceDepth += line.Count(c => c == '{') - line.Count(c => c == '}');
+                    methodScore += keywords.Count(k => line.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+                    if (braceDepth <= 0)
+                    {
+                        inMethod = false;
+                        var body = string.Join("\n", currentMethod);
+                        if (methodScore > 0 || (currentMethod.Count > 3 && currentMethod.Count < 60))
+                        {
+                            methods.Add((body, methodScore));
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(targetSymbol) &&
+                            string.Equals(methodName, targetSymbol, StringComparison.OrdinalIgnoreCase))
+                        {
+                            methods.Add((body, 1000));
+                        }
+
+                        methodName = "";
+                        currentMethod.Clear();
+                    }
+                }
+                continue;
+            }
+
+            var signatureMatch = Regex.Match(trimmed,
+                @"^\s*(?:async\s+)?(?:public|private|protected|internal|static|override|virtual|export\s+)?(?:function|def|func)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+                RegexOptions.IgnoreCase);
+
+            if (!inMethod && signatureMatch.Success)
             {
                 inMethod = true;
+                methodName = signatureMatch.Groups[1].Value;
                 braceDepth = line.Count(c => c == '{') - line.Count(c => c == '}');
                 currentMethod.Clear();
                 currentMethod.Add(line);
                 methodScore = keywords.Count(k => line.Contains(k, StringComparison.OrdinalIgnoreCase)) * 5;
+                if (!string.IsNullOrWhiteSpace(targetSymbol) &&
+                    string.Equals(methodName, targetSymbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    methodScore += 50;
+                }
                 continue;
             }
 
@@ -4299,17 +4453,59 @@ public static class AgentUtilities
                 {
                     inMethod = false;
                     var body = string.Join("\n", currentMethod);
-                    // Include if it has keywords, or if it's a reasonably sized method (to provide context)
                     if (methodScore > 0 || (currentMethod.Count > 3 && currentMethod.Count < 60))
                     {
                         methods.Add((body, methodScore));
                     }
+
+                    if (!string.IsNullOrWhiteSpace(targetSymbol) &&
+                        string.Equals(methodName, targetSymbol, StringComparison.OrdinalIgnoreCase))
+                    {
+                        methods.Add((body, 1000));
+                    }
+
+                    methodName = "";
+                    currentMethod.Clear();
                 }
             }
         }
 
-        // Sort by score, take top 8 methods to stay within small context limits
-        var topMethods = methods.OrderByDescending(m => m.score).Take(8).Select(m => m.body).ToList();
+        var topMethods = methods
+            .OrderByDescending(m => m.score)
+            .Take(8)
+            .Select(m => m.body)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (topMethods.Count == 0 && !string.IsNullOrWhiteSpace(targetSymbol))
+        {
+            var symbolMatch = Regex.Match(content, $@"\b{Regex.Escape(targetSymbol)}\b.*?\{{", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (symbolMatch.Success)
+            {
+                var startIdx = symbolMatch.Index;
+                var openBrace = content.IndexOf('{', startIdx);
+                var depth = 0;
+                var endIdx = -1;
+                for (var idx = openBrace; idx < content.Length; idx++)
+                {
+                    if (content[idx] == '{') depth++;
+                    else if (content[idx] == '}')
+                    {
+                        depth--;
+                        if (depth == 0)
+                        {
+                            endIdx = idx;
+                            break;
+                        }
+                    }
+                }
+                if (endIdx >= 0)
+                {
+                    topMethods.Add(content[startIdx..(endIdx + 1)]);
+                }
+            }
+        }
+
         return string.Join("\n\n---\n\n", topMethods);
     }
     
