@@ -5221,6 +5221,8 @@ public static class AgentUtilities
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
+    public static bool IsBraceBalanced(string content) => !HasUnbalancedBraces(content);
+
     public static bool HasUnbalancedBraces(string content)
     {
         var depth = 0;

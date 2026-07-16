@@ -106,6 +106,22 @@ public partial class AgentController : ControllerBase
         if (string.IsNullOrWhiteSpace(sourceText))
             return (null, "File is empty");
 
+        if (ext != ".cs" && AstCodeEditorService.IsSupportedExtension(ext))
+        {
+            var (astOldStr, _, astErr) = AstCodeEditorService.FindFunctionSource(sourceText, targetName, ext);
+            if (!string.IsNullOrWhiteSpace(astOldStr))
+                return (astOldStr, null);
+
+            if (!string.IsNullOrWhiteSpace(astErr))
+            {
+                var extHint = ext is ".html" or ".htm" or ".cshtml" or ".razor" or ".json" or ".css" or ".svg"
+                    ? $" {ext} files don't contain named symbols — use oldString/newString format instead"
+                    : ext is ".yaml" or ".yml" or ".toml"
+                    ? $" {ext} config files don't contain named symbols — use oldString/newString format instead"
+                    : "";
+                return (null, $"AST symbol lookup failed for '{targetName}' in {ext} file.{extHint} {astErr}");
+            }
+        }
 
         if (ext != ".cs")
         {
@@ -4103,6 +4119,8 @@ emitSse, ct);
         var lastResolveError = "";
         var lastOld = "";
         string? preEditContent = null;
+        if (System.IO.File.Exists(fullPath))
+            preEditContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
         const int MaxAttempts = 8;
         var forcedInsert = await TryForcedMethodInsertAsync(step, fullPath, relPath, explorationContext, emitSse, ct);
         if (forcedInsert.HasValue && !string.IsNullOrWhiteSpace(forcedInsert.Value.newStr))
@@ -4243,6 +4261,13 @@ emitSse, ct);
 
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
+            if (attempt > 0 && !string.IsNullOrWhiteSpace(preEditContent))
+            {
+                await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
+                await EmitLog(emitSse, "info",
+                    $"Retry {attempt + 1}/{MaxAttempts} reset {relPath} to the clean pre-edit snapshot before re-resolving the change", ct: ct);
+            }
+
             string? oldStr = null, newStr = null, resolveError = null;
             bool fullFile = false, alreadyDone = false;
             string? fullContent = null;
@@ -4688,6 +4713,32 @@ emitSse, ct);
                 {
                     var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
                     replaced = r; newContent = nc; matchError = me; snippet = sn;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(newStr) && !AgentUtilities.IsBraceBalanced(newStr))
+            {
+                var repairedNewStr = RepairBrokenCodeWithLadder(newStr, oldStr, fileContent, step.LineNumber, step.Change ?? "");
+                if (repairedNewStr != null)
+                {
+                    newStr = repairedNewStr;
+                    await EmitLog(emitSse, "warn",
+                        $"Deterministic brace repair applied to {relPath} before write (attempt {attempt + 1}/{MaxAttempts})", ct: ct);
+                }
+                else
+                {
+                    var braceErr = "NEW CODE FAILED BRACE BALANCE CHECK — the replacement code itself is not brace-balanced. " +
+                        "Before re-trying, repair the replacement so every { has a matching }. " +
+                        "Common causes: missing closing brace, truncated method signature, or an incomplete block in the LLM response. " +
+                        "The file was reset to the clean pre-edit snapshot and the next attempt will start fresh.";
+                    await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {braceErr}", ct: ct);
+                    history.Add((oldStr ?? "", newStr ?? "", braceErr));
+                    if (!string.IsNullOrWhiteSpace(preEditContent))
+                        await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
+                    if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                    else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                    if (stuckCount >= 2) goto RecordFailure;
+                    continue;
                 }
             }
 
@@ -6214,6 +6265,142 @@ emitSse, ct);
             return discoveryContext;
 
         return discoveryContext.Substring(nextMainSectionIdx + 1).TrimStart();
+    }
+
+    private string? RepairBrokenCodeWithLadder(string candidateCode, string? oldStr, string fileContent, int targetLine, string change)
+    {
+        if (string.IsNullOrWhiteSpace(candidateCode))
+            return null;
+
+        var normalized = AgentUtilities.NormalizeLineEndings(candidateCode).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return null;
+
+        var braceAppend = TryAutoAppendMissingClosingBraces(normalized);
+        if (!string.IsNullOrWhiteSpace(braceAppend))
+            return braceAppend;
+
+        var signatureSplice = TrySignatureSpliceRepair(normalized, oldStr);
+        if (!string.IsNullOrWhiteSpace(signatureSplice))
+            return signatureSplice;
+
+        var fuzzyAnchor = TryFuzzyAnchorRepair(normalized, oldStr, fileContent, targetLine, change);
+        return fuzzyAnchor;
+    }
+
+    private static string? TryAutoAppendMissingClosingBraces(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code) || AgentUtilities.IsBraceBalanced(code))
+            return null;
+
+        var depth = 0;
+        var inSingle = false;
+        var inDouble = false;
+        var inTemplate = false;
+        var inLineComment = false;
+        var inBlockComment = false;
+
+        for (var i = 0; i < code.Length; i++)
+        {
+            var c = code[i];
+            var n = i + 1 < code.Length ? code[i + 1] : '\0';
+
+            if (inLineComment && c == '\n') { inLineComment = false; continue; }
+            if (inBlockComment && c == '*' && n == '/') { inBlockComment = false; i++; continue; }
+            if (inBlockComment || inLineComment) continue;
+
+            if (!inSingle && !inDouble && !inTemplate)
+            {
+                if (c == '/' && n == '/') { inLineComment = true; i++; continue; }
+                if (c == '/' && n == '*') { inBlockComment = true; i++; continue; }
+            }
+
+            if (c == '"' && !inSingle && !inTemplate) { inDouble = !inDouble; continue; }
+            if (c == '\'' && !inDouble && !inTemplate) { inSingle = !inSingle; continue; }
+            if (c == '`' && !inSingle && !inDouble) { inTemplate = !inTemplate; continue; }
+            if (c == '\\' && (inSingle || inDouble || inTemplate)) { i++; continue; }
+
+            if (!inSingle && !inDouble && !inTemplate)
+            {
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth < 0)
+                        return null;
+                }
+            }
+        }
+
+        if (depth <= 0)
+            return null;
+
+        var suffix = new string('}', depth);
+        return code.TrimEnd() + Environment.NewLine + suffix;
+    }
+
+    private static string? TrySignatureSpliceRepair(string candidateCode, string? oldStr)
+    {
+        if (string.IsNullOrWhiteSpace(candidateCode) || string.IsNullOrWhiteSpace(oldStr) || candidateCode.Contains('{') || candidateCode.Contains('}'))
+            return null;
+
+        var signatureStart = oldStr.IndexOf('{');
+        if (signatureStart < 0)
+            signatureStart = oldStr.IndexOf('(');
+        if (signatureStart < 0)
+            return null;
+
+        var signature = oldStr[..signatureStart].Trim();
+        if (string.IsNullOrWhiteSpace(signature))
+            return null;
+
+        var trimmedCandidate = candidateCode.Trim();
+        if (trimmedCandidate.StartsWith(signature, StringComparison.OrdinalIgnoreCase) ||
+            trimmedCandidate.StartsWith("function ", StringComparison.OrdinalIgnoreCase) ||
+            trimmedCandidate.StartsWith("class ", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var body = trimmedCandidate;
+        return signature + Environment.NewLine + body + Environment.NewLine + "}";
+    }
+
+    private static string? TryFuzzyAnchorRepair(string candidateCode, string? oldStr, string fileContent, int targetLine, string change)
+    {
+        if (string.IsNullOrWhiteSpace(candidateCode) || string.IsNullOrWhiteSpace(oldStr) || string.IsNullOrWhiteSpace(fileContent))
+            return null;
+
+        var candidateTrim = candidateCode.Trim();
+        if (candidateTrim.Contains('{') || candidateTrim.Contains('}'))
+            return null;
+
+        var oldLines = oldStr
+            .Split('\n')
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToList();
+
+        if (oldLines.Count == 0)
+            return null;
+
+        var anchor = oldLines.FirstOrDefault(l => l.Length > 6 && !l.StartsWith("//", StringComparison.Ordinal))
+            ?? oldLines.First();
+
+        var anchorIdx = fileContent.IndexOf(anchor, StringComparison.Ordinal);
+        if (anchorIdx < 0)
+            return null;
+
+        var prefix = fileContent[..anchorIdx];
+        var lineStart = prefix.LastIndexOf('\n') + 1;
+        var lineNo = prefix.Count(c => c == '\n') + 1;
+        var lineOffset = Math.Max(0, targetLine - lineNo);
+
+        var signaturePrefix = oldStr.TakeWhile(c => c != '{' && c != '}' && c != ';').ToArray();
+        var signature = new string(signaturePrefix).Trim();
+        if (string.IsNullOrWhiteSpace(signature))
+            return null;
+
+        var repaired = signature + Environment.NewLine + candidateTrim + Environment.NewLine + "}";
+        return repaired;
     }
 
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
@@ -15235,15 +15422,13 @@ Respond with JSON only:
         }
 
 
-        if (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs"
-            or ".css" or ".scss" or ".less" or ".html" or ".json"
-            or ".vue" or ".svelte")
+        if (CodeFormatterService.CanFormat(relPath))
         {
             var before = fullContent;
-            fullContent = AutoFormatEditedRegion(fullContent, fullContent);
+            fullContent = await CodeFormatterService.FormatAsync(relPath, fullContent, ct);
             if (fullContent != before)
                 await EmitLog(emitSse, "info",
-                    $"Auto-formatted full file in {relPath} (commas/colons/semicolons/equals + closing-dedent)", ct: ct);
+                    $"Formatted full file in {relPath} via CodeFormatterService", ct: ct);
         }
 
         await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);

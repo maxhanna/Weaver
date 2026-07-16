@@ -73,10 +73,10 @@ public static class CodeFormatterService
 
     static CodeFormatterService()
     {
-        var assemblyDir = Path.GetDirectoryName(typeof(CodeFormatterService).Assembly.Location);
-        if (assemblyDir != null)
+        var baseDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrWhiteSpace(baseDir))
         {
-            var dir = new DirectoryInfo(assemblyDir);
+            var dir = new DirectoryInfo(baseDir);
             while (dir != null)
             {
                 var candidate = Path.Combine(dir.FullName, ".formatter");
