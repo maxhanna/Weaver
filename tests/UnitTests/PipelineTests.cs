@@ -248,6 +248,20 @@ public class PipelineTests
     }
 
     [Fact]
+    public void ExtractTargetSymbolFromChange_DoesNotPromoteGenericVerbAsMethodName()
+    {
+        // Arrange
+        var task = "Add additional time-based greetings to handle early morning hours before 5AM";
+
+        // Act
+        var result = AgentUtilities.ExtractTargetSymbolFromChange(task);
+
+        // Assert
+        Assert.NotEqual("handle", result);
+        Assert.Null(result);
+    }
+
+    [Fact]
     public void ExtractMethodBodiesByKeywords_PreservesExactTargetSymbolInVagueTask()
     {
         // Arrange

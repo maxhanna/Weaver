@@ -3220,12 +3220,9 @@ public partial class AgentController : ControllerBase
             var ext = Path.GetExtension(relPath).ToLowerInvariant();
             if (string.IsNullOrWhiteSpace(targetSymbol) && AstCodeEditorService.IsSupportedExtension(ext))
             {
-                var changeWords = (step.Change ?? "")
-                    .ToLowerInvariant()
-                    .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';', '!', '?' },
-                           StringSplitOptions.RemoveEmptyEntries)
-                    .Where(w => w.Length > 2 && !AgentUtilities.notTableWords.Contains(w))
-                    .ToHashSet();
+                var changeWords = AgentUtilities.ExtractMeaningfulKeywords((step.Change ?? "").ToLowerInvariant())
+                    .Where(w => w.Length >= 4)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 var allFuncs = AstCodeEditorService.FindAllFunctions(content, ext);
                 (string name, string source, int startLine)? funcBest = null;
@@ -7330,32 +7327,11 @@ emitSse, ct);
                    "(only the property values you actually need to change should be edited, not the guard logic).";
         }
 
-        var ext = Path.GetExtension(relPath).ToLowerInvariant();
-        if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".vb")
-        {
-            var oldSigLine = AgentUtilities.CollectCompleteSignatureLine(oldLines);
-            var newSigLine = AgentUtilities.CollectCompleteSignatureLine(newStr.Split('\n'));
-            if (LooksLikeMethodDeclaration(oldSigLine) && LooksLikeMethodDeclaration(newSigLine))
-            {
-                var oldTokens = AgentUtilities.ExtractSignatureTokens(oldSigLine);
-                var newTokens = AgentUtilities.ExtractSignatureTokens(newSigLine);
-                if (!oldTokens.SequenceEqual(newTokens))
-                {
-                    bool isConstructorInjection = (stepChange ?? "").Contains("constructor", StringComparison.OrdinalIgnoreCase) &&
-                                                  oldSigLine.Contains("constructor(", StringComparison.OrdinalIgnoreCase);
-
-                    if (!isConstructorInjection)
-                    {
-                        var oldSig = string.Join(" ", oldTokens);
-                        var newSig = string.Join(" ", newTokens);
-                        return $"SIGNATURE CHANGE — method declaration changed from [{oldSig}] to [{newSig}]. " +
-                               "The task is to tweak the body, not change the contract (return type / name / params). " +
-                               "RESTORE the original signature line and only modify the body lines below it.";
-                    }
-                }
-            }
-        }
-
+        // Signature-drift checks are intentionally disabled here.
+        // In this resolver flow they are too aggressive: the model can emit a replacement
+        // that swaps the declaration while still being the correct body-focused edit candidate,
+        // and the guard aborts the edit before the post-write verifier can decide whether the
+        // change is valid. Let the write proceed and use the verification layer to judge it.
         return null;
     }
 

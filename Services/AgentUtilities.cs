@@ -2198,7 +2198,7 @@ public static class AgentUtilities
             "delete","deleting","deletes","deleted",
             "remove","removing","removes","removed",
             "set","get","put","use","using","used",
-            "show","hide","display",
+            "show","hide","display","handle",
 
             "more","less","some","any","all","no","not","also","very","just",
             "nice","nicely","good","better","best","new","old","right","left",
@@ -3427,7 +3427,7 @@ public static class AgentUtilities
         // PascalCase or camelCase with uppercase transitions
         if (word.Any(char.IsUpper)) return true;
         // Single-word lowercase like "login", "render", "parse" — accept if > 2 chars and not a common English word
-        return word.Length >= 3 && !CommonEnglishWords.Contains(word);
+        return word.Length >= 3 && !CommonEnglishWords.Contains(word) && !CommonEnglishWords.Contains(word.ToLowerInvariant());
     }
     private static readonly HashSet<string> CommonEnglishWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -3440,7 +3440,7 @@ public static class AgentUtilities
         "often", "once", "only", "open", "order", "other", "over", "own", "part", "place", "play",
         "point", "power", "press", "price", "print", "process", "product", "project",
         "public", "purpose", "quality", "question", "quick", "quite", "race", "range", "rate", "rather",
-        "reach", "read", "ready", "real", "reason", "record", "region", "report", "result",
+        "reach", "read", "ready", "real", "reason", "record", "region", "report", "result", "handle",
         "return", "right", "rise", "risk", "road", "role", "room", "rule", "run", "safe", "sale",
         "same", "save", "scale", "school", "science", "score", "screen", "search",
         "season", "second", "section", "security", "select", "sense", "series", "serious", "service",
@@ -3461,7 +3461,7 @@ public static class AgentUtilities
         "well", "west", "western", "what", "whatever", "when", "where", "whether", "which", "while",
         "white", "who", "whole", "whom", "whose", "why", "wide", "will", "win", "wind", "window",
         "wish", "within", "without", "woman", "wonder", "word", "work", "worker", "world", "worry",
-        "would", "write", "writer", "wrong", "year", "young", "your", "yourself",
+        "would", "write", "writer", "wrong", "year", "young", "your", "yourself", "handle",
         "before", "during", "including", "according", "regarding", "following", "existing",
         "current", "previous", "various", "different", "another", "example", "purpose", "result"
     };
@@ -3487,11 +3487,19 @@ public static class AgentUtilities
         // Generic camelCase with at least one uppercase transition (e.g. showNotification, getData, sendEmail)
         // Check BEFORE "symbol call" pattern to avoid matching stopwords like "with call"
         m = Regex.Match(change, @"\b([a-z][a-zA-Z0-9]{2,}(?:[A-Z][a-z0-9]+)+)\b");
-        if (m.Success) return m.Groups[1].Value;
+        if (m.Success)
+        {
+            var candidate = m.Groups[1].Value;
+            if (LooksLikeCodeIdentifier(candidate)) return candidate;
+        }
 
         // "symbol call" or "symbol method" or "symbol function" — lowercase-starting camelCase
         m = Regex.Match(change, @"\b([a-z]\w*[A-Z]\w*)\s+(?:call|method|function)\b", RegexOptions.IgnoreCase);
-        if (m.Success) return m.Groups[1].Value;
+        if (m.Success)
+        {
+            var candidate = m.Groups[1].Value;
+            if (LooksLikeCodeIdentifier(candidate)) return candidate;
+        }
 
         // "method symbol" or "function symbol" pattern
         m = Regex.Match(change, @"\b(?:method|function)\s+([A-Za-z_]\w*)\b", RegexOptions.IgnoreCase);
