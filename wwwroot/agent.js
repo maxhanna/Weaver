@@ -70,6 +70,8 @@ angular.module('kanbanApp')
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.pendingContextReview = null; vm.contextReviewCountdown = 0; vm.contextReviewTimer = null;
+                vm._agentStartTime = null;
+                vm.agentTimer = null;
                 vm.buildTools = [
                     { name: 'Ping', icon: '📡', desc: 'Check host connectivity (TCP/ping/HTTP)', hint: 'ping google.com -n 4' },
                     { name: 'Install Package', icon: '📦', desc: 'Install a NuGet/npm/pip package', hint: 'install package SonarAnalyzer.CSharp' },
@@ -101,6 +103,12 @@ angular.module('kanbanApp')
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
+                            vm._agentStartTime = Date.now();
+                            vm.agentTimer = $interval(function () { 
+                                if (vm.streamingActive) {
+                                    vm.agentElapsed = (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0); 
+                                } 
+                            }, 1000);
 
                             if (!isAutoRestart) {
                                 vm.streamingSteps = [];
@@ -291,11 +299,13 @@ angular.module('kanbanApp')
 
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
+                                                                vm._agentStartTime = null;
+                                                                vm.agentTimer = null; 
 
                                                                 var analysis = { summary: finalSummary, thinking: finalThinking, steps: finalSteps, filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                                                                 if (doIdx !== -1) { vm.state.doing[doIdx].agentAnalysis = analysis; vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog); }
-
+                                                 
                                                                 if (vm._agentStopped || card.id !== vm.activeCardId) { $scope.$applyAsync(); return; }
 
                                                                 if (vm.planItems && vm.planItems.length) {
@@ -317,6 +327,8 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
+                                                                    vm._agentStartTime = null;
+                                                                    vm.agentTimer = null;
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
                                                                      if (!incomplete) { pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`); vm.moveCardToDone(card); return; }
                                                                      if (incomplete && card.id === vm.activeCardId) {
@@ -344,8 +356,29 @@ angular.module('kanbanApp')
                                                                 } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
                                                                 break;
                                                             case 'error':
-                                                                vm.streamingActive = false; vm.resumeTerminalPolling(); pushAgentLog(vm, 'error', parsed ? parsed.message : data); vm.agentResult = { error: parsed ? parsed.message : data }; vm.activeCardId = null; vm.activeCardIds = new Set();
-                                                                if (card._benchmark) { $http.post('/api/benchmark/save-score', { level: card._benchmarkLevel || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps || 1, scorePercent: 0, status: 'error', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, errorReason: parsed ? parsed.message : data }); var errIdx = vm.state.doing.indexOf(card); if (errIdx >= 0) { vm.state.doing.splice(errIdx, 1); vm.saveCards(); } }
+                                                                vm.streamingActive = false; 
+                                                                vm._agentStartTime = null;
+                                                                vm.agentTimer = null; 
+                                                                vm.resumeTerminalPolling(); 
+                                                                pushAgentLog(vm, 'error', parsed ? parsed.message : data); 
+                                                                vm.agentResult = { error: parsed ? parsed.message : data };
+                                                                vm.activeCardId = null; 
+                                                                vm.activeCardIds = new Set();
+
+                                                                if (card._benchmark) { 
+                                                                    $http.post('/api/benchmark/save-score', { 
+                                                                        level: card._benchmarkLevel 
+                                                                            || 1, stepsCompleted: 0, totalSteps: card._benchmarkTotalSteps 
+                                                                            || 1, scorePercent: 0, status: 'error', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) 
+                                                                            || '', durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, errorReason: parsed ? parsed.message : data 
+                                                                        }
+                                                                    ); 
+                                                                    var errIdx = vm.state.doing.indexOf(card); 
+                                                                    if (errIdx >= 0) { 
+                                                                        vm.state.doing.splice(errIdx, 1); 
+                                                                        vm.saveCards(); 
+                                                                    } 
+                                                                }
                                                                 break;
                                                         }
                                                     }
@@ -374,9 +407,18 @@ angular.module('kanbanApp')
                 };
 
                 vm.stopAgent = function (card) {
-                    vm._agentStopped = true; if (vm.abortController) vm.abortController.abort();
-                    vm.abortController = new AbortController(); vm.streamingActive = false; vm.agentResult = { warning: 'Agent stopped by user.' };
-                    pushAgentLog(vm, 'warn', 'Agent stopped by user'); vm.activeCardId = null; vm.activeCardIds = new Set(); vm.resumeTerminalPolling();
+                    vm.agentTimer = null; 
+                    vm._agentStartTime = null;
+                    vm.agentElapsed = 0; 
+                    vm._agentStopped = true; 
+                    if (vm.abortController) { vm.abortController.abort(); }
+                    vm.abortController = new AbortController(); 
+                    vm.streamingActive = false; 
+                    vm.agentResult = { warning: 'Agent stopped by user.' };
+                    pushAgentLog(vm, 'warn', 'Agent stopped by user'); 
+                    vm.activeCardId = null; 
+                    vm.activeCardIds = new Set(); 
+                    vm.resumeTerminalPolling();
                 };
 
                 vm.askAI = function () {
@@ -483,6 +525,9 @@ angular.module('kanbanApp')
                             }
                         });
                 };
+                vm.msToDigitalTime = function (ms) { 
+                    return new Date(ms).toISOString().slice(11, 19);
+                }
                 vm.fetchBenchmarksFromServer = function () {
                     if (!vm.bughostedClientId) { 
                         alert('Not connected to BugHosted. Login first.'); 

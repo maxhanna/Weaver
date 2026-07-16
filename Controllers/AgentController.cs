@@ -4044,7 +4044,8 @@ emitSse, ct);
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             var resolvedLine = AgentUtilities.ResolveTargetLineNumber(
-                preExtractContent, step.Change ?? "", exploration.TargetSymbol);
+                preExtractContent, step.Change ?? "", exploration.TargetSymbol,
+                plannerLineNumber: step.LineNumber);
             if (resolvedLine > 0)
             {
                 step.LineNumber = resolvedLine;
@@ -4938,7 +4939,7 @@ emitSse, ct);
             }
 
             bool bypassVerifyForAppend = !string.IsNullOrWhiteSpace(newStr) &&
-                                                 AgentUtilities.NormalizeLineEndings(newContent).Contains(AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal);
+                AgentUtilities.NormalizeLineEndings(newContent).Contains(AgentUtilities.NormalizeLineEndings(newStr), StringComparison.Ordinal);
 
             var (approved, verifyReason, _) =
                 bypassVerify || bypassVerifyForAppend ? (true, "Bypassed verify for successful append/insertion", 100) :
@@ -8025,8 +8026,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var sys = BuildIncrementalStepSystemPrompt();
         var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback);
 
-        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct,
-            requestTimeout: TimeSpan.FromMinutes(2), maxTokens: 700);
+        var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout, maxTokens: 700);
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -10740,6 +10740,139 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                    "Read the attached files in the DISCOVERY CONTEXT and plan the required edits directly. " +
                                    "If the files are empty, plan steps to populate them with the necessary code based on the user's task.";
 
+            // Cross-file UI text match: search all attached files for quoted strings from the task prompt
+            var quotedStrings = Regex.Matches(prompt, @"['""]([^'""]{3,})['""]")
+                .Select(m => m.Groups[1].Value)
+                .Where(q => !string.IsNullOrWhiteSpace(q) && q.Length >= 3)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (quotedStrings.Count > 0)
+            {
+                // Read all attached files once
+                var fileContents = new List<(string relPath, string content)>();
+                foreach (var af in attachedFiles)
+                {
+                    var afFullPath = Path.GetFullPath(Path.Combine(projectRoot,
+                        af.TrimStart('/', '\\').Replace('/', Path.DirectorySeparatorChar)));
+                    if (System.IO.File.Exists(afFullPath))
+                        fileContents.Add((af.Replace('\\', '/'), System.IO.File.ReadAllText(afFullPath, Encoding.UTF8)));
+                }
+
+                // Generate search variants for each quoted string (handle natural language vs code differences)
+                var searchVariants = new List<(string label, string searchText)>();
+                foreach (var qs in quotedStrings)
+                {
+                    searchVariants.Add((qs, qs)); // original
+                    var noComma = qs.Replace(",", "").Replace("'", "").Trim();
+                    if (noComma != qs && noComma.Length >= 3)
+                        searchVariants.Add((qs, noComma)); // without commas
+
+                    // Try with template literal interpolation for any placeholder word
+                    var withInterpolation = Regex.Replace(qs, @"\busername\b", @"\$\{username\}", RegexOptions.IgnoreCase);
+                    if (withInterpolation != qs && withInterpolation.Length >= 3)
+                        searchVariants.Add((qs, withInterpolation));
+
+                    // Try just the first significant word (e.g. "Welcome" from "Welcome back, username")
+                    var firstWord = qs.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    if (firstWord != null && firstWord.Length >= 3 && firstWord != qs)
+                        searchVariants.Add((qs, firstWord));
+
+                    // Try first two words (e.g. "Welcome back")
+                    var words = qs.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (words.Length >= 2)
+                    {
+                        var firstTwo = string.Join(" ", words.Take(2));
+                        if (firstTwo != qs && firstTwo.Length >= 3)
+                            searchVariants.Add((qs, firstTwo));
+                    }
+                }
+
+                var textMatchHints = new List<string>();
+                var matchedQuotedStrings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var (label, searchText) in searchVariants)
+                {
+                    if (matchedQuotedStrings.Contains(label)) continue;
+
+                    var matchingFiles = fileContents
+                        .Where(f => f.content.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Select(f => f.relPath)
+                        .ToList();
+
+                    if (matchingFiles.Count > 0)
+                    {
+                        matchedQuotedStrings.Add(label);
+                        var nonMatching = fileContents
+                            .Where(f => f.content.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) < 0)
+                            .Select(f => f.relPath)
+                            .ToList();
+
+                        var note = nonMatching.Count > 0
+                            ? $" (matched via '{searchText}'; NOT found in: {string.Join(", ", nonMatching)})"
+                            : " (found in ALL attached files)";
+                        textMatchHints.Add($"  - '{label}' found in {string.Join(", ", matchingFiles)}{note}");
+                    }
+                    // If exact didn't match but a variant did, don't continue searching variants for this label
+                }
+
+                // Fallback: if no quoted string matched, try partial word matching (e.g. "welcome" in any file)
+                if (textMatchHints.Count == 0 && fileContents.Count > 1)
+                {
+                    // Extract significant words (>=4 chars) from the task and search for them
+                    var taskWords = Regex.Matches(prompt, @"\b([A-Za-z]{4,})\b")
+                        .Select(m => m.Groups[1].Value)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Where(w => !"just from file with that this what have been which your their them into when also than about some then each would make like more than been has could were such only".Contains(w.ToLowerInvariant()))
+                        .Take(5)
+                        .ToList();
+
+                    foreach (var word in taskWords)
+                    {
+                        var matchingFiles = fileContents
+                            .Where(f => f.content.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0)
+                            .Select(f => f.relPath)
+                            .ToList();
+
+                        if (matchingFiles.Count > 0 && matchingFiles.Count < fileContents.Count)
+                        {
+                            var nonMatching = fileContents
+                                .Where(f => f.content.IndexOf(word, StringComparison.OrdinalIgnoreCase) < 0)
+                                .Select(f => f.relPath)
+                                .ToList();
+
+                            if (nonMatching.Count > 0)
+                            {
+                                textMatchHints.Add($"  - '{word}' found in {string.Join(", ", matchingFiles)} (NOT found in: {string.Join(", ", nonMatching)})");
+                            }
+                        }
+                    }
+
+                    if (textMatchHints.Count > 0)
+                    {
+                        await EmitLog(emitSse, "info",
+                            $"Cross-file fallback word match: {string.Join("; ", textMatchHints)}", ct: ct);
+                    }
+                }
+
+                if (textMatchHints.Count > 0)
+                {
+                    var matchSteering = "\n\n### TARGET TEXT LOCATION ###\n" +
+                                        "The task asks to modify/replace existing text. The following text was found in these attached files:\n" +
+                                        string.Join("\n", textMatchHints.Distinct(StringComparer.OrdinalIgnoreCase)) + "\n" +
+                                        "You MUST edit the file(s) where the text was found. Do NOT add new code in a different file.";
+
+                    attachedSteering += matchSteering;
+                    await EmitLog(emitSse, "info",
+                        $"Cross-file text match found: {string.Join("; ", textMatchHints.Distinct(StringComparer.OrdinalIgnoreCase))}", ct: ct);
+                }
+                else
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Cross-file text match searched {quotedStrings.Count} quoted string(s) in {fileContents.Count} file(s) — no matches found. " +
+                        $"Quoted strings: {string.Join(", ", quotedStrings)}", ct: ct);
+                }
+            }
+
             steeringContext = string.IsNullOrWhiteSpace(steeringContext)
                 ? attachedSteering
                 : $"{steeringContext}\n\n{attachedSteering}";
@@ -11615,13 +11748,12 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return (true, "", new List<string>());
     }
 
-
     private async Task<List<PlanStep>> TryReplanAfterStep(
-    string prompt, List<object> allResults, AgentPlan plan,
-    string? steeringContext, string projectRoot, bool emitSse,
-    CancellationToken ct, List<PlanStep> planItems, int itemIdx,
-    bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
-    int[] replanBudget, string? cardId = null)
+        string prompt, List<object> allResults, AgentPlan plan,
+        string? steeringContext, string projectRoot, bool emitSse,
+        CancellationToken ct, List<PlanStep> planItems, int itemIdx,
+        bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
+        int[] replanBudget, string? cardId = null)
     {
         if (!stepSkipped && !stepSucceeded) return planItems;
         var remainingSteps = planItems.Skip(itemIdx + 1)
@@ -11661,10 +11793,11 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             replanBudget[0]--;
             planItems = MergePlanSteps(planItems, moreSteps);
             if (emitSse)
-                await SendSse(Response, "plan",
-                    new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
-            await PersistBoardDataPlanStepAsync(cardId, planItems, emitSse, ct,
-                summary: $"Added {moreSteps.Count} step(s)", score: 0);
+            {
+                await SendSse(Response, "plan", new { summary = $"Added {moreSteps.Count} step(s)", items = planItems }, ct);
+            }
+                
+            await PersistBoardDataPlanAsync(cardId, planItems, emitSse, ct, summary: $"Added {moreSteps.Count} step(s)", score: 0);
         }
         return planItems;
     }

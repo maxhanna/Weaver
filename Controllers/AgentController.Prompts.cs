@@ -332,6 +332,9 @@ partial class AgentController
      "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
      "10. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
      "Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n" +
+     "11. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), " +
+     "you MUST examine ALL attached files in discovery context to find where that original message or behavior " +
+     "originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n" +
      "12. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
      "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
      "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +

@@ -290,6 +290,7 @@
               <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
                 tokens</span>
             </span>
+            <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
           </div>
 
           <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">

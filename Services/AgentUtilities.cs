@@ -3327,6 +3327,19 @@ public static class AgentUtilities
         m = Regex.Match(change, @"\b(?:in|inside)\s+(?:the\s+)?([A-Z]\w+)\b");
         if (m.Success) return m.Groups[1].Value;
 
+        // Generic camelCase with at least one uppercase transition (e.g. showNotification, getData, sendEmail)
+        // Check BEFORE "symbol call" pattern to avoid matching stopwords like "with call"
+        m = Regex.Match(change, @"\b([a-z][a-zA-Z0-9]{2,}(?:[A-Z][a-z0-9]+)+)\b");
+        if (m.Success) return m.Groups[1].Value;
+
+        // "symbol call" or "symbol method" or "symbol function" — lowercase-starting camelCase
+        m = Regex.Match(change, @"\b([a-z]\w*[A-Z]\w*)\s+(?:call|method|function)\b", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
+        // "method symbol" or "function symbol" pattern
+        m = Regex.Match(change, @"\b(?:method|function)\s+([A-Za-z_]\w*)\b", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Groups[1].Value;
+
         return null;
     }
     public static string CollapseExcessiveBlankLines(string content, string appliedNewStr)
@@ -4959,14 +4972,27 @@ public static class AgentUtilities
 
         if (!string.IsNullOrWhiteSpace(targetSymbol))
         {
+            var isCallTarget = Regex.IsMatch(changeDesc, @"\bcall\b", RegexOptions.IgnoreCase);
             var declPattern = $@"\b(class|record|struct)\s+{Regex.Escape(targetSymbol)}\b";
+            // Method declaration: symbol(params) { with opening brace on same line
+            var methodDeclPattern = $@"\b(?:async\s+|private\s+|public\s+|protected\s+)?{Regex.Escape(targetSymbol)}\s*\([^)]*\)\s*\{{";
             var symPattern = $@"\b{Regex.Escape(targetSymbol)}\s*[\(<{{]";
             var foundDecl = false;
             for (var i = 0; i < lines.Length; i++)
             {
                 if (Regex.IsMatch(lines[i], declPattern, RegexOptions.IgnoreCase))
                 {
-                    candidates.Add((i + 1, 99));
+                    candidates.Add((i + 1, 200));
+                    foundDecl = true;
+                    break;
+                }
+            }
+            if (!foundDecl && !isCallTarget)
+            {
+                for (var i = 0; i < lines.Length; i++)
+                {
+                    if (!Regex.IsMatch(lines[i], methodDeclPattern, RegexOptions.IgnoreCase)) continue;
+                    candidates.Add((i + 1, 190));
                     foundDecl = true;
                     break;
                 }
@@ -4976,8 +5002,15 @@ public static class AgentUtilities
                 for (var i = 0; i < lines.Length; i++)
                 {
                     if (!Regex.IsMatch(lines[i], symPattern, RegexOptions.IgnoreCase)) continue;
-                    candidates.Add((i + 1, 92));
-                    break;
+                    // When change targets a "call", skip matches where symbol starts the line (declaration)
+                    if (isCallTarget && Regex.IsMatch(lines[i], $@"^\s*(?:async\s+|private\s+|public\s+|protected\s+)?{Regex.Escape(targetSymbol)}\s*\(", RegexOptions.IgnoreCase))
+                        continue;
+                    var score = 180;
+                    // Prefer call sites with complex arguments (template literals or very long lines) --
+                    // these are likely the actual target of a replacement, not trivial validation calls
+                    if (lines[i].Contains("${")) score += 10;
+                    else if (lines[i].Length > 100) score += 5;
+                    candidates.Add((i + 1, score));
                 }
             }
         }
@@ -4994,7 +5027,7 @@ public static class AgentUtilities
                 for (var i = 0; i < lines.Length; i++)
                 {
                     if (lines[i].Contains(quoted, StringComparison.OrdinalIgnoreCase))
-                        candidates.Add((i + 1, 88));
+                        candidates.Add((i + 1, 160));
                 }
             }
         }
@@ -5007,7 +5040,7 @@ public static class AgentUtilities
                 var lineLower = lines[i].ToLowerInvariant();
                 var hitCount = keywords.Count(w => lineLower.Contains(w));
                 if (hitCount >= 2)
-                    candidates.Add((i + 1, 45 + hitCount * 8));
+                    candidates.Add((i + 1, 20 + hitCount * 5));
             }
         }
 
@@ -5023,7 +5056,7 @@ public static class AgentUtilities
                 for (var i = 0; i < lines.Length; i++)
                 {
                     if (textFragments.Any(t => lines[i].Contains(t, StringComparison.Ordinal)))
-                        candidates.Add((i + 1, 90));
+                        candidates.Add((i + 1, 170));
                 }
             }
         }
@@ -5042,6 +5075,8 @@ public static class AgentUtilities
             .OrderByDescending(x => x.score)
             .ThenBy(x => plannerLineNumber > 0 ? Math.Abs(x.line - plannerLineNumber) : x.line)
             .First();
+
+        System.Diagnostics.Debug.WriteLine($"[ResolveTargetLineNumber] targetSymbol={targetSymbol}, changeDesc={changeDesc?.Substring(0, Math.Min(80, changeDesc?.Length ?? 0))}, plannerLine={plannerLineNumber}, best=line {best.line} score {best.score}, all={string.Join(";", candidates.Select(c => $"{c.line}({c.score})").Distinct())}");
 
         return best.line;
     }
