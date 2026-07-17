@@ -1128,57 +1128,6 @@ public static class AgentUtilities
         }
         return string.Join("\n", result);
     }
-    public static string AutoFixCssWhitespace(string content)
-    {
-        if (string.IsNullOrWhiteSpace(content)) return content;
-        var lines = content.Split('\n');
-        for (int i = 0; i < lines.Length; i++)
-        {
-            var line = lines[i];
-            var trimmed = line.TrimStart();
-            if (string.IsNullOrWhiteSpace(trimmed)) continue;
-            // Skip comments, at-rules, selectors, and lines with URLs/strings to avoid corruption
-            if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*") ||
-                trimmed.StartsWith("@") || trimmed.StartsWith("&") ||
-                trimmed.Contains("{") || trimmed.Contains("}") ||
-                trimmed.Contains("url(") || trimmed.Contains("\""))
-            {
-                continue;
-            }
-            int colonIdx = -1;
-            int parenDepth = 0;
-            for (int j = 0; j < trimmed.Length; j++)
-            {
-                if (trimmed[j] == '(') parenDepth++;
-                else if (trimmed[j] == ')') parenDepth = Math.Max(0, parenDepth - 1);
-                else if (trimmed[j] == ':' && parenDepth == 0)
-                {
-                    colonIdx = j;
-                    break;
-                }
-            }
-            if (colonIdx <= 0 || colonIdx == trimmed.Length - 1) continue;
-            var prop = trimmed.Substring(0, colonIdx).TrimEnd();
-            var valueWithSemi = trimmed.Substring(colonIdx + 1);
-            string trailingComment = "";
-            var commentIdx = valueWithSemi.IndexOf("//");
-            if (commentIdx >= 0)
-            {
-                trailingComment = " " + valueWithSemi.Substring(commentIdx).TrimEnd();
-                valueWithSemi = valueWithSemi.Substring(0, commentIdx);
-            }
-            var value = valueWithSemi.Trim();
-            if (value.Length == 0) continue;
-            value = Regex.Replace(value, @",(?!\s)", ", ");
-            value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=\d)", "$1 ");
-            value = Regex.Replace(value, @"(\d(?:px|pt|em|rem|ex|ch|vw|vh|vmin|vmax|%|deg|s|ms|fr|dpi|dppx|dpcm|Hz|kHz))(?=[a-z])", "$1 ");
-            value = Regex.Replace(value, @"(?<!#)([a-z])(\d)", "$1 $2");
-            value = Regex.Replace(value, @"\s+", " ").Trim();
-            var leadingWhitespace = line.Substring(0, line.Length - trimmed.Length);
-            lines[i] = leadingWhitespace + prop + ": " + value + trailingComment;
-        }
-        return string.Join("\n", lines);
-    }
     public static StepExplorationResponse ParseStepExplorationResponse(string raw)
     {
         var empty = new StepExplorationResponse { FilesToRead = new List<string>() };
@@ -2879,7 +2828,7 @@ public static class AgentUtilities
     {
         if (string.IsNullOrWhiteSpace(change)) return null;
         var m = Regex.Match(change, @"\b(?:class|struct|interface|record)\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);
-        if (m.Success) return m.Groups[1].Value;
+        if (m.Success && LooksLikeCodeIdentifier(m.Groups[1].Value)) return m.Groups[1].Value;
         m = Regex.Match(change, @"\b([A-Z]\w*(?:DTO|Dto|Model|Request|Response|Controller|Service))\b");
         if (m.Success) return m.Groups[1].Value;
         m = Regex.Match(change, @"\bmethod\s+([A-Za-z_]\w*)", RegexOptions.IgnoreCase);

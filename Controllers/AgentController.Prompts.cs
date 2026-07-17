@@ -306,6 +306,7 @@ partial class AgentController
     "  \"step\": {\n" +
     "    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
     "    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n" +
+    "    \"targetSymbol\": \"getTimedGreetingMessage\",\n" +
     "    \"line\": 42,\n" +
     "    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n" +
     "  },\n" +
@@ -330,17 +331,18 @@ partial class AgentController
     "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. " +
     "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
     "   unrelated files.\n" +
-     "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
-     "10. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
+     "9. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\").\n" +
+    "10. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
+    "11. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
      "Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n" +
-     "11. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), " +
-     "you MUST examine ALL attached files in discovery context to find where that original message or behavior " +
-     "originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n" +
-     "12. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
-     "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
-     "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
-     "13. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
-     "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
+    "12. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), " +
+    "you MUST examine ALL attached files in discovery context to find where that original message or behavior " +
+    "originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n" +
+    "13. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
+    "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
+    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
+    "14. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
+    "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -484,8 +486,9 @@ partial class AgentController
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
                "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. " +
-            "For every edit step, include a \"line\" field with the 1-based line number of the target location. " +
-            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"priority\": 1, \"line\": 42}\n" +
+            "For every edit step, include a \"line\" field with the 1-based line number of the target location " +
+            "and a \"targetSymbol\" field with the exact method/function/class/selector name being edited. " +
+            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"targetSymbol\": \"methodName\", \"priority\": 1, \"line\": 42}\n" +
         "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.\n" +
@@ -569,6 +572,7 @@ partial class AgentController
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
         "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
+        "      \"targetSymbol\": \"confirmFilePicker\",\n" +
         "      \"line\": 42,\n" +
         "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
         "    }\n" +

@@ -67,4 +67,8 @@ public class PlanStep
     /// <summary>Meta-plan group label (sub-plan title) this step belongs to, if any.</summary>
     [JsonPropertyName("metaGroup")]
     public string? MetaGroup { get; set; }
+
+    /// <summary>Explicit target symbol (function/method/class/selector) to edit, set by the planner LLM.</summary>
+    [JsonPropertyName("targetSymbol")]
+    public string? TargetSymbol { get; set; }
 }

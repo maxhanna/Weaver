@@ -237,16 +237,23 @@ partial class AgentController
     }
     private async Task<string> RunCausalReasoningAsync(string taskDesc, string relPath, string fileContent, bool emitSse, CancellationToken ct)
     {
-        var extractedCode = AgentUtilities.ExtractMethodBodiesByKeywords(fileContent, taskDesc);
-        if (string.IsNullOrWhiteSpace(extractedCode)) return string.Empty;
+        if (string.IsNullOrWhiteSpace(fileContent)) return string.Empty;
+        // Quick LLM check: is this a bug fix or a feature/enhancement?
+        var classifyPrompt = $"Is the following task a bug fix or a feature/enhancement? Reply with exactly one word: BUG or FEATURE.\n\nTask: {taskDesc}";
+        var (classification, _, _) = await CallLlmRawStreaming(
+            "You classify tasks as BUG or FEATURE. Reply with exactly one word.",
+            classifyPrompt, false, ct, requestTimeout: TimeSpan.FromSeconds(10), maxTokens: 10);
+        await EmitLog(emitSse, "info", $"Causal reasoning classification: '{classification?.Trim()}' for task: {taskDesc}", ct: ct);
+        if (string.IsNullOrWhiteSpace(classification) || !classification.Trim().Equals("BUG", StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
         var sysPrompt = "You are an expert software debugger. " +
-                        "Given a bug report and code excerpts, trace the execution flow to identify the ROOT CAUSE. " +
+                        "Given a bug report and the full file content, trace the execution flow to identify the ROOT CAUSE. " +
                         "Small details matter: check if callbacks are missed, state isn't updated, or variables are out of sync. " +
                         "Do NOT write the fix. Output ONLY JSON: " +
                         "{\"rootCause\": \"detailed explanation\", \"affectedMethods\": [\"method1\", \"method2\"]}";
         var userPrompt = $"### BUG REPORT / TASK ###\n{taskDesc}\n\n" +
                          $"### FILE: {relPath} ###\n" +
-                         $"### RELEVANT CODE EXCERPTS ###\n{extractedCode}\n\n" +
+                         $"```\n{fileContent}\n```\n\n" +
                          "Trace the logic. What is the exact root cause of the issue, and which methods are affected?";
         try
         {

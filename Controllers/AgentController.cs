@@ -2873,7 +2873,9 @@ public partial class AgentController : ControllerBase
             }
         }
         var refinedChange = step.Change;
-        string? targetSymbol = AgentUtilities.ExtractTargetSymbolFromChange(step.Change ?? "");
+        string? targetSymbol = !string.IsNullOrWhiteSpace(step.TargetSymbol)
+            ? step.TargetSymbol
+            : AgentUtilities.ExtractTargetSymbolFromChange(step.Change ?? "");
         string? lineRange = null;
         var confidence = 0;
         var roundsCompleted = 0;
@@ -2985,7 +2987,9 @@ public partial class AgentController : ControllerBase
                 ? fallbackSymbol
                 : targetSymbol;
             var hasValidSymbolInFile = !string.IsNullOrWhiteSpace(finalTargetSymbol) &&
-                Regex.IsMatch(fileContent, $@"\b{Regex.Escape(finalTargetSymbol)}\b", RegexOptions.IgnoreCase);
+                (finalTargetSymbol.All(char.IsLetterOrDigit)
+                    ? Regex.IsMatch(fileContent, $@"\b{Regex.Escape(finalTargetSymbol)}\b", RegexOptions.IgnoreCase)
+                    : fileContent.Contains(finalTargetSymbol, StringComparison.OrdinalIgnoreCase));
             if (!hasValidSymbolInFile)
             {
                 finalTargetSymbol = null;
@@ -3660,11 +3664,7 @@ public partial class AgentController : ControllerBase
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                 var fileContent = step.NewString;
                 var createExt = Path.GetExtension(relPath).ToLowerInvariant();
-                if (createExt == ".css" || createExt == ".scss" || createExt == ".less")
-                {
-                    fileContent = AgentUtilities.AutoFixCssWhitespace(fileContent);
-                }
-                else if (createExt == ".html" || createExt == ".htm" || createExt == ".cshtml" || createExt == ".razor" || createExt == ".vue" || createExt == ".svelte")
+                if (createExt == ".html" || createExt == ".htm" || createExt == ".cshtml" || createExt == ".razor" || createExt == ".vue" || createExt == ".svelte")
                 {
                     fileContent = AgentUtilities.AutoFixHtmlIndentation(fileContent);
                 }
@@ -3846,76 +3846,8 @@ emitSse, ct);
                 }
                 else
                 {
-                    // No target symbol in step description — scan all functions and match against description keywords
-                    var allFuncs = AstCodeEditorService.FindAllFunctions(preExtractContent, fileExt);
-                    if (allFuncs.Count > 0)
-                    {
-                        var changeWords = (step.Change ?? "")
-                            .ToLowerInvariant()
-                            .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';', '!', '?' },
-                                   StringSplitOptions.RemoveEmptyEntries)
-                            .Where(w => w.Length > 2 && !AgentUtilities.notTableWords.Contains(w))
-                            .ToHashSet();
-                        (string name, string source, int startLine)? funcBest = null;
-                        var funcBestScore = 0;
-                        Func<string, string> stem = w =>
-                        {
-                            if (w.EndsWith("ies")) return w[..^3] + "y";
-                            if (w.EndsWith("ves")) return w[..^3] + "f";
-                            if (w.EndsWith("es")) return w[..^2];
-                            if (w.EndsWith("s") && !w.EndsWith("ss")) return w[..^1];
-                            if (w.EndsWith("ing")) return w[..^3];
-                            if (w.EndsWith("ed")) return w[..^2];
-                            if (w.EndsWith("ly")) return w[..^2];
-                            if (w.EndsWith("er")) return w[..^2];
-                            if (w.EndsWith("est")) return w[..^3];
-                            return w;
-                        };
-                        foreach (var func in allFuncs)
-                        {
-                            var score = 0;
-                            var funcLower = func.name.ToLowerInvariant();
-                            var funcStem = stem(funcLower);
-                            // CamelCase tokens (getTimedGreetingMessage → get, timed, greeting, message)
-                            var tokens = System.Text.RegularExpressions.Regex
-                                .Matches(func.name, @"[a-z]+|[A-Z][a-z]*")
-                                .Select(m => m.Value.ToLowerInvariant())
-                                .ToHashSet();
-                            foreach (var cw in changeWords)
-                            {
-                                var cwStem = stem(cw);
-                                // Direct match or stem match
-                                if (funcLower == cw || funcStem == cwStem)
-                                    score += 10;
-                                // Token match (stemmed)
-                                if (tokens.Contains(cw) || tokens.Contains(cwStem))
-                                    score += 5;
-                                // Substring match (e.g., "greet" in "getTimedGreetingMessage")
-                                if (funcLower.Contains(cw) || funcLower.Contains(cwStem) ||
-                                    cw.Contains(funcLower) || cw.Contains(funcStem))
-                                    if (cw.Length >= 4 || cwStem.Length >= 4)
-                                        score += 3;
-                            }
-                            if (score > funcBestScore)
-                            {
-                                funcBestScore = score;
-                                funcBest = func;
-                            }
-                        }
-                        if (funcBest != null && funcBestScore >= 3)
-                        {
-                            step.LineNumber = funcBest.Value.startLine;
-                            step.OldString = funcBest.Value.source;
-                            planOldStr = funcBest.Value.source;
-                            await EmitLog(emitSse, "info",
-                                $"AST inferred target '{funcBest.Value.name}' at line {funcBest.Value.startLine} from step description (score {funcBestScore}) — using method source as oldString", ct: ct);
-                        }
-                        else
-                        {
-                            await EmitLog(emitSse, "info",
-                                $"AST scanned {allFuncs.Count} function(s) but could not match any to step description", ct: ct);
-                        }
-                    }
+                    await EmitLog(emitSse, "info",
+                        $"No target symbol available for {relPath} — resolver will use full file context", ct: ct);
                 }
             }
         }
@@ -3983,6 +3915,16 @@ emitSse, ct);
                         cleaned = Regex.Replace(cleaned, @"\s*```$", "");
                         oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
                         newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
+                        // Format CSS replacement code via Prettier before applying
+                        var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
+                        if (CodeFormatterService.CanFormat(fmtExt))
+                        {
+                            var fmtNew = await CodeFormatterService.FormatAsync("dummy" + fmtExt, newStr, ct);
+                            if (!string.IsNullOrWhiteSpace(fmtNew) && fmtNew.Length > 10)
+                                newStr = AgentUtilities.NormalizeLineEndings(fmtNew.Trim());
+                        }
+                        if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
+                            newStr = LlmCssCleaner.Clean(newStr);
                         fromFormatC = true;
                         await EmitLog(emitSse, "info",
                             $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
@@ -4834,11 +4776,16 @@ emitSse, ct);
                     newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
                 }
             }
-            var ext = Path.GetExtension(relPath).ToLowerInvariant();
-            if (ext == ".css" || ext == ".scss" || ext == ".less")
+            if (CodeFormatterService.CanFormat(relPath))
             {
-                newContent = AgentUtilities.AutoFixCssWhitespace(newContent);
+                var before = newContent;
+                newContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
+                if (newContent != before)
+                    await EmitLog(emitSse, "info", $"Formatted {relPath} via CodeFormatterService", ct: ct);
             }
+            var cssExt = Path.GetExtension(relPath).ToLowerInvariant();
+            if (cssExt == ".css" || cssExt == ".scss" || cssExt == ".less")
+                newContent = LlmCssCleaner.Clean(newContent);
             preEditContent ??= fileContent;
             await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
@@ -5059,18 +5006,26 @@ emitSse, ct);
                     reasons.Add(reason);
                     scores.Add(score);
                     needsExtraStepFlags.Add(needsEs);
-                    // Capture for propagation to interleaved loop
-                    stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
-                    stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
+                    // Early consensus: if 2 rounds agree on needsExtraStep, trust it and stop
+                    if (r >= 1)
+                    {
+                        var keep2 = decisions.Take(r + 1).Count(x => x == "keep");
+                        var es2 = needsExtraStepFlags.Take(r + 1).Count(f => f);
+                        if (keep2 >= 2 && es2 == 0) break;          // 2 keeps, no extra step needed
+                        if (es2 >= 2) break;                        // 2 say extra step needed
+                    }
                 }
+                stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
+                stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
+                var roundsDone = decisions.Count;
                 var keepCount = 0;
                 var scoreSum = 0;
-                for (int r = 0; r < VerificationRounds; r++)
+                for (int r = 0; r < roundsDone; r++)
                 {
                     if (decisions[r] == "keep") keepCount++;
                     scoreSum += scores[r];
                 }
-                var avgScore = scoreSum / VerificationRounds;
+                var avgScore = scoreSum / roundsDone;
                 var llmGateDecision = keepCount >= 2 ? "keep" : "abandon";
                 var truncatedReasons = new List<string>(reasons.Count);
                 for (int r = 0; r < reasons.Count; r++)
@@ -5817,6 +5772,9 @@ emitSse, ct);
         var windowLines = contentLines.Skip(windowStart - 1).Take(windowEnd - windowStart + 1).ToList();
         var windowText = string.Join("\n", windowLines);
         var formattedWindow = await CodeFormatterService.FormatAsync(filePath, windowText, ct);
+        var fExt = Path.GetExtension(filePath).ToLowerInvariant();
+        if (fExt == ".css" || fExt == ".scss" || fExt == ".less")
+            formattedWindow = LlmCssCleaner.Clean(formattedWindow);
         if (string.Equals(formattedWindow, windowText, StringComparison.Ordinal))
             return content;
         var formattedWindowLines = formattedWindow.Split('\n').ToList();
@@ -7589,6 +7547,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 return new IncrementalStepProposal { PlanComplete = false, Thinking = thinking };
             var file = stepEl.TryGetProperty("file", out var fEl) ? fEl.GetString() : null;
             var change = stepEl.TryGetProperty("change", out var cEl) ? cEl.GetString() : null;
+            var targetSymbol = stepEl.TryGetProperty("targetSymbol", out var tsEl) && tsEl.ValueKind == JsonValueKind.String ? tsEl.GetString() : null;
             var line = stepEl.TryGetProperty("line", out var lEl) && lEl.ValueKind == JsonValueKind.Number ? lEl.GetInt32() : 0;
             var refFiles = new List<string>();
             if (stepEl.TryGetProperty("referenceFiles", out var rfArr) && rfArr.ValueKind == JsonValueKind.Array)
@@ -7607,6 +7566,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     File = file!.Replace('\\', '/'),
                     Change = change!,
+                    TargetSymbol = targetSymbol,
                     Priority = 1,
                     LineNumber = line,
                     ReferenceFiles = refFiles
@@ -13691,6 +13651,9 @@ Respond with JSON only:
                 await EmitLog(emitSse, "info",
                     $"Formatted full file in {relPath} via CodeFormatterService", ct: ct);
         }
+        var fExt = Path.GetExtension(relPath).ToLowerInvariant();
+        if (fExt == ".css" || fExt == ".scss" || fExt == ".less")
+            fullContent = LlmCssCleaner.Clean(fullContent);
         await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
         await EmitLog(emitSse, "success", $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
         var r = new Dictionary<string, object?>();
