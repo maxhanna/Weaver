@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Weaver.Services;
 
 namespace Weaver.Controllers;
 
@@ -685,7 +686,7 @@ partial class AgentController
 
         try
         {
-            var cleaned = ExtractFirstJsonObject(raw);
+            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             if (!doc.RootElement.TryGetProperty("requirements", out var arr) || arr.ValueKind != JsonValueKind.Array)
                 return "";

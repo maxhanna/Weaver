@@ -2,9 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Weaver.Services;
-
 namespace Weaver.Controllers;
-
 partial class AgentController
 {
     private async Task<string> GetLlamaBaseUrl()
@@ -12,7 +10,6 @@ partial class AgentController
         var cfg = await _configFile.LoadConfigAsync();
         return (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
     }
-
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRaw(
         string systemPrompt, string userMessage, CancellationToken ct = default,
         TimeSpan? requestTimeout = null, int? maxTokens = null)
@@ -31,7 +28,6 @@ partial class AgentController
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmNonStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens);
     }
-
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRawStreaming(
         string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
         TimeSpan? requestTimeout = null, int? maxTokens = null)
@@ -50,7 +46,6 @@ partial class AgentController
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await CallLlmStreaming(client, baseUrl + "/v1/chat/completions", model, messages, linkedCts.Token, maxTokens, emitSse);
     }
-
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmNonStreaming(
       HttpClient client, string target, string model, object messages,
       CancellationToken ct = default, int? maxTokens = null)
@@ -80,7 +75,6 @@ partial class AgentController
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
         catch (Exception ex) { return ("", null, ex.Message); }
     }
-
     private async Task<(string raw, AgentResponse? parsed, string? error)> CallLlmStreaming(
     HttpClient client, string target, string model, object messages,
     CancellationToken ct = default, int? maxTokens = null, bool emitSse = false)
@@ -104,16 +98,13 @@ partial class AgentController
             var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!resp.IsSuccessStatusCode)
             { var t2 = await resp.Content.ReadAsStringAsync(ct); return (t2, null, $"HTTP {resp.StatusCode}"); }
-
             var stream = await resp.Content.ReadAsStreamAsync(ct);
             var reader = new StreamReader(stream);
             var sb = new StringBuilder();
-
             const int WindowChars = 400;
             const int ChunkLen = 40;
             const int RepeatThreshold = 4;
             using var repeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
             while (true)
             {
                 repeatCts.Token.ThrowIfCancellationRequested();
@@ -137,7 +128,6 @@ partial class AgentController
                             {
                                 if (emitSse) await SendSse(Response, "token", new { token }, ct);
                                 sb.Append(token);
-
                                 if (sb.Length >= ChunkLen * (RepeatThreshold + 1) &&
                                     IsRepeatingLoop(sb, WindowChars, ChunkLen, RepeatThreshold))
                                 {
@@ -153,10 +143,8 @@ partial class AgentController
                 }
                 catch { }
             }
-
             var raw = sb.ToString();
             if (string.IsNullOrWhiteSpace(raw)) return ("", null, "Empty LLM response");
-
             var braceCount = 0;
             var topLevelOpens = 0;
             foreach (var c in raw)
@@ -170,9 +158,7 @@ partial class AgentController
                     $"Multiple JSON objects detected ({topLevelOpens}) in single response — " +
                     "model is emitting multiple attempts. Use a stronger model or lower temperature.");
             }
-
             var parsed2 = ParseAgentResponse(raw);
-
             return (raw, parsed2, parsed2 == null ? "JSON parse failed" : null);
         }
         catch (TaskCanceledException) { return ("", null, "LLM request timed out"); }
@@ -184,23 +170,19 @@ partial class AgentController
         var isAddition = Regex.IsMatch(stepChange,
             @"\b(add|create|insert|implement|define)\b.{0,40}\b(method|function)\b", RegexOptions.IgnoreCase);
         if (!isAddition) return null;
-
         if (!string.IsNullOrWhiteSpace(newStr))
         {
             var m = AgentUtilities.MethodDeclRegex.Match(newStr);
             if (m.Success) return m.Groups[1].Value;
-
             var tsMatch = Regex.Match(newStr,
                 @"\b(?:private|public|protected)?\s*(?:async\s+)?([A-Za-z_]\w*)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{");
             if (tsMatch.Success) return tsMatch.Groups[1].Value;
         }
-
         var dm = Regex.Match(stepChange, @"(?:method|function)\s+'?([A-Za-z_]\w*)'?", RegexOptions.IgnoreCase);
         if (dm.Success) return dm.Groups[1].Value;
         dm = Regex.Match(stepChange, @"\b([A-Za-z_]\w*)\s*\(\s*\)", RegexOptions.IgnoreCase);
         return dm.Success ? dm.Groups[1].Value : null;
     }
-
     /// <summary>
     /// Deterministic (non-LLM) check: does a call to this newly-added method exist ANYWHERE
     /// in the project outside its own declaration? No LLM opinion needed — grep either finds
@@ -211,7 +193,6 @@ partial class AgentController
         string methodName, string relPath, string projectRoot, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(methodName) || methodName.Length < 3) return (true, null);
-
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         var searchPatterns = ext switch
         {
@@ -220,12 +201,10 @@ partial class AgentController
             ".js" or ".jsx" => new[] { "*.js", "*.jsx", "*.html" },
             _ => new[] { "*" + ext }
         };
-
         var callPattern = new Regex($@"\b{Regex.Escape(methodName)}\s*\(", RegexOptions.Compiled);
         var declLinePattern = new Regex(
             $@"\b(?:private|public|protected|internal|static|async|get|set)\b[^\n]*\b{Regex.Escape(methodName)}\s*\(",
             RegexOptions.Compiled);
-
         foreach (var pattern in searchPatterns)
         {
             IEnumerable<string> files;
@@ -236,13 +215,11 @@ partial class AgentController
                              && !f.Contains("\\node_modules\\") && !f.Contains("\\.git\\") && !f.Contains("\\dist\\"));
             }
             catch { continue; }
-
             foreach (var file in files)
             {
                 string content;
                 try { content = await System.IO.File.ReadAllTextAsync(file, Encoding.UTF8, ct); }
                 catch { continue; }
-
                 foreach (Match m in callPattern.Matches(content))
                 {
                     var lineStart = content.LastIndexOf('\n', Math.Max(0, m.Index - 1)) + 1;
@@ -253,7 +230,6 @@ partial class AgentController
                 }
             }
         }
-
         return (false,
             $"Method '{methodName}' was just added to {relPath} but has ZERO call sites anywhere else in the " +
             "project — only its own declaration exists. It needs to be wired up (called from wherever the " +
@@ -263,24 +239,20 @@ partial class AgentController
     {
         var extractedCode = AgentUtilities.ExtractMethodBodiesByKeywords(fileContent, taskDesc);
         if (string.IsNullOrWhiteSpace(extractedCode)) return string.Empty;
-
         var sysPrompt = "You are an expert software debugger. " +
                         "Given a bug report and code excerpts, trace the execution flow to identify the ROOT CAUSE. " +
                         "Small details matter: check if callbacks are missed, state isn't updated, or variables are out of sync. " +
                         "Do NOT write the fix. Output ONLY JSON: " +
                         "{\"rootCause\": \"detailed explanation\", \"affectedMethods\": [\"method1\", \"method2\"]}";
-
         var userPrompt = $"### BUG REPORT / TASK ###\n{taskDesc}\n\n" +
                          $"### FILE: {relPath} ###\n" +
                          $"### RELEVANT CODE EXCERPTS ###\n{extractedCode}\n\n" +
                          "Trace the logic. What is the exact root cause of the issue, and which methods are affected?";
-
         try
         {
             var (raw, _, err) = await CallLlmRawStreaming(sysPrompt, userPrompt, emitSse, ct, requestTimeout: TimeSpan.FromSeconds(45), maxTokens: 500);
             if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-
-            var cleaned = ExtractFirstJsonObject(raw);
+            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
             using var doc = JsonDocument.Parse(cleaned);
             var rootCause = doc.RootElement.TryGetProperty("rootCause", out var rc) ? rc.GetString() : "Failed to parse root cause.";
             var affected = new List<string>();
@@ -289,7 +261,6 @@ partial class AgentController
                 foreach (var item in am.EnumerateArray())
                     if (item.ValueKind == JsonValueKind.String) affected.Add(item.GetString() ?? "");
             }
-
             var sb = new StringBuilder();
             sb.AppendLine("### ⚠️ CAUSAL REASONING ANALYSIS (CRITICAL — READ BEFORE EDITING) ###");
             sb.AppendLine($"Root Cause Identified: {rootCause}");
@@ -302,41 +273,15 @@ partial class AgentController
         {
             return string.Empty;
         }
-    }
-    private static bool LooksLikeMethodDeclaration(string line)
-    {
-        if (string.IsNullOrWhiteSpace(line)) return false;
-        if (!line.Contains('(')) return false;
-        var lower = line.ToLowerInvariant();
-        if (lower.StartsWith("if ") || lower.StartsWith("if(") ||
-            lower.StartsWith("for ") || lower.StartsWith("for(") ||
-            lower.StartsWith("while ") || lower.StartsWith("while(") ||
-            lower.StartsWith("switch ") || lower.StartsWith("switch(") ||
-            lower.StartsWith("return ") || lower.StartsWith("return(") ||
-            lower.StartsWith("using ") || lower.StartsWith("using(") ||
-            lower.StartsWith("lock ") || lower.StartsWith("lock(") ||
-            lower.StartsWith("await ") ||
-            lower.StartsWith("//") || lower.StartsWith("/*"))
-            return false;
-        return Regex.IsMatch(line,
-            @"^\s*(?:(?:public|private|protected|internal|static|async|export|function|override|sealed|virtual|abstract|readonly|partial)\s+)*"
-            + @"(?:<[^>]+>\s*)?"
-            + @"~?\w+\s*\(",
-            RegexOptions.Compiled);
-    }
-
+    } 
     private static bool IsRepeatingLoop(StringBuilder sb, int windowChars, int chunkLen, int repeatThreshold)
     {
         var len = sb.Length;
         var start = Math.Max(0, len - windowChars);
         var window = sb.ToString(start, len - start);
-
         if (window.Length < chunkLen * repeatThreshold) return false;
-
-
         var tail = window[^chunkLen..];
         if (string.IsNullOrWhiteSpace(tail.Trim())) return false;
-
         var pos = window.Length - chunkLen;
         var consecutive = 1;
         pos -= chunkLen;
@@ -353,34 +298,80 @@ partial class AgentController
         }
         return false;
     }
-
     private async Task<(string raw, string? error)> CallLlmRawText(
-        string systemPrompt, string userMessage, CancellationToken ct = default,
+        string systemPrompt, string userMessage, bool emitSse, CancellationToken ct = default,
         TimeSpan? requestTimeout = null, int? maxTokens = null)
     {
+        var baseUrl = await GetLlamaBaseUrl();
+        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var client = _clientFactory.CreateClient("llama");
+        client.Timeout = _infiniteTimeout;
+        var messages = new object[]
+        {
+            new { role = "system", content = systemPrompt },
+            new { role = "user",   content = userMessage  }
+        };
+        var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
+        using var timeoutCts = new CancellationTokenSource(timeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var cfg = await LoadConfigAsync();
+        var mt = maxTokens ?? cfg.defaultMaxTokens;
+        var reqBody = new
+        {
+            model,
+            messages,
+            stream = true,
+            temperature = 0.0,
+            max_tokens = mt,
+            repeat_penalty = 1.3,
+            repeat_last_n = 256
+        };
+        var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
         try
         {
-            var baseUrl = await GetLlamaBaseUrl();
-            var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
-            var client = _clientFactory.CreateClient("llama");
-            client.Timeout = _infiniteTimeout;
-            var messages = new object[] { new { role = "system", content = systemPrompt }, new { role = "user", content = userMessage } };
-            var timeout = requestTimeout ?? TimeSpan.FromMinutes(30);
-            using var tCts = new CancellationTokenSource(timeout);
-            using var lCts = CancellationTokenSource.CreateLinkedTokenSource(ct, tCts.Token);
-            var cfg3 = await LoadConfigAsync();
-            var reqBody = new { model, messages, stream = false, temperature = 0.0, max_tokens = maxTokens ?? cfg3.maxFileContextChars / 2 };
-            var httpContent = new StringContent(JsonSerializer.Serialize(reqBody), Encoding.UTF8, "application/json");
-            var resp = await client.PostAsync(baseUrl + "/v1/chat/completions", httpContent, lCts.Token);
-            var respText = await resp.Content.ReadAsStringAsync(lCts.Token);
-            var raw = ExtractLlmContent(respText);
-            if (string.IsNullOrWhiteSpace(raw)) return (respText, "Empty LLM response");
+            var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions") { Content = httpContent };
+            var resp = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            { var t2 = await resp.Content.ReadAsStringAsync(linkedCts.Token); return (t2, $"HTTP {resp.StatusCode}"); }
+            var stream = await resp.Content.ReadAsStreamAsync(linkedCts.Token);
+            var reader = new StreamReader(stream);
+            var sb = new StringBuilder();
+            while (true)
+            {
+                linkedCts.Token.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync().WaitAsync(linkedCts.Token);
+                if (line == null) break;
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (line.Contains("[DONE]")) break;
+                if (!line.StartsWith("data: ")) continue;
+                var data = line[6..].Trim();
+                if (string.IsNullOrWhiteSpace(data)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(data);
+                    if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+                    {
+                        var choice = choices[0];
+                        if (choice.TryGetProperty("delta", out var delta) && delta.TryGetProperty("content", out var content))
+                        {
+                            var token = content.GetString();
+                            if (!string.IsNullOrWhiteSpace(token))
+                            {
+                                if (emitSse) await SendSse(Response, "token", new { token }, ct);
+                                sb.Append(token);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+            var raw = sb.ToString();
+            if (string.IsNullOrWhiteSpace(raw)) return ("", "Empty LLM response");
             return (raw, null);
         }
         catch (TaskCanceledException) { return ("", "LLM request timed out"); }
         catch (Exception ex) { return ("", ex.Message); }
     }
-
     private static string ExtractLlmContent(string respText)
     {
         try
@@ -396,7 +387,6 @@ partial class AgentController
         catch { }
         return "";
     }
-
     private static AgentResponse? ParseAgentResponse(string raw)
     {
         var jsonStr = raw.Trim();
