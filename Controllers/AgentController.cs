@@ -671,9 +671,6 @@ public partial class AgentController : ControllerBase
             catch { }
         }
         var lineCount = fileContent.Split('\n').Length;
-        // Only excerpt if truly large — under the token budget, show full content and let
-        // the LLM locate its own anchor. We never use planner line numbers for anchoring
-        // because they are LLM guesses and are frequently wrong.
         var isLarge = fileContent.Length > cfg5.fileBodyTruncationChars;
         if (isLarge)
         {
@@ -865,7 +862,8 @@ public partial class AgentController : ControllerBase
             sb.AppendLine("  Three modes:");
             sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
-            sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"newCode\": [...]} — INSERT newCode BEFORE the matched code block (no insertAfter/replace field).");
+            sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
+            sb.AppendLine("     Semantics: insertAfter:false → replace (when replace is absent); replace:false → insertAfter (when insertAfter is absent); no fields → insertBefore.");
             sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
                              "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
             sb.AppendLine("  CRITICAL: newCode must contain ONLY the new HTML to insert. " +
@@ -1304,15 +1302,12 @@ public partial class AgentController : ControllerBase
                 var m = Regex.Match(rawTrimmed, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase);
                 if (m.Success) rawTrimmed = m.Groups[1].Value.Trim();
             }
-            // The LLM might emit multiple JSON objects (e.g. plan JSON followed by edit JSON).
-            // We need to find the one that contains edit fields.
             var jsonCandidates = ExtractAllJsonObjects(rawTrimmed);
             string? cleaned = null;
             JsonDocument? jDoc = null;
             foreach (var candidate in jsonCandidates)
             {
                 var c = RepairJsonNewlines(candidate);
-                // Fix LLM string concatenation hallucinations inside JSON arrays (e.g. "string1" + "string2")
                 c = Regex.Replace(c, @"""\s*\+\s*""", "");
                 try
                 {
@@ -1331,7 +1326,6 @@ public partial class AgentController : ControllerBase
             }
             if (jDoc == null)
             {
-                // Fallback to first object if no edit fields found
                 cleaned = ExtractFirstJsonObject(rawTrimmed);
                 cleaned = RepairJsonNewlines(cleaned);
                 cleaned = Regex.Replace(cleaned, @"""\s*\+\s*""", "");
@@ -1432,15 +1426,15 @@ public partial class AgentController : ControllerBase
                 {
                     newCodeStr = AgentUtilities.AutoFixPythonStatements(newCodeStr, relPath);
                     newCodeStr = AgentUtilities.CleanVerbatimStringEscapes(newCodeStr);
-                    var insertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl) && iaEl.GetBoolean();
-                    var replaceSection = jRoot.TryGetProperty("replace", out var rpEl) && rpEl.GetBoolean();
-                    // FORMAT D: handle replace, insertAfter, insertBefore for HTML
+                    var hasInsertAfter = jRoot.TryGetProperty("insertAfter", out var iaEl);
+                    var insertAfter = hasInsertAfter && iaEl.GetBoolean();
+                    var hasReplace = jRoot.TryGetProperty("replace", out var rpEl);
+                    var replaceSection = hasReplace && rpEl.GetBoolean();
                     if (string.Equals(targetType, "html", StringComparison.OrdinalIgnoreCase))
                     {
                         if (!System.IO.File.Exists(fullPath))
                             return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                         var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                        // Defensive: strip any leading </div> lines from newCode (LLM sometimes includes parent closing tags)
                         var rawNewCode = newCodeStr;
                         newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
                         if (newCodeStr != rawNewCode)
@@ -1448,7 +1442,6 @@ public partial class AgentController : ControllerBase
                             await EmitLog(emitSse, "warn",
                                 $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
                         }
-                        // Reject newCode that after stripping contains no real content (only closing tags)
                         if (string.IsNullOrWhiteSpace(newCodeStr) || !newCodeStr.Contains('<', StringComparison.Ordinal))
                         {
                             await EmitLog(emitSse, "warn",
@@ -1456,11 +1449,10 @@ public partial class AgentController : ControllerBase
                             return (null, null, false, null, false,
                                 $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
                         }
-                        // Check if the newCode already exists in the file to prevent duplication
                         if (sourceText.Contains(newCodeStr, StringComparison.OrdinalIgnoreCase))
                         {
                             await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
-                            return (null, null, false, null, true, null, false); // alreadyDone = true
+                            return (null, null, false, null, true, null, false); 
                         }
                         var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, !replaceSection);
                         if (matchedBlock == null)
@@ -1473,18 +1465,15 @@ public partial class AgentController : ControllerBase
                         }
                         var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
                         var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
-                        if (replaceSection)
+                        if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                         {
                             return (matchedBlock, newCodeStr, false, null, false, null, true);
                         }
-                        else if (insertAfter)
+                        if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                         {
                             return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
                         }
-                        else
-                        {
-                            return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
-                        }
+                        return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
                     }
                     if (insertAfter)
                     {
@@ -1554,7 +1543,6 @@ public partial class AgentController : ControllerBase
                     }
                     else
                     {
-                        // Match both patterns: "Add method FooName" AND "Add FooName method" AND "Add FooName method that..."
                         var addMethodMatch = Regex.Match(step.Change ?? "", @"Add\s+(?:a\s+)?(?:new\s+)?method\s+(\w+)", RegexOptions.IgnoreCase);
                         if (!addMethodMatch.Success)
                             addMethodMatch = Regex.Match(step.Change ?? "", @"(?:Add|Create|Implement|Insert|Define)\s+(?:a\s+)?(?:new\s+)?(\w+)\s+method\b", RegexOptions.IgnoreCase);
@@ -1563,7 +1551,6 @@ public partial class AgentController : ControllerBase
                         if (addMethodMatch.Success)
                         {
                             var requestedMethodName = addMethodMatch.Groups[1].Value;
-                            // Skip generic words that aren't method names
                             if (!string.IsNullOrWhiteSpace(requestedMethodName) &&
                                 requestedMethodName.Length > 2 &&
                                 !string.Equals(requestedMethodName, "method", StringComparison.OrdinalIgnoreCase) &&
@@ -1649,9 +1636,6 @@ public partial class AgentController : ControllerBase
                                                    string.Equals(ext, ".tsx", StringComparison.OrdinalIgnoreCase) ||
                                                    string.Equals(ext, ".js", StringComparison.OrdinalIgnoreCase) ||
                                                    string.Equals(ext, ".jsx", StringComparison.OrdinalIgnoreCase);
-                                // For TS/JS, the C#-targeted MethodDeclRegex incorrectly matches
-                                // expressions like `new Date()` — treat as no match to rely on
-                                // the hasOwnSignature heuristic below.
                                 Match? newMethodMatch = null;
                                 if (!isTypeScript)
                                     newMethodMatch = MethodDeclRegex.Match(newCodeStr);
@@ -1661,9 +1645,6 @@ public partial class AgentController : ControllerBase
                                     if (!string.IsNullOrWhiteSpace(newMethodName) &&
                                         !string.Equals(newMethodName, targetName, StringComparison.Ordinal))
                                     {
-                                        // When insertAfter is false, the LLM intends to REPLACE the target method.
-                                        // If the newCode names a different method, it's an error — they should use
-                                        // insertAfter:true for additions, or match the target name for replacements.
                                         if (!insertAfter)
                                         {
                                             return (null, null, false, null, false,
@@ -1700,8 +1681,6 @@ public partial class AgentController : ControllerBase
                                         return (astOldStr, newStr, false, null, false, null, true);
                                     }
                                 }
-                                // If newCode is body-only (no method/function declaration) when replacing,
-                                // wrap it with the old method's signature to avoid erasing the declaration
                                 if (newMethodMatch?.Success != true)
                                 {
                                     var hasOwnSignature = newCodeStr.TrimStart().StartsWith(targetName + "(", StringComparison.Ordinal) ||
@@ -1766,7 +1745,6 @@ public partial class AgentController : ControllerBase
                 }
                 oldStr = jRoot.TryGetProperty("oldString", out var osEl) ? ResolveString(osEl) : null;
                 newStr = jRoot.TryGetProperty("newString", out var nsEl) ? ResolveString(nsEl) : null;
-                // When forcedOldString is set, ALWAYS use it — the LLM was told to only provide newString
                 if (!string.IsNullOrWhiteSpace(forcedOldString))
                     oldStr = forcedOldString;
                 if (!string.IsNullOrWhiteSpace(oldStr))
@@ -1859,7 +1837,6 @@ public partial class AgentController : ControllerBase
                         "oldString MUST be the literal 1-3 lines of code from the file, copied character-for-character." +
                         snippet, false);
                 }
-                // Skip the line-length limit when forcedOldString is set (AST-resolved method source)
                 if (string.IsNullOrWhiteSpace(forcedOldString) && !string.IsNullOrWhiteSpace(oldStr) && oldStr.Split('\n').Length > 15)
                 {
                     return (null, null, false, null, false,
@@ -1932,7 +1909,7 @@ public partial class AgentController : ControllerBase
             if (ttMatch.Success && tnMatch.Success)
             {
                 var tt = ttMatch.Groups[1].Value;
-                var tn = AgentUtilities.UnescapeJsonString(tnMatch.Groups[1].Value); // UNESCAPE
+                var tn = AgentUtilities.UnescapeJsonString(tnMatch.Groups[1].Value); 
                 var ncIdx = raw.IndexOf("\"newCode\"", StringComparison.OrdinalIgnoreCase);
                 if (ncIdx >= 0)
                 {
@@ -1953,7 +1930,6 @@ public partial class AgentController : ControllerBase
                                     var lines = ExtractQuotedStrings(afterKey[1..i]);
                                     if (lines.Count > 0)
                                     {
-                                        // UNESCAPE each line
                                         lines = lines.Select(l => AgentUtilities.UnescapeJsonString(l)).ToList();
                                         newCodeStr = string.Join("\n", lines);
                                     }
@@ -1975,15 +1951,17 @@ public partial class AgentController : ControllerBase
                                 { newCodeStr = content[..i]; break; }
                             }
                         }
-                        if (newCodeStr != null) newCodeStr = AgentUtilities.UnescapeJsonString(newCodeStr); // UNESCAPE
+                        if (newCodeStr != null) newCodeStr = AgentUtilities.UnescapeJsonString(newCodeStr); 
                     }
                     if (!string.IsNullOrWhiteSpace(tt) && !string.IsNullOrWhiteSpace(tn) && newCodeStr != null)
                     {
-                        // Fix LLM string concatenation hallucinations inside JSON arrays
                         newCodeStr = Regex.Replace(newCodeStr, @"""\s*\+\s*""", "");
-                        var insertAfter = Regex.Match(raw, @"""insertAfter""\s*:\s*true", RegexOptions.IgnoreCase).Success;
-                        var replaceSection = Regex.Match(raw, @"""replace""\s*:\s*true", RegexOptions.IgnoreCase).Success;
-                        // FORMAT D: handle replace, insertAfter, insertBefore for HTML
+                        var rawInsertAfterMatch = Regex.Match(raw, @"""insertAfter""\s*:\s*(true|false)", RegexOptions.IgnoreCase);
+                        var hasInsertAfter = rawInsertAfterMatch.Success;
+                        var insertAfter = rawInsertAfterMatch.Success && string.Equals(rawInsertAfterMatch.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                        var rawReplaceMatch = Regex.Match(raw, @"""replace""\s*:\s*(true|false)", RegexOptions.IgnoreCase);
+                        var hasReplace = rawReplaceMatch.Success;
+                        var replaceSection = rawReplaceMatch.Success && string.Equals(rawReplaceMatch.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
                         if (string.Equals(tt, "html", StringComparison.OrdinalIgnoreCase))
                         {
                             if (!System.IO.File.Exists(fullPath))
@@ -2004,18 +1982,15 @@ public partial class AgentController : ControllerBase
                             }
                             var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
                             var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
-                            if (replaceSection)
+                            if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                             {
                                 return (matchedBlock, newCodeStr, false, null, false, null, true);
                             }
-                            else if (insertAfter)
+                            if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                             {
                                 return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
                             }
-                            else
-                            {
-                                return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
-                            }
+                            return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
                         }
                         if (insertAfter)
                         {
@@ -3811,8 +3786,6 @@ emitSse, ct);
         if (System.IO.File.Exists(fullPath))
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-            // Phase 1: AST-based resolution (for TS/JS files with known targetSymbol)
-            // Skips fragile line number guessing by finding the exact method source from the syntax tree
             if (string.IsNullOrWhiteSpace(planOldStr) &&
                 AstCodeEditorService.IsSupportedExtension(fileExt))
             {
@@ -3822,7 +3795,6 @@ emitSse, ct);
                         preExtractContent, exploration.TargetSymbol, fileExt);
                     if (astOldStr != null && astStartLine > 0)
                     {
-                        // Verify the resolved body actually contains the target symbol
                         if (!astOldStr.Contains(exploration.TargetSymbol, StringComparison.Ordinal))
                         {
                             await EmitLog(emitSse, "warn",
@@ -3851,7 +3823,6 @@ emitSse, ct);
                 }
             }
         }
-        // For HTML files, clear any plan-provided oldString — FORMAT D must be used instead
         if (HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(planOldStr))
         {
             planOldStr = null;
@@ -3864,7 +3835,7 @@ emitSse, ct);
         {
             var preExtractContent = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
             causalContext = await RunCausalReasoningAsync(prompt ?? step.Change ?? "", relPath, preExtractContent, emitSse, ct);
-        } 
+        }
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
             if (attempt > 0 && !string.IsNullOrWhiteSpace(preEditContent))
@@ -3884,8 +3855,6 @@ emitSse, ct);
                 {
                     await EmitLog(emitSse, "info",
                         $"AST-resolved oldString is set — making focused LLM call for replacement code only", ct: ct);
-                    // Make a focused LLM call that ONLY asks for the new replacement code,
-                    // bypassing ResolveEditForStep entirely to avoid format-confusion issues.
                     var replacePrompt = new StringBuilder();
                     replacePrompt.AppendLine("You are replacing the following method/function in the file. Output ONLY the replacement code — no JSON wrapper, no explanation, no markdown.");
                     replacePrompt.AppendLine();
@@ -3910,12 +3879,10 @@ emitSse, ct);
                     else
                     {
                         var cleaned = rawReplacement.Trim();
-                        // Strip code fences if the model wrapped output anyway
                         cleaned = Regex.Replace(cleaned, @"^```[a-zA-Z]*\s*", "");
                         cleaned = Regex.Replace(cleaned, @"\s*```$", "");
                         oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
                         newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
-                        // Format CSS replacement code via Prettier before applying
                         var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
                         if (CodeFormatterService.CanFormat(fmtExt))
                         {
@@ -3964,7 +3931,6 @@ emitSse, ct);
                     var newLen = newStr?.Length ?? 0;
                     await EmitLog(emitSse, "info",
                         $"  LLM produced: format={fmt}, old={oldLen}ch, new={newLen}ch", ct: ct);
-                    // Reject oldString/newString for HTML files — FORMAT D is required
                     if (!fromFormatC && !alreadyDone && HtmlDomEditor.IsHtmlDomFile(relPath) && !string.IsNullOrWhiteSpace(newStr))
                     {
                         var err = "HTML files: use FORMAT D (targetType=\"html\", targetName, insertAfter, newCode). Do NOT use oldString/newString.";
@@ -4054,7 +4020,7 @@ emitSse, ct);
                     fullContent, step, fullPath, relPath,
                     projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
                 return stepIndex;
-            } 
+            }
             var fileContent = System.IO.File.Exists(fullPath)
                 ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct)
                 : string.Empty;
@@ -4063,9 +4029,9 @@ emitSse, ct);
             string? matchError = null;
             string? snippet = null;
             bool bypassVerify = false;
+            bool wasFormattedByLib = false;
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
-            // Handle batch edits (multiple oldString/newString pairs in one step)
             if (step.Edits is { Count: > 0 } && !replaced)
             {
                 var batchContent = fileContent;
@@ -4075,9 +4041,9 @@ emitSse, ct);
                     if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
                     var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
                     var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
-                    var (r, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
+                    var (hasReplaced, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
                         edit.LineNumber > 0 ? edit.LineNumber : step.LineNumber, step.Change);
-                    if (!r)
+                    if (!hasReplaced)
                     {
                         await EmitLog(emitSse, "warn", $"Batch sub-edit failed: {err}", ct: ct);
                         allApplied = false;
@@ -4161,15 +4127,13 @@ emitSse, ct);
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
-                // Format the replacement snippet via library before applying
                 if (!string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
                 {
                     var before = newStr;
                     newStr = await CodeFormatterService.FormatAsync(relPath, newStr, ct);
                     if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                     {
-                        // Re-indent the formatted snippet to match oldStr's base indentation.
-                        // Prettier normalizes to 2-space relative indent — add back the absolute indent.
+                        wasFormattedByLib = true;
                         var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
                         if (oldFirstLine != null)
                         {
@@ -4224,6 +4188,8 @@ emitSse, ct);
                     var newLinesArr = string.IsNullOrWhiteSpace(normNew)
                         ? new List<string>()
                         : normNew.Split('\n').ToList();
+                    while (newLinesArr.Count > 0 && string.IsNullOrWhiteSpace(newLinesArr[^1]))
+                        newLinesArr.RemoveAt(newLinesArr.Count - 1);
                     int matchIdx = -1;
                     var targetLineIdx = step.LineNumber > 0 ? step.LineNumber - 1 : -1;
                     var allMatches = new List<int>();
@@ -4309,7 +4275,7 @@ emitSse, ct);
                                 finalNewLines.Add(baseIndent + relativeIndent + nl.TrimStart());
                             }
                             var rawNew = string.Join("\n", finalNewLines);
-                            if (IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
+                            if (!wasFormattedByLib && IsHtmlLikeContent(rawNew) && finalNewLines.Count > 5)
                             {
                                 var stripped = finalNewLines
                                     .Select(l => string.IsNullOrWhiteSpace(l) ? "" : l.TrimStart())
@@ -4319,7 +4285,7 @@ emitSse, ct);
                                 finalNewLines = fixedHtml.Split('\n').ToList();
                             }
                             var rawAfter = string.Join("\n", finalNewLines);
-                            if ((rawAfter.Contains('{') || rawAfter.Contains('}')) &&
+                            if (!wasFormattedByLib && (rawAfter.Contains('{') || rawAfter.Contains('}')) &&
                                 !IsHtmlLikeContent(rawAfter) && finalNewLines.Count > 2)
                             {
                                 var fixedBraces = AgentUtilities.AutoIndentFromFile(
@@ -4838,7 +4804,11 @@ emitSse, ct);
             }
             var cssExt = Path.GetExtension(relPath).ToLowerInvariant();
             if (cssExt == ".css" || cssExt == ".scss" || cssExt == ".less")
+            {
                 newContent = LlmCssCleaner.Clean(newContent);
+                if (!string.IsNullOrWhiteSpace(newStr))
+                    newStr = LlmCssCleaner.Clean(newStr);
+            }
             preEditContent ??= fileContent;
             await SaveEditWithUndoAsync(fullPath, newContent, relPath, projectRoot, preEditContent, ct);
             if (fileExt == ".cs" && !string.IsNullOrWhiteSpace(newStr))
@@ -4902,7 +4872,6 @@ emitSse, ct);
                         .ToList();
                     if (diagnostics.Count > 0)
                     {
-                        // Count pre-existing errors to determine if THIS edit introduced new ones
                         var preEditErrorCount = 0;
                         if (!string.IsNullOrWhiteSpace(preEditContent))
                         {
@@ -4918,7 +4887,6 @@ emitSse, ct);
                                 .ToList();
                             if (diagnostics.Count > preEditErrorCount)
                             {
-                                // ── BLOCK: The edit INTRODUCED new syntax errors — revert and retry ──
                                 await SaveEditWithUndoAsync(fullPath, preEditContent, relPath, projectRoot, preEditContent, ct);
                                 var roslynErr =
                                     $"ROSLYN SYNTAX ERRORS INTRODUCED — {diagnostics.Count} error(s) in {relPath} after edit " +
@@ -4938,11 +4906,10 @@ emitSse, ct);
                                     StringComparison.Ordinal)) stuckCount++;
                                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                                 if (stuckCount >= 2) goto RecordFailure;
-                                continue; // ← retry the edit
+                                continue; 
                             }
                             else
                             {
-                                // Pre-existing errors — log but don't block
                                 await EmitLog(emitSse, "warn",
                                     $"Roslyn syntax errors in {relPath} after edit ({diagnostics.Count} found, {preEditErrorCount} pre-existing — not blocking):" +
                                     Environment.NewLine + string.Join(Environment.NewLine, errorLines), ct: ct);
@@ -5059,13 +5026,12 @@ emitSse, ct);
                     reasons.Add(reason);
                     scores.Add(score);
                     needsExtraStepFlags.Add(needsEs);
-                    // Early consensus: if 2 rounds agree on needsExtraStep, trust it and stop
                     if (r >= 1)
                     {
                         var keep2 = decisions.Take(r + 1).Count(x => x == "keep");
                         var es2 = needsExtraStepFlags.Take(r + 1).Count(f => f);
-                        if (keep2 >= 2 && es2 == 0) break;          // 2 keeps, no extra step needed
-                        if (es2 >= 2) break;                        // 2 say extra step needed
+                        if (keep2 >= 2 && es2 == 0) break;          
+                        if (es2 >= 2) break;                        
                     }
                 }
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
@@ -6334,7 +6300,7 @@ emitSse, ct);
         }
         var sysPrompt = BuildVerifyEditUserPrompt();
         var userMsg =
-            $"### TASK PROMPT ###\n{originalPrompt}\n\n" + 
+            $"### TASK PROMPT ###\n{originalPrompt}\n\n" +
             (string.IsNullOrWhiteSpace(causalContext) ? "" : causalContext + "\n\n") +
             $"### STEP DESCRIPTION ###\n{stepChange}\n\n" +
             $"### FILE ###\n{relPath}\n\n" +
@@ -6596,11 +6562,6 @@ emitSse, ct);
                    "These lines protect against redundant work or null derefs. PRESERVE them in newString verbatim " +
                    "(only the property values you actually need to change should be edited, not the guard logic).";
         }
-        // Signature-drift checks are intentionally disabled here.
-        // In this resolver flow they are too aggressive: the model can emit a replacement
-        // that swaps the declaration while still being the correct body-focused edit candidate,
-        // and the guard aborts the edit before the post-write verifier can decide whether the
-        // change is valid. Let the write proceed and use the verification layer to judge it.
         return null;
     }
     private static string? CheckMethodExistsInFile(string fileContent, string newStr)
@@ -7263,8 +7224,6 @@ emitSse, ct);
                 {
                     if (item is not JsonObject cardObj || cardObj["id"]?.GetValue<string>() != cardId)
                         continue;
-                    // Build a lookup of existing items' done status by file+change signature.
-                    // This preserves completion flags across replan/reset cycles.
                     var existingItems = cardObj["_plan"]?.AsObject()?["items"] as JsonArray;
                     var doneLookup = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     if (existingItems != null)
@@ -7951,6 +7910,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 }
                 consecutiveSlotFailures = 0;
+                var isDuplicate = false;
+                foreach (var existing in planSoFar)
+                {
+                    if (existing.File == "_noop") continue;
+                    var checks = 0;
+                    if (string.Equals(existing.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase)) checks++;
+                    if (string.Equals(existing.Change, proposal.Step.Change, StringComparison.Ordinal) ||
+                        (existing.Change?.Length > 10 && proposal.Step.Change?.Length > 10 &&
+                         (existing.Change.Contains(proposal.Step.Change) || proposal.Step.Change.Contains(existing.Change)))) checks++;
+                    if ((!string.IsNullOrEmpty(existing.OldString) && string.Equals(existing.OldString, proposal.Step.OldString, StringComparison.Ordinal)) ||
+                        (!string.IsNullOrEmpty(existing.NewString) && string.Equals(existing.NewString, proposal.Step.NewString, StringComparison.Ordinal)) ||
+                        (!string.IsNullOrEmpty(existing.TargetSymbol) && string.Equals(existing.TargetSymbol, proposal.Step.TargetSymbol, StringComparison.Ordinal))) checks++;
+                    if (checks >= 2) { isDuplicate = true; break; }
+                }
+                if (isDuplicate)
+                {
+                    await EmitLog(emitSse, "info",
+                        $"Plan complete — duplicate step proposed: [{proposal.Step.File}] {proposal.Step.Change} — nothing new to add", ct: ct);
+                    break;
+                }
                 planSoFar.Add(proposal.Step);
                 rejectionFeedback.Clear();
                 regenAttempts = 0;
@@ -7995,11 +7974,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         };
         return (plan, discoveryContext);
     }
-    /// <summary>
-    /// Propose ONE atomic step → execute it → verify → refresh ground truth → decide whether
-    /// another step is genuinely needed. Never plans ahead of what has actually been executed,
-    /// so it can't hallucinate a runaway multi-step plan.
-    /// </summary>
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext)> RunInterleavedPlanExecutionLoop(
         string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
@@ -8012,7 +7986,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var thinkingLog = new StringBuilder();
         var regenAttempts = 0;
         var consecutiveSlotFailures = 0;
-        if (emitSse) {
+        if (emitSse)
+        {
             await SendSse(Response, "plan", new
             {
                 thinking = "",
@@ -8024,7 +7999,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         for (var turn = 0; turn < MAX_INCREMENTAL_STEPS; turn++)
         {
             ct.ThrowIfCancellationRequested();
-            if (emitSse) {
+            if (emitSse)
+            {
                 await SendSse(Response, "phase", new { message = $"Step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
@@ -8090,10 +8066,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
             if (proposal.Step.File != null && planSoFar.Count > 0)
             {
-                // ── STEP IMMUTABILITY: Once a step is DONE, it cannot be revised or repeated ──
                 var duplicateOf = planSoFar.FirstOrDefault(s =>
                     string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
-                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35); // lowered from 0.5
+                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35); 
                 if (duplicateOf != null)
                 {
                     rejectionFeedback.Add(
@@ -8137,251 +8112,259 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             regenAttempts = 0;
             rejectionFeedback.Clear();
             var stepToRun = proposal.Step;
-            planSoFar.Add(stepToRun);
-            if (!string.IsNullOrWhiteSpace(proposal.Thinking))
-                thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
-            await EmitLog(emitSse, "info",
-                $"▶ Executing atomic step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
-            if (emitSse)
-                await SendSse(Response, "plan", new
-                {
-                    thinking = thinkingLog.ToString(),
-                    summary = $"Executed {planSoFar.Count - 1} step(s) — running step {planSoFar.Count}",
-                    items = planSoFar.Select((s, idx) => new
-                    {
-                        File = s.File,
-                        Change = s.Change,
-                        Line = s.LineNumber,
-                        OldString = s.OldString,
-                        NewString = s.NewString,
-                        done = idx < planSoFar.Count - 1
-                    }).ToList(),
-                    incremental = true
-                }, ct);
-            await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
-            var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { stepToRun }, Summary = stepToRun.Change, Score = 90 };
-            var beforeCount = allResults.Count;
-            try
+            if (stepToRun != null && planSoFar.Any(s =>
+                s.File != "_noop" &&
+                string.Equals(s.File, stepToRun.File, StringComparison.OrdinalIgnoreCase) &&
+                (string.Equals(s.Change, stepToRun.Change, StringComparison.Ordinal) ||
+                 (s.Change?.Length > 10 && stepToRun.Change?.Length > 10 &&
+                  (s.Change.Contains(stepToRun.Change) || stepToRun.Change.Contains(s.Change)))) &&
+                ((!string.IsNullOrEmpty(s.OldString) && string.Equals(s.OldString, stepToRun.OldString, StringComparison.Ordinal)) ||
+                 (!string.IsNullOrEmpty(s.NewString) && string.Equals(s.NewString, stepToRun.NewString, StringComparison.Ordinal)) ||
+                 (!string.IsNullOrEmpty(s.TargetSymbol) && string.Equals(s.TargetSymbol, stepToRun.TargetSymbol, StringComparison.Ordinal)))))
             {
-                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
-                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                    replanBudget: new[] { 0 });
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                await EmitLog(emitSse, "error",
-                    $"⛔ Interleaved execution halted — step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                await EmitLog(emitSse, "info",
+                    $"Plan complete — duplicate step in interleaved execution: [{stepToRun.File}] {stepToRun.Change} — nothing new to add",
+                    ct: ct);
                 break;
             }
-            var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
-            var globalPlanIdx = planSoFar.Count - 1;
-            if (globalPlanIdx > 0)
+            if (stepToRun != null)
             {
-                foreach (var r in newResults)
-                {
-                    if (r.ContainsKey("planItemIndex"))
-                        r["planItemIndex"] = globalPlanIdx;
-                }
-                await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
-            }
-            if (singleStepPlan.Plan.Count > 1)
-            {
-                var chainIntact = true;
-                var anyNestedGeneration = false;
-                for (var si = 1; si < singleStepPlan.Plan.Count; si++)
-                {
-                    var synthStep = singleStepPlan.Plan[si];
-                    planSoFar.Add(synthStep);
-                    await EmitLog(emitSse, "info",
-                        $"▶ Executing auto-generated follow-up step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
-                    if (emitSse)
-                        await SendSse(Response, "plan", new
+                planSoFar.Add(stepToRun);
+                if (!string.IsNullOrWhiteSpace(proposal.Thinking))
+                    thinkingLog.AppendLine($"Step {planSoFar.Count}: {proposal.Thinking}");
+                await EmitLog(emitSse, "info",
+                    $"▶ Executing atomic step {planSoFar.Count} — [{stepToRun.File}] {stepToRun.Change}", ct: ct);
+                if (emitSse)
+                    await SendSse(Response, "plan", new
+                    {
+                        thinking = thinkingLog.ToString(),
+                        summary = $"Executed {planSoFar.Count - 1} step(s) — running step {planSoFar.Count}",
+                        items = planSoFar.Select((s, idx) => new
                         {
-                            thinking = thinkingLog.ToString(),
-                            summary = $"Executed {planSoFar.Count - 1} step(s) — running auto step {planSoFar.Count}",
-                            items = planSoFar.Select((s, idx) => new
-                            {
-                                File = s.File,
-                                Change = s.Change,
-                                Line = s.LineNumber,
-                                OldString = s.OldString,
-                                NewString = s.NewString,
-                                done = idx < planSoFar.Count - 1
-                            }).ToList(),
-                            incremental = true
-                        }, ct);
-                    await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                        summary: $"Interleaved execution — {planSoFar.Count} step(s) so far (incl. auto)", score: 90);
-                    var synthPlan = new AgentPlan
-                    { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
-                    var synthBefore = allResults.Count;
-                    try
-                    {
-                        await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
-                            steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                            replanBudget: new[] { 0 });
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        await EmitLog(emitSse, "error",
-                            $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
-                        chainIntact = false;
-                        break;
-                    }
-                    var synthGlobalIdx = planSoFar.Count - 1;
-                    if (synthGlobalIdx > 0)
-                    {
-                        var synthResults = allResults.Skip(synthBefore).OfType<Dictionary<string, object?>>().ToList();
-                        foreach (var r in synthResults)
-                        {
-                            if (r.ContainsKey("planItemIndex"))
-                                r["planItemIndex"] = synthGlobalIdx;
-                        }
-                        await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
-                    }
-                    if (synthPlan.Plan.Count > 1)
-                        anyNestedGeneration = true;
-                    discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
-                }
-                if (chainIntact && !anyNestedGeneration)
+                            File = s.File,
+                            Change = s.Change,
+                            Line = s.LineNumber,
+                            OldString = s.OldString,
+                            NewString = s.NewString,
+                            done = idx < planSoFar.Count - 1
+                        }).ToList(),
+                        incremental = true
+                    }, ct);
+                await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                    summary: $"Interleaved execution — {planSoFar.Count} step(s) so far", score: 90);
+                var singleStepPlan = new AgentPlan { Plan = new List<PlanStep> { stepToRun }, Summary = stepToRun.Change, Score = 90 };
+                var beforeCount = allResults.Count;
+                try
                 {
-                    await EmitLog(emitSse, "info",
-                        "Auto-generated follow-up chain exhausted — plan complete without further LLM round-trip", ct: ct);
+                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
+                        steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                        replanBudget: new[] { 0 });
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    await EmitLog(emitSse, "error",
+                        $"⛔ Interleaved execution halted — step {planSoFar.Count} threw: {ex.Message}", ct: ct);
                     break;
                 }
-            }
-            var touchedPaths = newResults
-                .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
-                .Select(r => r.GetValueOrDefault("path")?.ToString())
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            foreach (var touched in touchedPaths)
-                discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
-            var newEditLogLines = newResults
-                .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
-                            r.GetValueOrDefault("status")?.ToString() != "skipped")
-                .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("editAction") ?? "modified"}")
-                .ToList();
-            if (newEditLogLines.Count > 0)
-            {
-                var fullLog = "### EDIT LOG (changes applied — do NOT repeat them) ###\n" +
-                    string.Join("\n", newEditLogLines) + "\n";
-                if (!discoveryContext.Contains(fullLog))
-                    discoveryContext += "\n" + fullLog;
-            }
-            var editLog = newResults
-    .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
-    .Select(r => $"  {r.GetValueOrDefault("path")} — " +
-        (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
-    .ToList();
-            if (editLog.Count > 0)
-            {
-                var logSection = "\n### EDIT LOG (changes applied in previous steps) ###\n" +
-                    string.Join("\n", editLog) + "\n";
-                discoveryContext += logSection;
-            }
-            var hadFailure = newResults.Any(r =>
-                r.GetValueOrDefault("status")?.ToString() == "error" ||
-                r.GetValueOrDefault("type")?.ToString() == "plan_halted");
-            if (hadFailure)
-            {
-                await EmitLog(emitSse, "warn",
-                    $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
-                    "so post-execution verification can assess what genuinely remains.", ct: ct);
-                break;
-            }
-            // ── Check if the verifier flagged needsExtraStep ──
-            // If so, use the verifier's reason to propose the next step DIRECTLY,
-            // skipping the planner LLM entirely. The verifier already knows what's missing.
-            var needsExtraResult = newResults
-                .OfType<Dictionary<string, object?>>()
-                .FirstOrDefault(r => r.GetValueOrDefault("needsExtraStep") is true);
-            if (needsExtraResult != null && !hadFailure)
-            {
-                var extraReason = needsExtraResult.GetValueOrDefault("extraStepReason")?.ToString();
-                var extraFile = needsExtraResult.GetValueOrDefault("extraStepFile")?.ToString()
-                                ?? needsExtraResult.GetValueOrDefault("path")?.ToString()
-                                ?? stepToRun.File;
-                // Extract the missing method/symbol name from the verifier's reason
-                // e.g. "added button with ng-click calling missing method (vm.foo)" → "vm.foo"
-                var missingSymbolMatch = Regex.Match(extraReason ?? "",
-                    @"(?:missing\s+(?:method|property|function)\s*)[\(`]?(?:vm\.)?(\w+)[\)`]?");
-                var missingSymbol = missingSymbolMatch.Success ? missingSymbolMatch.Groups[1].Value : null;
-                if (!string.IsNullOrWhiteSpace(missingSymbol))
+                var newResults = allResults.Skip(beforeCount).OfType<Dictionary<string, object?>>().ToList();
+                var globalPlanIdx = planSoFar.Count - 1;
+                if (globalPlanIdx > 0)
                 {
-                    // Skip known built-in DOM/event/JS APIs that don't need component methods
-                    var knownBuiltIns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    foreach (var r in newResults)
+                    {
+                        if (r.ContainsKey("planItemIndex"))
+                            r["planItemIndex"] = globalPlanIdx;
+                    }
+                    await PersistBoardDataPlanStepAsync(cardId, globalPlanIdx, emitSse, ct);
+                }
+                if (singleStepPlan.Plan.Count > 1)
+                {
+                    var chainIntact = true;
+                    var anyNestedGeneration = false;
+                    for (var si = 1; si < singleStepPlan.Plan.Count; si++)
+                    {
+                        var synthStep = singleStepPlan.Plan[si];
+                        planSoFar.Add(synthStep);
+                        await EmitLog(emitSse, "info",
+                            $"▶ Executing auto-generated follow-up step {planSoFar.Count} — [{synthStep.File}] {synthStep.Change}", ct: ct);
+                        if (emitSse)
+                            await SendSse(Response, "plan", new
+                            {
+                                thinking = thinkingLog.ToString(),
+                                summary = $"Executed {planSoFar.Count - 1} step(s) — running auto step {planSoFar.Count}",
+                                items = planSoFar.Select((s, idx) => new
+                                {
+                                    File = s.File,
+                                    Change = s.Change,
+                                    Line = s.LineNumber,
+                                    OldString = s.OldString,
+                                    NewString = s.NewString,
+                                    done = idx < planSoFar.Count - 1
+                                }).ToList(),
+                                incremental = true
+                            }, ct);
+                        await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                            summary: $"Interleaved execution — {planSoFar.Count} step(s) so far (incl. auto)", score: 90);
+                        var synthPlan = new AgentPlan
+                        { Plan = new List<PlanStep> { synthStep }, Summary = synthStep.Change, Score = 90 };
+                        var synthBefore = allResults.Count;
+                        try
+                        {
+                            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
+                                steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                                replanBudget: new[] { 0 });
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            await EmitLog(emitSse, "error",
+                                $"⛔ Auto-generated step {planSoFar.Count} threw: {ex.Message}", ct: ct);
+                            chainIntact = false;
+                            break;
+                        }
+                        var synthGlobalIdx = planSoFar.Count - 1;
+                        if (synthGlobalIdx > 0)
+                        {
+                            var synthResults = allResults.Skip(synthBefore).OfType<Dictionary<string, object?>>().ToList();
+                            foreach (var r in synthResults)
+                            {
+                                if (r.ContainsKey("planItemIndex"))
+                                    r["planItemIndex"] = synthGlobalIdx;
+                            }
+                            await PersistBoardDataPlanStepAsync(cardId, synthGlobalIdx, emitSse, ct);
+                        }
+                        if (synthPlan.Plan.Count > 1)
+                            anyNestedGeneration = true;
+                        discoveryContext = await RefreshFileInDiscoveryContext(synthStep.File, discoveryContext, projectRoot, ct);
+                    }
+                    if (chainIntact && !anyNestedGeneration)
+                    {
+                        await EmitLog(emitSse, "info",
+                            "Auto-generated follow-up chain exhausted — plan complete without further LLM round-trip", ct: ct);
+                        break;
+                    }
+                }
+                var touchedPaths = newResults
+                    .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                    .Select(r => r.GetValueOrDefault("path")?.ToString())
+                    .Where(p => !string.IsNullOrWhiteSpace(p))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                foreach (var touched in touchedPaths)
+                    discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+                var newEditLogLines = newResults
+                    .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit" &&
+                                r.GetValueOrDefault("status")?.ToString() != "skipped")
+                    .Select(r => $"  · {r.GetValueOrDefault("path")}: {r.GetValueOrDefault("editAction") ?? "modified"}")
+                    .ToList();
+                if (newEditLogLines.Count > 0)
+                {
+                    var fullLog = "### EDIT LOG (changes applied — do NOT repeat them) ###\n" +
+                        string.Join("\n", newEditLogLines) + "\n";
+                    if (!discoveryContext.Contains(fullLog))
+                        discoveryContext += "\n" + fullLog;
+                }
+                var editLog = newResults
+        .Where(r => r.GetValueOrDefault("type")?.ToString() == "edit")
+        .Select(r => $"  {r.GetValueOrDefault("path")} — " +
+            (r.GetValueOrDefault("editAction")?.ToString() ?? "modified"))
+        .ToList();
+                if (editLog.Count > 0)
+                {
+                    var logSection = "\n### EDIT LOG (changes applied in previous steps) ###\n" +
+                        string.Join("\n", editLog) + "\n";
+                    discoveryContext += logSection;
+                }
+                var hadFailure = newResults.Any(r =>
+                    r.GetValueOrDefault("status")?.ToString() == "error" ||
+                    r.GetValueOrDefault("type")?.ToString() == "plan_halted");
+                if (hadFailure)
+                {
+                    await EmitLog(emitSse, "warn",
+                        $"Step {planSoFar.Count} did not complete successfully — stopping interleaved execution here " +
+                        "so post-execution verification can assess what genuinely remains.", ct: ct);
+                    break;
+                }
+                var needsExtraResult = newResults
+                    .OfType<Dictionary<string, object?>>()
+                    .FirstOrDefault(r => r.GetValueOrDefault("needsExtraStep") is true);
+                if (needsExtraResult != null && !hadFailure)
+                {
+                    var extraReason = needsExtraResult.GetValueOrDefault("extraStepReason")?.ToString();
+                    var extraFile = needsExtraResult.GetValueOrDefault("extraStepFile")?.ToString()
+                                    ?? needsExtraResult.GetValueOrDefault("path")?.ToString()
+                                    ?? stepToRun.File;
+                    var missingSymbolMatch = Regex.Match(extraReason ?? "",
+                        @"(?:missing\s+(?:method|property|function)\s*)[\(`]?(?:vm\.)?(\w+)[\)`]?");
+                    var missingSymbol = missingSymbolMatch.Success ? missingSymbolMatch.Groups[1].Value : null;
+                    if (!string.IsNullOrWhiteSpace(missingSymbol))
+                    {
+                        var knownBuiltIns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                     {
                         "preventDefault", "stopPropagation", "console", "event", "$event"
                     };
-                    if (knownBuiltIns.Contains(missingSymbol))
-                    {
-                        await EmitLog(emitSse, "warn",
-                            $"Skipping verifier auto-step for built-in API: {missingSymbol}", ct: ct);
-                    }
-                    else
-                    {
-                        var autoStep = new PlanStep
+                        if (knownBuiltIns.Contains(missingSymbol))
                         {
-                            File = extraFile!,
-                            Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
-                                     $"Verifier reason: {extraReason}",
-                            Priority = 1,
-                            LineNumber = 0
-                        };
-                        // Validate it's not a duplicate
-                        var isDup = planSoFar.Any(s =>
-                            string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
-                            TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
-                        if (!isDup)
+                            await EmitLog(emitSse, "warn",
+                                $"Skipping verifier auto-step for built-in API: {missingSymbol}", ct: ct);
+                        }
+                        else
                         {
-                            planSoFar.Add(autoStep);
-                            await EmitLog(emitSse, "info",
-                                $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
-                                $"[{autoStep.File}] {missingSymbol}()", ct: ct);
-                            if (emitSse)
-                                await SendSse(Response, "plan", new
-                                {
-                                    thinking = thinkingLog.ToString(),
-                                    summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
-                                    items = planSoFar,
-                                    incremental = true
-                                }, ct);
-                            await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
-                                summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
-                            // Execute directly — no planner round-trip
-                            var autoPlan = new AgentPlan
+                            var autoStep = new PlanStep
                             {
-                                Plan = new List<PlanStep> { autoStep },
-                                Summary = autoStep.Change,
-                                Score = 90
+                                File = extraFile!,
+                                Change = $"Add {missingSymbol} method — referenced by previous step but not yet implemented. " +
+                                         $"Verifier reason: {extraReason}",
+                                Priority = 1,
+                                LineNumber = 0
                             };
-                            var autoBeforeCount = allResults.Count;
-                            try
+                            var isDup = planSoFar.Any(s =>
+                                string.Equals(s.File, autoStep.File, StringComparison.OrdinalIgnoreCase) &&
+                                TokenOverlap(s.Change ?? "", autoStep.Change) > 0.5);
+                            if (!isDup)
                             {
-                                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
-                                    steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
-                                    replanBudget: new[] { 0 });
+                                planSoFar.Add(autoStep);
+                                await EmitLog(emitSse, "info",
+                                    $"⚡ Verifier flagged needsExtraStep — auto-proposing next step WITHOUT planner LLM: " +
+                                    $"[{autoStep.File}] {missingSymbol}()", ct: ct);
+                                if (emitSse)
+                                    await SendSse(Response, "plan", new
+                                    {
+                                        thinking = thinkingLog.ToString(),
+                                        summary = $"Executed {planSoFar.Count - 1} step(s) — auto-step {planSoFar.Count} from verifier",
+                                        items = planSoFar,
+                                        incremental = true
+                                    }, ct);
+                                await PersistBoardDataPlanAsync(cardId, planSoFar, emitSse, ct,
+                                    summary: $"Interleaved execution — {planSoFar.Count} step(s)", score: 90);
+                                var autoPlan = new AgentPlan
+                                {
+                                    Plan = new List<PlanStep> { autoStep },
+                                    Summary = autoStep.Change,
+                                    Score = 90
+                                };
+                                var autoBeforeCount = allResults.Count;
+                                try
+                                {
+                                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
+                                        steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
+                                        replanBudget: new[] { 0 });
+                                }
+                                catch (Exception ex) when (ex is not OperationCanceledException)
+                                {
+                                    await EmitLog(emitSse, "error",
+                                        $"⛔ Auto-step from verifier threw: {ex.Message}", ct: ct);
+                                }
+                                var autoResults = allResults.Skip(autoBeforeCount)
+                                    .OfType<Dictionary<string, object?>>()
+                                    .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
+                                    .Select(r => r.GetValueOrDefault("path")?.ToString())
+                                    .Where(p => !string.IsNullOrWhiteSpace(p))
+                                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                                    .ToList();
+                                foreach (var touched in autoResults)
+                                    discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
+                                continue;
                             }
-                            catch (Exception ex) when (ex is not OperationCanceledException)
-                            {
-                                await EmitLog(emitSse, "error",
-                                    $"⛔ Auto-step from verifier threw: {ex.Message}", ct: ct);
-                            }
-                            // Refresh discovery context with the auto-step's changes
-                            var autoResults = allResults.Skip(autoBeforeCount)
-                                .OfType<Dictionary<string, object?>>()
-                                .Where(r => r.GetValueOrDefault("type")?.ToString() is "edit" or "create")
-                                .Select(r => r.GetValueOrDefault("path")?.ToString())
-                                .Where(p => !string.IsNullOrWhiteSpace(p))
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToList();
-                            foreach (var touched in autoResults)
-                                discoveryContext = await RefreshFileInDiscoveryContext(touched!, discoveryContext, projectRoot, ct);
-                            // Continue to next turn — the planner will be invoked only if no further needsExtraStep
-                            continue;
                         }
                     }
                 }
@@ -8396,10 +8379,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         };
         return (finalPlan, allResults, discoveryContext);
     }
-    /// <summary>
-    /// Replaces (or appends) a file's section in the discovery context with its CURRENT on-disk
-    /// content, so the next proposed step is grounded in what actually happened, not stale context.
-    /// </summary>
     private async Task<string> RefreshFileInDiscoveryContext(
         string relPath, string discoveryContext, string projectRoot, CancellationToken ct)
     {
@@ -9598,11 +9577,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         if (newSteps?.Count > 0)
                         {
-                            // IMPORTANT: build the "already exists" set BEFORE merging, and key it on
-                            // (File, Change) — not Change alone — so a fix to method X in file A is never
-                            // confused with a fix to a similarly-worded step in file B. Computing this set
-                            // from plan.Plan AFTER MergePlans (the old code) meant the just-merged steps
-                            // matched themselves and every replan was silently discarded.
                             var preMergeKeys = (plan?.Plan ?? new List<PlanStep>())
                                 .Select(p => $"{p.File}|{NormalizeChangeForDedup(p.Change)}")
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -9650,11 +9624,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         else
                         {
-                            // `complete` is already false here (that's why we entered this branch).
-                            // Do NOT recompute it from raw step-status — every original step can be
-                            // technically "done" while still failing the quality bar. Recomputing
-                            // "all steps done" silently discarded a known negative verdict, which is
-                            // exactly what sent an unfunny, unwired welcome-message step to Done.
                             await EmitLog(emitSse, "warn",
                                 "No additional replan steps found, and the quality check still reports issues — " +
                                 "leaving task INCOMPLETE for review rather than silently marking it done.", ct: ct);
@@ -9903,7 +9872,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         allSteps.AddRange(ds);
         var requirementChecklist = await BuildRequirementChecklistAsync(prompt, ct);
         if (!string.IsNullOrWhiteSpace(requirementChecklist))
-        { 
+        {
             prompt = prompt + "\n\n" + requirementChecklist;
             await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
         }
@@ -9916,7 +9885,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                    "Do NOT try to understand how the code is called from elsewhere. " +
                                    "Read the attached files in the DISCOVERY CONTEXT and plan the required edits directly. " +
                                    "If the files are empty, plan steps to populate them with the necessary code based on the user's task.";
-            // Cross-file UI text match: search all attached files for quoted strings from the task prompt
             var quotedStrings = Regex.Matches(prompt, @"['""]([^'""]{3,})['""]")
                 .Select(m => m.Groups[1].Value)
                 .Where(q => !string.IsNullOrWhiteSpace(q) && q.Length >= 3)
@@ -9924,7 +9892,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 .ToList();
             if (quotedStrings.Count > 0)
             {
-                // Read all attached files once
                 var fileContents = new List<(string relPath, string content)>();
                 foreach (var af in attachedFiles)
                 {
@@ -9933,23 +9900,19 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     if (System.IO.File.Exists(afFullPath))
                         fileContents.Add((af.Replace('\\', '/'), System.IO.File.ReadAllText(afFullPath, Encoding.UTF8)));
                 }
-                // Generate search variants for each quoted string (handle natural language vs code differences)
                 var searchVariants = new List<(string label, string searchText)>();
                 foreach (var qs in quotedStrings)
                 {
-                    searchVariants.Add((qs, qs)); // original
+                    searchVariants.Add((qs, qs)); 
                     var noComma = qs.Replace(",", "").Replace("'", "").Trim();
                     if (noComma != qs && noComma.Length >= 3)
-                        searchVariants.Add((qs, noComma)); // without commas
-                    // Try with template literal interpolation for any placeholder word
+                        searchVariants.Add((qs, noComma)); 
                     var withInterpolation = Regex.Replace(qs, @"\busername\b", @"\$\{username\}", RegexOptions.IgnoreCase);
                     if (withInterpolation != qs && withInterpolation.Length >= 3)
                         searchVariants.Add((qs, withInterpolation));
-                    // Try just the first significant word (e.g. "Welcome" from "Welcome back, username")
                     var firstWord = qs.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
                     if (firstWord != null && firstWord.Length >= 3 && firstWord != qs)
                         searchVariants.Add((qs, firstWord));
-                    // Try first two words (e.g. "Welcome back")
                     var words = qs.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
                     if (words.Length >= 2)
                     {
@@ -9979,12 +9942,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                             : " (found in ALL attached files)";
                         textMatchHints.Add($"  - '{label}' found in {string.Join(", ", matchingFiles)}{note}");
                     }
-                    // If exact didn't match but a variant did, don't continue searching variants for this label
                 }
-                // Fallback: if no quoted string matched, try partial word matching (e.g. "welcome" in any file)
                 if (textMatchHints.Count == 0 && fileContents.Count > 1)
                 {
-                    // Extract significant words (>=4 chars) from the task and search for them
                     var taskWords = Regex.Matches(prompt, @"\b([A-Za-z]{4,})\b")
                         .Select(m => m.Groups[1].Value)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -10045,8 +10005,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
             discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
         }
-       // await EmitLog(emitSse, "info", "Phase 1.5 — META-PLAN: disabled (skipped)", ct: ct);
-        MetaPlanResult? metaPlan = null; //await RunIncrementalMetaPlanLoop(prompt, discoveryContext, projectRoot, emitSse, ct, cardId);
+        MetaPlanResult? metaPlan = null; 
         var planAlreadyExecuted = false;
         AgentPlan plan;
         if (metaPlan?.SubPlans?.Count > 0)
@@ -10344,21 +10303,17 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             }
         }
         var (taskComplete, verificationDetails, verificationIssues) =
-             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+             await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
         if (!taskComplete)
         {
             var stepTruthCompleted = await VerifyCompletedFromStepTruthAsync(allSteps, projectRoot, ct);
-            // Only trust "all steps done" over the verifier when the verifier gave NO concrete,
-            // actionable issues — i.e. it's a vague/stale complaint. If it named specific missing
-            // symbols (as it did here: imdbResults, imdbDisplayLimit, showMoreImdb), that is real
-            // signal and must flow into the repair loop below, not get silently discarded.
             if (stepTruthCompleted && verificationIssues.Count == 0)
             {
                 await EmitLog(emitSse, "warn",
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -10390,7 +10345,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            const int MaxPostVerifyRepairIterations = 3; // Up to 3 repair passes; each pass is ONE atomic step (line 10422), so catastrophic over-editing is prevented by the single-step enforcement below
+            const int MaxPostVerifyRepairIterations = 3; 
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
@@ -10416,10 +10371,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         failureContextForReplan.AppendLine($"  Context: {TruncateForLlm(failureCtx, 1000)}");
                     failureContextForReplan.AppendLine();
                 }
-                // Feed only the FIRST unresolved issue as the immediate target, listing the rest
-                // as deferred, so the planner produces ONE atomic step per pass — e.g.
-                // pass 1: declare `imdbResults`, pass 2: declare `imdbDisplayLimit`,
-                // pass 3: implement `showMoreImdb()`, etc.
                 var qualityCheckReason = new StringBuilder();
                 if (verificationIssues.Count > 0)
                 {
@@ -10451,7 +10402,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     exhaustedWithNoSteps = true;
                     break;
                 }
-                // Enforce ONE atomic step per repair pass even if the LLM returned more.
                 var singleStep = replanSteps[0];
                 var originalStepCount = plan?.Plan?.Count ?? 0;
                 plan = MergePlans(plan ?? new AgentPlan(),
@@ -10474,7 +10424,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         completedStepIndices: mergedDone, cardId: cardId);
                 }
                 var (reVerified, reDetails, reIssues) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct);
+                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);
                 taskComplete = reVerified;
                 verificationDetails = reDetails;
                 verificationIssues = reIssues;
@@ -10648,7 +10598,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     }
     private async Task<(bool complete, string details, List<string> issues)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
-        List<object> allResults, CancellationToken ct)
+        List<object> allResults, CancellationToken ct,
+        string? discoveryContext = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -10678,6 +10629,43 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("### ORIGINAL TASK ###");
         sb.AppendLine(originalPrompt);
         sb.AppendLine();
+        var editResults = allResults
+            .OfType<Dictionary<string, object?>>()
+            .Where(r => r.TryGetValue("type", out var t) && t?.ToString() == "edit" &&
+                        r.TryGetValue("path", out var p) && p?.ToString() != null)
+            .GroupBy(r => r["path"]!.ToString()!)
+            .ToList();
+        if (editResults.Count > 0)
+        {
+            sb.AppendLine("### CHANGES MADE (old → new snippets per file) ###");
+            foreach (var fileGroup in editResults)
+            {
+                sb.AppendLine($"\n--- {fileGroup.Key} ---");
+                foreach (var result in fileGroup)
+                {
+                    var oldStr = result.GetValueOrDefault("oldStringPreview")?.ToString();
+                    var newStr = result.GetValueOrDefault("newStringPreview")?.ToString();
+                    if (!string.IsNullOrWhiteSpace(oldStr) || !string.IsNullOrWhiteSpace(newStr))
+                    {
+                        sb.AppendLine("OLD:");
+                        sb.AppendLine("```");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(oldStr) ? "(empty)" : TruncateForLlm(oldStr, 800));
+                        sb.AppendLine("```");
+                        sb.AppendLine("NEW:");
+                        sb.AppendLine("```");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(newStr) ? "(empty)" : TruncateForLlm(newStr, 800));
+                        sb.AppendLine("```");
+                    }
+                }
+            }
+            sb.AppendLine();
+        }
+        if (!string.IsNullOrWhiteSpace(discoveryContext))
+        {
+            sb.AppendLine("### DISCOVERY CONTEXT (explored files) ###");
+            sb.AppendLine(TruncateForLlm(discoveryContext, 6000));
+            sb.AppendLine();
+        }
         sb.AppendLine("### CURRENT STATE OF MODIFIED FILES ###");
         var typeFilesToInclude = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var relPath in modifiedPaths)
@@ -10742,6 +10730,9 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("   Ignore existing code that predates this task — the task may be meant to REPLACE it.");
         sb.AppendLine("   CRITICAL: If the task asks to MOVE code, SEARCH THE ENTIRE FILE for the code in its new location. Do NOT report it as 'missing' or 'not moved' just because it is no longer in its original spot. Verify the actual file content provided above.");
         sb.AppendLine("   CRITICAL: If the requested content is physically present in the file, even if the formatting or nesting is slightly incorrect, the task is COMPLETE. Do NOT report a failure for minor formatting issues.");
+        sb.AppendLine("   IMPORTANT: CSS class changes ARE valid modifications for HTML button styling. A task asking to 'make buttons bigger in .html'");
+        sb.AppendLine("   is correctly solved by modifying the CSS class (.toolBtn) that those buttons use. Do NOT require inline style attributes");
+        sb.AppendLine("   on HTML elements when the styling is already controlled through CSS classes. Modifying the .css file IS sufficient.");
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
@@ -10820,7 +10811,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
             steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
-        // Reject _create_file steps injected after code edits have already been done
         if (moreSteps != null && moreSteps.Count > 0)
         {
             var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
@@ -11076,7 +11066,6 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     var newSteps = await CheckpointReplan(prompt, discoveryContext, remaining, allResults, projectRoot, emitSse, ct, steeringContext);
                     if (newSteps?.Count > 0)
                     {
-                        // Reject _create_file steps injected after edits already started
                         var anyEditsDone = allResults.OfType<Dictionary<string, object?>>()
                             .Any(r => r.GetValueOrDefault("type")?.ToString() is "edit");
                         if (anyEditsDone)
@@ -14262,8 +14251,6 @@ done = build OK; command = run this to fix; ask_user = need input";
             var (oldStr, _) = AstResolveEdit(fullPath, "method", targetSymbol);
             if (!string.IsNullOrWhiteSpace(oldStr))
             {
-                // Verify the resolved body actually contains the target symbol name
-                // to guard against AST lookup returning a wrong neighbor method
                 if (!oldStr.Contains(targetSymbol, StringComparison.Ordinal))
                 {
                     await EmitLog(emitSse, "warn",

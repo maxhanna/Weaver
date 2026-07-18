@@ -11,6 +11,7 @@ public static class LlmCssCleaner
     private static readonly Regex CalcOpRx = new(@"\s*([+\-*/])\s*", RegexOptions.Compiled);
     private static readonly Regex DblSpaceRx = new(@"\s+", RegexOptions.Compiled);
     private static readonly Regex MissingColonRx = new(@"^(\s*[a-z-]+)\s+(?=\d|#|var\(--)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex MissingSpaceAfterColonRx = new(@"^(\s*[a-z-]+):(\S)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex TrailingCommaRx = new(@"(:[^;\n]+),\s*$", RegexOptions.Multiline | RegexOptions.Compiled);
     private static readonly Regex SmashedBraceRx = new(@"\}(?=[^\s}])", RegexOptions.Compiled);
 
@@ -44,6 +45,9 @@ public static class LlmCssCleaner
 
         // 4. Fix missing colons
         clean = MissingColonRx.Replace(clean, "$1: ");
+
+        // 4b. Fix missing space after colon (width:40px -> width: 40px)
+        clean = MissingSpaceAfterColonRx.Replace(clean, "$1: $2");
 
         // 5. Fix illegal trailing commas
         clean = TrailingCommaRx.Replace(clean, "$1;");

@@ -123,7 +123,10 @@ public static class CodeFormatterService
         var parser = PrettierParsers.GetValueOrDefault(ext, "babel");
         var dummyName = $"dummy{ext}";
 
-        var psi = new ProcessStartInfo(_prettierCli, $"--stdin-filepath \"{dummyName}\"")
+        var prettierArgs = $"--stdin-filepath \"{dummyName}\"";
+        if (parser == "html") prettierArgs += " --bracket-same-line";
+
+        var psi = new ProcessStartInfo(_prettierCli, prettierArgs)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
