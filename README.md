@@ -10,7 +10,7 @@ Download EXE: https://Bughosted.com/assets/Weaver.exe
 Source code: https://github.com/maxhanna/Weaver
 
 Discord:
-https://discord.gg/5RHgUHcgG
+https://discord.gg/YQWkD6ZQDx
 
  
     :++++.  .+++-   -+++=   -++++%%++%   **%%&&%:   %=+*&#--%%-++&+. =#++++===:  :+++++++-          
