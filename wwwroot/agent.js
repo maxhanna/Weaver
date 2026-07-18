@@ -336,14 +336,14 @@ angular.module('kanbanApp')
                                                                         if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
-                                                                    if (vm.autoQueue) {
-                                                                        $timeout(function () {
-                                                                            var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
-                                                                            if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
-                                                                            var siCards = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.selfImproving; });
-                                                                            if (siCards.length) { var nextSi = siCards[siCards.length - 1]; nextSi.ready = true; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
-                                                                        }, 500);
-                                                                    }
+                                                                     $timeout(function () {
+                                                                         if (vm.autoQueue) {
+                                                                             var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
+                                                                             if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
+                                                                         }
+                                                                         var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
+                                                                         if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
+                                                                     }, 500);
                                                                 }
 
                                                                 if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {

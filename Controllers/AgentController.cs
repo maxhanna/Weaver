@@ -4065,6 +4065,38 @@ emitSse, ct);
             bool bypassVerify = false;
             int oldLines = oldStr?.Split('\n').Length ?? 0;
             int newLines = newStr?.Split('\n').Length ?? 0;
+            // Handle batch edits (multiple oldString/newString pairs in one step)
+            if (step.Edits is { Count: > 0 } && !replaced)
+            {
+                var batchContent = fileContent;
+                var allApplied = true;
+                foreach (var edit in step.Edits)
+                {
+                    if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
+                    var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
+                    var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
+                    var (r, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
+                        edit.LineNumber > 0 ? edit.LineNumber : step.LineNumber, step.Change);
+                    if (!r)
+                    {
+                        await EmitLog(emitSse, "warn", $"Batch sub-edit failed: {err}", ct: ct);
+                        allApplied = false;
+                        break;
+                    }
+                    batchContent = nc;
+                }
+                if (allApplied && batchContent != fileContent)
+                {
+                    replaced = true;
+                    newContent = batchContent;
+                    matchError = null;
+                    snippet = null;
+                    oldStr = step.Edits[0].OldString ?? "";
+                    newStr = "(batch: " + step.Edits.Count + " edits)";
+                    await EmitLog(emitSse, "info",
+                        $"Applied batch of {step.Edits.Count} edits to {relPath}", ct: ct);
+                }
+            }
             if (!replaced)
             {
                 if (!string.IsNullOrWhiteSpace(oldStr) && step.LineNumber > 0 && !fullFile && !fromFormatC)
@@ -4129,6 +4161,34 @@ emitSse, ct);
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
+                // Format the replacement snippet via library before applying
+                if (!string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
+                {
+                    var before = newStr;
+                    newStr = await CodeFormatterService.FormatAsync(relPath, newStr, ct);
+                    if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+                    {
+                        // Re-indent the formatted snippet to match oldStr's base indentation.
+                        // Prettier normalizes to 2-space relative indent — add back the absolute indent.
+                        var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+                        if (oldFirstLine != null)
+                        {
+                            var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
+                            if (baseIndent.Length > 0)
+                            {
+                                var fmtLines = newStr.Split('\n');
+                                for (var i = 0; i < fmtLines.Length; i++)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(fmtLines[i]))
+                                        fmtLines[i] = baseIndent + fmtLines[i];
+                                }
+                                newStr = string.Join("\n", fmtLines);
+                            }
+                        }
+                    }
+                    if (newStr != before)
+                        await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
+                }
                 if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
                 {
                     newContent = newStr;
@@ -4775,13 +4835,6 @@ emitSse, ct);
                 {
                     newStr = Regex.Replace(newStr, $@"\)\s+({pyKeywords})\b", ")\n$1");
                 }
-            }
-            if (CodeFormatterService.CanFormat(relPath))
-            {
-                var before = newContent;
-                newContent = await CodeFormatterService.FormatAsync(relPath, newContent, ct);
-                if (newContent != before)
-                    await EmitLog(emitSse, "info", $"Formatted {relPath} via CodeFormatterService", ct: ct);
             }
             var cssExt = Path.GetExtension(relPath).ToLowerInvariant();
             if (cssExt == ".css" || cssExt == ".scss" || cssExt == ".less")
@@ -10337,7 +10390,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            const int MaxPostVerifyRepairIterations = 0; // No repair passes — stop after first successful edit; post-execution repair loop caused catastrophic over-editing in HTML templates
+            const int MaxPostVerifyRepairIterations = 3; // Up to 3 repair passes; each pass is ONE atomic step (line 10422), so catastrophic over-editing is prevented by the single-step enforcement below
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)

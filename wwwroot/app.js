@@ -116,7 +116,11 @@ angular.module('kanbanApp', [])
 
       // === Global Init Calls ===
       if (vm.emailAccounts.length === 0) vm.addEmailAccount();
-      vm.loadConfig();
+      vm.loadConfig().then(function () {
+        if (vm.bughostedUsername && vm.bughostedPassword && vm.bughostedHeartbeatEnabled) {
+          vm.bughostedLogin();
+        }
+      });
       vm.countArchivedCards();
       vm.startCalendarProcessing();
 

@@ -318,6 +318,15 @@ partial class AgentController
     "2. The step MUST be atomic: one coherent edit at one location in one file. If the natural next " +
     "   action touches two locations (e.g. add a field AND initialize it in a constructor), propose ONLY " +
     "   the first location now — the second location gets its own turn later.\n" +
+    "   EXCEPTION: For small repetitive edits to the SAME file (e.g. removing priority tags from " +
+    "   todo/doing/done columns, updating the same CSS pattern in multiple selectors), you MAY use " +
+    "   the \"edits\" array to batch multiple oldString/newString pairs into ONE step:\n" +
+    "   \"edits\": [\n" +
+    "     {\"oldString\": \"line1\", \"newString\": \"line1\", \"line\": 10},\n" +
+    "     {\"oldString\": \"line2\", \"newString\": \"line2\", \"line\": 20}\n" +
+    "   ]\n" +
+    "   Each pair is applied independently to the same file. Do NOT use edits for edits in different files — " +
+    "   those still need separate steps.\n" +
     "3. NEVER repeat or restate a step already present in PLAN SO FAR.\n" +
     "4. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in " +
     "   the discovery context OR was introduced by an earlier committed step. NEVER explore files outside the " +
