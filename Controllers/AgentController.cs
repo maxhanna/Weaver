@@ -4034,10 +4034,32 @@ emitSse, ct);
             int newLines = newStr?.Split('\n').Length ?? 0;
             if (step.Edits is { Count: > 0 } && !replaced)
             {
-                var batchContent = fileContent;
+                // Reject overlapping edits within the same batch — each edit must target a different area
                 var allApplied = true;
-                foreach (var edit in step.Edits)
+                for (var oi = 0; oi < step.Edits.Count; oi++)
                 {
+                    var normO = AgentUtilities.NormalizeLineEndings(step.Edits[oi].OldString ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(normO)) continue;
+                    for (var oj = oi + 1; oj < step.Edits.Count; oj++)
+                    {
+                        var normJ = AgentUtilities.NormalizeLineEndings(step.Edits[oj].OldString ?? "").Trim();
+                        if (string.IsNullOrWhiteSpace(normJ)) continue;
+                        if (normO.Contains(normJ) || normJ.Contains(normO))
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"Batch sub-edit overlap: edit {oi + 1} and edit {oj + 1} target overlapping oldString sections — " +
+                                $"each batch edit must target a unique, non-overlapping area of the file.", ct: ct);
+                            allApplied = false;
+                            break;
+                        }
+                    }
+                    if (!allApplied) break;
+                }
+                if (allApplied)
+                {
+                    var batchContent = fileContent;
+                    foreach (var edit in step.Edits)
+                    {
                     if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
                     var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
                     var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
@@ -4061,6 +4083,7 @@ emitSse, ct);
                     newStr = "(batch: " + step.Edits.Count + " edits)";
                     await EmitLog(emitSse, "info",
                         $"Applied batch of {step.Edits.Count} edits to {relPath}", ct: ct);
+                }
                 }
             }
             if (!replaced)
@@ -7593,7 +7616,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
     private async Task<(bool valid, string? reason)> ValidateIncrementalStepAsync(
         PlanStep step, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string projectRoot, bool emitSse, CancellationToken ct,
-        bool skipLlm = false)
+        bool skipLlm = false, string? lastStepCompletionNote = null)
     {
         if (string.IsNullOrWhiteSpace(step.File) || string.IsNullOrWhiteSpace(step.Change))
             return (false, "Step is missing file or change description.");
@@ -7605,6 +7628,23 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (normNew == normExisting || CalculateChangeSimilarity(normNew, normExisting) >= 0.82)
                 return (false, $"Duplicates an already-committed step targeting {existing.File}: \"{existing.Change}\".");
         }
+        // Reject _create_file steps with no actual content (hallucinated file creation)
+        if (string.Equals(step.File, "_create_file", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(step.NewString))
+                return (false, "_create_file step has no file content in newString — provide the full file content or edit an existing file instead.");
+            if (step.NewString.Trim().Length < 20)
+                return (false, "_create_file step content is too short (" + step.NewString.Trim().Length + " chars) — provide meaningful file content.");
+            if (planSoFar.Any(s => string.Equals(s.File, "_create_file", StringComparison.OrdinalIgnoreCase)))
+                return (false, "A _create_file step is already committed — creating additional new files is likely unnecessary. Target the existing file instead.");
+        }
+        // Reject after too many edits to the same file+symbol (hallucination loop detection)
+        var sameTargetCount = planSoFar.Count(s =>
+            !string.IsNullOrWhiteSpace(s.TargetSymbol) &&
+            string.Equals(s.TargetSymbol, step.TargetSymbol, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(s.File, step.File, StringComparison.OrdinalIgnoreCase));
+        if (sameTargetCount >= 3)
+            return (false, $"Already committed {sameTargetCount} steps targeting '{step.TargetSymbol}' in {step.File}. Further edits to the same symbol suggest a hallucination loop — the task is likely complete.");
         var changeLower = step.Change.ToLowerInvariant();
         var rejectedActions = new[] { "move ", "reorder ", "restructure ", "refactor " };
         if (rejectedActions.Any(v => changeLower.StartsWith(v)))
@@ -7675,12 +7715,20 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         var fileSection = AgentUtilities.ExtractFileSectionFromContext(validatorDiscovery, step.File);
         sb.AppendLine(string.IsNullOrWhiteSpace(fileSection) ? validatorDiscovery : fileSection);
         sb.AppendLine();
+        if (!string.IsNullOrWhiteSpace(lastStepCompletionNote))
+        {
+            sb.AppendLine("### PREVIOUS STEP COMPLETED ###");
+            sb.AppendLine(lastStepCompletionNote);
+            sb.AppendLine();
+        }
         sb.AppendLine("Judge the PROPOSED NEXT STEP ONLY. Answer:");
         sb.AppendLine("1. Does it reference any method/property/symbol that does NOT exist in the discovery context " +
                       "AND is NOT introduced by an earlier committed step? (if so: invalid)");
         sb.AppendLine("2. Does it contradict or redo anything already committed? (if so: invalid)");
         sb.AppendLine("3. Does it require a prerequisite step not yet committed (e.g. an endpoint before its DTO)? (if so: invalid)");
         sb.AppendLine("4. Is it a genuinely necessary, atomic step toward the ORIGINAL TASK (not scope creep)? (if not: invalid)");
+        sb.AppendLine("5. If a previous step was marked complete (needsExtraStep=false), does this step address a GENUINELY DIFFERENT " +
+                      "requirement — not a continuation, cleanup, or refinement of already-completed work? (if not: invalid)");
         sb.AppendLine();
         sb.AppendLine("Output ONLY JSON: {\"valid\": true|false, \"reason\": \"short reason, only if invalid\"}");
         var (raw, _, err) = await CallLlmRaw(
@@ -8089,8 +8137,25 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var fp = Path.GetFullPath(Path.Combine(projectRoot, (proposal.Step.File ?? "").Replace('/', Path.DirectorySeparatorChar)));
                 if (System.IO.File.Exists(fp)) skipLlm = true;
             }
+            // If the last step had needsExtraStep=false, force LLM validation to check if the new step
+            // is about a genuinely different concern — the per-step verifier already confirmed completion.
+            string? completionNote = null;
+            var lastResult = allResults
+                .OfType<Dictionary<string, object?>>()
+                .Where(r => r.ContainsKey("needsExtraStep") && r.GetValueOrDefault("type")?.ToString() is "modified")
+                .LastOrDefault();
+            if (lastResult != null && lastResult["needsExtraStep"] is false)
+            {
+                var lastPath = lastResult.GetValueOrDefault("path")?.ToString() ?? "";
+                var lastChange = lastResult.GetValueOrDefault("change")?.ToString() ?? "";
+                completionNote = $"The previous step [{lastPath}] \"{lastChange}\" was verified complete (needsExtraStep=false). " +
+                    "Your proposed step MUST address a GENUINELY DIFFERENT requirement from the original task, " +
+                    "not a continuation or cleanup of already-completed work. If the task is done, return planComplete=true.";
+                skipLlm = false; // force LLM validation
+            }
             var (valid, reason) = await ValidateIncrementalStepAsync(
-                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct, skipLlm: skipLlm);
+                proposal.Step, prompt, discoveryContext, planSoFar, projectRoot, emitSse, ct,
+                skipLlm: skipLlm, lastStepCompletionNote: completionNote);
             if (!valid)
             {
                 await EmitLog(emitSse, "warn",
@@ -10345,6 +10410,29 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
+            // If every step that has needsExtraStep set has it set to false, the step-level verifier
+            // already confirmed no follow-up is needed — override the post-execution verifier.
+            var needsExtraStepResults = allSteps.OfType<Dictionary<string, object?>>()
+                .Where(s => s.ContainsKey("needsExtraStep"))
+                .Select(s => s["needsExtraStep"])
+                .ToList();
+            if (needsExtraStepResults.Count > 0 && needsExtraStepResults.All(v => v is false))
+            {
+                var stepCount = needsExtraStepResults.Count;
+                await EmitLog(emitSse, "info",
+                    $"All {stepCount} step(s) had needsExtraStep=false (step-level verifier confirmed completion) — " +
+                    $"overriding post-execution verifier rejection. Details: {verificationDetails}", ct: ct);
+                taskComplete = true;
+                allSteps.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "verified_complete",
+                    ["status"] = "done",
+                    ["reason"] = $"Step-level verifier confirmed completion (needsExtraStep=false on all {stepCount} step(s)). {verificationDetails}"
+                });
+            }
+        }
+        if (!taskComplete)
+        {
             const int MaxPostVerifyRepairIterations = 3; 
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
@@ -10706,6 +10794,31 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
             }
         }
+        // Include unmodified files referenced in the task so the verifier can check cross-file references
+        var taskReferencedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match m in Regex.Matches(originalPrompt, @"[\w/]+\.(html|css|ts|tsx|js|jsx|scss|less)", RegexOptions.IgnoreCase))
+        {
+            var candidate = m.Value.Replace('/', Path.DirectorySeparatorChar);
+            var fullPath = Path.GetFullPath(Path.Combine(projectRoot, candidate));
+            if (System.IO.File.Exists(fullPath) && !modifiedPaths.Any(mp =>
+                string.Equals(mp, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                taskReferencedFiles.Add(fullPath);
+            }
+        }
+        if (taskReferencedFiles.Count > 0)
+        {
+            sb.AppendLine("\n### TASK-REFERENCED FILES (not modified, shown for context) ###");
+            foreach (var fullPath in taskReferencedFiles.Take(3))
+            {
+                var content = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
+                var rel = Path.GetRelativePath(projectRoot, fullPath).Replace('\\', '/');
+                sb.AppendLine($"\n### {rel}");
+                sb.AppendLine("```");
+                sb.AppendLine(content);
+                sb.AppendLine("```");
+            }
+        }
         if (typeFilesToInclude.Count > 0)
         {
             sb.AppendLine("\n### RELATED TYPE DEFINITIONS ###");
@@ -10732,7 +10845,8 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         sb.AppendLine("   CRITICAL: If the requested content is physically present in the file, even if the formatting or nesting is slightly incorrect, the task is COMPLETE. Do NOT report a failure for minor formatting issues.");
         sb.AppendLine("   IMPORTANT: CSS class changes ARE valid modifications for HTML button styling. A task asking to 'make buttons bigger in .html'");
         sb.AppendLine("   is correctly solved by modifying the CSS class (.toolBtn) that those buttons use. Do NOT require inline style attributes");
-        sb.AppendLine("   on HTML elements when the styling is already controlled through CSS classes. Modifying the .css file IS sufficient.");
+        sb.AppendLine("   on HTML elements when the styling is already controlled through CSS classes. Modifying the .css file IS sufficient —");
+        sb.AppendLine("   the HTML file does NOT need to be edited. CSS-only changes are 100% valid for styling tasks, even when the task mentions the .html file name.");
         sb.AppendLine("   Example: if the task says 'wrap in details/summary' but the file already has per-column");
         sb.AppendLine("   collapse buttons, report that details/summary is missing — do NOT report that");
         sb.AppendLine("   toggleColumnCollapse is unimplemented, because the task has nothing to do with that.");
