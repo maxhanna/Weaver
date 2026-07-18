@@ -139,7 +139,8 @@ Weaver supports syntax highlighting and editing for:
 
 ## 🧨 Why Developers Love Weaver
 - One prompt → entire project updated  
-- Atomic, safe, reviewable diffs  
+- Atomic, safe, reviewable diffs
+- Review all terminal commands before they run, create a command approval list or approve all by default.
 - Full IDE + Git + Kanban + Calendar in one app  
 - Local, fast, private  
 - Works with any project structure  
