@@ -1020,7 +1020,7 @@
             <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
               <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
               <div style="display:flex;flex-wrap:wrap;gap:4px;">
-                <button ng-repeat="(name, _) in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
+                <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
                   style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
                   {{name}}
                 </button>

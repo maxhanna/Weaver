@@ -94,6 +94,7 @@ angular.module('kanbanApp')
                 vm.buildCommands = "";
                 vm.prByDefault = false;
                 vm.themeColors = {};
+                vm.presetThemeList = Object.keys(PRESET_THEMES);
 
                 // UI Panels
                 vm.showProjectOptions = false;
@@ -385,7 +386,6 @@ angular.module('kanbanApp')
                 };
                 vm.resetThemeColors = function () {
                 vm.themeColors = {};
-                vm.presetThemeList = Object.keys(PRESET_THEMES);
                     Object.keys(DEFAULT_THEME).forEach(function (k) { vm.themeColors[k] = DEFAULT_THEME[k]; });
                     applyTheme(null, vm.themeColors);
                 };
