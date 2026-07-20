@@ -330,7 +330,31 @@ angular.module('kanbanApp')
                                                                     vm._agentStartTime = null;
                                                                     vm.agentTimer = null;
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
-                                                                     if (!incomplete) { pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`); vm.moveCardToDone(card); return; }
+                                                                     if (!incomplete) {
+                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
+                                                                         vm.moveCardToDone(card);
+                                                                         $timeout(function () {
+                                                                             if (!vm.autoQueue) return;
+                                                                             var readyTodo = vm.state.todo.filter(function (c) {
+                                                                                 return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                                                                             });
+                                                                             if (readyTodo.length) {
+                                                                                 var next = readyTodo[readyTodo.length - 1];
+                                                                                 vm.moveCardToDoing(next.id);
+                                                                                 vm.executeAgent(next);
+                                                                                 return;
+                                                                             }
+                                                                             var siReady = vm.state.selfImproving.filter(function (c) {
+                                                                                 return c.filePath === vm.selectedProject && c.ready && c.selfImproving;
+                                                                             });
+                                                                             if (siReady.length) {
+                                                                                 var nextSi = siReady[siReady.length - 1];
+                                                                                 vm.moveCardToDoing(nextSi.id);
+                                                                                 vm.executeAgent(nextSi);
+                                                                             }
+                                                                         }, 500);
+                                                                         return;
+                                                                     }
                                                                      if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
                                                                         if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }

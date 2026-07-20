@@ -861,14 +861,16 @@ public partial class AgentController : ControllerBase
             sb.AppendLine("⚠ HTML FILE — FORMAT D is REQUIRED. This is the ONLY accepted format.");
             sb.AppendLine("  Three modes:");
             sb.AppendLine("  1. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
+            sb.AppendLine("     REPLACE mode: newCode must be the FULL replacement HTML (including any parent tags and closing tags that should remain).");
             sb.AppendLine("  2. {\"targetType\": \"html\", \"targetName\": \"...\", \"insertAfter\": true, \"newCode\": [...]} — INSERT newCode AFTER the matched code block.");
+            sb.AppendLine("     INSERT mode: newCode contains ONLY the new HTML to insert. Do NOT include any </div> closing tags.");
             sb.AppendLine("  3. {\"targetType\": \"html\", \"targetName\": \"...\", \"replace\": true, \"newCode\": [...]} — REPLACE the matched code block with newCode.");
             sb.AppendLine("     Semantics: insertAfter:false → replace (when replace is absent); replace:false → insertAfter (when insertAfter is absent); no fields → insertBefore.");
             sb.AppendLine("  targetName is a CODE BLOCK — copy it VERBATIM from the file. " +
                              "Multi-line is OK. The system finds this block then inserts/replaces relative to it.");
-            sb.AppendLine("  CRITICAL: newCode must contain ONLY the new HTML to insert. " +
-                            "Do NOT include ANY </div> closing tags — not even from parent elements. " +
-                            "The system does NOT add them automatically. newCode is inserted as-is.");
+            sb.AppendLine("  CRITICAL: newCode MUST NOT be empty when replace:true. " +
+                            "With replace:true, newCode must contain the FULL replacement HTML " +
+                            "including all content from targetName that should remain.");
             sb.AppendLine("  DO NOT output oldString, newString, or fullFile fields. DO NOT use oldString/newString format.");
             sb.AppendLine("  ANCHOR SELECTION: prefer the SHORTEST unique line as targetName — a heading, " +
                             "a plain-text label (e.g. '<div class=\"groupDomainTitle\">YouTube Results</div>'), " +
@@ -1224,8 +1226,9 @@ public partial class AgentController : ControllerBase
                           "CRITICAL: targetName is a CODE BLOCK copied verbatim from the file. " +
                           "It CAN be multi-line. Copy the exact lines you want to replace or insert after. " +
                           "For insertAfter: the targetName block is found, and newCode is inserted AFTER that block. " +
+                          "newCode in insertAfter mode should contain ONLY the new HTML. " +
                           "For replace: the targetName block is replaced entirely with newCode. " +
-                          "CRITICAL: newCode must contain ONLY the new HTML to insert — no parent closing tags. " +
+                          "newCode in replace mode MUST contain the FULL replacement HTML and MUST NOT be empty. " +
                           "Do NOT use oldString/newString for HTML insertion — use FORMAT D.");
         }
         sb.AppendLine();
@@ -1442,10 +1445,17 @@ public partial class AgentController : ControllerBase
                             await EmitLog(emitSse, "warn",
                                 $"Stripped leading </div> lines from newCode for {relPath}", ct: ct);
                         }
-                        if (string.IsNullOrWhiteSpace(newCodeStr) || !newCodeStr.Contains('<', StringComparison.Ordinal))
+                        if (string.IsNullOrWhiteSpace(newCodeStr))
                         {
                             await EmitLog(emitSse, "warn",
-                                $"FORMAT D rejected: newCode contains no HTML opening tags — retry", ct: ct);
+                                $"FORMAT D rejected: newCode is EMPTY — when replace:true, newCode MUST contain the full replacement HTML. Include all content from targetName that should remain.", ct: ct);
+                            return (null, null, false, null, false,
+                                $"FORMAT D failed: newCode is empty. You MUST provide the full replacement HTML in newCode, not an empty array.", false);
+                        }
+                        if (!newCodeStr.Contains('<', StringComparison.Ordinal))
+                        {
+                            await EmitLog(emitSse, "warn",
+                                $"FORMAT D rejected: newCode contains no HTML opening tags — newCode must be valid HTML with opening tags", ct: ct);
                             return (null, null, false, null, false,
                                 $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);
                         }
@@ -1968,7 +1978,12 @@ public partial class AgentController : ControllerBase
                                 return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                             var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
                             newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
-                            if (string.IsNullOrWhiteSpace(newCodeStr) || !newCodeStr.Contains('<', StringComparison.Ordinal))
+                            if (string.IsNullOrWhiteSpace(newCodeStr))
+                            {
+                                return (null, null, false, null, false,
+                                    $"FORMAT D failed: newCode is empty — when replace:true, newCode MUST contain the full replacement HTML.", false);
+                            }
+                            if (!newCodeStr.Contains('<', StringComparison.Ordinal))
                             {
                                 return (null, null, false, null, false,
                                     $"FORMAT D failed: newCode is incomplete (only closing tags). Generate the full HTML to insert.", false);

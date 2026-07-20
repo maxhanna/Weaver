@@ -109,7 +109,19 @@ public static class CodeFormatterService
         if (ext.Equals(".py", StringComparison.OrdinalIgnoreCase))
             return await FormatWithBlackAsync(content, ct);
 
-        return await FormatWithPrettierAsync(ext, content, ct);
+        var formatted = await FormatWithPrettierAsync(ext, content, ct);
+
+        if (ext is ".html" or ".htm" or ".css" or ".cshtml" or ".razor" or ".vue" or ".svelte")
+            formatted = FixCssSpacing(formatted);
+
+        return formatted;
+    }
+
+    private static string FixCssSpacing(string content)
+    {
+        return System.Text.RegularExpressions.Regex.Replace(content,
+            @"(\d+(?:\.\d+)?)(px|em|rem|%|vh|vw|vmin|vmax|pt|pc|mm|cm|ch|ex)(\d)",
+            "$1$2 $3");
     }
 
     private static async Task<string> FormatWithPrettierAsync(string ext, string content, CancellationToken ct)
