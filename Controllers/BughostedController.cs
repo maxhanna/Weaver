@@ -4,7 +4,9 @@ using Microsoft.AspNetCore.Http.Features;
 using System.Text.Json;
 using System.Text;
 using System.IO.Compression;
+using Microsoft.Extensions.Hosting;
 using Weaver.Services;
+using IOFile = System.IO.File;
 
 namespace Weaver.Controllers;
 
@@ -16,15 +18,20 @@ public class BughostedController : ControllerBase
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
+    private readonly IHostApplicationLifetime _hostLifetime;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
+    private static string _updateStage = "idle";
+    private static long _updateBytesDownloaded;
+    private static long _updateTotalBytes;
 
-    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env)
+    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env, IHostApplicationLifetime hostLifetime)
     {
         _configFile = configFile;
         _clientFactory = clientFactory;
         _config = config;
         _env = env;
+        _hostLifetime = hostLifetime;
     }
 
     // ─── Filesystem proxy (for BugHosted IDE remote file access) ─────────────
@@ -322,12 +329,16 @@ public class BughostedController : ControllerBase
     [HttpPost("update")]
     public IActionResult TriggerUpdate()
     {
+        _updateStage = "idle";
+        _updateBytesDownloaded = 0;
+        _updateTotalBytes = 0;
+
         _ = Task.Run(async () =>
         {
             try
             {
                 var remoteVer = await GetRemoteVersionAsync();
-                if (remoteVer == null) return;
+                if (remoteVer == null) { _updateStage = "failed"; return; }
                 await SetLocalVersionAsync(remoteVer);
 
                 var tempDir = Path.Combine(Path.GetTempPath(), "weaver-update");
@@ -336,19 +347,77 @@ public class BughostedController : ControllerBase
 
                 using var client = new HttpClient();
                 client.Timeout = TimeSpan.FromMinutes(5);
-                var bytes = await client.GetByteArrayAsync("https://bughosted.com/assets/Weaver.exe");
-                await System.IO.File.WriteAllBytesAsync(tempExe, bytes);
+                using var response = await client.GetAsync("https://bughosted.com/assets/Weaver.exe", HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                _updateTotalBytes = response.Content.Headers.ContentLength ?? -1;
+                _updateStage = "downloading";
+                _updateBytesDownloaded = 0;
+
+                using var stream = await response.Content.ReadAsStreamAsync();
+                using var fileStream = new FileStream(tempExe, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+                var buffer = new byte[8192];
+                int read;
+                while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer, 0, read);
+                    _updateBytesDownloaded += read;
+                }
+                fileStream.Close();
+
+                _updateStage = "installing";
+
+                // Validate the downloaded EXE before touching the original
+                using (var validateStream = new FileStream(tempExe, FileMode.Open, FileAccess.Read))
+                {
+                    var magic = new byte[2];
+                    await validateStream.ReadAsync(magic, 0, 2);
+                    var size = new FileInfo(tempExe).Length;
+                    if (magic[0] != 'M' || magic[1] != 'Z' || size < 1024 * 1024)
+                    {
+                        _updateStage = "failed";
+                        return;
+                    }
+                }
 
                 var currentExe = Environment.ProcessPath!;
-                Process.Start(currentExe, $"--update-self \"{tempExe}\" \"{currentExe}\"");
-            }
-            catch { }
+                var scriptPath = Path.Combine(tempDir, "update.cmd");
 
-            await Task.Delay(500);
-            Environment.Exit(0);
+                var script = $@"@echo off
+timeout /t 8 /nobreak >nul
+copy /Y ""{tempExe}"" ""{currentExe}""
+start """" ""{currentExe}"" --no-open-browser
+";
+                await IOFile.WriteAllTextAsync(scriptPath, script);
+
+                var psi = new ProcessStartInfo("cmd.exe", $"/c \"{scriptPath}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                Process.Start(psi);
+
+                _updateStage = "restarting";
+
+                // Graceful shutdown: the host drains connections and unbinds the port.
+                // The process exits naturally when Kestrel finishes.
+                _hostLifetime.StopApplication();
+            }
+            catch { _updateStage = "failed"; }
         });
 
         return Ok(new { updating = true, message = "Update started" });
+    }
+
+    [HttpGet("update-progress")]
+    public IActionResult GetUpdateProgress()
+    {
+        return Ok(new
+        {
+            stage = _updateStage,
+            bytesDownloaded = _updateBytesDownloaded,
+            totalBytes = _updateTotalBytes,
+            percent = _updateTotalBytes > 0 ? (int)(_updateBytesDownloaded * 100 / _updateTotalBytes) : 0
+        });
     }
 
     [HttpGet("commands")]
@@ -847,6 +916,7 @@ public class BughostedController : ControllerBase
         try
         {
             using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromSeconds(5);
             var json = await client.GetStringAsync("https://bughosted.com/weaver/version");
             return json.Trim();
         }

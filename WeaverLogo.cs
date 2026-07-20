@@ -80,17 +80,8 @@ public class WeaverLogo
                 {
                     Console.WriteLine(line);
                 }
-                
-                Console.WriteLine();
-                Console.WriteLine("Starting Weaver backend service...");
-                Console.WriteLine();
-                Console.WriteLine("[INFO] Backend service initialized successfully.");
-                Console.WriteLine();
-                Console.WriteLine("[DEBUG] Logo displayed successfully.");
-                Console.WriteLine("[TRACE] DisplayLogo method completed.");
-                Console.WriteLine("[VERBOSE] All system components are operational.");
-                Console.WriteLine();
-                Console.WriteLine("[SUCCESS] Weaver logo displayed with enhanced styling.");
+                 
+                Console.WriteLine("[INFO] Backend service initialized successfully."); 
             }
             catch (IOException)
             {

@@ -56,6 +56,8 @@ public class FrontendConfig
     public string? bughostedUsername { get; set; }
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
+    // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
+    public Dictionary<string, string>? themeColors { get; set; }
 }
 
 public class ConfigFileService

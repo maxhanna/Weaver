@@ -3,6 +3,64 @@ angular.module('kanbanApp')
     .factory('SettingsMixin', ['$http', '$window', '$timeout', function ($http, $window, $timeout) {
         const SETTINGS_KEY = 'weaverconfig.settings';
 
+        var DEFAULT_THEME = {
+            '--bg': '#071025', '--surface': '#0b1220', '--panel': '#071322',
+            '--muted': '#9fb3c8', '--text': '#e6eef6', '--accent': '#06b6d4',
+            '--accent-2': '#7c3aed', '--success': '#4ade80', '--warning': '#fbbf24',
+            '--error': '#f87171'
+        };
+
+        var PRESET_THEMES = {
+            'Dracula': {
+                '--bg': '#282a36', '--surface': '#2d2f3e', '--panel': '#21222c',
+                '--muted': '#6272a4', '--text': '#f8f8f2', '--accent': '#bd93f9',
+                '--accent-2': '#ff79c6', '--success': '#50fa7b', '--warning': '#f1fa8c',
+                '--error': '#ff5555'
+            },
+            'Nord': {
+                '--bg': '#2e3440', '--surface': '#3b4252', '--panel': '#434c5e',
+                '--muted': '#81a1c1', '--text': '#eceff4', '--accent': '#88c0d0',
+                '--accent-2': '#b48ead', '--success': '#a3be8c', '--warning': '#ebcb8b',
+                '--error': '#bf616a'
+            },
+            'Solarized': {
+                '--bg': '#002b36', '--surface': '#073642', '--panel': '#0a4a54',
+                '--muted': '#657b83', '--text': '#93a1a1', '--accent': '#268bd2',
+                '--accent-2': '#d33682', '--success': '#859900', '--warning': '#b58900',
+                '--error': '#dc322f'
+            },
+            'Catppuccin': {
+                '--bg': '#1e1e2e', '--surface': '#181825', '--panel': '#11111b',
+                '--muted': '#a6adc8', '--text': '#cdd6f4', '--accent': '#89b4fa',
+                '--accent-2': '#f5c2e7', '--success': '#a6e3a1', '--warning': '#f9e2af',
+                '--error': '#f38ba8'
+            },
+            'Tokyo Night': {
+                '--bg': '#0d0f1c', '--surface': '#13152a', '--panel': '#1a1b2e',
+                '--muted': '#565f89', '--text': '#c0caf5', '--accent': '#7aa2f7',
+                '--accent-2': '#bb9af7', '--success': '#9ece6a', '--warning': '#e0af68',
+                '--error': '#f7768e'
+            }
+        };
+
+        function mergeTheme(themeColors) {
+            var merged = {};
+            Object.keys(DEFAULT_THEME).forEach(function (k) { merged[k] = DEFAULT_THEME[k]; });
+            if (themeColors) {
+                Object.keys(themeColors).forEach(function (k) {
+                    if (merged.hasOwnProperty(k) && themeColors[k]) merged[k] = themeColors[k];
+                });
+            }
+            return merged;
+        }
+
+        function applyTheme(el, themeColors) {
+            if (!el) el = document.documentElement;
+            Object.keys(themeColors).forEach(function (k) {
+                el.style.setProperty(k, themeColors[k]);
+            });
+        }
+
         function normalizeProjects(raw) {
             return raw.map(function (p) {
                 return { Name: p.Name || p.name, Path: p.Path || p.path, Description: p.Description || p.description || '', BuildCommands: p.buildCommands || p.BuildCommands || '' };
@@ -35,6 +93,7 @@ angular.module('kanbanApp')
                 vm.defaultMaxTokens = 2048;
                 vm.buildCommands = "";
                 vm.prByDefault = false;
+                vm.themeColors = {};
 
                 // UI Panels
                 vm.showProjectOptions = false;
@@ -124,6 +183,8 @@ angular.module('kanbanApp')
                             vm.bughostedUsername = cfg.bughostedUsername || '';
                             vm.bughostedPassword = cfg.bughostedPassword || '';
                             vm.bughostedHeartbeatEnabled = cfg.bughostedHeartbeatEnabled || false;
+                            vm.themeColors = mergeTheme(cfg.themeColors);
+                            applyTheme(null, vm.themeColors);
                         } catch (e) { console.log("Loading config error", e); }
                     }, function () {
                         vm.projects = normalizeProjects([{ Name: 'Default', Path: '..' }]);
@@ -152,6 +213,7 @@ angular.module('kanbanApp')
                         cfg.bughostedUsername = vm.bughostedUsername || '';
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
+                        cfg.themeColors = vm.themeColors;
                         return $http.post('/api/config/save', cfg);
                     }).then(function () {
                         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
@@ -247,8 +309,63 @@ angular.module('kanbanApp')
                 };
                 vm.openDiscordPanel = function () { vm.showDiscordPanel = true; vm.loadVersion(); };
                 vm.closeDiscordPanel = function () { vm.showDiscordPanel = false; };
-                vm.loadVersion = function () { $http.get('/api/bughosted/version').then(function (resp) { vm.appVersion = resp.data; }, function () { vm.appVersion = { local: '?', remote: null, updateAvailable: false }; }); };
-                vm.triggerUpdate = function () { vm.updating = true; $http.post('/api/bughosted/update').then(function () { }, function () { vm.updating = false; alert('Update failed.'); }); };
+                vm.loadVersion = function () { $http.get('/api/bughosted/version', { timeout: 10000 }).then(function (resp) { vm.appVersion = resp.data; }, function () { vm.appVersion = { local: '?', remote: null, updateAvailable: false }; }); };
+                vm.triggerUpdate = function () {
+                    vm.updating = true;
+                    vm.updateProgress = { stage: 'starting', percent: 0, bytesDownloaded: 0, totalBytes: 0 };
+                    $http.post('/api/bughosted/update').then(function () {
+                        pollUpdateProgress();
+                    }, function () {
+                        vm.updating = false;
+                        vm.updateProgress = null;
+                        alert('Update failed.');
+                    });
+                };
+
+                function pollUpdateProgress() {
+                    var poll = function () {
+                        $http.get('/api/bughosted/update-progress', { timeout: 3000 }).then(function (resp) {
+                            vm.updateProgress = resp.data;
+                            if (resp.data.stage === 'failed') {
+                                vm.updating = false;
+                                alert('Update failed.');
+                            } else if (resp.data.stage === 'installing' || resp.data.stage === 'restarting') {
+                                vm.updateProgress = { stage: 'restarting', percent: 100, bytesDownloaded: 0, totalBytes: 0 };
+                                waitForServer();
+                            } else {
+                                $timeout(poll, 500);
+                            }
+                        }, function () {
+                            vm.updateProgress = { stage: 'restarting', percent: 100, bytesDownloaded: 0, totalBytes: 0 };
+                            waitForServer();
+                        });
+                    };
+                    $timeout(poll, 1000);
+                }
+
+                function shutdownBackground() {
+                    vm.shuttingDown = true;
+                    if (vm.stopBughostedTimers) vm.stopBughostedTimers();
+                    if (vm.pauseTerminalPolling) vm.pauseTerminalPolling();
+                    if (vm.stopIdePolling) vm.stopIdePolling();
+                }
+
+                function waitForServer(fromManual) {
+                    shutdownBackground();
+                    var started = Date.now();
+                    var retry = function () {
+                        var elapsed = (Date.now() - started) / 1000;
+                        if (elapsed > 15) vm.updateProgress.stuck = true;
+                        if (fromManual && elapsed > 60) { vm.updateProgress.stuck = true; return; }
+                        $http.get('/api/bughosted/version', { timeout: 5000 }).then(function () {
+                            window.location.reload();
+                        }, function () {
+                            $timeout(retry, fromManual ? 500 : 2000);
+                        });
+                    };
+                    $timeout(retry, fromManual ? 500 : 1000);
+                }
+                vm.reloadNow = function () { waitForServer(true); };
 
                 vm.openSettingsPanel = function () {
                     vm.settingsDefaultProject = vm.defaultProject || vm.selectedProject; vm.showSettingsPanel = true;
@@ -265,6 +382,18 @@ angular.module('kanbanApp')
                         } catch (e) { }
                     });
                     var backdrop = document.getElementById('backdrop'); if (backdrop) backdrop.style.display = 'block';
+                };
+                vm.resetThemeColors = function () {
+                vm.themeColors = {};
+                vm.presetThemeList = Object.keys(PRESET_THEMES);
+                    Object.keys(DEFAULT_THEME).forEach(function (k) { vm.themeColors[k] = DEFAULT_THEME[k]; });
+                    applyTheme(null, vm.themeColors);
+                };
+                vm.applyPresetTheme = function (name) {
+                    var preset = PRESET_THEMES[name];
+                    if (!preset) return;
+                    Object.keys(preset).forEach(function (k) { vm.themeColors[k] = preset[k]; });
+                    applyTheme(null, vm.themeColors);
                 };
                 vm.closeSettingsPanel = function (event) {
                     if (event && event.target.tagName === 'INPUT') return;

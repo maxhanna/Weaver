@@ -1,41 +1,7 @@
 ﻿using System.Diagnostics;
-using System.IO;
-using System.Threading.Tasks;
+using System.Reflection;
 using Weaver.Services;
 using Weaver.Hubs;
-using System.Reflection;
-
-// ── Self-update mode ──────────────────────────────────────────────
-// Weaver.exe --update-self <tempExe> <originalExe>
-if (args.Length >= 3 && args[0] == "--update-self")
-{
-    var newExe = args[1];
-    var oldExe = args[2];
-    await Task.Delay(2000);
-    while (true)
-    {
-        try
-        {
-            File.Copy(newExe, oldExe, overwrite: true);
-            break;
-        }
-        catch
-        {
-            await Task.Delay(500);
-        }
-    }
-
-    try
-    {
-        File.Delete(newExe);
-    }
-    catch
-    {
-    }
-
-    Process.Start(oldExe);
-    return;
-}
 
 WeaverLogo.DisplayLogo();
 var builder = WebApplication.CreateBuilder(args);
@@ -119,6 +85,7 @@ var runTask = app.RunAsync();
 
 // Now Kestrel has started and URLs are populated
 var url = app.Urls.First();
-Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+if (!args.Contains("--no-open-browser"))
+    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
 
 await runTask;

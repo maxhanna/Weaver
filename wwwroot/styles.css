@@ -2773,6 +2773,52 @@ h3 .small.ghost:hover {
 	width: 100%;
 }
 
+/* ── Update progress panel (Discord panel) ── */
+.update-stage {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+	font-size: 13px;
+}
+.update-dot {
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: #06b6d4;
+	flex-shrink: 0;
+	animation: update-pulse 1.2s ease-in-out infinite;
+}
+.update-stage-label {
+	font-weight: 500;
+}
+.update-progress-bar-track {
+	height: 6px;
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: 3px;
+	overflow: hidden;
+	margin-bottom: 4px;
+}
+.update-progress-bar-fill {
+	height: 100%;
+	background: linear-gradient(90deg, #06b6d4, #7c3aed);
+	border-radius: 3px;
+	transition: width 0.3s ease;
+}
+.update-progress-text {
+	font-size: 11px;
+	color: var(--muted);
+}
+.update-restart-note {
+	font-size: 11px;
+	color: var(--muted);
+	font-style: italic;
+}
+@keyframes update-pulse {
+	0%, 100% { opacity: 1; transform: scale(1); }
+	50% { opacity: 0.5; transform: scale(0.85); }
+}
+
 .file-picker-nav {
 	display: flex;
 	align-items: center;

@@ -16,7 +16,7 @@ angular.module('kanbanApp')
                 };
 
                 vm.refreshTerminal = function () {
-                    if (vm.destroyed) return;
+                    if (vm.destroyed || vm.shuttingDown) return;
                     fetch('/api/terminal/output').then(function (r) { return r.json(); }).then(function (data) {
                         var newOutput = (data && data.output) || '';
                         if (newOutput !== vm.terminalOutput) {
@@ -28,7 +28,7 @@ angular.module('kanbanApp')
                 };
 
                 vm.refreshTerminalApprovals = function () {
-                    if (vm.destroyed) return;
+                    if (vm.destroyed || vm.shuttingDown) return;
                     fetch('/api/terminal/approvals/pending').then(function (r) { return r.json(); }).then(function (data) {
                         vm.pendingTerminalApprovals = (data && data.approvals) || [];
                     }, function () { vm.pendingTerminalApprovals = []; });
