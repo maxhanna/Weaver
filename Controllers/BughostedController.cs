@@ -370,7 +370,7 @@ public class BughostedController : ControllerBase
                 using (var validateStream = new FileStream(tempExe, FileMode.Open, FileAccess.Read))
                 {
                     var magic = new byte[2];
-                    await validateStream.ReadAsync(magic, 0, 2);
+                    await validateStream.ReadExactlyAsync(magic, 0, 2);
                     var size = new FileInfo(tempExe).Length;
                     if (magic[0] != 'M' || magic[1] != 'Z' || size < 1024 * 1024)
                     {
