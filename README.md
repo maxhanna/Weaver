@@ -28,7 +28,7 @@ https://discord.gg/YQWkD6ZQDx
 ## Requirements
 
 - .NET 10 SDK (or compatible runtime)
-- llama.cpp server / Ollama 
+- OpenAI endpoint / llama.cpp server / Ollama 
 
 ## Run
 
