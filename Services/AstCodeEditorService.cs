@@ -42,6 +42,7 @@ public static class AstCodeEditorService
     {
         ["TypeScript"] =
         [
+            "(property_definition name: (property_identifier) @name) @target",
             "(method_definition name: (property_identifier) @name) @target",
             "(function_declaration name: (identifier) @name) @target",
             "(method_signature name: (property_identifier) @name) @target",
@@ -54,6 +55,7 @@ public static class AstCodeEditorService
         ],
         ["TSX"] =
         [
+            "(property_definition name: (property_identifier) @name) @target",
             "(method_definition name: (property_identifier) @name) @target",
             "(function_declaration name: (identifier) @name) @target",
             "(method_signature name: (property_identifier) @name) @target",

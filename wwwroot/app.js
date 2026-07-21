@@ -44,14 +44,14 @@ angular.module('kanbanApp', [])
         if ("Notification" in window) {
           let permission = Notification.permission;
           if (permission === "granted") {
-            new Notification("Weaver", { body: message });
+            new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
             return;
           }
           if (permission === "default") {
             try {
               permission = await Notification.requestPermission();
               if (permission === "granted") {
-                new Notification("Weaver", { body: message });
+                new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
                 return;
               }
             } catch (e) { console.warn("Notification permission request failed:", e); }
@@ -62,7 +62,7 @@ angular.module('kanbanApp', [])
 
       vm.sendSystemToast = function () {
         if (navigator.userAgent.indexOf('Win') !== -1) {
-          vm.showNotification('Done');
+          vm.showNotification('Task done');
           vm.playSound();
         }
       };

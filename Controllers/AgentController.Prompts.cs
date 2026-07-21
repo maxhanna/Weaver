@@ -147,7 +147,8 @@ partial class AgentController
             "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
             "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
             " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
-            " * Do NOT consider style/whitespace issues — those are handled by other passes.\n" +
+             " * Do NOT consider style/whitespace/indentation issues — those are handled by other passes. " +
+             "Indentation changes (e.g., 20 spaces → 21 spaces for closing tags) are cosmetic and do NOT make the code malformed.\n" +
             " * BLANK LINE SPAM: If the newString has a blank line between nearly every code line " +
             "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
             "  Code should have consecutive lines within a block, with at most one blank line " +

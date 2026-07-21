@@ -308,11 +308,10 @@ angular.module('kanbanApp')
                                                  
                                                                 if (vm._agentStopped || card.id !== vm.activeCardId) { $scope.$applyAsync(); return; }
 
-                                                                if (vm.planItems && vm.planItems.length) {
-                                                                    var allDone = vm.planItems.every(function (pi) { return pi.done; });
-                                                                    if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
-                                                                    else incomplete = false;
-                                                                }
+                                                                 if (vm.planItems && vm.planItems.length) {
+                                                                     var allDone = vm.planItems.every(function (pi) { return pi.done; });
+                                                                     if (!allDone) { incomplete = true; pushAgentLog(vm, 'warn', 'Plan has ' + vm.planItems.filter(function (pi) { return !pi.done; }).length + ' unchecked step(s) — card stays in Doing'); }
+                                                                 }
 
                                                                 function recordBenchmarkScore() {
                                                                     if (!card._benchmark) return;
@@ -361,10 +360,9 @@ angular.module('kanbanApp')
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
                                                                      $timeout(function () {
-                                                                         if (vm.autoQueue) {
-                                                                             var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
-                                                                             if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
-                                                                         }
+                                                                         if (!vm.autoQueue) return;
+                                                                         var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
+                                                                         if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
                                                                          var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
                                                                          if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
                                                                      }, 500);
