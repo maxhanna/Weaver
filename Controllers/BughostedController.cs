@@ -4,7 +4,9 @@ using Microsoft.AspNetCore.Http.Features;
 using System.Text.Json;
 using System.Text;
 using System.IO.Compression;
+using Microsoft.Extensions.Hosting;
 using Weaver.Services;
+using IOFile = System.IO.File;
 
 namespace Weaver.Controllers;
 
@@ -16,15 +18,20 @@ public class BughostedController : ControllerBase
     private readonly IHttpClientFactory _clientFactory;
     private readonly IConfiguration _config;
     private readonly IWebHostEnvironment _env;
+    private readonly IHostApplicationLifetime _hostLifetime;
     private const string DefaultBugHostedUrl = "https://bughosted.com";
     private static readonly Dictionary<string, BughostedSession> _sessions = new();
+    private static string _updateStage = "idle";
+    private static long _updateBytesDownloaded;
+    private static long _updateTotalBytes;
 
-    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env)
+    public BughostedController(ConfigFileService configFile, IHttpClientFactory clientFactory, IConfiguration config, IWebHostEnvironment env, IHostApplicationLifetime hostLifetime)
     {
         _configFile = configFile;
         _clientFactory = clientFactory;
         _config = config;
         _env = env;
+        _hostLifetime = hostLifetime;
     }
 
     // ─── Filesystem proxy (for BugHosted IDE remote file access) ─────────────
@@ -322,12 +329,16 @@ public class BughostedController : ControllerBase
     [HttpPost("update")]
     public IActionResult TriggerUpdate()
     {
+        _updateStage = "idle";
+        _updateBytesDownloaded = 0;
+        _updateTotalBytes = 0;
+
         _ = Task.Run(async () =>
         {
             try
             {
                 var remoteVer = await GetRemoteVersionAsync();
-                if (remoteVer == null) return;
+                if (remoteVer == null) { _updateStage = "failed"; return; }
                 await SetLocalVersionAsync(remoteVer);
 
                 var tempDir = Path.Combine(Path.GetTempPath(), "weaver-update");
@@ -336,19 +347,77 @@ public class BughostedController : ControllerBase
 
                 using var client = new HttpClient();
                 client.Timeout = TimeSpan.FromMinutes(5);
-                var bytes = await client.GetByteArrayAsync("https://bughosted.com/assets/Weaver.exe");
-                await System.IO.File.WriteAllBytesAsync(tempExe, bytes);
+                using var response = await client.GetAsync("https://bughosted.com/assets/Weaver.exe", HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                _updateTotalBytes = response.Content.Headers.ContentLength ?? -1;
+                _updateStage = "downloading";
+                _updateBytesDownloaded = 0;
+
+                using var stream = await response.Content.ReadAsStreamAsync();
+                using var fileStream = new FileStream(tempExe, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+                var buffer = new byte[8192];
+                int read;
+                while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer, 0, read);
+                    _updateBytesDownloaded += read;
+                }
+                fileStream.Close();
+
+                _updateStage = "installing";
+
+                // Validate the downloaded EXE before touching the original
+                using (var validateStream = new FileStream(tempExe, FileMode.Open, FileAccess.Read))
+                {
+                    var magic = new byte[2];
+                    await validateStream.ReadExactlyAsync(magic, 0, 2);
+                    var size = new FileInfo(tempExe).Length;
+                    if (magic[0] != 'M' || magic[1] != 'Z' || size < 1024 * 1024)
+                    {
+                        _updateStage = "failed";
+                        return;
+                    }
+                }
 
                 var currentExe = Environment.ProcessPath!;
-                Process.Start(currentExe, $"--update-self \"{tempExe}\" \"{currentExe}\"");
-            }
-            catch { }
+                var scriptPath = Path.Combine(tempDir, "update.cmd");
 
-            await Task.Delay(500);
-            Environment.Exit(0);
+                var script = $@"@echo off
+timeout /t 8 /nobreak >nul
+copy /Y ""{tempExe}"" ""{currentExe}""
+start """" ""{currentExe}"" --no-open-browser
+";
+                await IOFile.WriteAllTextAsync(scriptPath, script);
+
+                var psi = new ProcessStartInfo("cmd.exe", $"/c \"{scriptPath}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                Process.Start(psi);
+
+                _updateStage = "restarting";
+
+                // Graceful shutdown: the host drains connections and unbinds the port.
+                // The process exits naturally when Kestrel finishes.
+                _hostLifetime.StopApplication();
+            }
+            catch { _updateStage = "failed"; }
         });
 
         return Ok(new { updating = true, message = "Update started" });
+    }
+
+    [HttpGet("update-progress")]
+    public IActionResult GetUpdateProgress()
+    {
+        return Ok(new
+        {
+            stage = _updateStage,
+            bytesDownloaded = _updateBytesDownloaded,
+            totalBytes = _updateTotalBytes,
+            percent = _updateTotalBytes > 0 ? (int)(_updateBytesDownloaded * 100 / _updateTotalBytes) : 0
+        });
     }
 
     [HttpGet("commands")]
@@ -468,8 +537,8 @@ public class BughostedController : ControllerBase
         try
         {
             var client = _clientFactory.CreateClient();
-            var payload = JsonSerializer.Serialize(new { dto });
-            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/addbenchmark")
+            var payload = JsonSerializer.Serialize(dto);
+            var httpReq = new HttpRequestMessage(HttpMethod.Post, url + "/weaver/addbenchmark")
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
@@ -488,6 +557,91 @@ public class BughostedController : ControllerBase
             Console.WriteLine($"Error sending benchmark: {ex.Message}");
             return StatusCode(500, new { error = "Internal server error while sending benchmark" });
         }
+    }
+
+    [HttpGet("benchmarks")]
+    public async Task<IActionResult> GetBenchmarks([FromQuery] string token)
+    {
+        if (string.IsNullOrWhiteSpace(token) || !_sessions.TryGetValue(token, out var session))
+            return Unauthorized(new { error = "Not logged in" });
+
+        var cfg = await _configFile.LoadConfigAsync();
+        var url = (cfg.bughostedUrl ?? DefaultBugHostedUrl).TrimEnd('/');
+        try
+        {
+            var client = _clientFactory.CreateClient();
+            var httpReq = new HttpRequestMessage(HttpMethod.Get,
+                url + $"/weaver/benchmarks?token={Uri.EscapeDataString(session.Token)}");
+            var httpRes = await client.SendAsync(httpReq);
+            var body = await httpRes.Content.ReadAsStringAsync();
+
+            if (!httpRes.IsSuccessStatusCode)
+                return BadRequest(new { error = "Failed to fetch benchmarks", detail = body });
+
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var rawList = JsonSerializer.Deserialize<List<Dictionary<string, JsonElement>>>(body, opts);
+            var mapped = rawList?.Select(b => new Dictionary<string, object?>
+            {
+                ["timestamp"] = b.TryGetValue("date", out var d) ? JsonString(d) : null,
+                ["level"] = b.TryGetValue("benchmark", out var l) ? JsonInt(l) : 0,
+                ["stepsCompleted"] = b.TryGetValue("steps", out var sc) ? JsonStepsPart(sc, 0) : 0,
+                ["totalSteps"] = b.TryGetValue("steps", out var st) ? JsonStepsPart(st, 1) : 0,
+                ["scorePercent"] = b.TryGetValue("score", out var so) ? JsonDouble(so) : 0.0,
+                ["status"] = b.TryGetValue("status", out var su) ? JsonString(su) : "",
+                ["durationMs"] = b.TryGetValue("duration", out var du) ? JsonDouble(du) : 0.0,
+                ["modelUsed"] = b.TryGetValue("model", out var mo) ? JsonString(mo) : "",
+                ["os"] = b.TryGetValue("os", out var os) ? JsonString(os) : "",
+                ["cpu"] = b.TryGetValue("cpu", out var cpu) ? JsonString(cpu) : "",
+                ["ram"] = b.TryGetValue("ram", out var ram) ? JsonString(ram) : "",
+                ["gpu"] = b.TryGetValue("gpu", out var gpu) ? JsonString(gpu) : "",
+                ["_source"] = "server"
+            }).ToList();
+
+            return Ok(mapped ?? new List<Dictionary<string, object?>>());
+        }
+        catch (Exception ex)
+        {
+            var fullError = ex.ToString();
+            Console.WriteLine("Error fetching benchmarks:");
+            Console.WriteLine(fullError);
+            return StatusCode(500, new
+            {
+                error = "Internal server error while fetching benchmarks",
+                detail = fullError
+            });
+        }
+    }
+
+    private static string JsonString(JsonElement el) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString() ?? "",
+            JsonValueKind.Number => el.GetRawText(),
+            _ => ""
+        };
+
+    private static int JsonInt(JsonElement el, int fallback = 0) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.Number => el.TryGetInt32(out var n) ? n : (int)el.GetDouble(),
+            JsonValueKind.String => int.TryParse(el.GetString(), out var n) ? n : fallback,
+            _ => fallback
+        };
+
+    private static double JsonDouble(JsonElement el, double fallback = 0.0) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.Number => el.TryGetDouble(out var n) ? n : fallback,
+            JsonValueKind.String => double.TryParse(el.GetString(), out var n) ? n : fallback,
+            _ => fallback
+        };
+
+    private static int JsonStepsPart(JsonElement el, int index)
+    {
+        if (el.ValueKind != JsonValueKind.String) return 0;
+        var parts = el.GetString()?.Split('/');
+        if (parts == null || parts.Length != 2) return 0;
+        return int.TryParse(parts[index], out var v) ? v : 0;
     }
 
     [HttpPost("commands/ack")]
@@ -762,6 +916,7 @@ public class BughostedController : ControllerBase
         try
         {
             using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromSeconds(5);
             var json = await client.GetStringAsync("https://bughosted.com/weaver/version");
             return json.Trim();
         }

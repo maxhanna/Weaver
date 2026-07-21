@@ -4,6 +4,9 @@
 data/*
 weaverconfig.json
 
+.formatter/node_modules/
+.formatter/package-lock.json
+
 # Test output artifacts
 **/TestResults/
 *.trx

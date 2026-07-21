@@ -2,20 +2,16 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using System.IO;
-
 namespace Weaver.Controllers;
-
 [ApiController]
 [Route("api/[controller]")]
 public class FileHintsController : ControllerBase
 {
         private readonly string _filePath;
-
         public FileHintsController(IWebHostEnvironment env)
         {
             _filePath = Path.Combine(env.ContentRootPath, "data/filehints.json");
         }
-
         [HttpGet]
         public IActionResult GetFileHints()
         {
@@ -28,13 +24,11 @@ public class FileHintsController : ControllerBase
                 {
                     Directory.CreateDirectory(directory);
                 }
-
                 // Initialize with the default structure expected by the Angular client
                 // Using a raw string ensures the PascalCase "Projects" key matches the JS expectations
                 var defaultContent = "{\"Projects\": {}}";
                 System.IO.File.WriteAllText(_filePath, defaultContent);
             }
-
             var fileContent = System.IO.File.ReadAllText(_filePath);
             try
             {
@@ -46,7 +40,6 @@ public class FileHintsController : ControllerBase
                 return Ok(fileContent);
             }
         }
-
         [HttpPut]
         public IActionResult UpdateFileHints([FromBody] object content)
         {

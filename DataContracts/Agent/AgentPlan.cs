@@ -52,6 +52,13 @@ public class AgentPlan
     public List<PlanStep> Plan { get; set; } = new();
 }
 
+public class EditPair
+{
+    public string OldString { get; set; } = "";
+    public string NewString { get; set; } = "";
+    public int LineNumber { get; set; }
+}
+
 public class PlanStep
 {
     public string File { get; set; } = string.Empty;
@@ -67,4 +74,12 @@ public class PlanStep
     /// <summary>Meta-plan group label (sub-plan title) this step belongs to, if any.</summary>
     [JsonPropertyName("metaGroup")]
     public string? MetaGroup { get; set; }
+
+    /// <summary>Explicit target symbol (function/method/class/selector) to edit, set by the planner LLM.</summary>
+    [JsonPropertyName("targetSymbol")]
+    public string? TargetSymbol { get; set; }
+
+    /// <summary>Multiple edits in one step — for small repetitive changes across columns/sections.</summary>
+    [JsonPropertyName("edits")]
+    public List<EditPair>? Edits { get; set; }
 }

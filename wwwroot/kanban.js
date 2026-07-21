@@ -340,7 +340,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
       vm.toggleCardReady = function (card) {
         try {
           card.ready = !card.ready;
-          if (card.ready && vm.activeCardIds.size === 0) {
+          if (card.ready && !vm.streamingActive) {
             vm.startCard(card);
           }
         }
@@ -641,7 +641,11 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
         var moved = vm.state.doing.splice(idx, 1)[0];
         if (moved) {
           console.log("Found card in doing, moving to " + targetCol);
-          vm.state[targetCol].push(moved);
+          if (targetCol === 'selfImproving') {
+            vm.state[targetCol].unshift(moved);
+          } else {
+            vm.state[targetCol].push(moved);
+          }
           console.log("card added to " + targetCol + " setting active card to null");
           vm.activeCardId = null;
           if (!vm.activeCardIds) vm.activeCardIds = new Set();

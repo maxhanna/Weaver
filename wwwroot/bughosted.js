@@ -52,7 +52,7 @@ angular.module('kanbanApp')
                 vm.bughostedForceReconnect = function () { vm.bughostedLogout(); _bhHeartbeatFailCount = 0; $timeout(function () { vm.bughostedLogin(); }, 300); };
 
                 vm.syncEditorState = function () {
-                    if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected' || _isSyncingData) return;
+                    if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected' || _isSyncingData || vm.shuttingDown) return;
                     _isSyncingData = true;
                     var data = buildHeartbeatPayload();
                     $http.post('/api/bughosted/heartbeat', data).then(function () { _bhHeartbeatFailCount = 0; vm.bughostedStatus = 'connected'; _isSyncingData = false; }, function () { _bhHeartbeatFailCount++; if (_bhHeartbeatFailCount >= 3) vm.bughostedStatus = 'error'; _isSyncingData = false; });
@@ -61,11 +61,11 @@ angular.module('kanbanApp')
                 function startBughostedHeartbeat() {
                     stopBughostedHeartbeat();
                     _bhHeartbeatTimer = $interval(function () {
-                        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+                        if (!vm.bughostedClientId || vm.bughostedStatus !== 'connected' || vm.shuttingDown) return;
                         _lastSyncedEditorState = null; var data = buildHeartbeatPayload();
-                        $http.post('/api/bughosted/heartbeat', data).then(function () { _bhHeartbeatFailCount = 0; vm.bughostedStatus = 'connected'; }, function () { _bhHeartbeatFailCount++; if (_bhHeartbeatFailCount >= 3) vm.bughostedStatus = 'error'; });
+                        $http.post('/api/bughosted/heartbeat', data).then(function () { if (vm.shuttingDown) return; _bhHeartbeatFailCount = 0; vm.bughostedStatus = 'connected'; }, function () { if (vm.shuttingDown) return; _bhHeartbeatFailCount++; if (_bhHeartbeatFailCount >= 3) vm.bughostedStatus = 'error'; });
                     }, 30000, 0, false);
-                    _bhEditorSyncTimer = $interval(function () { if (vm.bughostedClientId && vm.bughostedStatus === 'connected') vm.syncEditorState(); }, 3000, 0, false);
+                    _bhEditorSyncTimer = $interval(function () { if (vm.bughostedClientId && vm.bughostedStatus === 'connected' && !vm.shuttingDown) vm.syncEditorState(); }, 3000, 0, false);
                 }
                 function stopBughostedHeartbeat() {
                     if (_bhHeartbeatTimer) { $interval.cancel(_bhHeartbeatTimer); _bhHeartbeatTimer = null; }
@@ -92,7 +92,7 @@ angular.module('kanbanApp')
                 function startPollingFallback() {
                     if (vm.destroyed || _bhCommandTimer) return;
                     _bhCommandTimer = $interval(function () {
-                        if (vm.destroyed || _bhTimerRunning || !vm.bughostedClientId || vm.bughostedStatus !== 'connected') return;
+                        if (vm.destroyed || _bhTimerRunning || !vm.bughostedClientId || vm.bughostedStatus !== 'connected' || vm.shuttingDown) return;
                         _bhTimerRunning = true;
                         $http.get('/api/bughosted/commands?clientId=' + encodeURIComponent(vm.bughostedClientId)).then(function (resp) {
                             _bhTimerRunning = false;
@@ -131,6 +131,7 @@ angular.module('kanbanApp')
                     $http.post('/api/bughosted/commands/ack', { clientId: vm.bughostedClientId, commandId: cmd.id, status: 'executed', result: 'ok' });
                 };
 
+                vm.stopBughostedTimers = function () { stopBughostedHeartbeat(); stopBughostedCommandPolling(); };
                 $scope.$on('$destroy', function () { stopBughostedHeartbeat(); stopBughostedCommandPolling(); });
             }
         };

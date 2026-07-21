@@ -290,6 +290,7 @@
               <span ng-if="vm.streamingContextSize" class="phase-tag">{{vm.streamingContextSize | formatNumber}}
                 tokens</span>
             </span>
+            <span>Duration: {{ vm.msToDigitalTime(vm.agentElapsed) }}</span>
           </div>
 
           <div class="agent-current" ng-if="vm.streamingActive && vm.getActiveStep()">
@@ -760,7 +761,7 @@
       </div>
       <div class="popup-body" style="text-align:center;">
         <p style="font-size:1.1em; margin-bottom:16px;">Connect with the Weaver community!</p>
-        <a href="https://discord.gg/5RHgUHcgG" target="_blank" rel="noopener noreferrer"
+        <a href="https://discord.gg/YQWkD6ZQDx" target="_blank" rel="noopener noreferrer"
           style="display:inline-block; padding:12px 32px; background:#5865F2; color:#fff; border-radius:6px; text-decoration:none; font-weight:bold; font-size:1.1em;">
           Join Discord Server
         </a>
@@ -777,11 +778,40 @@
             </span>
             <span ng-if="!vm.appVersion.updateAvailable && vm.appVersion.remote"
               style="color:#98c379; margin-left:8px;">Up to date</span>
-            <button ng-if="vm.appVersion.updateAvailable" ng-click="vm.triggerUpdate()"
+            <button ng-if="vm.appVersion.updateAvailable && !vm.updating" ng-click="vm.triggerUpdate()"
               style="display:block; margin-top:8px; padding:6px 16px; background:#e06c75; color:#fff; border:none; border-radius:4px; cursor:pointer;">
               Download Update
             </button>
-            <div ng-if="vm.updating" style="margin-top:8px; color:#e5c07b;">Updating... app will restart.</div>
+            <div ng-if="vm.updating" style="margin-top:12px; border:1px solid rgba(255,255,255,0.1); border-radius:6px; padding:12px; background:rgba(0,0,0,0.2);">
+              <div class="update-stage">
+                <span ng-if="vm.updateProgress.stage === 'starting'" class="update-dot"></span>
+                <span ng-if="vm.updateProgress.stage === 'downloading'" class="update-dot"></span>
+                <span ng-if="vm.updateProgress.stage === 'installing'" class="update-dot"></span>
+                <span ng-if="vm.updateProgress.stage === 'restarting'" class="update-dot"></span>
+                <span ng-if="vm.updateProgress.stage === 'failed'" class="update-dot" style="background:#f87171;"></span>
+                <span class="update-stage-label">
+                  <span ng-if="vm.updateProgress.stage === 'starting'">Starting...</span>
+                  <span ng-if="vm.updateProgress.stage === 'downloading'">Downloading update</span>
+                  <span ng-if="vm.updateProgress.stage === 'installing'">Installing update</span>
+                  <span ng-if="vm.updateProgress.stage === 'restarting'">Restarting app</span>
+                  <span ng-if="vm.updateProgress.stage === 'failed'">Update failed</span>
+                </span>
+              </div>
+              <div ng-if="vm.updateProgress.stage === 'downloading'" class="update-progress-bar-track">
+                <div class="update-progress-bar-fill" ng-style="{width: (vm.updateProgress.percent || 0) + '%'}"></div>
+              </div>
+              <div ng-if="vm.updateProgress.stage === 'downloading'" class="update-progress-text">
+                {{vm.updateProgress.percent || 0}}%
+                <span ng-if="vm.updateProgress.totalBytes > 0">
+                  ({{(vm.updateProgress.bytesDownloaded / 1048576).toFixed(1)}} / {{(vm.updateProgress.totalBytes / 1048576).toFixed(1)}} MB)
+                </span>
+              </div>
+              <div ng-if="vm.updateProgress.stage === 'restarting'" class="update-restart-note">The app will restart automatically.</div>
+              <div ng-if="vm.updateProgress.stage === 'restarting'" style="margin-top:8px;display:flex;gap:6px;">
+                <button ng-click="vm.reloadNow()" style="padding:5px 14px;font-size:12px;background:#06b6d4;color:#fff;border:none;border-radius:4px;cursor:pointer;">Reload now</button>
+              </div>
+              <div ng-if="vm.updateProgress.stuck" style="margin-top:6px;font-size:11px;color:#e5c07b;">The app may take up to 30s to restart. If it doesn't come back, close the Weaver window and launch Weaver.exe again.</div>
+            </div>
           </div>
           <div ng-if="!vm.appVersion" style="color:#888;">Loading version...</div>
         </div>
@@ -949,6 +979,53 @@
             </div>
             <span class="settings-help">These limits control how much context the LLM receives. Higher values allow the
               agent to handle larger files but consume more tokens.</span>
+          </div>
+        </details>
+        <details>
+          <summary class="settings-header">CSS Theme</summary>
+          <div class="form-row" style="display:flex;flex-direction:column;gap:8px;padding:8px 0;">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <div><label style="font-size:12px;">Background (--bg)</label>
+                <input type="color" ng-model="vm.themeColors['--bg']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Surface (--surface)</label>
+                <input type="color" ng-model="vm.themeColors['--surface']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Panel (--panel)</label>
+                <input type="color" ng-model="vm.themeColors['--panel']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Text (--text)</label>
+                <input type="color" ng-model="vm.themeColors['--text']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Muted (--muted)</label>
+                <input type="color" ng-model="vm.themeColors['--muted']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Accent (--accent)</label>
+                <input type="color" ng-model="vm.themeColors['--accent']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Accent 2 (--accent-2)</label>
+                <input type="color" ng-model="vm.themeColors['--accent-2']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Success (--success)</label>
+                <input type="color" ng-model="vm.themeColors['--success']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Warning (--warning)</label>
+                <input type="color" ng-model="vm.themeColors['--warning']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+              <div><label style="font-size:12px;">Error (--error)</label>
+                <input type="color" ng-model="vm.themeColors['--error']" style="width:100%;height:36px;border:none;cursor:pointer;background:transparent;" />
+              </div>
+            </div>
+            <button ng-click="vm.resetThemeColors()" style="margin-top:4px;padding:4px 12px;font-size:12px;">Reset to defaults</button>
+            <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:8px;">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">Quick Themes</div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                <button ng-repeat="name in vm.presetThemeList" ng-click="vm.applyPresetTheme(name)"
+                  style="padding:3px 10px;font-size:11px;border:1px solid rgba(255,255,255,0.1);border-radius:3px;background:rgba(255,255,255,0.03);cursor:pointer;">
+                  {{name}}
+                </button>
+              </div>
+            </div>
           </div>
         </details>
         <details>
@@ -1145,10 +1222,6 @@
               </div>
             </div>
           </div>
-          <div ng-if="!vm.benchmarkPlans || vm.benchmarkPlans.length === 0" class="text-sm muted"
-            style="padding:8px 0;">
-            Loading benchmark plans...
-          </div>
           <div ng-if="vm.benchmarkRunning" style="margin-top:8px;color:var(--accent);font-size:13px;">Benchmark
             {{vm.benchmarkLevel}} running...</div>
         </div>
@@ -1160,8 +1233,53 @@
         <div ng-if="vm.benchmarkSummary && vm.benchmarkSummary.runCount" class="muted" style="margin:6px 0 10px;font-size:12px;">
           History: {{vm.benchmarkSummary.runCount}} runs · {{vm.benchmarkSummary.averageScore.toFixed(1)}}% average · {{vm.formatBenchmarkDuration(vm.benchmarkSummary.averageDurationMs)}} average duration
         </div>
+        <!-- Server Benchmarks (fetched) -->
+        <div ng-if="vm.serverBenchmarks.length > 0" style="margin-bottom:16px;">
+          <strong style="font-size:13px;">Server Benchmarks</strong>
+          <table style="width:100%;border-collapse:collapse;margin-top:4px;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border);">
+                <th style="text-align:left;padding:4px 8px;">Benchmark</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr ng-repeat="s in vm.serverBenchmarks" style="border-bottom:1px solid var(--border);">
+                <td style="padding:4px 8px;font-size:12px;">
+                  <div style="font-weight: bold;">
+                    <span style="font-size: small">{{s.timestamp ? (s.timestamp | date:'short') : '—'}}</span> - 
+                    {{vm.benchmarkLevelName(s.level) || 'BM ' + s.level}} - 
+                    {{s.stepsCompleted}}/{{s.totalSteps}} - 
+                    {{s.scorePercent != null ? (s.scorePercent.toFixed(1) + '%') : '—'}} - 
+                    {{s.status || '—'}} - 
+                    {{vm.formatBenchmarkDuration(s.durationMs)}}
+                  </div>
+                  <div>
+                    Model: {{(s.modelUsed || '') | limitTo:50}} - 
+                    OS : {{s.os || '—'}}
+                  </div>
+                  <div>
+                    {{(s.cpu || '') | limitTo:40}} - 
+                    {{s.ram || '—'}}GB RAM - 
+                    {{(s.gpu || '') | limitTo:50}}
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Local Scores -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <strong style="font-size:13px;">Local Scores</strong>
+          <div style="display:flex;gap:4px;">
+            <button ng-click="vm.fetchBenchmarksFromServer()" class="small" ng-disabled="vm.fetchingBenchmarks"
+              style="font-size:11px;">
+              {{vm.fetchingBenchmarks ? 'Fetching...' : '📥 Fetch from Server'}}
+            </button>
+          </div>
+        </div>
         <div ng-if="vm.benchmarkScores.length === 0" class="text-sm muted" style="padding:12px 0;">
-          No benchmark scores yet. Run a benchmark above.
+          No local benchmark scores yet. Run a benchmark above.
         </div>
         <table ng-if="vm.benchmarkScores.length > 0" style="width:100%;border-collapse:collapse;">
           <thead>

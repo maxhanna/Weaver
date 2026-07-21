@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Weaver.Services;
 
 namespace Weaver.Controllers;
 
@@ -89,6 +90,78 @@ partial class AgentController
 
         return intro + formatSection + commonRules;
     }
+
+    private static string BuildVerifyEditUserPrompt() =>
+            "You are a meticulous code reviewer verifying a single edit step in a larger plan. " +
+            "Your job is to decide whether to KEEP the edit (it correctly implements the step " +
+            "without breaking existing functionality) or ABANDON it (it broke something, changed " +
+            "the wrong thing, introduced syntax errors, deleted guards/caches, or otherwise " +
+            "missed the intent of the step).\n\n" +
+            "STRICT OUTPUT FORMAT — output ONLY a JSON object, no prose, no markdown fences:\n" +
+            "{\"decision\":\"keep\"|\"abandon\", \"reason\":\"one short sentence\", \"score\": 0-100, \"needsExtraStep\": true|false}\n\n" +
+            "SCORE GUIDELINES:\n" +
+            "  90-100: Perfect — correctly implements the step, no issues\n" +
+            "  70-89:  Good — mostly correct, minor issues that could be fixed in a follow-up\n" +
+            "  40-69:  Poor — wrong approach or missing key functionality\n" +
+            "  0-39:   Broken — signature change, deleted functionality, syntax errors\n\n" +
+            "DECISION RULES:\n" +
+            " * Return \"keep\" if the edit is structurally sound and implements the step. Score 85+.\n" +
+            " * Set \"needsExtraStep\": true if the edit is CORRECT but references a method/property " +
+            "that doesn't exist in any file yet and needs to be added in a follow-up step (e.g. the HTML " +
+            "adds a button with ng-click=\"vm.foo()\" but vm.foo() doesn't exist in the .js/.ts file). " +
+            "IMPORTANT: Do NOT flag built-in DOM/event APIs like $event.preventDefault(), " +
+            "$event.stopPropagation(), console.log(), etc. — these are native JavaScript/DOM " +
+            "methods that do NOT need component-level implementations.\n" +
+            "When needsExtraStep is true, ALWAYS also include the missing method name in parentheses " +
+            "in the reason, e.g. 'added button with ng-click calling missing method (vm.clearAll).'\n" +
+            " * If needsExtraStep is true AND the edit is otherwise correct, set decision to \"keep\" " +
+            "(do NOT abandon — the system will auto-generate the follow-up step).\n" +
+            " * Return \"abandon\" if ANY of these are true:\n" +
+            "    - The edit breaks the build (syntax errors, missing braces, malformed HTML like `({ {x}}`).\n" +
+            "    - The edit is in the WRONG LOCATION (e.g., inserted inside the wrong div/section).\n" +
+            "    - The edit uses incorrect variable names or syntax in the NEW code itself (e.g., typos, mismatched braces).\n" +
+            "    - The edit deleted cache/state guard lines (e.g. `if (this.X) return ...`, " +
+            "      `map.has(...)`, `map.get(...)`, `map.set(...)`).\n" +
+            "    - The edit changed an existing method's signature (return type, name, or parameter list).\n" +
+            "    - The edit is functionally a no-op (old and new do the same thing).\n" +
+            "    - SECTION MISMATCH: For HTML/Angular templates with multiple *ngIf sections " +
+            "      (e.g., *ngIf=\"activeDataTab === 'users'\" vs *ngIf=\"activeDataTab === 'general'\"), " +
+            "      if the step says 'add X to the general tab' but the oldString comes from the 'users' " +
+            "      tab (or any other section), ABANDON with reason 'edited wrong section'. " +
+            "      This is critical — do NOT be fooled by sections that have similar structure. " +
+            "      Check WHICH *ngIf section the oldString belongs to, not just whether the edit 'looks right'.\n" +
+            " * IMPORTANT: Do NOT abandon an edit just because it 'radically changed the method' or " +
+            "  'replaced existing logic'. If the step asked for a new feature or significant modification, " +
+            "  a rewrite of the method body is EXPECTED and CORRECT. Only abandon if it breaks existing " +
+            "  functionality that is UNRELATED to the requested change.\n" +
+            " * SEQUENTIAL DEPENDENCIES (CRITICAL): Do NOT abandon an edit just because it references a method or property " +
+            "  that doesn't exist in the current file yet. If the PLANNED FUTURE STEPS section indicates that a future " +
+            "  step will add the missing method/property, OR if the system has auto-injected stubs, you MUST KEEP the current edit. " +
+            "  For HTML files, assume that methods referenced in (click) or (menuClicked) handlers WILL BE or HAVE BEEN added to the .ts file. " +
+            "  Do NOT abandon an HTML edit solely because you think the method might not exist in the .ts file.\n" +
+            " * INSERTIONS: If the step asks to ADD a new method, property, or block of code, and the newString " +
+            "  CONTAINS the entire oldString unchanged (usually at the beginning) followed by the new code, this is an INSERTION. " +
+            "  This is the CORRECT behavior. Do NOT abandon it claiming it 'replaced' or 'failed to add' the new method. " +
+            "  If the new code is present and the old code is preserved, keep the edit.\n" +
+            " * If the step asks to modify specific values inside a method (e.g., change coordinates, update a config), " +
+            "  it is acceptable to replace the entire method as long as the requested values are updated correctly " +
+            "  and the rest of the method is preserved. Do NOT abandon just because the LLM rewrote the method.\n" +
+            " * Be conservative: if you're unsure, return \"keep\" and let the build check catch any issues.\n" +
+            " * Do NOT consider style/whitespace issues — those are handled by other passes.\n" +
+            " * BLANK LINE SPAM: If the newString has a blank line between nearly every code line " +
+            "  (alternating code/blank pattern), ABANDON with reason 'excessive blank lines'. " +
+            "  Code should have consecutive lines within a block, with at most one blank line " +
+            "  between logical sections.\n" +
+            " * DO NOT SUGGEST MOVING CODE: Do not flag issues that require moving code blocks, reordering DOM, or restructuring files. " +
+            "  Structural refactors are user decisions. Only flag functional bugs, missing methods, or syntax errors.\n" +
+            " * DO NOT SECOND-GUESS STRUCTURE: Do not flag nesting, sibling placement, or container wrapping issues. " +
+            "  Do not invent issues just to find something to do. If the requested feature is present and functional, KEEP the edit.\n" +
+            " * IGNORE TRIVIAL CASING & NAMING: Do not flag variable casing differences (e.g., 'isSearchingImdb' vs 'isSearchingIMDB') or minor naming inconsistencies. " +
+            "  Assume the system handles these. Only flag completely missing functionality or critical syntax errors.\n" +
+            " * MISSING METHODS ARE NOT BUGS: If the HTML references a method like showMoreReddit() that doesn't exist yet, DO NOT ABANDON. " +
+            "  Set needsExtraStep=true and KEEP the edit. The system will auto-generate the missing method. Only ABANDON if the edit deletes existing code or breaks syntax.\n" +
+            " * SYNTAX ERRORS ARE FATAL: If the edit has malformed HTML (e.g., `({ {x}}`), mismatched braces, or incorrect Angular syntax in the NEW code itself, ABANDON immediately. " +
+            "  Do not create a repair step for syntax errors; the system will automatically retry the edit with the failure context.\n";
 
     private static string BuildStepExplorationSystemPrompt() =>
         "You are a senior codebase navigation agent. Before a code change is applied, " +
@@ -232,7 +305,8 @@ partial class AgentController
     "  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n" +
     "  \"step\": {\n" +
     "    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
-    "    \"change\": \"precise, atomic description of ONLY this step's change\",\n" +
+    "    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n" +
+    "    \"targetSymbol\": \"getTimedGreetingMessage\",\n" +
     "    \"line\": 42,\n" +
     "    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n" +
     "  },\n" +
@@ -244,6 +318,15 @@ partial class AgentController
     "2. The step MUST be atomic: one coherent edit at one location in one file. If the natural next " +
     "   action touches two locations (e.g. add a field AND initialize it in a constructor), propose ONLY " +
     "   the first location now — the second location gets its own turn later.\n" +
+    "   EXCEPTION: For small repetitive edits to the SAME file (e.g. removing priority tags from " +
+    "   todo/doing/done columns, updating the same CSS pattern in multiple selectors), you MAY use " +
+    "   the \"edits\" array to batch multiple oldString/newString pairs into ONE step:\n" +
+    "   \"edits\": [\n" +
+    "     {\"oldString\": \"line1\", \"newString\": \"line1\", \"line\": 10},\n" +
+    "     {\"oldString\": \"line2\", \"newString\": \"line2\", \"line\": 20}\n" +
+    "   ]\n" +
+    "   Each pair is applied independently to the same file. Do NOT use edits for edits in different files — " +
+    "   those still need separate steps.\n" +
     "3. NEVER repeat or restate a step already present in PLAN SO FAR.\n" +
     "4. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in " +
     "   the discovery context OR was introduced by an earlier committed step. NEVER explore files outside the " +
@@ -257,10 +340,18 @@ partial class AgentController
     "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. " +
     "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
     "   unrelated files.\n" +
-    "9. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
-    "10. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
+     "9. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\").\n" +
+    "10. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
+    "11. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
+     "Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n" +
+    "12. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), " +
+    "you MUST examine ALL attached files in discovery context to find where that original message or behavior " +
+    "originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n" +
+    "13. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
     "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
-    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n";
+    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
+    "14. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
+    "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -404,8 +495,9 @@ partial class AgentController
         "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
                "### STEP TYPES (the \"file\" field) ###\n" +
         "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. " +
-            "For every edit step, include a \"line\" field with the 1-based line number of the target location. " +
-            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"priority\": 1, \"line\": 42}\n" +
+            "For every edit step, include a \"line\" field with the 1-based line number of the target location " +
+            "and a \"targetSymbol\" field with the exact method/function/class/selector name being edited. " +
+            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"targetSymbol\": \"methodName\", \"priority\": 1, \"line\": 42}\n" +
         "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
         "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.\n" +
         "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.\n" +
@@ -452,7 +544,12 @@ partial class AgentController
         "   BAD (too vague): \"Fix the dashboard\"\n" +
         "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
         "   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n" +
-        "9. Each step's change field must be extremely precise: name the method/component/selector, describe the old behavior, and describe the new behavior.\n" +
+         "9. CRITICAL: Each step's change field MUST include the exact method/function/variable name being changed (e.g., \"getTimedGreetingMessage\", \"renderCards\", \"constructor\"). " +
+             "The execution pipeline uses this name to locate the correct code position in the file. " +
+             "If the change description lacks a code identifier, the system cannot find the target location. " +
+             "Also describe the old behavior and the new behavior.\n" +
+             "   BAD (missing method name): \"Add additional specific hour-based greetings to cover early morning, late night, and midnight periods\"\n" +
+             "   GOOD (includes method name): \"Add early morning, late night, and midnight greeting branches to getTimedGreetingMessage()\"\n" +
         "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
         "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
         "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
@@ -484,6 +581,7 @@ partial class AgentController
         "    {\n" +
         "      \"file\": \"wwwroot/app.js\",\n" +
         "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
+        "      \"targetSymbol\": \"confirmFilePicker\",\n" +
         "      \"line\": 42,\n" +
         "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
         "    }\n" +
@@ -583,7 +681,45 @@ partial class AgentController
         }
         return sb.ToString();
     }
+     
+    private async Task<string> BuildRequirementChecklistAsync(string prompt, CancellationToken ct)
+    {
+        var sys =
+            "You extract a short checklist of literal, testable requirements from a coding task. " +
+            "Output ONLY JSON: {\"requirements\": [\"...\", \"...\"]}. 3-6 items max. " +
+            "Each item must be objectively checkable, not vague ('good code'), and must preserve the " +
+            "task's specific wording (tone, style, exact behavior). " +
+            "CRITICAL: if the task implies content must have a specific quality (funny, concise, matches " +
+            "brand voice, etc.), that is a requirement. If the task implies the change must be VISIBLE/USED/" +
+            "WIRED UP — not just exist as new code — that is always a requirement, even if not stated explicitly, " +
+            "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
 
+        var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 400);
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+
+        try
+        {
+            var cleaned = AgentUtilities.ExtractFirstJsonObject(raw);
+            using var doc = JsonDocument.Parse(cleaned);
+            if (!doc.RootElement.TryGetProperty("requirements", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return "";
+
+            var items = arr.EnumerateArray()
+                .Select(e => e.GetString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Take(6)
+                .ToList();
+            if (items.Count == 0) return "";
+
+            var sb = new StringBuilder();
+            sb.AppendLine("### EXPLICIT REQUIREMENTS CHECKLIST ###");
+            sb.AppendLine("Verify EACH item individually against the actual code/content. A task is only complete " +
+                           "if EVERY item below is satisfied — do not form one overall impression.");
+            for (var i = 0; i < items.Count; i++) sb.AppendLine($"  {i + 1}. {items[i]}");
+            return sb.ToString();
+        }
+        catch { return ""; }
+    }
     private static string PreviewForPrompt(string value, int maxChars) =>
         value.Length <= maxChars ? value : value[..maxChars] + "\n[truncated]";
 

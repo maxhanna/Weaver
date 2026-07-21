@@ -70,6 +70,8 @@ angular.module('kanbanApp')
                 vm.streamingStableCount = 0; vm.activeStepIndex = null; vm.agentResult = null; vm.steeringContext = ''; vm.clarificationReply = '';
                 vm.abortController = new AbortController(); vm.planItems = []; vm.cohesionIssues = []; vm.cohesionFile = '';
                 vm.pendingContextReview = null; vm.contextReviewCountdown = 0; vm.contextReviewTimer = null;
+                vm._agentStartTime = null;
+                vm.agentTimer = null;
                 vm.buildTools = [
                     { name: 'Ping', icon: '📡', desc: 'Check host connectivity (TCP/ping/HTTP)', hint: 'ping google.com -n 4' },
                     { name: 'Install Package', icon: '📦', desc: 'Install a NuGet/npm/pip package', hint: 'install package SonarAnalyzer.CSharp' },
@@ -78,7 +80,7 @@ angular.module('kanbanApp')
                 ];
 
                 // Benchmarks State
-                vm.benchmarkScores = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.routingCalibration = null; vm.benchmarkSummary = null;
+                vm.benchmarkScores = []; vm.serverBenchmarks = []; vm.benchmarkPlans = []; vm.benchmarkRunning = false; vm.benchmarkLevel = null; vm.selectedBenchmarkScore = null; vm.benchmarkPlanNames = {}; vm.fetchingBenchmarks = false; vm.routingCalibration = null; vm.benchmarkSummary = null;
 
                 // Methods
                 vm.useToolHint = function (hint) { vm.aiChatInput = hint; var el = document.querySelector('.ai-chat-body input'); if (el) el.focus(); };
@@ -101,6 +103,12 @@ angular.module('kanbanApp')
                             vm.streamingPhase = ''; vm.streamingContextSize = 0; vm.streamingTokenBuffer = ''; vm.streamingStableCount = 0;
                             vm.cohesionIssues = []; vm.cohesionFile = '';
                             vm.activeStepIndex = null; vm.streamingActive = true; vm.pauseTerminalPolling();
+                            vm._agentStartTime = Date.now();
+                            vm.agentTimer = $interval(function () { 
+                                if (vm.streamingActive) {
+                                    vm.agentElapsed = (vm._agentStartTime ? Date.now() - vm._agentStartTime : 0); 
+                                } 
+                            }, 1000);
 
                             if (!isAutoRestart) {
                                 vm.streamingSteps = [];
@@ -291,11 +299,13 @@ angular.module('kanbanApp')
 
                                                                 vm.agentResult = { summary: finalSummary, thinking: finalThinking, filesEdited: vm.streamingFilesEdited, steps: finalSteps, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 vm.aiResponse = (parsed && parsed.warning) || finalSummary || 'Agent completed.';
+                                                                vm._agentStartTime = null;
+                                                                vm.agentTimer = null; 
 
                                                                 var analysis = { summary: finalSummary, thinking: finalThinking, steps: finalSteps, filesEdited: vm.streamingFilesEdited, planItems: angular.copy(vm.planItems), warning: parsed && parsed.warning, incomplete: incomplete, needsClarification: parsed && parsed.needsClarification, question: parsed && (parsed.question || parsed.warning || finalSummary) };
                                                                 var doIdx = vm.state.doing.findIndex(function (c) { return c.id === card.id; });
                                                                 if (doIdx !== -1) { vm.state.doing[doIdx].agentAnalysis = analysis; vm.state.doing[doIdx].agentLog = angular.copy(vm.agentActivityLog); }
-
+                                                 
                                                                 if (vm._agentStopped || card.id !== vm.activeCardId) { $scope.$applyAsync(); return; }
 
                                                                 if (vm.planItems && vm.planItems.length) {
@@ -315,21 +325,47 @@ angular.module('kanbanApp')
                                                                 }
 
                                                                 function finishCard() {
+                                                                    vm._agentStartTime = null;
+                                                                    vm.agentTimer = null;
                                                                     if (card._benchmark && !incomplete) { recordBenchmarkScore(); return; }
-                                                                     if (!incomplete) { pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`); vm.moveCardToDone(card); return; }
+                                                                     if (!incomplete) {
+                                                                         pushAgentLog(vm, 'log', `Plan completed — moving card to ${card.selfImproving ? 'Self-Improving' : 'Done'} column.`);
+                                                                         vm.moveCardToDone(card);
+                                                                         $timeout(function () {
+                                                                             if (!vm.autoQueue) return;
+                                                                             var readyTodo = vm.state.todo.filter(function (c) {
+                                                                                 return c.filePath === vm.selectedProject && c.ready && !c.selfImproving;
+                                                                             });
+                                                                             if (readyTodo.length) {
+                                                                                 var next = readyTodo[readyTodo.length - 1];
+                                                                                 vm.moveCardToDoing(next.id);
+                                                                                 vm.executeAgent(next);
+                                                                                 return;
+                                                                             }
+                                                                             var siReady = vm.state.selfImproving.filter(function (c) {
+                                                                                 return c.filePath === vm.selectedProject && c.ready && c.selfImproving;
+                                                                             });
+                                                                             if (siReady.length) {
+                                                                                 var nextSi = siReady[siReady.length - 1];
+                                                                                 vm.moveCardToDoing(nextSi.id);
+                                                                                 vm.executeAgent(nextSi);
+                                                                             }
+                                                                         }, 500);
+                                                                         return;
+                                                                     }
                                                                      if (incomplete && card.id === vm.activeCardId) {
                                                                         card._agentIteration = (card._agentIteration || 0) + 1; var MAX_ITERATIONS = 5;
                                                                         if (card._agentIteration >= MAX_ITERATIONS) { pushAgentLog(vm, 'warn', 'Max iterations reached — stopping'); incomplete = false; if (card._benchmark) { recordBenchmarkScore(); return; } }
                                                                         else { pushAgentLog(vm, 'info', 'Re-starting agent (' + card._agentIteration + '/' + MAX_ITERATIONS + ') — ' + (vm.planItems ? vm.planItems.filter(function (pi) { return !pi.done; }).length : 'quality') + ' issue(s) remain'); $timeout(function () { vm.executeAgent(card, true); }, 1000); return; }
                                                                     }
-                                                                    if (vm.autoQueue) {
-                                                                        $timeout(function () {
-                                                                            var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
-                                                                            if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
-                                                                            var siCards = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.selfImproving; });
-                                                                            if (siCards.length) { var nextSi = siCards[siCards.length - 1]; nextSi.ready = true; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
-                                                                        }, 500);
-                                                                    }
+                                                                     $timeout(function () {
+                                                                         if (vm.autoQueue) {
+                                                                             var readyTodo = vm.state.todo.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && !c.selfImproving; });
+                                                                             if (readyTodo.length) { var next = readyTodo[readyTodo.length - 1]; vm.moveCardToDoing(next.id); vm.executeAgent(next); return; }
+                                                                         }
+                                                                         var siReady = vm.state.selfImproving.filter(function (c) { return c.filePath === vm.selectedProject && c.ready && c.selfImproving; });
+                                                                         if (siReady.length) { var nextSi = siReady[siReady.length - 1]; vm.moveCardToDoing(nextSi.id); vm.executeAgent(nextSi); }
+                                                                     }, 500);
                                                                 }
 
                                                                 if (!incomplete && card.autoPr && card.prStatus && card.prStatus.branch) {
@@ -342,8 +378,22 @@ angular.module('kanbanApp')
                                                                 } else { if (incomplete) pushAgentLog(vm, 'warn', 'Card kept in Doing — no files were modified'); finishCard(); }
                                                                 break;
                                                             case 'error':
-                                                                vm.streamingActive = false; vm.resumeTerminalPolling(); pushAgentLog(vm, 'error', parsed ? parsed.message : data); vm.agentResult = { error: parsed ? parsed.message : data }; vm.activeCardId = null; vm.activeCardIds = new Set();
-                                                                if (card._benchmark) { $http.post('/api/benchmark/evaluate', { level: card._benchmarkLevel || 1, benchmarkProjectRoot: card._benchmarkRunRoot || '', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, actualStrategies: [] }); var errIdx = vm.state.doing.indexOf(card); if (errIdx >= 0) { vm.state.doing.splice(errIdx, 1); vm.saveCards(); } }
+                                                                vm.streamingActive = false; 
+                                                                vm.resumeTerminalPolling(); 
+                                                                pushAgentLog(vm, 'error', parsed ? parsed.message : data); 
+                                                                vm.agentResult = { error: parsed ? parsed.message : data };
+                                                                vm.activeCardId = null; 
+                                                                vm.activeCardIds = new Set();
+                                                                if (card._benchmark) { 
+                                                                    $http.post('/api/benchmark/evaluate', { level: card._benchmarkLevel || 1, benchmarkProjectRoot: card._benchmarkRunRoot || '', modelUsed: (vm.systemInfoCustom && vm.systemInfoCustom.model) || '', durationMs: vm._agentStartTime ? Date.now() - vm._agentStartTime : 0, actualStrategies: [] });
+                                                                    var errIdx = vm.state.doing.indexOf(card); 
+                                                                    if (errIdx >= 0) { 
+                                                                        vm.state.doing.splice(errIdx, 1); 
+                                                                        vm.saveCards(); 
+                                                                    } 
+                                                                }
+                                                                vm._agentStartTime = null;
+                                                                vm.agentTimer = null; 
                                                                 break;
                                                         }
                                                     }
@@ -372,9 +422,18 @@ angular.module('kanbanApp')
                 };
 
                 vm.stopAgent = function (card) {
-                    vm._agentStopped = true; if (vm.abortController) vm.abortController.abort();
-                    vm.abortController = new AbortController(); vm.streamingActive = false; vm.agentResult = { warning: 'Agent stopped by user.' };
-                    pushAgentLog(vm, 'warn', 'Agent stopped by user'); vm.activeCardId = null; vm.activeCardIds = new Set(); vm.resumeTerminalPolling();
+                    vm.agentTimer = null; 
+                    vm._agentStartTime = null;
+                    vm.agentElapsed = 0; 
+                    vm._agentStopped = true; 
+                    if (vm.abortController) { vm.abortController.abort(); }
+                    vm.abortController = new AbortController(); 
+                    vm.streamingActive = false; 
+                    vm.agentResult = { warning: 'Agent stopped by user.' };
+                    pushAgentLog(vm, 'warn', 'Agent stopped by user'); 
+                    vm.activeCardId = null; 
+                    vm.activeCardIds = new Set(); 
+                    vm.resumeTerminalPolling();
                 };
 
                 vm.askAI = function () {
@@ -432,7 +491,7 @@ angular.module('kanbanApp')
                     $http.post('/api/agent/questions/answer', { id: vm.pendingQuestion.id, answers: {} }).then(function () { vm.showQuestionModal = false; vm.pendingQuestion = null; });
                 };
 
-                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/summary').then(function (resp) { vm.benchmarkSummary = resp.data; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); $http.get('/api/benchmark/routing-calibration').then(function (resp) { vm.routingCalibration = resp.data; }); };
+                vm.openBenchmarksPanel = function () { vm.showBenchmarksPanel = true; $http.get('/api/benchmark/scores').then(function (resp) { vm.benchmarkScores = resp.data || []; }); $http.get('/api/benchmark/plans').then(function (resp) { vm.benchmarkPlans = resp.data || []; }); $http.get('/api/benchmark/summary').then(function (resp) { vm.benchmarkSummary = resp.data; }); $http.get('/api/benchmark/system-info').then(function (resp) { vm.systemInfoCustom = resp.data.custom || {}; }); $http.get('/api/benchmark/routing-calibration').then(function (resp) { vm.routingCalibration = resp.data; }); };
                 vm.closeBenchmarksPanel = function () { vm.showBenchmarksPanel = false; };
                 vm.startBenchmark = function (level) {
                     if (vm.benchmarkRunning || vm.streamingActive) return; vm.benchmarkRunning = true; vm.benchmarkLevel = level;
@@ -462,16 +521,16 @@ angular.module('kanbanApp')
                         ClientId: vm.bughostedClientId,
                         Token: vm.bughostedClientId,
                         Date: s.date,
-                        Benchmark: s.level,
-                        Steps: s.stepsCompleted + "/" + s.totalSteps,
-                        Score: s.scorePercent || '0',
-                        Status: s.status || '',
-                        Duration: s.durationMs.toString() || '0',
-                        Model: s.modelUsed || '',
-                        OS: vm.systemInfoCustom.os || vm.systemInfoDetected.os || '',
-                        CPU: vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || '',
-                        RAM: vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || null,
-                        GPU: vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || ''
+                        Benchmark: String(s.level ?? ''),
+                        Steps: String(s.stepsCompleted ?? '') + "/" + String(s.totalSteps ?? ''),
+                        Score: String(s.scorePercent ?? '0'),
+                        Status: String(s.status ?? ''),
+                        Duration: s.durationMs ? String(s.durationMs) : '0',
+                        Model: String(s.modelUsed ?? ''),
+                        OS: String(vm.systemInfoCustom.os || vm.systemInfoDetected.os || ''),
+                        CPU: String(vm.systemInfoCustom.cpu || vm.systemInfoDetected.cpu || ''),
+                        RAM: String(vm.systemInfoCustom.ramGb || vm.systemInfoDetected.ramBytes || ''),
+                        GPU: String(vm.systemInfoCustom.gpu || vm.systemInfoDetected.gpu || '')
                     };
 
                     $http.post('/api/bughosted/addbenchmark', benchmarkDto)
@@ -486,6 +545,27 @@ angular.module('kanbanApp')
                             } else {
                                 alert('Failed to send benchmark due to an unknown error.');
                             }
+                        });
+                };
+                vm.msToDigitalTime = function (ms) { 
+                    return new Date(ms).toISOString().slice(11, 19);
+                }
+                vm.fetchBenchmarksFromServer = function () {
+                    if (!vm.bughostedClientId) { 
+                        alert('Not connected to BugHosted. Login first.'); 
+                        return; 
+                    }
+                    vm.fetchingBenchmarks = true;
+                    $http.get('/api/bughosted/benchmarks?token=' + encodeURIComponent(vm.bughostedClientId))
+                        .then(function (resp) {
+                            vm.serverBenchmarks = resp.data || [];
+                            vm.fetchingBenchmarks = false;
+                        })
+                        .catch(function (error) {
+                            vm.fetchingBenchmarks = false;
+                            console.error('Error fetching benchmarks:', error);
+                            var msg = error.data && (error.data.detail || error.data.error || error.data.title) || error.message || 'Unknown error';
+                            alert('Failed to fetch benchmarks:\n' + msg);
                         });
                 };
                 vm.saveSystemInfo = function () { $http.post('/api/benchmark/system-info', vm.systemInfoCustom).then(function () { vm.systemInfoSaved = true; $timeout(function () { vm.systemInfoSaved = false; }, 2000); }); };

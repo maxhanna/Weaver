@@ -53,7 +53,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
       function startFileChangePolling() {
         if (_pollInterval) return;
         _pollInterval = $interval(function () {
-          if (!vm.ide.openTabs || vm.ide.openTabs.length === 0) return;
+          if (vm.shuttingDown || !vm.ide.openTabs || vm.ide.openTabs.length === 0) return;
           vm.ide.openTabs.forEach(function (tab) {
             if (!tab.path || !tab.lastModified) return;
             $http.get('/api/editor/check-modified', {
@@ -522,6 +522,7 @@ angular.module('kanbanApp').factory('IDEMixin', function($http, $timeout, $inter
         stopFileChangePolling();
         vm.showIDE = false;
       };
+      vm.stopIdePolling = stopFileChangePolling;
 
       // ── Search ─────────────────────────────────────────────────────────
       vm.openSearch = function () {

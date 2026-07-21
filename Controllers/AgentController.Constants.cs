@@ -1,5 +1,4 @@
 namespace Weaver.Controllers;
-
 partial class AgentController
 {
     private const int MAX_INCREMENTAL_STEPS = 24;

@@ -3,9 +3,7 @@ using MailKit.Net.Imap;
 using MailKit.Search;
 using MailKit.Security;
 using MimeKit;
-
 namespace Weaver.Services;
-
 public class EmailConfigStatus
 {
     public bool IsConfigured { get; set; }
@@ -18,7 +16,6 @@ public class EmailConfigStatus
     public int AccountCount { get; set; }
     public List<string> AccountLabels { get; set; } = new();
 }
-
 public class EmailMessage
 {
     public string From { get; set; } = "";
@@ -28,16 +25,13 @@ public class EmailMessage
     public bool IsUnread { get; set; }
     public string? AccountLabel { get; set; }
 }
-
 public class EmailService
 {
     private readonly ConfigFileService _configFile;
-
     public EmailService(ConfigFileService configFile)
     {
         _configFile = configFile;
     }
-
     public async Task<EmailConfigStatus> CheckAndAutoConfigureAsync()
     {
         var cfg = await _configFile.LoadConfigAsync();
@@ -46,7 +40,6 @@ public class EmailService
         {
             return new EmailConfigStatus { IsConfigured = false, MissingField = "emailAccounts" };
         }
-
         // Auto-infer IMAP settings for each account
         foreach (var acct in accounts)
         {
@@ -73,9 +66,7 @@ public class EmailService
                 }
             }
         }
-
         await _configFile.WriteConfigAsync(cfg);
-
         var first = accounts[0];
         var status = new EmailConfigStatus
         {
@@ -84,7 +75,6 @@ public class EmailService
             AccountCount = accounts.Count,
             AccountLabels = accounts.Select(a => a.label ?? a.username ?? "").Where(l => !string.IsNullOrWhiteSpace(l)).ToList()!
         };
-
         if (string.IsNullOrWhiteSpace(first.imapServer))
         {
             status.IsConfigured = false;
@@ -103,23 +93,19 @@ public class EmailService
             status.MissingField = "emailPassword";
             return status;
         }
-
         status.IsConfigured = true;
         return status;
     }
-
     public async Task<List<EmailMessage>> FetchLatestEmailsAsync(int maxEmails = 10, bool unreadOnly = true, int? accountIndex = null)
     {
         var cfg = await _configFile.LoadConfigAsync();
         var accounts = cfg.emailAccounts;
-
         if (accountIndex.HasValue)
         {
             if (accountIndex.Value < 0 || accountIndex.Value >= accounts.Count)
                 throw new IndexOutOfRangeException($"Account index {accountIndex} is out of range. {accounts.Count} account(s) configured.");
             return await FetchFromAccountAsync(accounts[accountIndex.Value], maxEmails, unreadOnly);
         }
-
         // No specific account — fetch from all accounts
         var allEmails = new List<EmailMessage>();
         for (var i = 0; i < accounts.Count; i++)
@@ -142,12 +128,10 @@ public class EmailService
                 });
             }
         }
-
         // Sort all emails by date descending, then take max
         allEmails = allEmails.OrderByDescending(e => e.Date).Take(maxEmails).ToList();
         return allEmails;
     }
-
     /// <summary>
     /// Connect to IMAP server and authenticate using the best available
     /// password-based SASL mechanism for the server.
@@ -164,21 +148,17 @@ public class EmailService
     {
         var sslOptions = ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTlsWhenAvailable;
         await client.ConnectAsync(host, port, sslOptions);
-
         // Log what the server advertises so auth failures are diagnosable
         var advertised = string.Join(", ", client.AuthenticationMechanisms);
         Console.WriteLine($"[EmailService] {host} advertises mechanisms: [{advertised}]");
-
         // Remove OAuth2 — we are doing password-based auth only
         client.AuthenticationMechanisms.Remove("XOAUTH2");
         client.AuthenticationMechanisms.Remove("OAUTHBEARER");
-
         var hostLower = host.ToLowerInvariant();
         var isMicrosoft = hostLower.Contains("outlook.com") ||
                           hostLower.Contains("office365.com") ||
                           hostLower.Contains("hotmail.com") ||
                           hostLower.Contains("live.com");
-
         if (isMicrosoft)
         {
             // imap-mail.outlook.com advertises [PLAIN, XOAUTH2].
@@ -191,7 +171,6 @@ public class EmailService
                 ("LOGIN",    () => client.AuthenticateAsync(new SaslMechanismLogin(username, password ?? ""))),
                 ("DEFAULT",  () => client.AuthenticateAsync(username, password ?? "")),
             };
-
             Exception? lastEx = null;
             foreach (var (name, auth) in attempts)
             {
@@ -208,7 +187,6 @@ public class EmailService
                     lastEx = ex;
                 }
             }
-
             throw new Exception(
                 $"Authentication failed for {username} on {host} (advertised: [{advertised}]). " +
                 $"Tried PLAIN, LOGIN, DEFAULT — all rejected. " +
@@ -223,17 +201,14 @@ public class EmailService
             await client.AuthenticateAsync(new SaslMechanismPlain(username, password ?? ""));
         }
     }
-
     private async Task<List<EmailMessage>> FetchFromAccountAsync(EmailAccountConfig acct, int maxEmails, bool unreadOnly)
     {
         if (string.IsNullOrWhiteSpace(acct.imapServer) || string.IsNullOrWhiteSpace(acct.username))
             throw new InvalidOperationException($"Email account '{acct.label ?? acct.username}' is not fully configured.");
-
         using var client = new ImapClient();
         client.ServerCertificateValidationCallback = (s, c, h, e) => true;
         await ConnectAndAuthenticateAsync(client, acct.imapServer, acct.imapPort, acct.useSsl, acct.username, acct.password ?? "");
         await client.Inbox.OpenAsync(FolderAccess.ReadOnly);
-
         IList<UniqueId> uids;
         if (unreadOnly)
         {
@@ -243,9 +218,7 @@ public class EmailService
         {
             uids = await client.Inbox.SearchAsync(SearchQuery.All);
         }
-
         if (uids.Count == 0) return new List<EmailMessage>();
-
         // Fetch message summaries (date + UID) for all matching UIDs so we
         // can sort by INTERNALDATE (UID order does not always reflect date
         // order on Outlook/Office 365).  Then take only the N most recent
@@ -256,7 +229,6 @@ public class EmailService
             .Take(maxEmails)
             .Select(s => s.UniqueId)
             .ToList();
-
         var emails = new List<EmailMessage>();
         foreach (var uid in recentUids)
         {
@@ -271,28 +243,23 @@ public class EmailService
                 AccountLabel = acct.label ?? acct.username ?? "Email"
             });
         }
-
         await client.DisconnectAsync(true);
         return emails;
     }
-
     public async Task<string> ValidateConfigAsync(int? accountIndex = null)
     {
         try
         {
             var cfg = await _configFile.LoadConfigAsync();
             var accounts = cfg.emailAccounts;
-
             if (accountIndex.HasValue)
             {
                 if (accountIndex.Value < 0 || accountIndex.Value >= accounts.Count)
                     return $"error: account index {accountIndex} out of range ({accounts.Count} account(s))";
                 return await ValidateAccountAsync(accounts[accountIndex.Value], accountIndex.Value);
             }
-
             if (accounts.Count == 0)
                 return "not_configured";
-
             // Validate all accounts
             var results = new List<string>();
             for (var i = 0; i < accounts.Count; i++)
@@ -307,7 +274,6 @@ public class EmailService
             return $"error: {ex.Message}";
         }
     }
-
     private async Task<string> ValidateAccountAsync(EmailAccountConfig acct, int index)
     {
         if (string.IsNullOrWhiteSpace(acct.imapServer))
@@ -316,7 +282,6 @@ public class EmailService
             return $"account[{index}] not_configured (missing username)";
         if (string.IsNullOrWhiteSpace(acct.password))
             return $"account[{index}] not_configured (missing password)";
-
         try
         {
             using var client = new ImapClient();
@@ -332,7 +297,6 @@ public class EmailService
             return $"error ({label}): {ex.Message}";
         }
     }
-
     /// <summary>
     /// Tests connection for a single account by index, returning a structured result.
     /// </summary>
@@ -341,13 +305,10 @@ public class EmailService
         var cfg = await _configFile.LoadConfigAsync();
         if (accountIndex < 0 || accountIndex >= cfg.emailAccounts.Count)
             return new EmailTestResult { Success = false, Message = "Account not found" };
-
         var acct = cfg.emailAccounts[accountIndex];
         var label = acct.label ?? acct.username ?? $"Account {accountIndex + 1}";
-
         if (string.IsNullOrWhiteSpace(acct.imapServer) || string.IsNullOrWhiteSpace(acct.username) || string.IsNullOrWhiteSpace(acct.password))
             return new EmailTestResult { Success = false, Message = $"{label}: Please fill in all fields" };
-
         try
         {
             using var client = new ImapClient();
@@ -361,7 +322,6 @@ public class EmailService
             return new EmailTestResult { Success = false, Message = $"{label}: {ex.Message}" };
         }
     }
-
     /// <summary>
     /// Tests connection for inline credentials (from UI form, not yet saved).
     /// </summary>
@@ -369,7 +329,6 @@ public class EmailService
     {
         if (string.IsNullOrWhiteSpace(imapServer) || string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
             return new EmailTestResult { Success = false, Message = "Please fill in all fields" };
-
         try
         {
             using var client = new ImapClient();
@@ -384,7 +343,6 @@ public class EmailService
         }
     }
 }
-
 public class EmailTestResult
 {
     public bool Success { get; set; }

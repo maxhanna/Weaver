@@ -56,6 +56,8 @@ public class FrontendConfig
     public string? bughostedUsername { get; set; }
     public string? bughostedPassword { get; set; }
     public bool bughostedHeartbeatEnabled { get; set; } = false;
+    // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
+    public Dictionary<string, string>? themeColors { get; set; }
 }
 
 public class ConfigFileService
@@ -122,6 +124,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = EncryptPassword(acct.password);
         cfg.emailPassword = EncryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = EncryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = EncryptPassword(cfg.bughostedPassword);
     }
 
@@ -130,6 +133,7 @@ public class ConfigFileService
         foreach (var acct in cfg.emailAccounts)
             acct.password = DecryptPassword(acct.password);
         cfg.emailPassword = DecryptPassword(cfg.emailPassword);
+        cfg.bughostedUsername = DecryptPassword(cfg.bughostedUsername);
         cfg.bughostedPassword = DecryptPassword(cfg.bughostedPassword);
     }
 
