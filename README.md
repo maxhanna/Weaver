@@ -28,7 +28,7 @@ https://discord.gg/YQWkD6ZQDx
 ## Requirements
 
 - .NET 10 SDK (or compatible runtime)
-- llama.cpp server / Ollama 
+- OpenAI endpoint / llama.cpp server / Ollama 
 
 ## Run
 
@@ -179,3 +179,5 @@ Publish command : dotnet publish -c Release -r win-x64 --self-contained true /p:
 Testing command : dotnet test tests\Weaver.UnitTests\Weaver.UnitTests.csproj
 
 ![Agentic loop](https://venturebeat.com/_next/image?url=https%3A%2F%2Fimages.ctfassets.net%2Fjdtwqhzvc2n1%2F5gWXRttHvteZMEGgygXVuz%2F3fa3112800b8d8f6e153fa0957a78f22%2Fautonomous_optimization.png%3Fw%3D1000%26q%3D100&w=3840&q=75)
+
+Since: May 21st, 2026
