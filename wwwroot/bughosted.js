@@ -24,7 +24,7 @@ angular.module('kanbanApp')
                     return {
                         clientId: vm.bughostedClientId,
                         kanbanData: JSON.stringify({ projects: (vm.projects || []).map(function (p) { return { Name: p.Name, Path: p.Path, Description: p.Description, BuildCommands: p.BuildCommands }; }), state: vm.state, agentActive: vm.streamingActive || false, agentPhase: vm.streamingPhase || '', agentThinking: vm.streamingThinking || '', agentSummary: vm.streamingSummary || '', activeCardId: vm.activeCardId || null, activeCardText: vm.activeCardText || '', calendarCards: vm.calCards || [] }),
-                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword })
+                        settings: JSON.stringify({ llamaUrl: vm.llamaUrl, llamaModel: vm.llamaModel, terminalApprovalMode: vm.terminalApprovalMode, defaultProject: vm.defaultProject || vm.selectedProject, showTerminal: vm.showTerminal, showAI: vm.showAI, showIDE: vm.showIDE, showKanban: vm.showKanban, showCalendar: vm.showCalendar, bughostedHeartbeatEnabled: vm.bughostedHeartbeatEnabled, bughostedUsername: vm.bughostedUsername, bughostedPassword: vm.bughostedPassword })
                     };
                 }
 
@@ -125,6 +125,7 @@ angular.module('kanbanApp')
                         var activeCard = vm.findCardById ? vm.findCardById(vm.activeCardId) : null; vm.stopAgent && vm.stopAgent(activeCard);
                     } else if (cmd.command === 'updateSettings' && cmd.params) {
                         if (cmd.params.llamaUrl !== undefined) vm.llamaUrl = cmd.params.llamaUrl;
+                        if (cmd.params.llamaModel !== undefined) vm.llamaModel = cmd.params.llamaModel;
                         if (cmd.params.terminalApprovalMode !== undefined) vm.terminalApprovalMode = cmd.params.terminalApprovalMode;
                         vm.saveSettings();
                     }

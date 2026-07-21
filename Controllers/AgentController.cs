@@ -1439,7 +1439,7 @@ public partial class AgentController : ControllerBase
                             return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                         var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
                         var rawNewCode = newCodeStr;
-                        newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
+                        newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr, targetName);
                         if (newCodeStr != rawNewCode)
                         {
                             await EmitLog(emitSse, "warn",
@@ -1464,7 +1464,7 @@ public partial class AgentController : ControllerBase
                             await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
                             return (null, null, false, null, true, null, false); 
                         }
-                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, !replaceSection);
+                        var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, true);
                         if (matchedBlock == null)
                         {
                             await EmitLog(emitSse, "warn",
@@ -1473,17 +1473,15 @@ public partial class AgentController : ControllerBase
                                 $"FORMAT D failed: targetName block not found in {relPath}. " +
                                 $"Copy the exact code block from the file as targetName.", false);
                         }
-                        var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
-                        var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
                         if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                         {
                             return (matchedBlock, newCodeStr, false, null, false, null, true);
                         }
                         if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                         {
-                            return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
+                            return (matchedBlock, matchedBlock + "\n" + newCodeStr, false, null, false, null, true);
                         }
-                        return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
+                        return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                     }
                     if (insertAfter)
                     {
@@ -1977,7 +1975,7 @@ public partial class AgentController : ControllerBase
                             if (!System.IO.File.Exists(fullPath))
                                 return (null, null, false, null, false, $"FORMAT D failed: file not found '{relPath}'", false);
                             var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct);
-                            newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr);
+                            newCodeStr = HtmlDomEditor.StripLeadingClosingDivs(newCodeStr, tn);
                             if (string.IsNullOrWhiteSpace(newCodeStr))
                             {
                                 return (null, null, false, null, false,
@@ -1995,17 +1993,15 @@ public partial class AgentController : ControllerBase
                                     $"FORMAT D failed: targetName block not found in {relPath}. " +
                                     $"Copy the exact code block from the file as targetName.", false);
                             }
-                            var baseIndent = HtmlDomEditor.GetLineIndent(sourceText, matchIndex);
-                            var htmlIndented = AutoIndentCode(matchedBlock, newCodeStr, relPath, baseIndent);
                             if (replaceSection || (hasInsertAfter && !insertAfter && !hasReplace))
                             {
                                 return (matchedBlock, newCodeStr, false, null, false, null, true);
                             }
                             if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                             {
-                                return (matchedBlock, matchedBlock + "\n" + htmlIndented, false, null, false, null, true);
+                                return (matchedBlock, matchedBlock + "\n" + newCodeStr, false, null, false, null, true);
                             }
-                            return (matchedBlock, htmlIndented + "\n" + matchedBlock, false, null, false, null, true);
+                            return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                         }
                         if (insertAfter)
                         {
@@ -4165,29 +4161,29 @@ emitSse, ct);
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
-                if (!string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
-                {
-                    var before = newStr;
-                    newStr = await CodeFormatterService.FormatAsync(relPath, newStr, ct);
-                    if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+                    if (!string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
                     {
-                        wasFormattedByLib = true;
-                        var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-                        if (oldFirstLine != null)
+                        var before = newStr;
+                        newStr = (await CodeFormatterService.FormatAsync(relPath, newStr, ct)).TrimEnd('\n', '\r');
+                        if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                         {
-                            var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
-                            if (baseIndent.Length > 0)
+                            wasFormattedByLib = true;
+                            var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+                            if (oldFirstLine != null)
                             {
-                                var fmtLines = newStr.Split('\n');
-                                for (var i = 0; i < fmtLines.Length; i++)
+                                var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
+                                if (baseIndent.Length > 0)
                                 {
-                                    if (!string.IsNullOrWhiteSpace(fmtLines[i]))
-                                        fmtLines[i] = baseIndent + fmtLines[i];
+                                    var fmtLines = newStr.Split('\n');
+                                    for (var i = 0; i < fmtLines.Length; i++)
+                                    {
+                                        if (!string.IsNullOrWhiteSpace(fmtLines[i]))
+                                            fmtLines[i] = baseIndent + fmtLines[i];
+                                    }
+                                    newStr = string.Join("\n", fmtLines);
                                 }
-                                newStr = string.Join("\n", fmtLines);
                             }
                         }
-                    }
                     if (newStr != before)
                         await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
                 }
@@ -9955,6 +9951,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             prompt = prompt + "\n\n" + requirementChecklist;
             await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
+        } 
+        else 
+        {
+            await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct); 
         }
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
@@ -10425,18 +10425,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         else
         {
-            // If every step that has needsExtraStep set has it set to false, the step-level verifier
-            // already confirmed no follow-up is needed — override the post-execution verifier.
+            // If every step has needsExtraStep=false AND verifier gave no concrete issues,
+            // step-level verification is sufficient — trust it and override a vague rejection.
             var needsExtraStepResults = allSteps.OfType<Dictionary<string, object?>>()
                 .Where(s => s.ContainsKey("needsExtraStep"))
                 .Select(s => s["needsExtraStep"])
                 .ToList();
-            if (needsExtraStepResults.Count > 0 && needsExtraStepResults.All(v => v is false))
+            if (needsExtraStepResults.Count > 0 && needsExtraStepResults.All(v => v is false) && verificationIssues.Count == 0)
             {
                 var stepCount = needsExtraStepResults.Count;
                 await EmitLog(emitSse, "info",
-                    $"All {stepCount} step(s) had needsExtraStep=false (step-level verifier confirmed completion) — " +
-                    $"overriding post-execution verifier rejection. Details: {verificationDetails}", ct: ct);
+                    $"All {stepCount} step(s) had needsExtraStep=false (step-level verifier confirmed completion) and " +
+                    $"post-execution verifier gave no specific issues — overriding rejection. Details: {verificationDetails}", ct: ct);
                 taskComplete = true;
                 allSteps.Add(new Dictionary<string, object?>
                 {
@@ -10525,6 +10525,26 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                         completedStepIndices: mergedDone, cardId: cardId);
+                }
+                // If repair step was "already done", the verifier issue was a phantom —
+                // remove it and skip re-verify so the next pass tries the next issue.
+                var repairStep = allSteps.OfType<Dictionary<string, object?>>().LastOrDefault();
+                var stepWasAlreadyDone = repairStep != null
+                    && repairStep.GetValueOrDefault("status")?.ToString() == "skipped"
+                    && repairStep.GetValueOrDefault("reason")?.ToString() == "already done";
+                if (stepWasAlreadyDone && verificationIssues.Count > 0)
+                {
+                    var phantom = verificationIssues[0];
+                    verificationIssues.RemoveAt(0);
+                    await EmitLog(emitSse, "info",
+                        $"Repair step was already done — issue \"{phantom}\" was a phantom. " +
+                        $"Remaining issues: {verificationIssues.Count}", ct: ct);
+                    if (verificationIssues.Count == 0)
+                    {
+                        taskComplete = true;
+                        break;
+                    }
+                    continue;
                 }
                 var (reVerified, reDetails, reIssues) =
                     await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext);

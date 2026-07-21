@@ -80,6 +80,7 @@ angular.module('kanbanApp')
 
                 // Terminal/Config settings
                 vm.llamaUrl = 'http://localhost:8080';
+                vm.llamaModel = 'medgemma:4b';
                 vm.terminalApprovalMode = 'approveAll';
                 vm.approvedTerminalRoots = [];
                 vm.disallowedTerminalRoots = [];
@@ -162,6 +163,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.showIDE === 'boolean') vm.showIDE = cfg.showIDE;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
+                            vm.llamaModel = cfg.llamaModel || "medgemma:4b";
                             vm.terminalApprovalMode = cfg.terminalApprovalMode || 'approveAll';
                             vm.approvedTerminalRoots = cfg.approvedTerminalRoots || [];
                             vm.approvedTerminalRootsText = vm.approvedTerminalRoots.join(', ');
@@ -200,6 +202,7 @@ angular.module('kanbanApp')
                         cfg.projects = cfg.projects || vm.projects;
                         cfg.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
                         cfg.llamaUrl = vm.llamaUrl || "http://localhost:8080";
+                        cfg.llamaModel = vm.llamaModel || "medgemma:4b";
                         cfg.terminalApprovalMode = vm.terminalApprovalMode || 'approveAll';
                         cfg.approvedTerminalRoots = (vm.approvedTerminalRootsText || '').split(',').map(function (r) { return r.trim().toLowerCase(); }).filter(Boolean);
                         cfg.disallowedTerminalRoots = (vm.disallowedTerminalRootsText || '').split(',').map(function (r) { return r.trim().toLowerCase(); }).filter(Boolean);

@@ -30,8 +30,9 @@ public class AiController : ControllerBase
         string baseUrl = await GetBaseURL();
         var target = baseUrl.TrimEnd('/') + "/v1/chat/completions";
         var client = _clientFactory.CreateClient("llama");
-        // Determine model: prefer payload.model, then configuration, then fallback
-        string model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        // Determine model: prefer payload.model, then config file, then fallback
+        var cfgModel = await _configFile.LoadConfigAsync();
+        string model = cfgModel.llamaModel ?? "medgemma:4b";
         if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("model", out var modelProp) && modelProp.ValueKind == JsonValueKind.String)
         {
             var m = modelProp.GetString();

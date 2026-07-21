@@ -10,12 +10,17 @@ partial class AgentController
         var cfg = await _configFile.LoadConfigAsync();
         return (cfg.llamaUrl ?? "http://localhost:8080").TrimEnd('/');
     }
+    private async Task<string> GetLlamaModel()
+    {
+        var cfg = await _configFile.LoadConfigAsync();
+        return cfg.llamaModel ?? "medgemma:4b";
+    }
     private async Task<(string raw, AgentResponse? response, string? error)> CallLlmRaw(
         string systemPrompt, string userMessage, CancellationToken ct = default,
         TimeSpan? requestTimeout = null, int? maxTokens = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
-        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var model = await GetLlamaModel();
         var client = _clientFactory.CreateClient("llama");
         client.Timeout = _infiniteTimeout;
         var messages = new object[]
@@ -33,7 +38,7 @@ partial class AgentController
         TimeSpan? requestTimeout = null, int? maxTokens = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
-        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var model = await GetLlamaModel();
         var client = _clientFactory.CreateClient("llama");
         client.Timeout = _infiniteTimeout;
         var messages = new object[]
@@ -238,11 +243,10 @@ partial class AgentController
     private async Task<string> RunCausalReasoningAsync(string taskDesc, string relPath, string fileContent, bool emitSse, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(fileContent)) return string.Empty;
-        // Quick LLM check: is this a bug fix or a feature/enhancement?
         var classifyPrompt = $"Is the following task a bug fix or a feature/enhancement? Reply with exactly one word: BUG or FEATURE.\n\nTask: {taskDesc}";
         var (classification, _, _) = await CallLlmRawStreaming(
             "You classify tasks as BUG or FEATURE. Reply with exactly one word.",
-            classifyPrompt, false, ct, requestTimeout: TimeSpan.FromSeconds(10), maxTokens: 10);
+            classifyPrompt, false, ct, requestTimeout: _infiniteTimeout, maxTokens: 10);
         await EmitLog(emitSse, "info", $"Causal reasoning classification: '{classification?.Trim()}' for task: {taskDesc}", ct: ct);
         if (string.IsNullOrWhiteSpace(classification) || !classification.Trim().Equals("BUG", StringComparison.OrdinalIgnoreCase))
             return string.Empty;
@@ -280,7 +284,7 @@ partial class AgentController
         {
             return string.Empty;
         }
-    } 
+    }
     private static bool IsRepeatingLoop(StringBuilder sb, int windowChars, int chunkLen, int repeatThreshold)
     {
         var len = sb.Length;
@@ -310,7 +314,7 @@ partial class AgentController
         TimeSpan? requestTimeout = null, int? maxTokens = null)
     {
         var baseUrl = await GetLlamaBaseUrl();
-        var model = _config.GetValue<string>("Ai:Model") ?? "medgemma:4b";
+        var model = await GetLlamaModel();
         var client = _clientFactory.CreateClient("llama");
         client.Timeout = _infiniteTimeout;
         var messages = new object[]

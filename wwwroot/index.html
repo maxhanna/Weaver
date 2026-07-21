@@ -925,6 +925,10 @@
         <details>
           <summary class="settings-header">OpenAI/llama.cpp/Ollama Endpoint Url</summary>
           <input id="settings-llama" ng-model="vm.llamaUrl" placeholder="http://localhost:8080" style="width: 100%;" />
+          <div style="margin-top:6px;">
+            <label for="settings-llama-model" style="font-size:0.85em;color:var(--muted);">Model Name</label>
+            <input id="settings-llama-model" ng-model="vm.llamaModel" placeholder="medgemma:4b" style="width:100%;margin-top:2px;" />
+          </div>
         </details>
         <details>
           <summary class="settings-header">Context Size Limits</summary>

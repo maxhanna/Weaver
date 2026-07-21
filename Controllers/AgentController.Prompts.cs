@@ -695,7 +695,10 @@ partial class AgentController
             "because 'add X so it does Y' always implies X actually gets called somewhere that produces Y.";
 
         var (raw, _, _) = await CallLlmRaw(sys, prompt, ct, requestTimeout: _infiniteTimeout, maxTokens: 400);
-        if (string.IsNullOrWhiteSpace(raw)) return "";
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return "";
+        } 
 
         try
         {

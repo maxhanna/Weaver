@@ -34,6 +34,7 @@ public class FrontendConfig
     public bool prByDefault { get; set; } = false;
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
+    public string llamaModel { get; set; } = "medgemma:4b";
     public string terminalApprovalMode { get; set; } = "approveAll";
     public List<string> approvedTerminalRoots { get; set; } = new();
     public List<string> disallowedTerminalRoots { get; set; } = new();

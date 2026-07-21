@@ -114,18 +114,39 @@ public static class HtmlDomEditor
         var m = Regex.Match(line, @"^(\s*)");
         return m.Groups[1].Value;
     }
-    public static string StripLeadingClosingDivs(string html)
+    public static string StripLeadingClosingDivs(string html, string? targetName = null)
     {
         if (string.IsNullOrWhiteSpace(html))
             return html;
-        var lines = html.Split('\n').ToList();
-        while (lines.Count > 0)
+        int targetLeading = 0;
+        if (targetName != null)
         {
-            var trimmed = lines[0].Trim();
+            var targetLines = targetName.Split('\n');
+            foreach (var line in targetLines)
+            {
+                var trimmed = line.Trim();
+                if (trimmed == "</div>" || string.IsNullOrWhiteSpace(trimmed))
+                    targetLeading++;
+                else
+                    break;
+            }
+        }
+        var lines = html.Split('\n').ToList();
+        int toStrip = 0;
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
             if (trimmed == "</div>" || string.IsNullOrWhiteSpace(trimmed))
-                lines.RemoveAt(0);
+                toStrip++;
             else
                 break;
+        }
+        int excess = toStrip - targetLeading;
+        if (excess <= 0)
+            return html;
+        for (int i = 0; i < excess && lines.Count > 0; i++)
+        {
+            lines.RemoveAt(0);
         }
         return string.Join("\n", lines);
     }

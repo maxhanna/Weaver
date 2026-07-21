@@ -135,7 +135,7 @@ public static class CodeFormatterService
         var parser = PrettierParsers.GetValueOrDefault(ext, "babel");
         var dummyName = $"dummy{ext}";
 
-        var prettierArgs = $"--stdin-filepath \"{dummyName}\"";
+        var prettierArgs = $"--stdin-filepath \"{dummyName}\" --print-width 200";
         if (parser == "html") prettierArgs += " --bracket-same-line";
 
         var psi = new ProcessStartInfo(_prettierCli, prettierArgs)
