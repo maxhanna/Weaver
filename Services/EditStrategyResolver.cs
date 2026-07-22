@@ -41,6 +41,10 @@ public static class EditStrategyResolver
         if (!fileExists)
             return new EditPlanDecision(EditStrategy.FullFileCreate, null, null, null, "File does not exist yet");
 
+        if (fileExists && fileContent.Length < 500)
+            return new EditPlanDecision(EditStrategy.FullFileCreate, null, null, null,
+                $"Small file ({fileContent.Length} chars) — full file replacement");
+
         // Whitespace-significant / non-AST-friendly languages always use anchored text edits.
         if (AgentUtilities.IsWhitespaceSignificant(relPath) ||
             ext is ".css" or ".scss" or ".less" or ".json" or ".yaml" or ".yml")

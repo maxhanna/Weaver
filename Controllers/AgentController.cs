@@ -440,13 +440,8 @@ public partial class AgentController : ControllerBase
             var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
             if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
                 return ReindentHtmlTags(newCode, baseIndent, indentUnit);
-            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-            {
-                var tsFixed = AgentUtilities.FixJsTsIndentationWithTreeSitter(newCode, ext, baseIndent, indentUnit);
-                return AgentUtilities.FixMultilineParenIndentation(tsFixed);
-            }
             var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, indentUnit);
-            if (ext is ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
+            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
                 reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
             return reindented;
         }
@@ -1280,7 +1275,7 @@ public partial class AgentController : ControllerBase
              Regex.IsMatch(changeLower, @"\ball\s+(?:the\s+)?(?:specified|required|listed)\s+propert") ||
              (Regex.IsMatch(changeLower, @"\bpropert") && changeLower.Count(c => c == ',') >= 2));
         string editFormat;
-        if (!fileExists)
+        if (!fileExists || (fileExists && fileContent?.Length < 500))
         {
             editFormat = "full_file";
         }
@@ -4111,32 +4106,19 @@ public partial class AgentController : ControllerBase
             {
                 var fileAlreadyExists = System.IO.File.Exists(fullPath);
                 var fullFileExt = Path.GetExtension(relPath).ToLowerInvariant();
-                var isCssDeletion = fullFileExt is ".css" or ".scss" or ".less" &&
-                    (step.Change ?? "").Contains("Remove", StringComparison.OrdinalIgnoreCase);
-                var codeFileExtRestricted = fullFileExt is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx";
-                var allowFullFileEscalation = fileAlreadyExists && !codeFileExtRestricted &&
-                    fullFileExt is not (".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte") &&
-                    (history.Count >= 3 || isCssDeletion);
-                if (fileAlreadyExists && !allowFullFileEscalation)
+                var isSmallFile = fileAlreadyExists && fullContent.Length < 500;
+                if (fileAlreadyExists && !isSmallFile)
                 {
-                    var e = fullFileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte"
-                        ? "fullFile is BLOCKED for HTML/Angular template files — the LLM generates wrong component structure. " +
-                          "Use a single unique line from the TARGET SECTION as your ENTIRE oldString (must appear only once in the file, ≥20 chars). " +
-                          "Look at the ⚡ ACTUAL TARGET SECTION shown in the history above."
-                        : fullFileExt == ".cs"
-                            ? "fullFile is BLOCKED for existing C# files — the LLM hallucinates or truncates large C# files. " +
-                              "Use a targeted oldString/newString edit. Pick a single unique line INSIDE the target class/method as your anchor. " +
-                              "Do NOT include the preceding closing brace } in your oldString."
-                        : "LLM incorrectly used fullFile for existing file — use oldString/newString targeted edits only";
+                    var e = "fullFile is only allowed for new files. Use a targeted oldString/newString edit instead. " +
+                            "Pick a single unique line INSIDE the target section (≥20 chars, appears once in the file) as your oldString.";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
                     continue;
                 }
-                if (allowFullFileEscalation)
+                if (fileAlreadyExists && isSmallFile)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"⚠ Strategy escalation: accepting fullFile replacement for existing file {relPath} " +
-                        $"(after {history.Count} failed oldString attempts)", ct: ct);
+                        $"⚠ Accepting fullFile for small existing file {relPath} ({fullContent.Length} chars)", ct: ct);
                 }
                 if (fullContent.Length > cfg8.maxFullFileTokens * 4)
                 {

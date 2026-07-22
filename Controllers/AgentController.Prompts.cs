@@ -38,11 +38,11 @@ partial class AgentController
                 "  - NEVER include surrounding container lines — delete ONLY what's asked.\n\n",
 
             "full_file" =>
-                "This is a NEW FILE (does not exist yet). Use full-file replacement:\n" +
+                "The file is new or very small. Use full-file replacement:\n" +
                 "{\n" +
                 "  \"fullFile\": [\"...entire file content...\"]\n" +
                 "}\n" +
-                "  - fullFile MUST contain EVERY line of the new file.\n" +
+                "  - fullFile MUST contain EVERY line of the new/replacement file.\n" +
                 "  - Use array format for multi-line content.\n\n",
 
             "format_c_class_fill" =>
