@@ -430,13 +430,22 @@ public partial class AgentController : ControllerBase
             baseIndent = Regex.Match(firstRealLine, @"^(\s*)").Value;
         }
         if (string.IsNullOrEmpty(baseIndent)) return newCode;
-        var baseIndentLen = baseIndent.Length;
         var newLines = newCode.Split('\n');
         if (newLines.Length <= 1) return newCode;
         var nonEmpty = newLines.Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
         if (nonEmpty.Count == 0) return newCode;
+        if (!AgentUtilities.IsWhitespaceSignificant(filePath))
+        {
+            var indentUnit = DetectIndentUnit(oldSource);
+            var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
+            if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
+                return ReindentHtmlTags(newCode, baseIndent, indentUnit);
+            var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, indentUnit);
+            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
+                reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
+            return reindented;
+        }
         var minNewIndent = nonEmpty.Min(l => Regex.Match(l, @"^(\s*)").Groups[1].Length);
-        if (minNewIndent >= baseIndentLen) return newCode;
         var result = new List<string>();
         foreach (var line in newLines)
         {
@@ -452,34 +461,7 @@ public partial class AgentController : ControllerBase
                 result.Add(baseIndent + trimmed);
             }
         }
-        var shifted = string.Join("\n", result);
-        var shiftedLines = shifted.Split('\n');
-        var distinctIndents = shiftedLines
-            .Where(l => !string.IsNullOrWhiteSpace(l))
-            .Select(l => Regex.Match(l, @"^(\s*)").Groups[1].Length)
-            .Distinct()
-            .ToList();
-        if (distinctIndents.Count <= 1
-            && !AgentUtilities.IsWhitespaceSignificant(filePath))
-        {
-            var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
-            if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
-            {
-                return ReindentHtmlTags(newCode, baseIndent, DetectIndentUnit(oldSource));
-            }
-            var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, DetectIndentUnit(oldSource));
-            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
-            {
-                reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
-            }
-            return reindented;
-        }
-        var ext2 = Path.GetExtension(filePath ?? "").ToLowerInvariant();
-        if (ext2 is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
-        {
-            shifted = AgentUtilities.FixMultilineParenIndentation(shifted);
-        }
-        return shifted;
+        return string.Join("\n", result);
     }
     private static string ReindentHtmlTags(string code, string baseIndent, string indentUnit = "  ")
     {
@@ -870,7 +852,7 @@ public partial class AgentController : ControllerBase
         }
         sb.AppendLine();
         var isNewMethodInsertion = !string.IsNullOrWhiteSpace(step.Change) &&
-            langSupportsFormatC && (
+            langSupportsFormatC && !string.IsNullOrWhiteSpace(fileContent) && (
             Regex.IsMatch(step.Change, @"\b(add|create|insert)\b.{0,40}\b(method|endpoint|action|route|function)\b",
                 RegexOptions.IgnoreCase) ||
             Regex.IsMatch(step.Change,
@@ -880,6 +862,11 @@ public partial class AgentController : ControllerBase
                 @"(?:\s+[A-Za-z_]\w*)?" +
                 @"\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{",
                 RegexOptions.Multiline | RegexOptions.IgnoreCase));
+        if (isNewMethodInsertion && !string.IsNullOrWhiteSpace(targetSymbol) &&
+            Regex.IsMatch(fileContent, @"\b" + Regex.Escape(targetSymbol) + @"\s*\(", RegexOptions.Multiline))
+        {
+            isNewMethodInsertion = false;
+        }
         if (HtmlDomEditor.IsHtmlDomFile(relPath))
         {
             sb.AppendLine();
@@ -1276,6 +1263,11 @@ public partial class AgentController : ControllerBase
             Regex.IsMatch(changeLower, @"\b(add|create|implement|define|insert|new)\b.{0,60}\b(method|endpoint|action|route|function)\b") ||
             (step.Change ?? "").Contains("[Http", StringComparison.OrdinalIgnoreCase) ||
             rawMethodCodeDetect));
+        if (isNewMethodInsert && !string.IsNullOrWhiteSpace(targetSymbol) &&
+            Regex.IsMatch(fileContent ?? "", @"\b" + Regex.Escape(targetSymbol) + @"\s*\(", RegexOptions.Multiline))
+        {
+            isNewMethodInsert = false;
+        }
         var isClassPropertyFill = ext == ".cs" && fileExists && !classIsNewCsMethod &&
             Regex.IsMatch(changeLower, @"\bclass\b") &&
             (Regex.IsMatch(changeLower, @"\bfill\s+in\b") ||
@@ -1364,7 +1356,7 @@ public partial class AgentController : ControllerBase
             var jRoot = jDoc.RootElement;
             if (jRoot.TryGetProperty("alreadyDone", out var ad) && ad.GetBoolean())
             {
-                var (verdict, _) = PreEditValidation(fileContent, step);
+                var (verdict, _) = PreEditValidation(fileContent ?? "", step);
                 if (verdict == PreEditVerdict.AlreadyDone)
                 {
                     return (null, null, false, null, true, null, false);
@@ -1506,7 +1498,8 @@ public partial class AgentController : ControllerBase
                         }
                         if (insertAfter || (hasReplace && !replaceSection && !hasInsertAfter))
                         {
-                            return (matchedBlock, matchedBlock + "\n" + newCodeStr, false, null, false, null, true);
+                            var indented = AutoIndentCode(matchedBlock, newCodeStr, relPath);
+                            return (matchedBlock, matchedBlock + "\n" + indented, false, null, false, null, true);
                         }
                         return (matchedBlock, newCodeStr + "\n" + matchedBlock, false, null, false, null, true);
                     }
@@ -2105,8 +2098,9 @@ public partial class AgentController : ControllerBase
     }
     private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
     {
-        if (string.IsNullOrWhiteSpace(fileContent))
+        if (string.IsNullOrWhiteSpace(fileContent)) {
             return (PreEditVerdict.Proceed, "");
+        }
         var content = AgentUtilities.NormalizeLineEndings(fileContent);
         var changeLower = (step.Change ?? "").ToLowerInvariant();
         if ((changeLower.StartsWith("create ") || changeLower.Contains("create a new") || changeLower.Contains("create new") || changeLower.Contains("add new")) &&
@@ -3826,18 +3820,37 @@ public partial class AgentController : ControllerBase
             plan, planItemIndex, emitSse, ct, cardId, attachedFiles);
         step = exploration.EnrichedStep;
         var explorationContext = exploration.ExplorationContext;
-        if (!string.IsNullOrWhiteSpace(explorationContext))
+        var eiTask = EditIntentClassifier.ClassifyAsync(step.Change ?? "", relPath,
+            async (sys, usr, c) =>
+            {
+                var (raw, _, err) = await CallLlmRaw(sys, usr, c, TimeSpan.FromSeconds(15), maxTokens: 128);
+                return (raw, err);
+            }, ct);
+        var fe = System.IO.File.Exists(fullPath);
+        var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
+        var ei = await eiTask;
+        var ed = EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
+        if (ed.ResolvedOldStr != null)
+        {
+            await EmitLog(emitSse, "info",
+                $"  🎯 AST-resolved '{ed.TargetName}' ({ed.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", ct: ct);
+            step.OldString = ed.ResolvedOldStr;
+            explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{ed.ResolvedOldStr}\n```" +
+                (!string.IsNullOrWhiteSpace(explorationContext) ? "\n\n" + explorationContext : "");
+        }
+        if (!string.IsNullOrWhiteSpace(explorationContext) && !string.IsNullOrWhiteSpace(step.Change))
         {
             explorationContext = await EnrichContextWithProjectTypesAndSql(
                 projectRoot, relPath, step.Change, explorationContext,
                 new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
                 emitSse, ct);
             var typeChainContext = await EnrichWithTypeChain(
-projectRoot, relPath, step.Change,
-new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
-emitSse, ct);
-            if (!string.IsNullOrWhiteSpace(typeChainContext))
+                projectRoot, relPath, step.Change,
+                new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
+                emitSse, ct);
+            if (!string.IsNullOrWhiteSpace(typeChainContext)) {
                 explorationContext += typeChainContext;
+            }
         }
         if (exploration.LowConfidenceWarning != null)
         {
@@ -3978,14 +3991,26 @@ emitSse, ct);
                         oldStr = AgentUtilities.NormalizeLineEndings(planOldStr);
                         newStr = AgentUtilities.NormalizeLineEndings(cleaned.Trim());
                         var fmtExt = Path.GetExtension(relPath).ToLowerInvariant();
+                        var prettierFormatted = false;
                         if (CodeFormatterService.CanFormat(fmtExt))
                         {
                             var fmtNew = await CodeFormatterService.FormatAsync("dummy" + fmtExt, newStr, ct);
-                            if (!string.IsNullOrWhiteSpace(fmtNew) && fmtNew.Length > 10)
+                            if (!string.IsNullOrWhiteSpace(fmtNew) && fmtNew.Length > 10 && fmtNew != newStr)
+                            {
                                 newStr = AgentUtilities.NormalizeLineEndings(fmtNew.Trim());
+                                prettierFormatted = true;
+                            }
                         }
                         if (fmtExt == ".css" || fmtExt == ".scss" || fmtExt == ".less")
                             newStr = LlmCssCleaner.Clean(newStr);
+                        if (!AgentUtilities.IsWhitespaceSignificant(relPath))
+                        {
+                            var jsLike = fmtExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs";
+                            if (jsLike)
+                                newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
+                            if (!prettierFormatted)
+                                newStr = AutoIndentCode(planOldStr, newStr, relPath);
+                        }
                         fromFormatC = true;
                         await EmitLog(emitSse, "info",
                             $"Focused LLM returned replacement: old={oldStr.Split('\n').Length}L, new={newStr.Split('\n').Length}L", ct: ct);
@@ -4272,6 +4297,8 @@ emitSse, ct);
                         if (newStr != before)
                             await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
                     }
+                    if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                        newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
                 if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
                 {
                     newContent = newStr;
@@ -4468,6 +4495,18 @@ emitSse, ct);
                         }
                     }
                 }
+            }
+            if (!string.IsNullOrWhiteSpace(newStr) && (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs") &&
+                AgentUtilities.HasCommentContainingBrace(newStr))
+            {
+                var err = "A comment line in the replacement contains '{' which likely means code was accidentally embedded in a comment. " +
+                          "Remove the '{' from the comment or un-comment the code.";
+                await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
+                history.Add((oldStr!, newStr ?? "", err));
+                if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
+                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
+                if (stuckCount >= 2) goto RecordFailure;
+                continue;
             }
             if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
                             !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
@@ -4780,12 +4819,15 @@ emitSse, ct);
         continueResolveLoop:;
             if (replaced && !string.IsNullOrWhiteSpace(newStr))
             {
-                var fixedSqlContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
-                if (fixedSqlContent != newContent)
+                if (fileExt == ".cs")
                 {
-                    await EmitLog(emitSse, "info", $"Pre-verify SQL fix: corrected spacing in {relPath}", ct: ct);
-                    newContent = fixedSqlContent;
-                    newStr = AgentUtilities.AutoFixSqlWhitespace(newStr);
+                    var fixedSqlContent = AgentUtilities.AutoFixSqlWhitespace(newContent);
+                    if (fixedSqlContent != newContent)
+                    {
+                        await EmitLog(emitSse, "info", $"Pre-verify SQL fix: corrected spacing in {relPath}", ct: ct);
+                        newContent = fixedSqlContent;
+                        newStr = AgentUtilities.AutoFixSqlWhitespace(newStr);
+                    }
                 }
                 if (Path.GetExtension(relPath).Equals(".py", StringComparison.OrdinalIgnoreCase))
                 {
@@ -4927,10 +4969,7 @@ emitSse, ct);
                     continue;
                 }
             }
-            if (Path.GetExtension(relPath).Equals(".ts", StringComparison.OrdinalIgnoreCase) ||
-                Path.GetExtension(relPath).Equals(".tsx", StringComparison.OrdinalIgnoreCase) ||
-                Path.GetExtension(relPath).Equals(".js", StringComparison.OrdinalIgnoreCase) ||
-                Path.GetExtension(relPath).Equals(".jsx", StringComparison.OrdinalIgnoreCase))
+            if (Path.GetExtension(relPath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
             {
                 newContent = NormalizeTypeScriptObjectLiterals(newContent);
             }
@@ -8201,7 +8240,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             ct.ThrowIfCancellationRequested();
             if (emitSse)
             {
-                await SendSse(Response, "phase", new { message = $"Step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
+                await SendSse(Response, "phase", new { message = $"Planning Step {planSoFar.Count + 1}" }, ct);
             }
             var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct);
             if (proposal == null)

@@ -436,8 +436,10 @@ angular.module('kanbanApp')
                     if (vm.abortController) { vm.abortController.abort(); }
                     vm.abortController = new AbortController(); 
                     vm.streamingActive = false; 
-                    vm.agentResult = { warning: 'Agent stopped by user.' };
-                    pushAgentLog(vm, 'warn', 'Agent stopped by user'); 
+                    const message = 'Agent stopped by user.';
+                    vm.agentResult = { warning:  message};
+                    pushAgentLog(vm, 'warn', message); 
+                    vm.showSideToast(message);
                     vm.activeCardId = null; 
                     vm.activeCardIds = new Set(); 
                     vm.resumeTerminalPolling();

@@ -126,19 +126,35 @@ public static class CodeFormatterService
 
     private static async Task<string> FormatWithPrettierAsync(string ext, string content, CancellationToken ct)
     {
-        if (_prettierCli == null || !File.Exists(_prettierCli))
+        string prettierCmd;
+        string prettierArgsBase;
+        string workingDir;
+
+        if (_prettierCli != null && File.Exists(_prettierCli))
         {
-            Debug.WriteLine("[CodeFormatter] Local Prettier not available at " + _prettierCli);
-            return content;
+            prettierCmd = _prettierCli;
+            prettierArgsBase = "";
+            workingDir = _formatterDir!;
+        }
+        else
+        {
+            if (!await IsNpxAvailableAsync())
+            {
+                Debug.WriteLine("[CodeFormatter] npx not found on PATH");
+                return content;
+            }
+            prettierCmd = "npx.cmd";
+            prettierArgsBase = "--yes prettier";
+            workingDir = Path.GetTempPath();
         }
 
         var parser = PrettierParsers.GetValueOrDefault(ext, "babel");
         var dummyName = $"dummy{ext}";
 
-        var prettierArgs = $"--stdin-filepath \"{dummyName}\" --print-width 200";
+        var prettierArgs = $"{prettierArgsBase} --stdin-filepath \"{dummyName}\" --print-width 200";
         if (parser == "html") prettierArgs += " --bracket-same-line";
 
-        var psi = new ProcessStartInfo(_prettierCli, prettierArgs)
+        var psi = new ProcessStartInfo(prettierCmd, prettierArgs)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -148,7 +164,7 @@ public static class CodeFormatterService
             StandardInputEncoding = Encoding.UTF8,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
-            WorkingDirectory = _formatterDir,
+            WorkingDirectory = workingDir,
         };
 
         try
@@ -173,6 +189,28 @@ public static class CodeFormatterService
             Debug.WriteLine($"[CodeFormatter] Prettier error for {ext}: {ex.Message}");
             return content;
         }
+    }
+
+    private static async Task<bool> IsNpxAvailableAsync()
+    {
+        try
+        {
+            using var proc = new Process
+            {
+                StartInfo = new ProcessStartInfo("npx.cmd", "--version")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                }
+            };
+            proc.Start();
+            var output = await proc.StandardOutput.ReadToEndAsync();
+            proc.WaitForExit(5000);
+            return proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(output);
+        }
+        catch { return false; }
     }
 
     private static async Task<string> FormatWithBlackAsync(string content, CancellationToken ct)

@@ -45,19 +45,19 @@ angular.module('kanbanApp', [])
           let permission = Notification.permission;
           if (permission === "granted") {
             new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
-            return;
+            vm.showSideToast(message);
           }
           if (permission === "default") {
             try {
               permission = await Notification.requestPermission();
               if (permission === "granted") {
                 new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
-                return;
+                vm.showSideToast(message);
               }
             } catch (e) { console.warn("Notification permission request failed:", e); }
           }
         }
-        alert(message); // Fallback toast
+        vm.showSideToast(message);
       };
 
       vm.sendSystemToast = function () {
@@ -66,6 +66,35 @@ angular.module('kanbanApp', [])
           vm.playSound();
         }
       };
+
+      vm.showSideToast = function (message, duration = 3500) {
+        const container = document.getElementById("weaver-toast-container");
+
+        const toast = document.createElement("div");
+        toast.className = "weaver-toast";
+
+        const img = document.createElement("img");
+        img.className = "toast-icon";
+        img.src = "/wwwroot/weavericon.png";
+        img.alt = "";
+
+        const span = document.createElement("span");
+        span.className = "toast-text";
+        span.textContent = message;
+
+        toast.appendChild(img);
+        toast.appendChild(span);
+        container.appendChild(toast);
+
+        requestAnimationFrame(() => toast.classList.add("show"));
+
+        setTimeout(() => {
+          toast.classList.remove("show");
+          toast.classList.add("hide");
+          setTimeout(() => toast.remove(), 300);
+        }, duration);
+      };
+
 
       vm.exportKanbanData = function () {
         const data = JSON.stringify(vm.state);

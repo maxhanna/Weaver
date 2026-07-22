@@ -1027,6 +1027,35 @@ public static class AgentUtilities
         }
         return changed ? result : content;
     }
+    private static readonly Regex OperatorSpacingRegex = new(
+        @"(===|!==|>=|<=|==|!=|&&|\|\||=>)\s*(\d)",
+        RegexOptions.IgnoreCase);
+    private static readonly Regex LtGtDigitRegex = new(@"(<|>)\s*(\d)");
+    private static readonly Regex KeywordParenRegex = new(
+        @"\b(if|for|while|switch|catch|typeof|instanceof)\s*\(");
+    private static readonly Regex ElseBraceRegex = new(@"\}\s*else\s*\{");
+    private static readonly Regex ElseIfParenRegex = new(@"else\s+if\s*\(");
+    private static readonly Regex ParenBraceRegex = new(@"\)\s*\{");
+    private static readonly Regex ReturnBraceRegex = new(@"\breturn\s*\{");
+    private static readonly Regex FatArrowBraceRegex = new(@"=>\s*\{");
+    private static readonly Regex CommaSpaceRegex = new(@",(\S)");
+    public static string AutoFixOperatorSpacing(string code)
+    {
+        code = OperatorSpacingRegex.Replace(code, "$1 $2");
+        code = LtGtDigitRegex.Replace(code, "$1 $2");
+        code = KeywordParenRegex.Replace(code, m =>
+        {
+            var kw = m.Groups[1].Value;
+            return kw + " (";
+        });
+        code = ElseBraceRegex.Replace(code, "} else {");
+        code = ElseIfParenRegex.Replace(code, "else if (");
+        code = ParenBraceRegex.Replace(code, ") {");
+        code = ReturnBraceRegex.Replace(code, "return {");
+        code = FatArrowBraceRegex.Replace(code, "=> {");
+        code = CommaSpaceRegex.Replace(code, ", $1");
+        return code;
+    }
     public static string AutoFixPythonStatements(string content, string relPath)
     {
         if (string.IsNullOrWhiteSpace(content)) return content;
@@ -4387,6 +4416,21 @@ public static class AgentUtilities
         var pattern = $@"{fieldName}:\s*(.*?)(?=\s*(?:FILE:|CHANGE:|DESCRIPTION:|<<<|$))";
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
+    }
+    public static bool HasCommentContainingBrace(string code)
+    {
+        var lines = code.Split('\n');
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("//") && trimmed.Contains('{'))
+                return true;
+            if (trimmed.StartsWith("/*") && trimmed.Contains('{'))
+                return true;
+            if ((trimmed.StartsWith("#") || trimmed.StartsWith("--")) && trimmed.Contains('{'))
+                return true;
+        }
+        return false;
     }
     public static bool IsBraceBalanced(string content) => !HasUnbalancedBraces(content);
     public static bool HasUnbalancedBraces(string content)
