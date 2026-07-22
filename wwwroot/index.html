@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/ide.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.17/codemirror.min.css" />
   <link rel="icon" href="/weavericon.png">
+  <link rel="manifest" href="/manifest.json">
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 </head>
 
@@ -1477,6 +1478,43 @@
   <script src="/agent.js"></script>
   <script src="/voice-input.js"></script>
   <script src="/ide.js"></script>
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator) || !('Notification' in window)) return;
+      var swRegistration = null;
+      navigator.serviceWorker.register('/service-worker.js').then(function (reg) {
+        swRegistration = reg;
+        if (Notification.permission === 'granted') subscribePush(reg);
+      }).catch(function () {});
+      function subscribePush(reg) {
+        reg.pushManager.getSubscription().then(function (sub) {
+          if (sub) return sub;
+          return fetch('/api/push/vapid-public-key').then(function (r) { return r.text(); }).then(function (key) {
+            return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
+          });
+        }).then(function (sub) {
+          fetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub.toJSON()) });
+        }).catch(function () {});
+      }
+      window.__weaverSwReady = function () { return swRegistration; };
+      window.__weaverSendNotification = function (title, body) {
+        var reg = swRegistration;
+        if (reg) {
+          reg.showNotification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
+        } else if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
+        }
+      };
+      function urlBase64ToUint8Array(base64String) {
+        var padding = '='.repeat((4 - base64String.length % 4) % 4);
+        var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        var rawData = window.atob(base64);
+        var output = new Uint8Array(rawData.length);
+        for (var i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
+        return output;
+      }
+    })();
+  </script>
 </body>
 
 </html>

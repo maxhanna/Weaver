@@ -41,18 +41,18 @@ angular.module('kanbanApp', [])
       };
 
       vm.showNotification = async function (message) {
-        if ("Notification" in window) {
+        if (window.__weaverSwReady && window.__weaverSwReady()) {
+          window.__weaverSendNotification('Weaver', message);
+        } else if ("Notification" in window) {
           let permission = Notification.permission;
           if (permission === "granted") {
-            new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
-            vm.showSideToast(message);
+            new Notification("Weaver", { body: message, icon: "/weavericon.png" }); 
           }
           if (permission === "default") {
             try {
               permission = await Notification.requestPermission();
               if (permission === "granted") {
-                new Notification("Weaver", { body: message, icon: "/wwwroot/weavericon.png" });
-                vm.showSideToast(message);
+                new Notification("Weaver", { body: message, icon: "/weavericon.png" }); 
               }
             } catch (e) { console.warn("Notification permission request failed:", e); }
           }

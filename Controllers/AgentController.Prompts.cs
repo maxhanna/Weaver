@@ -37,14 +37,6 @@ partial class AgentController
                 "  - newString = empty array [].\n" +
                 "  - NEVER include surrounding container lines — delete ONLY what's asked.\n\n",
 
-            "full_file" =>
-                "The file is new or very small. Use full-file replacement:\n" +
-                "{\n" +
-                "  \"fullFile\": [\"...entire file content...\"]\n" +
-                "}\n" +
-                "  - fullFile MUST contain EVERY line of the new/replacement file.\n" +
-                "  - Use array format for multi-line content.\n\n",
-
             "format_c_class_fill" =>
                 "You MUST use FORMAT C to fill an EXISTING class body with new property/field declarations:\n" +
                 "{\n" +
@@ -56,7 +48,7 @@ partial class AgentController
                 "  - targetName MUST be the EXISTING class name copied VERBATIM from the file (e.g. the class already shown as empty `{ }` in the file content below).\n" +
                 "  - newCode MUST contain ONLY the new property/field lines to insert inside the class body — one per line.\n" +
                 "  - Do NOT repeat the class declaration or braces in newCode. Do NOT set insertAfter.\n" +
-                "  - Do NOT use oldString/newString. Do NOT use fullFile. Do NOT touch any other method in the file.\n\n",
+                "  - Do NOT use oldString/newString.\n\n",
 
             _ =>
                 "Use oldString/newString targeted edit format:\n" +
@@ -90,6 +82,24 @@ partial class AgentController
              "15. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form. Only add comments if the change description explicitly asks for them.\n";
 
         return intro + formatSection + commonRules;
+    }
+
+    private static string BuildFullFileSystemPrompt()
+    {
+        return
+            "You are a surgical code editor. Output ONLY a JSON object.\n\n" +
+            "Use full-file replacement (the file is new or very small):\n" +
+            "{\n" +
+            "  \"fullFile\": [\"...entire file content...\"]\n" +
+            "}\n" +
+            "  - fullFile MUST contain EVERY line of the new/replacement file.\n" +
+            "  - Use array format for multi-line content.\n" +
+            "  - Do NOT use oldString/newString.\n\n" +
+            "CRITICAL RULES:\n" +
+            "1. oldString must exist VERBATIM in the file — copy character-for-character including EVERY leading space and tab (indentation).\n" +
+            "2. Output ONLY the JSON — no markdown, no code fences, no introductory text\n" +
+            "3. NEVER INVENT type names or property names. Every type/property you reference MUST exist in the project.\n" +
+            "4. Do NOT add comments (// or /* */ or # or <!-- -->) to the code — comments are bad form.\n";
     }
 
     private static string BuildVerifyEditUserPrompt() =>

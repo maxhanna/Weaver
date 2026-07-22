@@ -12,6 +12,7 @@ using Weaver.Services;
 using static Weaver.Services.AgentUtilities;
 using Weaver;
 namespace Weaver.Controllers;
+
 [ApiController]
 [Route("api/agent")]
 public partial class AgentController : ControllerBase
@@ -658,6 +659,17 @@ public partial class AgentController : ControllerBase
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
         var (langFamily, langSupportsFormatC, langHint) = AgentUtilities.GetLanguageProfile(ext);
         sb.AppendLine(langHint);
+        var eiTask = EditIntentClassifier.ClassifyAsync(step.Change ?? "", relPath,
+            async (sys, usr, c) =>
+            {
+                var (raw, _, err) = await CallLlmRaw(sys, usr, c, TimeSpan.FromSeconds(15), maxTokens: 128);
+                return (raw, err);
+            }, ct);
+        var fe = System.IO.File.Exists(fullPath);
+        var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
+        var ei = await eiTask;
+        var decidedEditStrategy = EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
+
         if (ext == ".cs" && fileExists && !string.IsNullOrWhiteSpace(fileContent))
         {
             try
@@ -1296,7 +1308,9 @@ public partial class AgentController : ControllerBase
         {
             editFormat = "old_new";
         }
-        var systemPrompt = BuildEditSystemPrompt(editFormat);
+        var systemPrompt = editFormat == "full_file"
+            ? BuildFullFileSystemPrompt()
+            : BuildEditSystemPrompt(editFormat);
         var (raw, _, resolveError2) = await CallLlmRawStreaming(systemPrompt, sb.ToString(), emitSse, ct, _infiniteTimeout, maxTokens: 1536);
         if (!string.IsNullOrWhiteSpace(resolveError2) && resolveError2.Contains("Repetition loop detected", StringComparison.OrdinalIgnoreCase))
         {
@@ -1481,7 +1495,7 @@ public partial class AgentController : ControllerBase
                         if (sourceText.Contains(newCodeStr, StringComparison.OrdinalIgnoreCase))
                         {
                             await EmitLog(emitSse, "info", $"✓ Already done: {relPath} — HTML block already present", ct: ct);
-                            return (null, null, false, null, true, null, false); 
+                            return (null, null, false, null, true, null, false);
                         }
                         var (matchedBlock, matchIndex, htmlErr) = HtmlDomEditor.ResolveHtmlAnchor(sourceText, targetName, step.Change, step.LineNumber, !replaceSection, true);
                         if (matchedBlock == null)
@@ -1981,7 +1995,7 @@ public partial class AgentController : ControllerBase
             if (ttMatch.Success && tnMatch.Success)
             {
                 var tt = ttMatch.Groups[1].Value;
-                var tn = AgentUtilities.UnescapeJsonString(tnMatch.Groups[1].Value); 
+                var tn = AgentUtilities.UnescapeJsonString(tnMatch.Groups[1].Value);
                 var ncIdx = raw.IndexOf("\"newCode\"", StringComparison.OrdinalIgnoreCase);
                 if (ncIdx >= 0)
                 {
@@ -2023,7 +2037,7 @@ public partial class AgentController : ControllerBase
                                 { newCodeStr = content[..i]; break; }
                             }
                         }
-                        if (newCodeStr != null) newCodeStr = AgentUtilities.UnescapeJsonString(newCodeStr); 
+                        if (newCodeStr != null) newCodeStr = AgentUtilities.UnescapeJsonString(newCodeStr);
                     }
                     if (!string.IsNullOrWhiteSpace(tt) && !string.IsNullOrWhiteSpace(tn) && newCodeStr != null)
                     {
@@ -2098,7 +2112,8 @@ public partial class AgentController : ControllerBase
     }
     private static (PreEditVerdict verdict, string reason) PreEditValidation(string fileContent, PlanStep step)
     {
-        if (string.IsNullOrWhiteSpace(fileContent)) {
+        if (string.IsNullOrWhiteSpace(fileContent))
+        {
             return (PreEditVerdict.Proceed, "");
         }
         var content = AgentUtilities.NormalizeLineEndings(fileContent);
@@ -3834,13 +3849,13 @@ public partial class AgentController : ControllerBase
         var fe = System.IO.File.Exists(fullPath);
         var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
         var ei = await eiTask;
-        var ed = EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
-        if (ed.ResolvedOldStr != null)
+        var decidedEditStrategy = EditStrategyResolver.Decide(relPath, fe, fc, step.Change ?? "", ei);
+        if (decidedEditStrategy.ResolvedOldStr != null)
         {
             await EmitLog(emitSse, "info",
-                $"  🎯 AST-resolved '{ed.TargetName}' ({ed.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", ct: ct);
-            step.OldString = ed.ResolvedOldStr;
-            explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{ed.ResolvedOldStr}\n```" +
+                $"  🎯 AST-resolved '{decidedEditStrategy.TargetName}' ({decidedEditStrategy.ResolvedOldStr.Split('\n').Length}L) via EditStrategyResolver", decidedEditStrategy, ct: ct);
+            step.OldString = decidedEditStrategy.ResolvedOldStr;
+            explorationContext = $"### TARGET FILE: {relPath}\n\n```\n{decidedEditStrategy.ResolvedOldStr}\n```" +
                 (!string.IsNullOrWhiteSpace(explorationContext) ? "\n\n" + explorationContext : "");
         }
         if (!string.IsNullOrWhiteSpace(explorationContext) && !string.IsNullOrWhiteSpace(step.Change))
@@ -3853,7 +3868,8 @@ public partial class AgentController : ControllerBase
                 projectRoot, relPath, step.Change,
                 new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
                 emitSse, ct);
-            if (!string.IsNullOrWhiteSpace(typeChainContext)) {
+            if (!string.IsNullOrWhiteSpace(typeChainContext))
+            {
                 explorationContext += typeChainContext;
             }
         }
@@ -3978,7 +3994,8 @@ public partial class AgentController : ControllerBase
                     replacePrompt.AppendLine("Output ONLY the replacement code. It MUST be a complete method/function declaration (signature + body).");
                     replacePrompt.AppendLine("Do NOT include markdown code fences or any other text — just the raw source code.");
                     var (rawReplacement, replaceError) = await CallLlmRawText(
-                        "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation.",
+                        "You are a precise code editor. Output ONLY the replacement source code with no formatting, no markdown, no explanation. " +
+                        "Do NOT add comments (// or /* */) to the code.",
                         replacePrompt.ToString(), emitSse, ct,
                         requestTimeout: TimeSpan.FromMinutes(5),
                         maxTokens: 2048);
@@ -4109,16 +4126,24 @@ public partial class AgentController : ControllerBase
                 var isSmallFile = fileAlreadyExists && fullContent.Length < 500;
                 if (fileAlreadyExists && !isSmallFile)
                 {
-                    var e = "fullFile is only allowed for new files. Use a targeted oldString/newString edit instead. " +
+                    var e = "This file already exists and is not small — use a targeted oldString/newString edit instead. " +
                             "Pick a single unique line INSIDE the target section (≥20 chars, appears once in the file) as your oldString.";
                     await EmitLog(emitSse, "error", e, ct: ct);
                     history.Add((step.OldString ?? "", step.NewString ?? "", e));
+                    resolveStuckCount++;
+                    if (resolveStuckCount >= 3)
+                    {
+                        await EmitLog(emitSse, "error",
+                            $"LLM keeps using wrong format for existing file — aborting {relPath}",
+                            ct: ct);
+                        goto RecordFailure;
+                    }
                     continue;
                 }
                 if (fileAlreadyExists && isSmallFile)
                 {
                     await EmitLog(emitSse, "warn",
-                        $"⚠ Accepting fullFile for small existing file {relPath} ({fullContent.Length} chars)", ct: ct);
+                        $"⚠ Accepting replacement for small existing file {relPath} ({fullContent.Length} chars)", ct: ct);
                 }
                 if (fullContent.Length > cfg8.maxFullFileTokens * 4)
                 {
@@ -4171,30 +4196,30 @@ public partial class AgentController : ControllerBase
                     var batchContent = fileContent;
                     foreach (var edit in step.Edits)
                     {
-                    if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
-                    var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
-                    var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
-                    var (hasReplaced, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
-                        edit.LineNumber > 0 ? edit.LineNumber : step.LineNumber, step.Change);
-                    if (!hasReplaced)
-                    {
-                        await EmitLog(emitSse, "warn", $"Batch sub-edit failed: {err}", ct: ct);
-                        allApplied = false;
-                        break;
+                        if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
+                        var normOld = AgentUtilities.NormalizeLineEndings(edit.OldString);
+                        var normNew = AgentUtilities.NormalizeLineEndings(edit.NewString);
+                        var (hasReplaced, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
+                            edit.LineNumber > 0 ? edit.LineNumber : step.LineNumber, step.Change);
+                        if (!hasReplaced)
+                        {
+                            await EmitLog(emitSse, "warn", $"Batch sub-edit failed: {err}", ct: ct);
+                            allApplied = false;
+                            break;
+                        }
+                        batchContent = nc;
                     }
-                    batchContent = nc;
-                }
-                if (allApplied && batchContent != fileContent)
-                {
-                    replaced = true;
-                    newContent = batchContent;
-                    matchError = null;
-                    snippet = null;
-                    oldStr = step.Edits[0].OldString ?? "";
-                    newStr = "(batch: " + step.Edits.Count + " edits)";
-                    await EmitLog(emitSse, "info",
-                        $"Applied batch of {step.Edits.Count} edits to {relPath}", ct: ct);
-                }
+                    if (allApplied && batchContent != fileContent)
+                    {
+                        replaced = true;
+                        newContent = batchContent;
+                        matchError = null;
+                        snippet = null;
+                        oldStr = step.Edits[0].OldString ?? "";
+                        newStr = "(batch: " + step.Edits.Count + " edits)";
+                        await EmitLog(emitSse, "info",
+                            $"Applied batch of {step.Edits.Count} edits to {relPath}", ct: ct);
+                    }
                 }
             }
             if (!replaced)
@@ -4261,36 +4286,36 @@ public partial class AgentController : ControllerBase
                 await EmitLog(emitSse, "info",
                     $"Applying edit: old={oldLines}L, new={newLines}L | oldStart: {oldPreview} | newStart: {newPreview}",
                     ct: ct);
-                    // Skip Prettier for snippet formatting — it strips indentation and destroys nesting
-                    var skipSnippetFormat = true;
-                    if (!skipSnippetFormat && !string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
+                // Skip Prettier for snippet formatting — it strips indentation and destroys nesting
+                var skipSnippetFormat = true;
+                if (!skipSnippetFormat && !string.IsNullOrWhiteSpace(newStr) && newStr.Length > 10 && CodeFormatterService.CanFormat(relPath))
+                {
+                    var before = newStr;
+                    newStr = (await CodeFormatterService.FormatAsync(relPath, newStr, ct)).TrimEnd('\n', '\r');
+                    if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
                     {
-                        var before = newStr;
-                        newStr = (await CodeFormatterService.FormatAsync(relPath, newStr, ct)).TrimEnd('\n', '\r');
-                        if (!string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr))
+                        wasFormattedByLib = true;
+                        var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+                        if (oldFirstLine != null)
                         {
-                            wasFormattedByLib = true;
-                            var oldFirstLine = oldStr.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
-                            if (oldFirstLine != null)
+                            var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
+                            if (baseIndent.Length > 0)
                             {
-                                var baseIndent = Regex.Match(oldFirstLine, @"^(\s*)").Value;
-                                if (baseIndent.Length > 0)
+                                var fmtLines = newStr.Split('\n');
+                                for (var i = 0; i < fmtLines.Length; i++)
                                 {
-                                    var fmtLines = newStr.Split('\n');
-                                    for (var i = 0; i < fmtLines.Length; i++)
-                                    {
-                                        if (!string.IsNullOrWhiteSpace(fmtLines[i]))
-                                            fmtLines[i] = baseIndent + fmtLines[i];
-                                    }
-                                    newStr = string.Join("\n", fmtLines);
+                                    if (!string.IsNullOrWhiteSpace(fmtLines[i]))
+                                        fmtLines[i] = baseIndent + fmtLines[i];
                                 }
+                                newStr = string.Join("\n", fmtLines);
                             }
                         }
-                        if (newStr != before)
-                            await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
                     }
-                    if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
-                        newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
+                    if (newStr != before)
+                        await EmitLog(emitSse, "info", $"Formatted replacement snippet in {relPath} via CodeFormatterService", ct: ct);
+                }
+                if (!string.IsNullOrWhiteSpace(newStr) && Path.GetExtension(relPath) is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+                    newStr = AgentUtilities.AutoFixOperatorSpacing(newStr);
                 if (string.IsNullOrEmpty(oldStr) && string.IsNullOrWhiteSpace(fileContent) && !string.IsNullOrWhiteSpace(newStr))
                 {
                     newContent = newStr;
@@ -5067,7 +5092,7 @@ public partial class AgentController : ControllerBase
                                     StringComparison.Ordinal)) stuckCount++;
                                 else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
                                 if (stuckCount >= 2) goto RecordFailure;
-                                continue; 
+                                continue;
                             }
                             else
                             {
@@ -5213,8 +5238,8 @@ public partial class AgentController : ControllerBase
                     {
                         var keep2 = decisions.Take(r + 1).Count(x => x == "keep");
                         var es2 = needsExtraStepFlags.Take(r + 1).Count(f => f);
-                        if (keep2 >= 2 && es2 == 0) break;          
-                        if (es2 >= 2) break;                        
+                        if (keep2 >= 2 && es2 == 0) break;
+                        if (es2 >= 2) break;
                     }
                 }
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
@@ -8288,7 +8313,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             {
                 var duplicateOf = planSoFar.FirstOrDefault(s =>
                     string.Equals(s.File, proposal.Step.File, StringComparison.OrdinalIgnoreCase) &&
-                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35); 
+                    TokenOverlap(s.Change ?? "", proposal.Step.Change ?? "") > 0.35);
                 if (duplicateOf != null)
                 {
                     rejectionFeedback.Add(
@@ -10114,10 +10139,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         {
             prompt = prompt + "\n\n" + requirementChecklist;
             await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
-        } 
-        else 
+        }
+        else
         {
-            await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct); 
+            await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct);
         }
         if (attachedFiles != null && attachedFiles.Count > 0)
         {
@@ -10146,10 +10171,10 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 var searchVariants = new List<(string label, string searchText)>();
                 foreach (var qs in quotedStrings)
                 {
-                    searchVariants.Add((qs, qs)); 
+                    searchVariants.Add((qs, qs));
                     var noComma = qs.Replace(",", "").Replace("'", "").Trim();
                     if (noComma != qs && noComma.Length >= 3)
-                        searchVariants.Add((qs, noComma)); 
+                        searchVariants.Add((qs, noComma));
                     var withInterpolation = Regex.Replace(qs, @"\busername\b", @"\$\{username\}", RegexOptions.IgnoreCase);
                     if (withInterpolation != qs && withInterpolation.Length >= 3)
                         searchVariants.Add((qs, withInterpolation));
@@ -10248,7 +10273,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
             discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
         }
-        MetaPlanResult? metaPlan = null; 
+        MetaPlanResult? metaPlan = null;
         var planAlreadyExecuted = false;
         AgentPlan plan;
         if (metaPlan?.SubPlans?.Count > 0)
@@ -10611,7 +10636,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         }
         if (!taskComplete)
         {
-            const int MaxPostVerifyRepairIterations = 3; 
+            const int MaxPostVerifyRepairIterations = 3;
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
