@@ -75,7 +75,7 @@ angular.module('kanbanApp', [])
 
         const img = document.createElement("img");
         img.className = "toast-icon";
-        img.src = "/wwwroot/weavericon.png";
+        img.src = "/weavericon.png";
         img.alt = "";
 
         const span = document.createElement("span");
@@ -91,7 +91,7 @@ angular.module('kanbanApp', [])
         setTimeout(() => {
           toast.classList.remove("show");
           toast.classList.add("hide");
-          setTimeout(() => toast.remove(), 300);
+          setTimeout(() => toast.remove(), 30000);
         }, duration);
       };
 

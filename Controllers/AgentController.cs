@@ -440,8 +440,13 @@ public partial class AgentController : ControllerBase
             var ext = Path.GetExtension(filePath ?? "").ToLowerInvariant();
             if (ext is ".html" or ".htm" or ".cshtml" or ".razor")
                 return ReindentHtmlTags(newCode, baseIndent, indentUnit);
+            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+            {
+                var tsFixed = AgentUtilities.FixJsTsIndentationWithTreeSitter(newCode, ext, baseIndent, indentUnit);
+                return AgentUtilities.FixMultilineParenIndentation(tsFixed);
+            }
             var reindented = AgentUtilities.ReindentByBraceDepth(newCode, baseIndent, indentUnit);
-            if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
+            if (ext is ".cs" or ".java" or ".go" or ".kt" or ".php" or ".rb")
                 reindented = AgentUtilities.FixMultilineParenIndentation(reindented);
             return reindented;
         }
@@ -3391,7 +3396,8 @@ public partial class AgentController : ControllerBase
     }
     private async Task<string> EnrichContextWithProjectTypesAndSql(
         string projectRoot, string relPath, string stepChange, string explorationContext,
-        HashSet<string> alreadyRead, bool emitSse, CancellationToken ct)
+        HashSet<string> alreadyRead, bool emitSse, CancellationToken ct,
+        string? targetSymbol = null)
     {
         var buf = new StringBuilder();
         const int MaxEnrichChars = 6000;
@@ -3399,10 +3405,14 @@ public partial class AgentController : ControllerBase
             Path.Combine(projectRoot, relPath.Replace('/', Path.DirectorySeparatorChar)));
         if (!System.IO.File.Exists(targetFullPath)) return explorationContext;
         var targetContent = await System.IO.File.ReadAllTextAsync(targetFullPath, Encoding.UTF8, ct);
-        var methodNameMatch = Regex.Match(stepChange,
-            @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(?:the|this|that|a|an)?\s*(\w+)",
-            RegexOptions.IgnoreCase);
-        var methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
+        var methodName = targetSymbol;
+        if (methodName == null)
+        {
+            var methodNameMatch = Regex.Match(stepChange,
+                @"(?:Modify|Update|Change|Edit|Replace|Add|Remove|Delete)\s+(?:the|this|that|a|an)?\s*(\w+)",
+                RegexOptions.IgnoreCase);
+            methodName = methodNameMatch.Success ? methodNameMatch.Groups[1].Value : null;
+        }
         string? methodBody = null;
         if (methodName != null && methodName != "?")
         {
@@ -3843,7 +3853,7 @@ public partial class AgentController : ControllerBase
             explorationContext = await EnrichContextWithProjectTypesAndSql(
                 projectRoot, relPath, step.Change, explorationContext,
                 new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
-                emitSse, ct);
+                emitSse, ct, targetSymbol: exploration.TargetSymbol);
             var typeChainContext = await EnrichWithTypeChain(
                 projectRoot, relPath, step.Change,
                 new HashSet<string>(exploration.FilesRead, StringComparer.OrdinalIgnoreCase),
@@ -4496,18 +4506,7 @@ public partial class AgentController : ControllerBase
                     }
                 }
             }
-            if (!string.IsNullOrWhiteSpace(newStr) && (fileExt is ".ts" or ".tsx" or ".js" or ".jsx" or ".cs") &&
-                AgentUtilities.HasCommentContainingBrace(newStr))
-            {
-                var err = "A comment line in the replacement contains '{' which likely means code was accidentally embedded in a comment. " +
-                          "Remove the '{' from the comment or un-comment the code.";
-                await EmitLog(emitSse, "warn", $"Edit attempt {attempt + 1}/{MaxAttempts} failed for {relPath}: {err}", ct: ct);
-                history.Add((oldStr!, newStr ?? "", err));
-                if (string.Equals(AgentUtilities.NormalizeLineEndings(oldStr ?? ""), AgentUtilities.NormalizeLineEndings(lastOld), StringComparison.Ordinal)) stuckCount++;
-                else { stuckCount = 0; lastOld = AgentUtilities.NormalizeLineEndings(oldStr ?? ""); }
-                if (stuckCount >= 2) goto RecordFailure;
-                continue;
-            }
+            // Tree-sitter correction is handled in AutoIndentCode below
             if (replaced && string.IsNullOrWhiteSpace(newStr) && !string.IsNullOrWhiteSpace(oldStr) &&
                             !(step.Change ?? "").Contains("remove", StringComparison.OrdinalIgnoreCase) &&
                             !(step.Change ?? "").Contains("delete", StringComparison.OrdinalIgnoreCase))

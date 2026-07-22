@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using TreeSitter;
 namespace Weaver.Services;
 public static class AgentUtilities
 {
@@ -4417,20 +4418,68 @@ public static class AgentUtilities
         var m = Regex.Match(text, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
-    public static bool HasCommentContainingBrace(string code)
+    public static string FixJsTsIndentationWithTreeSitter(string code, string extension, string baseIndent, string indentUnit = "  ")
     {
-        var lines = code.Split('\n');
-        foreach (var line in lines)
+        if (string.IsNullOrWhiteSpace(code)) return code;
+        var langMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            var trimmed = line.TrimStart();
-            if (trimmed.StartsWith("//") && trimmed.Contains('{'))
-                return true;
-            if (trimmed.StartsWith("/*") && trimmed.Contains('{'))
-                return true;
-            if ((trimmed.StartsWith("#") || trimmed.StartsWith("--")) && trimmed.Contains('{'))
-                return true;
+            { ".ts", "TypeScript" }, { ".tsx", "TSX" },
+            { ".js", "JavaScript" }, { ".jsx", "JavaScript" },
+            { ".mjs", "JavaScript" }, { ".cjs", "JavaScript" },
+        };
+        if (!langMap.TryGetValue(extension, out var langName)) return code;
+        try
+        {
+            using var language = new Language(langName);
+            using var parser = new Parser(language);
+            Tree? tree = null;
+            int wrapOffset = 0;
+            foreach (var (prefix, suffix, offset) in new (string, string, int)[] {
+                ("", "", 0), ("function __w(){", "\n}", 1), ("class __c{", "\n}", 1) })
+            {
+                var wrapped = string.IsNullOrEmpty(prefix) ? code : prefix + "\n" + code + suffix;
+                tree = parser.Parse(wrapped);
+                if (tree != null && !tree.RootNode.HasError)
+                {
+                    wrapOffset = offset;
+                    break;
+                }
+            }
+            if (tree == null || tree.RootNode.HasError) return code;
+            var blocks = new List<(int startRow, int endRow)>();
+            CollectStatementBlocks(tree.RootNode, blocks);
+            blocks = blocks
+                .Where(b => b.startRow >= wrapOffset)
+                .Select(b => (b.startRow - wrapOffset, b.endRow - wrapOffset))
+                .ToList();
+            var lines = code.Split('\n');
+            var result = new List<string>();
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var trimmed = line.TrimStart();
+                if (string.IsNullOrWhiteSpace(trimmed))
+                {
+                    result.Add(line);
+                    continue;
+                }
+                var depth = blocks.Count(b => b.startRow < i && b.endRow >= i);
+                if (depth > 0 && trimmed[0] == '}')
+                    depth--;
+                if (depth < 0) depth = 0;
+                var indent = baseIndent + string.Concat(Enumerable.Repeat(indentUnit, depth));
+                result.Add(indent + trimmed);
+            }
+            return string.Join("\n", result);
         }
-        return false;
+        catch { return code; }
+    }
+    private static void CollectStatementBlocks(Node node, List<(int startRow, int endRow)> blocks)
+    {
+        if (node.Type == "statement_block")
+            blocks.Add((node.StartPosition.Row, node.EndPosition.Row));
+        foreach (var child in node.NamedChildren)
+            CollectStatementBlocks(child, blocks);
     }
     public static bool IsBraceBalanced(string content) => !HasUnbalancedBraces(content);
     public static bool HasUnbalancedBraces(string content)
