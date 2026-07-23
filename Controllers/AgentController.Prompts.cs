@@ -208,7 +208,7 @@ partial class AgentController
         "interface/model definitions, and tests only if they reveal expected behavior. Avoid generated, minified, bin/obj, and package files.\n" +
         "5. refinedChange MUST: name the exact method/function/component, describe the " +
         "exact code block being replaced, describe the replacement code — zero ambiguity\n" +
-        "6. targetSymbol: the identifier of the specific method/function/class being changed\n" +
+        "6. targetSymbol: the identifier of the specific method/function/class being changed or the container method/function/class that contains the location of the change.\n" +
         "7. confidence 0-100: if < 70, request more files rather than guessing\n" +
         "8. If the target file already has enough context (small file, obvious location), " +
         "go ready=true on round 1 with a precise refinedChange\n" +
@@ -300,70 +300,120 @@ partial class AgentController
         return sb.ToString();
     }
 
-    private static string BuildIncrementalStepSystemPrompt() =>
-    "You are a senior autonomous coding agent building a code-change plan ONE STEP AT A TIME.\n" +
-    "You will be shown the task, the discovered file contents, and the PLAN SO FAR (steps already committed).\n" +
-    "Your job on EACH turn is to propose exactly ONE new step — the next atomic action required — " +
-    "or declare the plan complete if no further step is needed.\n\n" +
-    "Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n" +
-    "### DECISION ###\n" +
-    "If the plan-so-far, together with the discovery context, already fully satisfies the task:\n" +
-    "{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n" +
-    "If you need to read a file not yet in discovery context before you can safely propose the next step:\n" +
-    "{\"planComplete\": false, \"exploreFile\": \"{path/to/FILE_TO_EXPLORE.ext}\", \"thinking\": \"why you need this file\"}\n\n" +
-    "Otherwise, propose exactly ONE next step:\n" +
-    "{\n" +
-    "  \"planComplete\": false,\n" +
-    "  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n" +
-    "  \"step\": {\n" +
-    "    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: _create_file/_command/_web_search/_web_fetch/_git/_rename_file/_delete_file/_show/_checkpoint\",\n" +
-    "    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n" +
-    "    \"targetSymbol\": \"getTimedGreetingMessage\",\n" +
-    "    \"line\": 42,\n" +
-    "    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n" +
-    "  },\n" +
-    "  \"justification\": \"why this step must happen NOW relative to steps already committed " +
-    "(e.g. 'this DTO property must exist before step 2's endpoint can reference it')\"\n" +
-    "}\n\n" +
-    "### RULES ###\n" +
-    "1. ONE step per turn. Never propose multiple steps or a 'plan' array.\n" +
-    "2. The step MUST be atomic: one coherent edit at one location in one file. If the natural next " +
-    "   action touches two locations (e.g. add a field AND initialize it in a constructor), propose ONLY " +
-    "   the first location now — the second location gets its own turn later.\n" +
-    "   EXCEPTION: For small repetitive edits to the SAME file (e.g. removing priority tags from " +
-    "   todo/doing/done columns, updating the same CSS pattern in multiple selectors), you MAY use " +
-    "   the \"edits\" array to batch multiple oldString/newString pairs into ONE step:\n" +
-    "   \"edits\": [\n" +
-    "     {\"oldString\": \"line1\", \"newString\": \"line1\", \"line\": 10},\n" +
-    "     {\"oldString\": \"line2\", \"newString\": \"line2\", \"line\": 20}\n" +
-    "   ]\n" +
-    "   Each pair is applied independently to the same file. Do NOT use edits for edits in different files — " +
-    "   those still need separate steps.\n" +
-    "3. NEVER repeat or restate a step already present in PLAN SO FAR.\n" +
-    "4. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in " +
-    "   the discovery context OR was introduced by an earlier committed step. NEVER explore files outside the " +
-    "   attached files listed in the task or steering. Only explore to find a symbol definition when the symbol " +
-    "   is referenced in an already-attached file.\n" +
-    "5. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, " +
-    "   services before UI code that calls them.\n" +
-    "6. CREATE TABLE IF NOT EXISTS belongs INSIDE the method body that needs it — never its own step.\n" +
-    "7. Prefer FEWER, more complete steps. If the whole task is one coherent edit, propose that one step, " +
-    "   then declare planComplete=true on the next turn.\n" +
-    "8. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. " +
-    "   Read the discovery context more carefully and fix the symbol references instead of trying to explore " +
-    "   unrelated files.\n" +
-     "9. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\").\n" +
-    "10. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n" +
-    "11. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. " +
-     "Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n" +
-    "12. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), " +
-    "you MUST examine ALL attached files in discovery context to find where that original message or behavior " +
-    "originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n" +
-    "13. NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step. " +
-    "You already have the full file content in the discovery context. Every step MUST make an actual code change " +
-    "(add, modify, delete, replace, rename, etc.). If you need to understand code before editing, do it in your thinking, not in a separate step.\n" +
-    "14. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description " +
-    "(e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n";
+    private static string BuildIncrementalStepSystemPrompt(string stepMode = "all", List<string>? enabledTools = null)
+    {
+        var enabled = enabledTools != null && enabledTools.Count > 0
+            ? new HashSet<string>(enabledTools, StringComparer.OrdinalIgnoreCase)
+            : null;
+        var markers = new List<string>();
+        if (stepMode == "edit")
+        {
+            markers.Add("\"{path/to/TARGET_FILE}.ext\"");
+        }
+        else
+        {
+            if (enabled == null || enabled.Contains("_create_file")) markers.Add("_create_file");
+            if (enabled == null || enabled.Contains("_command")) markers.Add("_command");
+            if (enabled == null || enabled.Contains("_web_search")) markers.Add("_web_search");
+            if (enabled == null || enabled.Contains("_web_fetch")) markers.Add("_web_fetch");
+            if (enabled == null || enabled.Contains("_git")) markers.Add("_git");
+            if (enabled == null || enabled.Contains("_rename_file")) markers.Add("_rename_file");
+            if (enabled == null || enabled.Contains("_delete_file")) markers.Add("_delete_file");
+            if (enabled == null || enabled.Contains("_show")) markers.Add("_show");
+            markers.Add("_checkpoint");
+        }
+        var markerStr = string.Join("/", markers);
+        var sb = new StringBuilder();
+        sb.Append("You are a senior autonomous coding agent building a code-change plan ONE STEP AT A TIME.\n");
+        sb.Append("You will be shown the task, the discovered file contents, and the PLAN SO FAR (steps already committed).\n");
+        sb.Append("Your job on EACH turn is to propose exactly ONE new step — the next atomic action required — ");
+        sb.Append("or declare the plan complete if no further step is needed.\n\n");
+        sb.Append("Output ONLY valid JSON — no markdown fences, no prose outside the JSON.\n\n");
+        sb.Append("### DECISION ###\n");
+        sb.Append("If the plan-so-far, together with the discovery context, already fully satisfies the task:\n");
+        sb.Append("{\"planComplete\": true, \"completionReason\": \"one sentence: why nothing more is needed\"}\n\n");
+        sb.Append("If you need to read a file not yet in discovery context before you can safely propose the next step:\n");
+        sb.Append("{\"planComplete\": false, \"exploreFile\": \"{path/to/FILE_TO_EXPLORE.ext}\", \"thinking\": \"why you need this file\"}\n\n");
+        sb.Append("Otherwise, propose exactly ONE next step:\n");
+        sb.Append("{\n");
+        sb.Append("  \"planComplete\": false,\n");
+        sb.Append("  \"thinking\": \"1-2 sentences: why this is the correct NEXT step given what's already planned\",\n");
+        sb.Append("  \"step\": {\n");
+        if (stepMode == "edit")
+            sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext\",\n");
+        else
+            sb.Append("    \"file\": \"{path/to/TARGET_FILE}.ext, or a marker: ").Append(markerStr).Append("\",\n");
+        sb.Append("    \"change\": \"precise, atomic description including the exact method/function name being changed (e.g., getTimedGreetingMessage, renderCards, constructor)\",\n");
+        sb.Append("    \"targetSymbol\": \"getTimedGreetingMessage\",\n");
+        sb.Append("    \"referenceFiles\": [\"{path/to/REFERENCE_FILE}.ext\"]\n");
+        sb.Append("  },\n");
+        sb.Append("  \"justification\": \"why this step must happen NOW relative to steps already committed ");
+        sb.Append("(e.g. 'this DTO property must exist before step 2's endpoint can reference it')\"\n");
+        sb.Append("}\n\n");
+        sb.Append("### RULES ###\n");
+        sb.Append("1. CRITICAL — NO EXPLORATION: You already have the FULL file contents of all attached files in the DISCOVERY CONTEXT section above. ");
+        sb.Append("If you need to understand code before editing, reason about it in your \"thinking\" field, not in a separate step. ");
+        sb.Append("NEVER propose a 'locate', 'find', 'examine', 'understand', 'read', 'explore', 'look at', 'inspect', 'review', 'check', 'see', 'search' step.\n");
+        sb.Append("2. ONE step per turn. Never propose multiple steps or a 'plan' array.\n");
+        if (stepMode != "command")
+        {
+            sb.Append("3. The step MUST be atomic: one coherent edit at one location in one file. If the natural next ");
+            sb.Append("   action touches two locations (e.g. add a field AND initialize it in a constructor), propose ONLY ");
+            sb.Append("   the first location now — the second location gets its own turn later.\n");
+            sb.Append("   EXCEPTION: For small repetitive edits to the SAME file (e.g. removing priority tags from ");
+            sb.Append("   todo/doing/done columns, updating the same CSS pattern in multiple selectors), you MAY use ");
+            sb.Append("   the \"edits\" array to batch multiple oldString/newString pairs into ONE step:\n");
+            sb.Append("   \"edits\": [\n");
+            sb.Append("     {\"oldString\": \"line1\", \"newString\": \"line1 edit\"},\n");
+            sb.Append("     {\"oldString\": \"line2\", \"newString\": \"line2 edit\"}\n");
+            sb.Append("   ]\n");
+            sb.Append("   Each pair is applied independently to the same file. Do NOT use edits for edits in different files — ");
+            sb.Append("   those still need separate steps.\n");
+        }
+        else
+        {
+            sb.Append("3. The step MUST complete one self-contained operation (a command, a search, a git action, etc.). ");
+            sb.Append("   Do NOT batch unrelated operations into one step.\n");
+        }
+        sb.Append("4. NEVER repeat or restate a step already present in PLAN SO FAR.\n");
+        sb.Append("5. NEVER propose a step that assumes a method/property/symbol exists unless it is already visible in ");
+        sb.Append("   the discovery context OR was introduced by an earlier committed step.\n");
+        if (stepMode != "command")
+        {
+            sb.Append("6. Respect dependency order: DTOs/models before endpoints that use them, backend before frontend, ");
+            sb.Append("   services before UI code that calls them.\n");
+            sb.Append("7. CREATE TABLE IF NOT EXISTS belongs INSIDE the method body that needs it — never its own step.\n");
+        }
+        else
+        {
+            sb.Append("6. A tool step should be followed by whatever edit step consumes its output. ");
+            sb.Append("   If running a build/command is needed before edits can begin, propose the tool step now.\n");
+        }
+        sb.Append("8. Prefer FEWER, more complete steps. If the whole task is one coherent step, propose that one step, ");
+        sb.Append("   then declare planComplete=true on the next turn.\n");
+        sb.Append("9. If your last proposal was REJECTED (see REJECTED ATTEMPTS), do not repeat the same mistake. ");
+        sb.Append("   Read the discovery context more carefully and fix the references.\n");
+        if (stepMode != "command")
+        {
+            sb.Append("10. Each edit step MUST include the \"targetSymbol\" field with the exact function/method/property/selector name being edited (e.g., \"getTimedGreetingMessage\", \"toolBtn\", \"_timer\").\n");
+            sb.Append("11. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n");
+            sb.Append("12. _create_file steps MUST come BEFORE any code-editing steps. If a new file is needed, propose it as the first step. ");
+            sb.Append("   Never add a _create_file step after code edits have already been proposed — at that point it is too late.\n");
+            sb.Append("13. When the task involves modifying an existing UI message or behavior (e.g. 'Instead of just X, do Y'), ");
+            sb.Append("   you MUST examine ALL attached files in discovery context to find where that original message or behavior ");
+            sb.Append("   originates. Then edit THAT file. Do NOT add new code in a different file than where the original lives.\n");
+            sb.Append("14. For .html, .htm, .cshtml, .razor files: the 'change' field MUST be ONLY a short natural-language description ");
+            sb.Append("   (e.g. 'Add IMDB section after YouTube results'). Do NOT include any HTML code in the 'change' field.\n");
+        }
+        else
+        {
+            sb.Append("10. When running commands, the working directory is the project root.\n");
+            sb.Append("11. Stop as soon as the task is fully satisfied — never propose steps the user did not ask for.\n");
+            sb.Append("12. If the task requires both tool operations AND code edits, propose the tool step first, ");
+            sb.Append("    then declare planComplete=false so the edit planner handles the code changes.\n");
+        }
+        return sb.ToString();
+    }
 
     private static string BuildIncrementalStepUserPrompt(
         string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
@@ -501,181 +551,196 @@ partial class AgentController
         return sb.ToString();
     }
 
-    private static string BuildPlanningPrompt() =>
-        "You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n" +
-        "Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n" +
-        "Output ONLY valid JSON — no markdown fences, no extra text.\n\n" +
-               "### STEP TYPES (the \"file\" field) ###\n" +
-        "  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. " +
-            "For every edit step, include a \"line\" field with the 1-based line number of the target location " +
-            "and a \"targetSymbol\" field with the exact method/function/class/selector name being edited. " +
-            "Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"targetSymbol\": \"methodName\", \"priority\": 1, \"line\": 42}\n" +
-        "  \"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.\n" +
-        "  \"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.\n" +
-        "  \"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.\n" +
-        "  \"_web_search\"         — Search the web; put the query in \"change\"\n" +
-        "  \"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"\n" +
-        "  \"_git\"                — Git operation (commit/pull/push/branch/revert)\n" +
-        "  \"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"\n" +
-        "  \"_delete_file\"        — Delete a file path in \"change\"\n" +
-        "  \"_show\"               — Display text to the user (use last)\n" +
-        "  \"_done\"               — Task is already complete; put reason in \"change\"\n" +
-        "  \"_checkpoint\"         — Split large refactor into phases\n\n" +
-        "### RULES ###\n" +
-        "0. OUTPUT DISCIPLINE (CRITICAL): Do NOT write step-by-step reasoning, analysis, or exploratory prose before the JSON. " +
+    private static readonly Dictionary<string, string> AllTools = new()
+    {
+        ["_explore"] = "\"_explore\"            — Read a file NOT YET in the discovery context for REFERENCE only (no edits). Put the file path in \"change\". Do NOT use _explore for files whose content is already shown in the DISCOVERY CONTEXT section — they have already been read.",
+        ["_command"] = "\"_command\"            — Run a terminal command; put the full command in \"change\". SAFETY: only use _command if the task requires terminal operations. NEVER use mkdir/rmdir/del for project files — use _create_file instead.",
+        ["_create_file"] = "\"_create_file\"        — Create a new file: put full file content in \"newString\", leave \"oldString\" empty. If the directory does not exist, the system will create it automatically. Do NOT use mkdir.",
+        ["_web_search"] = "\"_web_search\"         — Search the web; put the query in \"change\"",
+        ["_web_fetch"] = "\"_web_fetch\"          — Fetch a URL; put the full URL in \"change\"",
+        ["_git"] = "\"_git\"                — Git operation (commit/pull/push/branch/revert)",
+        ["_rename_file"] = "\"_rename_file\"        — Rename: put \"oldpath → newpath\" in \"change\"",
+        ["_delete_file"] = "\"_delete_file\"        — Delete a file path in \"change\"",
+        ["_show"] = "\"_show\"               — Display text to the user (use last)",
+    };
+
+    private static readonly HashSet<string> AlwaysEnabledTools = new()
+    {
+        "_done", "_checkpoint"
+    };
+
+    private static string BuildPlanningPrompt(List<string>? enabledTools = null)
+    {
+        var enabled = enabledTools != null && enabledTools.Count > 0
+            ? new HashSet<string>(enabledTools, StringComparer.OrdinalIgnoreCase)
+            : null;
+        var sb = new StringBuilder();
+        sb.Append("You are a senior autonomous coding agent. Plan the complete minimum set of steps needed to satisfy the user's request.\n");
+        sb.Append("Think in this loop before writing JSON: understand the exact task, identify the owning files, decide what context is missing, then plan only the actionable delta.\n");
+        sb.Append("Output ONLY valid JSON — no markdown fences, no extra text.\n\n");
+        sb.Append("### STEP TYPES (the \"file\" field) ###\n");
+        sb.Append("  \"relative/path.ext\"  — Edit an existing file (must be in discovery context). Do NOT include oldString/newString — they will be resolved at execution time. ");
+        sb.Append("For every edit step, include a \"line\" field with the 1-based line number of the target location ");
+        sb.Append("and a \"targetSymbol\" field with the exact method/function/class/selector name being edited. ");
+        sb.Append("Example: {\"file\": \"src/app.ts\", \"change\": \"description\", \"targetSymbol\": \"methodName\", \"priority\": 1}\n");
+        foreach (var kvp in AllTools)
+        {
+            if (enabled == null || enabled.Contains(kvp.Key))
+                sb.Append("  ").Append(kvp.Value).Append('\n');
+        }
+        sb.Append("  \"_done\"               — Task is already complete; put reason in \"change\"\n");
+        sb.Append("  \"_checkpoint\"         — Split large refactor into phases\n\n");
+        sb.Append("### RULES ###\n");
+        sb.Append("0. OUTPUT DISCIPLINE (CRITICAL): Do NOT write step-by-step reasoning, analysis, or exploratory prose before the JSON. " +
             "Any internal reasoning belongs ONLY inside the \"thinking\" field (max 1-2 sentences). " +
-            "Your response MUST begin with '{' as the very first character — no preamble, no \"Looking at...\", no walkthrough.\n" +
-        "1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n" +
-        "   If the right file is not in discovery context but its path is listed or strongly implied, use _explore with the exact project-relative path.\n" +
-        "   If you are unsure which file owns a symbol, choose the most likely path from filenames/imports and use _explore before planning an edit.\n" +
-        "2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps for simple tasks, but up to 10-12 steps for complex features. " +
-        "Do NOT artificially limit yourself to 1-2 steps so you can be re-invoked later — under-planning " +
-        "causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. " +
-        "If the task is a single coherent code change (e.g. two related assignments in the same block, " +
-        "or one method body), output exactly ONE step for it.\n" +
-        "3. Tool choice: use _explore for repository source, _web_search/_web_fetch only for external current information, and _command only for terminal work that cannot be represented as an edit step.\n" +
-        "4. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n" +
-        "5. COMMANDS BEFORE EDITS: if a generated/downloaded file must exist first, add _command BEFORE the edit step and write outputs inside the project.\n" +
-        "6. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n" +
-        "   The DISCOVERY CONTEXT section above shows the ACTUAL content of files that were read.\n" +
-        "   Check that content BEFORE planning an edit step. If the property, method, or config\n" +
-        "   already exists in the file shown in discovery context, do NOT create an edit step.\n" +
-        "   Use _done instead.\n" +
-        "7. Score precisely:\n" +
-        "   90-100: Exact file + precise change description, no uncertainty\n" +
-        "   70-89:  Correct file, good description, minor refinement possible\n" +
-        "   40-69:  File identified but change is vague or approach is uncertain\n" +
-        "   0-39:  Unsure which file or what to change.\n" +
-        "   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n" +
-        "8. Step sizing: one step may cover one coherent edit in one file or one tightly coupled block. Split when changes touch different files, have different owners, need independent verification, OR target DIFFERENT LOCATIONS within the same file.\n" +
-        "   CRITICAL — SAME-FILE MULTI-LOCATION: Even within a single file, if a step requires editing 2+ separate locations (e.g., add a field at the top of a class, initialize it in the constructor, AND add a new method at the bottom), that is MULTIPLE steps. Each location requires a different edit strategy and anchor, so combining them causes the editor to attempt full-class rewrites instead of targeted edits.\n" +
-        "   BAD (over-combined, SAME FILE): \"Add a _timer field and initialize it in the constructor, then add a RunTimerTasks method\"\n" +
-        "   GOOD (3 steps, SAME FILE): Step 1: \"Add _timer field declaration after the last existing timer field\", Step 2: \"Initialize _timer in the constructor after existing timer initializations\", Step 3: \"Add RunTimerTasks method after the last existing RunXxxTasks method\"\n" +
-        "   BAD (over-combined, SAME FILE): \"Add a isMenuPanelOpen property and add showMenuPanel/closeMenuPanel methods\"\n" +
-        "   GOOD (3 steps, SAME FILE): Step 1: \"Add isMenuPanelOpen property declaration after the last existing property\", Step 2: \"Add showMenuPanel() method after the last existing method\", Step 3: \"Add closeMenuPanel() method after showMenuPanel()\"\n" +
-        "   BAD (too vague): \"Fix the dashboard\"\n" +
-        "   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n" +
-        "   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n" +
-         "9. CRITICAL: Each step's change field MUST include the exact method/function/variable name being changed (e.g., \"getTimedGreetingMessage\", \"renderCards\", \"constructor\"). " +
-             "The execution pipeline uses this name to locate the correct code position in the file. " +
-             "If the change description lacks a code identifier, the system cannot find the target location. " +
-             "Also describe the old behavior and the new behavior.\n" +
-             "   BAD (missing method name): \"Add additional specific hour-based greetings to cover early morning, late night, and midnight periods\"\n" +
-             "   GOOD (includes method name): \"Add early morning, late night, and midnight greeting branches to getTimedGreetingMessage()\"\n" +
-        "10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n" +
-        "11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n" +
-        "12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n" +
-        "13. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n" +
-        "14. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n" +
-        "15. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. " +
-        "For reading project source files use _explore with the relative file path. " +
-        "_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). " +
-        "If you don't know which file contains the code, add an _explore step first.\n" +
-        "16. Context and memory discipline: do not ask to read everything. Prefer the smallest file set that proves names, signatures, imports, and local patterns. Use referenceFiles for narrow supporting context rather than extra edit steps.\n" +
-        "17. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. " +
-        "DO NOT re-describe existing functionality as something that needs to be built. " +
-        "BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" " +
-        "(the method already collects events — \"collect\" is wrong). " +
-        "GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" " +
-        "(describes only the missing logic). " +
-        "Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n" +
-         "18. CREATE TABLE MUST BE INLINE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, " +
-         "the CREATE TABLE IF NOT EXISTS statement MUST be placed INSIDE the method body, BEFORE the INSERT/UPDATE statement. " +
-         "Do NOT create a separate 'table creation' method or step — the table creation is an inline guard clause, not a separate concern. " +
-         "BAD: Step 1: 'Add CreateBenchmarksTable method', Step 2: 'Add PostBenchmarks endpoint with INSERT' — WRONG, these should be ONE step. " +
-         "GOOD: 'Add PostBenchmarks endpoint with inline CREATE TABLE IF NOT EXISTS and INSERT statement inside the method body'.\n\n" +
-        "### OUTPUT FORMAT ###\n" +
-        "{\n" +
-        "  \"thinking\": \"1-2 lines: which file needs changing and why\",\n" +
-        "  \"summary\": \"one sentence: what this step accomplishes\",\n" +
-        "  \"score\": <0-100>,\n" +
-        "  \"plan\": [\n" +
-        "    {\n" +
-        "      \"file\": \"wwwroot/app.js\",\n" +
-        "      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n" +
-        "      \"targetSymbol\": \"confirmFilePicker\",\n" +
-        "      \"line\": 42,\n" +
-        "      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n" +
-        "    }\n" +
-        "  ]\n" +
-        "}" +
-        "22. LINE NUMBERS (CRITICAL): Every line of file content above is PREFIXED with its line number " +
-        "(e.g. \"104: <div class=\\\"card-tags\\\">\"). Use those EXACT numbers in the \"line\" field — do NOT guess or " +
-        "estimate. The line prefix IS the correct line number in the file. If the change targets the section " +
-        "at line 96, set \"line\": 96. These numbers are used during execution to find the right code location " +
-        "in files with repeated sections.\n" +
-        "18. DATA FLOW TRACING: Before planning an edit that modifies how data is displayed or accessed, " +
-        "trace WHERE the data comes from. Read type definitions to understand the full data structure. " +
-        "Example: if the task is about 'image preview navigation', don't assume images come from filtering " +
-        "a file list — check the actual type definitions to see if there's a metadata field with " +
-        "screenshot/artwork/cover URLs. Plan your edit based on the ACTUAL data structure, not assumptions.\n" +
-        "19. When the DISCOVERY CONTEXT shows a type reference like `romMetadata?: RomMetadata`, and the " +
-        "task involves data that might live in that nested type, add a _explore step to read the RomMetadata " +
-        "type definition BEFORE planning the edit. You cannot plan correctly without understanding the " +
-        "full data structure.\n" +
-        "20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), " +
-        "and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file " +
-        "(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. " +
-        "Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. " +
-        "If the service method does not exist, plan a step to create it.\n" +
-       "21. SCAFFOLDING (CRITICAL & MANDATORY): When the task asks to CREATE a new component... " +
-        "your plan MUST contain the following steps in order:\n" +
-        "   1. A `_command` step to run the framework's CLI generator. Use `;` to separate commands (e.g., `cd maxhanna.client; npx ng g c components/recipe --skip-tests`). NEVER use `&&` as it fails in PowerShell.\n" +
-        "   2. An edit step for `app.module.ts` to register the new component in the declarations array. This is MANDATORY.\n" +
-        "   3. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files.\n" +
-        "   Do NOT manually create the files with `_create_file`. Do NOT bypass scaffolding by using `edit` with `fullFile` on a non-existent file. The system will inject the scaffolding command automatically if you forget.\n" +
-        "22. COMPONENT TEMPLATE WIRING (CRITICAL): When the task involves adding UI elements (buttons, inputs) that trigger new " +
-        "actions (e.g., (click)=\"doSomething()\"), you MUST plan the step to implement the method in the TypeScript " +
-        "component file (e.g., .ts) BEFORE the step to edit the HTML template (e.g., .html) to reference it. " +
-        "Do NOT plan HTML edits that depend on .ts methods if the .ts step comes later. The .ts step MUST come first.\n" +
-        "actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript " +
-        "component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. " +
-        "Do NOT reference methods in the HTML template that do not exist in the component class yet. " +
-        "If the component class does not have the method, plan a step to add it first.\n" +
-        "23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call. When describing the call in the step description, you MUST use the exact syntax `this.serviceName.methodName()` so the system can automatically detect the dependency.\n" +
-        "24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n" +
-        "25. FEATURE IMPLEMENTATION STACK (CRITICAL): When the user asks to build a new feature (e.g., 'Create a paint component where users can paint, save, and view paintings'), you MUST plan the steps in the following strict architectural order. Do NOT combine these phases into fewer steps.\n" +
-        "   a. Backend Data Model (if needed): Create the C# data contract (e.g., `Painting.cs`) with the required properties.\n" +
-        "   b. Backend Controller/Service (if needed): Create the endpoint (e.g., `PaintController.cs`) to save and retrieve the data. \n" +
-        "   c. Frontend Data Contract: Create the TypeScript interface (e.g., `painting.ts`) matching the backend model.\n" +
-        "   d. Frontend Service: Create the Angular service (e.g., `paint.service.ts`) with methods to call the backend API (e.g., `savePainting`, `getPaintings`).\n" +
-        "   e. Frontend Component Scaffolding: Run the `_command` step to generate the component.\n" +
-        "   f. Component Logic (.ts): Inject the new service in the constructor and implement the methods to save/load paintings.\n" +
-        "   g. Component Template (.html): Build the UI (canvas, buttons, list).\n" +
-        "   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n" +
-        "   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n" +
-        "26. NUMBERED LIST ADHERENCE: If the user's request contains a numbered list of tasks (e.g., '1. Create folder, 2. Create file, 3. Add heading'), your plan MUST contain AT LEAST that many steps. Do NOT combine multiple numbered items into a single step. Follow the user's structure exactly.\n" +
-        "27. FILE CREATION MARKER: When creating a new file that does not exist yet, you MUST use \"_create_file\" as the step type. Put the full file path in the \"file\" field and the complete file content in the \"newString\" field. NEVER use a relative path as the file marker for a new file — the executor will treat it as an edit to an existing file and fail.\n" +
-        "28. PATTERN MIRRORING (CRITICAL): When the user asks to 'mirror', 'copy', or 'wire up exactly like' a pattern from another file, your plan steps MUST explicitly name the exact methods, properties, and HTML attributes to copy. " +
-        "For each file type involved:\n" +
-        "   * .ts steps: Explicitly list the exact property declarations and method signatures to add (e.g., 'Add X property, Y() method, and Z() method').\n" +
-        "   * .html steps: Explicitly describe BOTH the new HTML structure to insert AND any attribute/event bindings to add to existing elements.\n" +
-        "Do NOT invent new method names. Use the EXACT names from the source. " +
-        "Do NOT invent custom wrapper tags if the source uses standard elements with classes. " +
-        "Copy the EXACT DOM structure, CSS classes, and text content from the source. " +
-         "Do NOT invent method calls inside the HTML that do not exist in the source pattern.\n" +
-        "29. METHOD CREATION IS ONE STEP (CRITICAL): Creating a new method includes its signature, parameters, and body — " +
-        "all in ONE step. Do NOT split into \"Create method signature\" and \"Implement method body\". " +
-        "A method is ONE coherent block at ONE location. " +
-        "If the method body needs inline SQL (CREATE TABLE IF NOT EXISTS + INSERT/UPDATE/SELECT), " +
-        "that SQL belongs INSIDE the method body in the same step. " +
-        "BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"\n" +
-        "GOOD: \"Add PostBenchmarks method with CREATE TABLE IF NOT EXISTS and INSERT logic\"\n" +
-        "BAD: Step 1: \"Add Benchmarks schema\", Step 2: \"Add INSERT endpoint\"\n" +
-        "GOOD: \"Add PostBenchmarks endpoint method with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT\"\n" +
-        "RATIONALE: The CREATE TABLE IF NOT EXISTS runs at the START of the method body, " +
-        "before any INSERT/UPDATE/SELECT. It is NOT a separate schema definition — " +
-        "it is an inline guard clause that ensures the table exists. " +
-        "Treating it as a separate step forces the editor to insert the CREATE TABLE into " +
-        "a random unrelated location instead of inside the method where it belongs.\n" +
-        "30. DO NOT CREATE SEPARATE SETUP ENDPOINTS: When a single new endpoint needs both " +
-        "infrastructure setup (CREATE TABLE, connection check) and business logic (INSERT/UPDATE/SELECT), " +
-        "put the setup INSIDE the endpoint method as inline code at the top. " +
-        "Do NOT create a separate \"PostXxxTable\" or \"InitializeXxx\" endpoint as a separate step. " +
-        "BAD: Step 1: \"Add PostBenchmarksTable endpoint (creates table)\", Step 2: \"Add AddBenchmark endpoint (inserts data)\"\n" +
-        "GOOD: \"Add AddBenchmark endpoint with CREATE TABLE IF NOT EXISTS at the top and parameterized INSERT below\"\n" +
-        "RATIONALE: A separate setup endpoint creates unnecessary public API surface. " +
-        "Table creation is an implementation detail that belongs inside the method that needs it.\n";
+            "Your response MUST begin with '{' as the very first character — no preamble, no \"Looking at...\", no walkthrough.\n");
+        sb.Append("1. Only reference files that exist in the discovery context. Files whose content is shown in the DISCOVERY CONTEXT have already been read — do NOT add _explore steps for them.\n");
+        sb.Append("   If the right file is not in discovery context but its path is listed or strongly implied, use _explore with the exact project-relative path.\n");
+        sb.Append("   If you are unsure which file owns a symbol, choose the most likely path from filenames/imports and use _explore before planning an edit.\n");
+        sb.Append("2. Plan the COMPLETE set of steps needed to finish this task in ONE shot — usually 1-4 steps for simple tasks, but up to 10-12 steps for complex features. ");
+        sb.Append("Do NOT artificially limit yourself to 1-2 steps so you can be re-invoked later — under-planning ");
+        sb.Append("causes repeated re-invocations that tend to invent redundant or conflicting follow-up edits. ");
+        sb.Append("If the task is a single coherent code change (e.g. two related assignments in the same block, ");
+        sb.Append("or one method body), output exactly ONE step for it.\n");
+        sb.Append("3. Tool choice: use _explore for repository source, _web_search/_web_fetch only for external current information, and _command only for terminal work that cannot be represented as an edit step.\n");
+        sb.Append("4. WEB FIRST: add a _web_search step if you need current API docs or recent data.\n");
+        sb.Append("5. COMMANDS BEFORE EDITS: if a generated/downloaded file must exist first, add _command BEFORE the edit step and write outputs inside the project.\n");
+        sb.Append("6. SELF-STOP: emit a single _done step if the code already satisfies the requirement.\n");
+        sb.Append("   The DISCOVERY CONTEXT section above shows the ACTUAL content of files that were read.\n");
+        sb.Append("   Check that content BEFORE planning an edit step. If the property, method, or config\n");
+        sb.Append("   already exists in the file shown in discovery context, do NOT create an edit step.\n");
+        sb.Append("   Use _done instead.\n");
+        sb.Append("7. Score precisely:\n");
+        sb.Append("   90-100: Exact file + precise change description, no uncertainty\n");
+        sb.Append("   70-89:  Correct file, good description, minor refinement possible\n");
+        sb.Append("   40-69:  File identified but change is vague or approach is uncertain\n");
+        sb.Append("   0-39:  Unsure which file or what to change.\n");
+        sb.Append("   Be decisive. If you have the right file and a clear change, score 85+. Do NOT stay low when the plan is solid.\n");
+        sb.Append("8. Step sizing: one step may cover one coherent edit in one file or one tightly coupled block. Split when changes touch different files, have different owners, need independent verification, OR target DIFFERENT LOCATIONS within the same file.\n");
+        sb.Append("   CRITICAL — SAME-FILE MULTI-LOCATION: Even within a single file, if a step requires editing 2+ separate locations (e.g., add a field at the top of a class, initialize it in the constructor, AND add a new method at the bottom), that is MULTIPLE steps. Each location requires a different edit strategy and anchor, so combining them causes the editor to attempt full-class rewrites instead of targeted edits.\n");
+        sb.Append("   BAD (over-combined, SAME FILE): \"Add a _timer field and initialize it in the constructor, then add a RunTimerTasks method\"\n");
+        sb.Append("   GOOD (3 steps, SAME FILE): Step 1: \"Add _timer field declaration after the last existing timer field\", Step 2: \"Initialize _timer in the constructor after existing timer initializations\", Step 3: \"Add RunTimerTasks method after the last existing RunXxxTasks method\"\n");
+        sb.Append("   BAD (over-combined, SAME FILE): \"Add a isMenuPanelOpen property and add showMenuPanel/closeMenuPanel methods\"\n");
+        sb.Append("   GOOD (3 steps, SAME FILE): Step 1: \"Add isMenuPanelOpen property declaration after the last existing property\", Step 2: \"Add showMenuPanel() method after the last existing method\", Step 3: \"Add closeMenuPanel() method after showMenuPanel()\"\n");
+        sb.Append("   BAD (too vague): \"Fix the dashboard\"\n");
+        sb.Append("   GOOD: \"In Dashboard.renderCards(): include archived cards in the existing filteredCards calculation when showArchived is true\"\n");
+        sb.Append("   RULE OF THUMB: If the change description contains 'and ... then ...' or mentions 2+ of {field, property, constructor, method, handler} in a single step, SPLIT IT.\n");
+        sb.Append("9. CRITICAL: Each step's change field MUST include the exact method/function/variable name being changed (e.g., \"getTimedGreetingMessage\", \"renderCards\", \"constructor\"). ");
+        sb.Append("The execution pipeline uses this name to locate the correct code position in the file. ");
+        sb.Append("If the change description lacks a code identifier, the system cannot find the target location. ");
+        sb.Append("Also describe the old behavior and the new behavior.\n");
+        sb.Append("   BAD (missing method name): \"Add additional specific hour-based greetings to cover early morning, late night, and midnight periods\"\n");
+        sb.Append("   GOOD (includes method name): \"Add early morning, late night, and midnight greeting branches to getTimedGreetingMessage()\"\n");
+        sb.Append("10. UI layout rule: if the request is about visual position/spacing/screen location (top right, under, overlay, mobile-only, etc.), plan a stylesheet/CSS step. Do NOT satisfy visual placement by reordering existing HTML nodes. Use HTML only to create a missing control or fix missing wiring, and use the component script when changing event handlers.\n");
+        sb.Append("11. If the user stated any constraints (e.g. 'do not use x'), include them verbatim in the 'change' field.\n");
+        sb.Append("12. If the file path contains \"\\\\\" escape it for JSON: use \"path/to/file.ext\"\n");
+        sb.Append("13. For each edit step (relative path in \"file\"), also set \"referenceFiles\" to a list of file paths the edit pipeline should load as context. Include files that define types, methods, or patterns the edit needs to reference. This keeps the edit context small and focused.\n");
+        sb.Append("14. When editing a component/UI file or making changes involving imports/aliases, first read the target file's imports. Include the import source files in \"referenceFiles\" so the edit pipeline can verify aliases are correct before making changes.\n");
+        sb.Append("15. NEVER use _web_search to find, read, or understand code that exists inside this project's repository. ");
+        sb.Append("For reading project source files use _explore with the relative file path. ");
+        sb.Append("_web_search is ONLY for external resources (public docs, npm packages, Stack Overflow, API references). ");
+        sb.Append("If you don't know which file contains the code, add an _explore step first.\n");
+        sb.Append("16. Context and memory discipline: do not ask to read everything. Prefer the smallest file set that proves names, signatures, imports, and local patterns. Use referenceFiles for narrow supporting context rather than extra edit steps.\n");
+        sb.Append("17. Describe plan steps as the MINIMAL delta needed. The DISCOVERY CONTEXT section shows actual file content. ");
+        sb.Append("DO NOT re-describe existing functionality as something that needs to be built. ");
+        sb.Append("BAD: \"Modify GetUsersWithCalendarNotificationsEnabled to collect all events per user and send Firebase notifications\" ");
+        sb.Append("(the method already collects events — \"collect\" is wrong). ");
+        sb.Append("GOOD: \"After the existing usersWithEvents loop, send Firebase notification for each user with the events list\" ");
+        sb.Append("(describes only the missing logic). ");
+        sb.Append("Read the file body in DISCOVERY CONTEXT to understand what already exists, then describe ONLY what is missing.\n");
+        sb.Append("18. CREATE TABLE MUST BE INLINE (CRITICAL): If the task involves creating a new database table and inserting/updating data into it, ");
+        sb.Append("the CREATE TABLE IF NOT EXISTS statement MUST be placed INSIDE the method body, BEFORE the INSERT/UPDATE statement. ");
+        sb.Append("Do NOT create a separate 'table creation' method or step — the table creation is an inline guard clause, not a separate concern. ");
+        sb.Append("BAD: Step 1: 'Add CreateBenchmarksTable method', Step 2: 'Add PostBenchmarks endpoint with INSERT' — WRONG, these should be ONE step. ");
+        sb.Append("GOOD: 'Add PostBenchmarks endpoint with inline CREATE TABLE IF NOT EXISTS and INSERT statement inside the method body'.\n\n");
+        sb.Append("### OUTPUT FORMAT ###\n");
+        sb.Append("{\n");
+        sb.Append("  \"thinking\": \"1-2 lines: which file needs changing and why\",\n");
+        sb.Append("  \"summary\": \"one sentence: what this step accomplishes\",\n");
+        sb.Append("  \"score\": <0-100>,\n");
+        sb.Append("  \"plan\": [\n");
+        sb.Append("    {\n");
+        sb.Append("      \"file\": \"wwwroot/app.js\",\n");
+        sb.Append("      \"change\": \"Modify confirmFilePicker to append files to existing list\",\n");
+        sb.Append("      \"targetSymbol\": \"confirmFilePicker\",\n");
+        sb.Append("      \"referenceFiles\": [\"wwwroot/utils.js\", \"wwwroot/types.js\"]\n");
+        sb.Append("    }\n");
+        sb.Append("  ]\n");
+        sb.Append("}\n");
+        sb.Append("18. DATA FLOW TRACING: Before planning an edit that modifies how data is displayed or accessed, ");
+        sb.Append("trace WHERE the data comes from. Read type definitions to understand the full data structure. ");
+        sb.Append("Example: if the task is about 'image preview navigation', don't assume images come from filtering ");
+        sb.Append("a file list — check the actual type definitions to see if there's a metadata field with ");
+        sb.Append("screenshot/artwork/cover URLs. Plan your edit based on the ACTUAL data structure, not assumptions.\n");
+        sb.Append("19. When the DISCOVERY CONTEXT shows a type reference like `romMetadata?: RomMetadata`, and the ");
+        sb.Append("task involves data that might live in that nested type, add a _explore step to read the RomMetadata ");
+        sb.Append("type definition BEFORE planning the edit. You cannot plan correctly without understanding the ");
+        sb.Append("full data structure.\n");
+        sb.Append("20. CROSS-FILE ENDPOINT WIRING: When the task involves creating a new backend endpoint (e.g., in a .cs controller), ");
+        sb.Append("and the frontend needs to call it, you MUST add a step to create the corresponding method in the frontend service file ");
+        sb.Append("(e.g., grandtheft.service.ts) BEFORE adding the UI code that calls it. ");
+        sb.Append("Do NOT reuse methods from unrelated services (e.g., enderService) just because they have similar names. ");
+        sb.Append("If the service method does not exist, plan a step to create it.\n");
+        sb.Append("21. SCAFFOLDING (CRITICAL & MANDATORY): When the task asks to CREATE a new component... ");
+        sb.Append("your plan MUST contain the following steps in order:\n");
+        sb.Append("   1. A `_command` step to run the framework's CLI generator. Use `;` to separate commands (e.g., `cd maxhanna.client; npx ng g c components/recipe --skip-tests`). NEVER use `&&` as it fails in PowerShell.\n");
+        sb.Append("   2. An edit step for `app.module.ts` to register the new component in the declarations array. This is MANDATORY.\n");
+        sb.Append("   3. Edit steps to modify the newly generated `.ts`, `.html`, and `.css` files.\n");
+        sb.Append("   Do NOT manually create the files with `_create_file`. Do NOT bypass scaffolding by using `edit` with `fullFile` on a non-existent file. The system will inject the scaffolding command automatically if you forget.\n");
+        sb.Append("22. COMPONENT TEMPLATE WIRING (CRITICAL): When the task involves adding UI elements (buttons, inputs) that trigger new ");
+        sb.Append("actions (e.g., (click)=\"doSomething()\"), you MUST plan the step to implement the method in the TypeScript ");
+        sb.Append("component file (e.g., .ts) BEFORE the step to edit the HTML template (e.g., .html) to reference it. ");
+        sb.Append("Do NOT plan HTML edits that depend on .ts methods if the .ts step comes later. The .ts step MUST come first.\n");
+        sb.Append("actions (e.g., (click)=\"doSomething()\"), you MUST add a step to implement the method in the TypeScript ");
+        sb.Append("component file (e.g., .ts) BEFORE editing the HTML template (e.g., .html) to reference it. ");
+        sb.Append("Do NOT reference methods in the HTML template that do not exist in the component class yet. ");
+        sb.Append("If the component class does not have the method, plan a step to add it first.\n");
+        sb.Append("23. SERVICE DEPENDENCIES (CRITICAL): When planning to call a method on a service (e.g., `this.userEventService.insertUserEvent(...)`) that is NOT already imported and injected into the constructor of the target file, you MUST add a separate step FIRST to import the service and add it to the constructor parameters. Do NOT assume the service is already available in the component. If the service method requires a specific model/interface (e.g., `UserEvent`), you MUST read that model's definition to know the exact properties required before writing the call. When describing the call in the step description, you MUST use the exact syntax `this.serviceName.methodName()` so the system can automatically detect the dependency.\n");
+        sb.Append("24. MODEL CONSTRUCTION: When passing an object to a service method, you MUST match the exact properties of the target interface. Do NOT invent properties. If the interface requires `{ userId, eventType, eventText }`, do not pass `('wordler', guess)`. Read the interface definition first.\n");
+        sb.Append("25. FEATURE IMPLEMENTATION STACK (CRITICAL): When the user asks to build a new feature (e.g., 'Create a paint component where users can paint, save, and view paintings'), you MUST plan the steps in the following strict architectural order. Do NOT combine these phases into fewer steps.\n");
+        sb.Append("   a. Backend Data Model (if needed): Create the C# data contract (e.g., `Painting.cs`) with the required properties.\n");
+        sb.Append("   b. Backend Controller/Service (if needed): Create the endpoint (e.g., `PaintController.cs`) to save and retrieve the data. \n");
+        sb.Append("   c. Frontend Data Contract: Create the TypeScript interface (e.g., `painting.ts`) matching the backend model.\n");
+        sb.Append("   d. Frontend Service: Create the Angular service (e.g., `paint.service.ts`) with methods to call the backend API (e.g., `savePainting`, `getPaintings`).\n");
+        sb.Append("   e. Frontend Component Scaffolding: Run the `_command` step to generate the component.\n");
+        sb.Append("   f. Component Logic (.ts): Inject the new service in the constructor and implement the methods to save/load paintings.\n");
+        sb.Append("   g. Component Template (.html): Build the UI (canvas, buttons, list).\n");
+        sb.Append("   h. Routing/Module: Register the new component in `app.module.ts` and routing if necessary.\n");
+        sb.Append("   Do NOT skip steps. Do NOT combine the service creation and the component logic into one step. Each letter (a through h) should be its own step in the plan if required by the feature.\n");
+        sb.Append("26. NUMBERED LIST ADHERENCE: If the user's request contains a numbered list of tasks (e.g., '1. Create folder, 2. Create file, 3. Add heading'), your plan MUST contain AT LEAST that many steps. Do NOT combine multiple numbered items into a single step. Follow the user's structure exactly.\n");
+        sb.Append("27. FILE CREATION MARKER: When creating a new file that does not exist yet, you MUST use \"_create_file\" as the step type. Put the full file path in the \"file\" field and the complete file content in the \"newString\" field. NEVER use a relative path as the file marker for a new file — the executor will treat it as an edit to an existing file and fail.\n");
+        sb.Append("28. PATTERN MIRRORING (CRITICAL): When the user asks to 'mirror', 'copy', or 'wire up exactly like' a pattern from another file, your plan steps MUST explicitly name the exact methods, properties, and HTML attributes to copy. ");
+        sb.Append("For each file type involved:\n");
+        sb.Append("   * .ts steps: Explicitly list the exact property declarations and method signatures to add (e.g., 'Add X property, Y() method, and Z() method').\n");
+        sb.Append("   * .html steps: Explicitly describe BOTH the new HTML structure to insert AND any attribute/event bindings to add to existing elements.\n");
+        sb.Append("Do NOT invent new method names. Use the EXACT names from the source. ");
+        sb.Append("Do NOT invent custom wrapper tags if the source uses standard elements with classes. ");
+        sb.Append("Copy the EXACT DOM structure, CSS classes, and text content from the source. ");
+        sb.Append("Do NOT invent method calls inside the HTML that do not exist in the source pattern.\n");
+        sb.Append("29. METHOD CREATION IS ONE STEP (CRITICAL): Creating a new method includes its signature, parameters, and body — ");
+        sb.Append("all in ONE step. Do NOT split into \"Create method signature\" and \"Implement method body\". ");
+        sb.Append("A method is ONE coherent block at ONE location. ");
+        sb.Append("If the method body needs inline SQL (CREATE TABLE IF NOT EXISTS + INSERT/UPDATE/SELECT), ");
+        sb.Append("that SQL belongs INSIDE the method body in the same step. ");
+        sb.Append("BAD: Step 1: \"Create Benchmarks table\", Step 2: \"Add PostBenchmarks method with INSERT\"\n");
+        sb.Append("GOOD: \"Add PostBenchmarks method with CREATE TABLE IF NOT EXISTS and INSERT logic\"\n");
+        sb.Append("BAD: Step 1: \"Add Benchmarks schema\", Step 2: \"Add INSERT endpoint\"\n");
+        sb.Append("GOOD: \"Add PostBenchmarks endpoint method with inline CREATE TABLE IF NOT EXISTS and parameterized INSERT\"\n");
+        sb.Append("RATIONALE: The CREATE TABLE IF NOT EXISTS runs at the START of the method body, ");
+        sb.Append("before any INSERT/UPDATE/SELECT. It is NOT a separate schema definition — ");
+        sb.Append("it is an inline guard clause that ensures the table exists. ");
+        sb.Append("Treating it as a separate step forces the editor to insert the CREATE TABLE into ");
+        sb.Append("a random unrelated location instead of inside the method where it belongs.\n");
+        sb.Append("30. DO NOT CREATE SEPARATE SETUP ENDPOINTS: When a single new endpoint needs both ");
+        sb.Append("infrastructure setup (CREATE TABLE, connection check) and business logic (INSERT/UPDATE/SELECT), ");
+        sb.Append("put the setup INSIDE the endpoint method as inline code at the top. ");
+        sb.Append("Do NOT create a separate \"PostXxxTable\" or \"InitializeXxx\" endpoint as a separate step. ");
+        sb.Append("BAD: Step 1: \"Add PostBenchmarksTable endpoint (creates table)\", Step 2: \"Add AddBenchmark endpoint (inserts data)\"\n");
+        sb.Append("GOOD: \"Add AddBenchmark endpoint with CREATE TABLE IF NOT EXISTS at the top and parameterized INSERT below\"\n");
+        sb.Append("RATIONALE: A separate setup endpoint creates unnecessary public API surface. ");
+        sb.Append("Table creation is an implementation detail that belongs inside the method that needs it.\n");
+        return sb.ToString();
+    }
 
     private static string BuildFailedEditHistory(List<object> allSteps)
     {
@@ -924,5 +989,117 @@ partial class AgentController
             fileCount++;
         }
         return result.ToString();
+    }
+
+    // ── EditStrategy-keyed system prompt ─────────────────────────────────────
+    // Single dispatch point: strategy → correct JSON schema for the LLM.
+    // All per-strategy text lives here. Nothing in AgentController.cs branches on
+    // "format_c_insert" / "old_new" / "delete" strings any more.
+
+    internal static string BuildEditSystemPrompt(EditStrategy strategy) => strategy switch
+    {
+        EditStrategy.InsertMethod  => BuildEditSystemPrompt("format_c_insert"),
+        EditStrategy.FillClassBody => BuildEditSystemPrompt("format_c_class_fill"),
+        EditStrategy.DeleteLines   => BuildEditSystemPrompt("delete"),
+        EditStrategy.CreateFile or EditStrategy.FullFileRewrite
+                                   => BuildFullFileSystemPrompt(),
+        EditStrategy.HtmlInsertAfter or EditStrategy.HtmlInsertBefore or EditStrategy.HtmlReplace
+                                   => BuildEditSystemPrompt("old_new"), // FORMAT D is driven by user prompt, not system prompt
+        _                          => BuildEditSystemPrompt("old_new"),  // AnchoredEdit + ReplaceMethod
+    };
+}
+
+// ── Escalation state machine ─────────────────────────────────────────────────
+// Replaces the if (history.Count == 1) / (== 2) / else magic numbers.
+
+public enum EscalationLevel
+{
+    /// <summary>First retry: copy oldString verbatim from displayed file content.</summary>
+    VerbatimCopy,
+    /// <summary>Second retry: narrow to single most-distinctive anchor line.</summary>
+    SingleLineAnchor,
+    /// <summary>Third+ retry: switch format entirely (fullFile for non-HTML; HTML_PINPOINT for templates; FORMAT_C for C# method inserts).</summary>
+    FormatSwitch,
+}
+
+public static class EscalationStateMachine
+{
+    /// <summary>Advance escalation level based on how many failures have occurred.</summary>
+    public static EscalationLevel Level(int failureCount) => failureCount switch
+    {
+        0 => EscalationLevel.VerbatimCopy,
+        1 => EscalationLevel.SingleLineAnchor,
+        _ => EscalationLevel.FormatSwitch,
+    };
+
+    /// <summary>Build the ESCALATION DIRECTIVE block for the retry prompt.</summary>
+    public static void AppendEscalationDirective(
+        System.Text.StringBuilder sb,
+        EscalationLevel level,
+        EditStrategy strategy,
+        string fileExt,
+        string fileContent,
+        string stepChange,
+        int stepLineNumber)
+    {
+        sb.AppendLine("⚠ ESCALATION DIRECTIVE — your previous attempt(s) failed. You MUST change approach:");
+
+        switch (level)
+        {
+            case EscalationLevel.VerbatimCopy:
+                sb.AppendLine("  STRATEGY: VERBATIM_COPY.");
+                sb.AppendLine("  • Do NOT retype oldString from memory — the file content above is authoritative.");
+                sb.AppendLine("  • Open the FILE CONTENT block, find the EXACT lines you want to replace, and");
+                sb.AppendLine("    copy them character-for-character into oldString. Include every space, comma,");
+                sb.AppendLine("    and indentation character. The DIFF hints above show what you got wrong.");
+                sb.AppendLine("  • If the file shows 'rgba(255, 255, 255, 0.03)' (with spaces), your oldString MUST");
+                sb.AppendLine("    contain 'rgba(255, 255, 255, 0.03)' — NOT 'rgba(255,255,255,0.03)'.");
+                break;
+
+            case EscalationLevel.SingleLineAnchor:
+                sb.AppendLine("  STRATEGY: SINGLE_LINE_ANCHOR.");
+                sb.AppendLine("  • Drop your multi-line oldString. Pick the SINGLE most distinctive line in the");
+                sb.AppendLine("    target region (longest line with the most unique tokens) as your oldString.");
+                sb.AppendLine("  • Add ONE line above OR below for anchor context — no more.");
+                sb.AppendLine("  • Example: if you want to add a flex-wrap property to a .kanban-board rule,");
+                sb.AppendLine("    use `  display: flex;` as oldString and `  display: flex;\\n  flex-wrap: wrap;` as newString.");
+                sb.AppendLine("  • DO NOT include the entire rule block — that's what failed last time.");
+                break;
+
+            case EscalationLevel.FormatSwitch:
+                // HTML/template: HTML_PINPOINT
+                if (fileExt is ".html" or ".htm" or ".cshtml" or ".razor" or ".vue" or ".svelte")
+                {
+                    sb.AppendLine("  STRATEGY: HTML_PINPOINT — fullFile is BLOCKED for HTML/Angular templates.");
+                    sb.AppendLine("  1. Look at the TARGET SECTION shown in the history above.");
+                    sb.AppendLine("  2. Pick the SINGLE most unique line there (longest, appears only ONCE in the whole file).");
+                    sb.AppendLine("  3. Use that one line VERBATIM as your entire oldString (≥20 chars).");
+                    sb.AppendLine("  4. In newString: include that unchanged line, then add your new elements around it.");
+                    sb.AppendLine("  ⚠ Do NOT output fullFile — it will be rejected."); 
+                }
+                // C# new method insert: stay on FORMAT C
+                else if (strategy == EditStrategy.InsertMethod)
+                {
+                    sb.AppendLine("  STRATEGY: FORMAT_C_INSERTION.");
+                    sb.AppendLine("  • You MUST use FORMAT C with insertAfter:true.");
+                    sb.AppendLine("  • Set targetType=\"method\", targetName to an EXISTING method name");
+                    sb.AppendLine("    (e.g. the LAST method in the class), insertAfter=true, and newCode");
+                    sb.AppendLine("    to the COMPLETE new method including [HttpPost] attribute, signature, and body.");
+                    sb.AppendLine("  • Do NOT use fullFile and do NOT return alreadyDone — both will be rejected.");
+                }
+                // Everything else: full-file replacement
+                else
+                {
+                    sb.AppendLine("  STRATEGY: LINE_RANGE_REPLACEMENT.");
+                    sb.AppendLine("  • Your oldString/newString approach has failed 3+ times. SWITCH FORMATS.");
+                    sb.AppendLine("  • Output a JSON object with this exact shape:");
+                    sb.AppendLine("    { \"fullFile\": [\"...entire file content with your changes applied...\"] }");
+                    sb.AppendLine("  • The fullFile MUST contain EVERY line of the file, with your changes applied.");
+                    sb.AppendLine("  • This bypasses oldString matching entirely, so it cannot fail on whitespace.");
+                }
+                break;
+        }
+
+        sb.AppendLine();
     }
 }

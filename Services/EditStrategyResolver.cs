@@ -1,34 +1,64 @@
 using System.Text.RegularExpressions;
-using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Weaver.Services;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EDIT STRATEGY ENUM  — single source of truth for "how this edit will happen"
+// ═══════════════════════════════════════════════════════════════════════════════
+
 public enum EditStrategy
 {
-    FullFileCreate,      // file doesn't exist
-    FormatCReplace,      // AST-resolved symbol, LLM supplies newCode only, no oldString
-    FormatCInsert,       // AST-resolved anchor symbol, LLM supplies newCode to insert after it
-    ClassPropertyFill,   // add properties/fields to existing class body
-    OldNewTargeted,      // small anchor (<=5 lines), used when no reliable AST symbol
+    CreateFile,         // file does not exist — emit full content
+    InsertMethod,       // AST insertAfter  — new method/endpoint/function
+    ReplaceMethod,      // AST targetType/targetName — rewrite existing method body
+    FillClassBody,      // oldString/newString anchored at end of class — add property/field
+    DeleteLines,        // oldString/newString where newString is empty
+    AnchoredEdit,       // small oldString/newString (default safe fallback)
+    HtmlInsertBefore,   // HTML DOM insert before anchor
+    HtmlInsertAfter,    // HTML DOM insert after anchor
+    HtmlReplace,        // HTML DOM replace anchor
+    FullFileRewrite,    // last-resort escalation only — not classified into directly
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EDIT INTENT  — what the resolver/classifier exposes to callers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+public enum EditIntentKind
+{
+    ReplaceSymbol,       // rewrite an existing method/class/property body
+    InsertNearSymbol,    // add a new symbol near an existing anchor
+    AddProperty,         // append a field/property to a class
+    DeleteContent,       // remove lines/blocks
+    TargetedEdit,        // small localised change — no reliable symbol
+}
+
+public sealed record EditIntent(EditIntentKind Kind, string? Symbol, string? PreferredKind);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EDIT PLAN DECISION  — strategy + pre-resolved symbol info
+// ═══════════════════════════════════════════════════════════════════════════════
 
 public sealed record EditPlanDecision(
     EditStrategy Strategy,
-    string? TargetType,      // "method","class","property" etc (AST-resolvable languages)
-    string? TargetName,      // resolved symbol name
-    string? ResolvedOldStr,  // pre-resolved by the SERVER via AST — never asked of the LLM
+    string? TargetType,       // "method","class","property" etc
+    string? TargetName,       // resolved symbol name
+    string? ResolvedOldStr,   // server-resolved via AST — LLM never needs to author this
     string Reason);
 
-/// <summary>
-/// Deterministic state machine for choosing how a single edit step should be applied.
-/// Language-specific AST resolution decides whether a symbol can be targeted directly;
-/// the LLM is only ever asked for the OLD anchor text when no reliable symbol resolution
-/// exists for the language/edit shape (e.g. whitespace-significant languages, CSS, JSON).
-/// </summary>
+// ═══════════════════════════════════════════════════════════════════════════════
+//  EDIT STRATEGY RESOLVER  — deterministic state machine
+// ═══════════════════════════════════════════════════════════════════════════════
+
 public static class EditStrategyResolver
 {
+    /// <summary>
+    /// Given a file path, its current content, and the resolved edit intent,
+    /// returns the best strategy and any pre-resolved symbol text.
+    /// This is the ONLY place that decides "how to apply this edit".
+    /// </summary>
     public static EditPlanDecision Decide(
         string relPath,
         bool fileExists,
@@ -38,58 +68,68 @@ public static class EditStrategyResolver
     {
         var ext = Path.GetExtension(relPath).ToLowerInvariant();
 
+        // ── File doesn't exist yet ───────────────────────────────────────────
         if (!fileExists)
-            return new EditPlanDecision(EditStrategy.FullFileCreate, null, null, null, "File does not exist yet");
+            return new EditPlanDecision(EditStrategy.CreateFile, null, null, null,
+                "File does not exist yet");
 
-        if (fileExists && fileContent.Length < 500)
-            return new EditPlanDecision(EditStrategy.FullFileCreate, null, null, null,
-                $"Small file ({fileContent.Length} chars) — full file replacement");
-
-        // Whitespace-significant / non-AST-friendly languages always use anchored text edits.
-        if (AgentUtilities.IsWhitespaceSignificant(relPath) ||
-            ext is ".css" or ".scss" or ".less" or ".json" or ".yaml" or ".yml")
+        // ── HTML/template family → delegate to HtmlDomEditor ─────────────────
+        if (HtmlDomEditor.IsHtmlDomFile(relPath))
         {
-            return new EditPlanDecision(EditStrategy.OldNewTargeted, null, null, null,
-                $"{ext} is whitespace/structure-significant — using anchored text edit");
+            var htmlStrategy = intent.Kind == EditIntentKind.InsertNearSymbol
+                ? EditStrategy.HtmlInsertAfter
+                : intent.Kind == EditIntentKind.ReplaceSymbol
+                    ? EditStrategy.HtmlReplace
+                    : EditStrategy.HtmlInsertBefore;
+            return new EditPlanDecision(htmlStrategy, null, intent.Symbol, null,
+                $"HTML/template file — using DOM edit strategy {htmlStrategy}");
         }
 
-        // Property/field addition never goes through FORMAT C class-replace (data loss risk).
+        // ── Deletion ─────────────────────────────────────────────────────────
+        if (intent.Kind == EditIntentKind.DeleteContent)
+            return new EditPlanDecision(EditStrategy.DeleteLines, null, null, null,
+                "Deletion — oldString/newString with empty newString");
+
+        // ── Whitespace-significant / non-AST languages → always anchored ────
+        if (ext is ".css" or ".scss" or ".sass" or ".less"
+                or ".json" or ".jsonc"
+                or ".yaml" or ".yml"
+                or ".xml" or ".svg"
+                or ".md" or ".txt")
+            return new EditPlanDecision(EditStrategy.AnchoredEdit, null, null, null,
+                $"{ext} — anchored text edit (no AST)");
+
+        var (_, supportsFormatC, _) = AgentUtilities.GetLanguageProfile(ext);
+
+        // ── Property/field addition → never FORMAT C class-replace ───────────
         if (intent.Kind == EditIntentKind.AddProperty)
-        {
-            return new EditPlanDecision(EditStrategy.ClassPropertyFill, "class", intent.Symbol, null,
+            return new EditPlanDecision(EditStrategy.FillClassBody, "class", intent.Symbol, null,
                 "Adding property/field — anchored append, not full-class replace");
-        }
 
-        // Try AST resolution for symbol-level edits (replace or insert-after).
-        if (intent.Kind is EditIntentKind.ReplaceSymbol or EditIntentKind.InsertNearSymbol
+        // ── Symbol-level edits — try AST resolution ──────────────────────────
+        if (supportsFormatC
+            && intent.Kind is EditIntentKind.ReplaceSymbol or EditIntentKind.InsertNearSymbol
             && !string.IsNullOrWhiteSpace(intent.Symbol))
         {
-            var (targetType, resolvedOld, err) = TryResolveSymbol(relPath, ext, fileContent, intent);
+            var (targetType, resolvedOld, _) = TryResolveSymbol(relPath, ext, fileContent, intent);
 
             if (resolvedOld != null)
             {
                 var strategy = intent.Kind == EditIntentKind.ReplaceSymbol
-                    ? EditStrategy.FormatCReplace
-                    : EditStrategy.FormatCInsert;
-
+                    ? EditStrategy.ReplaceMethod
+                    : EditStrategy.InsertMethod;
                 return new EditPlanDecision(strategy, targetType, intent.Symbol, resolvedOld,
-                    $"AST-resolved '{intent.Symbol}' as {targetType} — LLM will not see or author oldString");
+                    $"AST-resolved '{intent.Symbol}' as {targetType}");
             }
-
-            // AST resolution failed (symbol not found, or language unsupported for this shape).
-            // Fall through to anchored text edit rather than asking the LLM to hand-copy the whole method.
         }
 
-        return new EditPlanDecision(EditStrategy.OldNewTargeted, null, null, null,
+        // ── Safe fallback ─────────────────────────────────────────────────────
+        return new EditPlanDecision(EditStrategy.AnchoredEdit, null, null, null,
             "No reliable AST symbol resolution — using small anchored text edit");
     }
 
-    /// <summary>
-    /// Server-side symbol resolution. For C#, uses Roslyn exclusively (no tree-sitter, no
-    /// native DLL dependency). For other AST-friendly languages, uses the existing regex-based
-    /// resolver in AgentController.AstResolveEdit's style — kept here as a delegate injected
-    /// by the caller to avoid duplicating that logic.
-    /// </summary>
+    // ── Symbol resolution ────────────────────────────────────────────────────
+
     private static (string? targetType, string? oldStr, string? error) TryResolveSymbol(
         string relPath, string ext, string fileContent, EditIntent intent)
     {
@@ -101,11 +141,8 @@ public static class EditStrategyResolver
             var (astOldStr, _, astErr) = AstCodeEditorService.FindFunctionSource(
                 fileContent, intent.Symbol!, ext);
             if (astOldStr != null)
-            {
-                var kind = intent.PreferredKind ?? "method";
-                return (kind, astOldStr, null);
-            }
-            return (null, null, astErr ?? "Tree-sitter did not find symbol");
+                return (intent.PreferredKind ?? "method", astOldStr, null);
+            return (null, null, astErr ?? "AST did not find symbol");
         }
 
         return (null, null, $"AST not supported for {ext}");
@@ -122,9 +159,9 @@ public static class EditStrategyResolver
 
         var order = preferredKind switch
         {
-            "class" => new[] { "class", "method", "property" },
+            "class"    => new[] { "class", "method", "property" },
             "property" => new[] { "property", "method", "class" },
-            _ => new[] { "method", "constructor", "class", "property" }
+            _          => new[] { "method", "constructor", "class", "property" }
         };
 
         foreach (var kind in order)
@@ -133,33 +170,26 @@ public static class EditStrategyResolver
             {
                 "method" when root.DescendantNodes().OfType<MethodDeclarationSyntax>()
                     .FirstOrDefault(m => m.Identifier.Text == symbolName) is { } mtd
-                    => (mtd.GetLeadingTrivia().ToFullString() + mtd.ToString()).Replace("\r\n", "\n").Replace("\r", "\n"),
+                    => (mtd.GetLeadingTrivia().ToFullString() + mtd.ToString())
+                        .Replace("\r\n", "\n").Replace("\r", "\n"),
                 "constructor" when root.DescendantNodes().OfType<ConstructorDeclarationSyntax>()
                     .FirstOrDefault(c => (c.Parent as TypeDeclarationSyntax)?.Identifier.Text == symbolName) is { } ctor
-                    => (ctor.GetLeadingTrivia().ToFullString() + ctor.ToString()).Replace("\r\n", "\n").Replace("\r", "\n"),
+                    => (ctor.GetLeadingTrivia().ToFullString() + ctor.ToString())
+                        .Replace("\r\n", "\n").Replace("\r", "\n"),
                 "class" when root.DescendantNodes().OfType<ClassDeclarationSyntax>()
                     .FirstOrDefault(c => c.Identifier.Text == symbolName) is { } cls
-                    => (cls.GetLeadingTrivia().ToFullString() + cls.ToString()).Replace("\r\n", "\n").Replace("\r", "\n"),
+                    => (cls.GetLeadingTrivia().ToFullString() + cls.ToString())
+                        .Replace("\r\n", "\n").Replace("\r", "\n"),
                 "property" when root.DescendantNodes().OfType<PropertyDeclarationSyntax>()
                     .FirstOrDefault(p => p.Identifier.Text == symbolName) is { } prop
-                    => (prop.GetLeadingTrivia().ToFullString() + prop.ToString()).Replace("\r\n", "\n").Replace("\r", "\n"),
+                    => (prop.GetLeadingTrivia().ToFullString() + prop.ToString())
+                        .Replace("\r\n", "\n").Replace("\r", "\n"),
                 _ => null
             };
 
-            if (text != null)
-                return (kind, text, null);
+            if (text != null) return (kind, text, null);
         }
 
         return (null, null, $"Symbol '{symbolName}' not found via Roslyn");
     }
 }
-
-public enum EditIntentKind
-{
-    ReplaceSymbol,      // rewrite an existing method/class/property body in place
-    InsertNearSymbol,   // add a new method near an existing anchor method
-    AddProperty,        // append a field/property to a class
-    TargetedEdit        // small localized change, no reliable symbol
-}
-
-public sealed record EditIntent(EditIntentKind Kind, string? Symbol, string? PreferredKind);

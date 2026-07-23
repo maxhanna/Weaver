@@ -439,7 +439,7 @@ angular.module('kanbanApp')
                     const message = 'Agent stopped by user.';
                     vm.agentResult = { warning:  message};
                     pushAgentLog(vm, 'warn', message); 
-                    vm.showSideToast(message);
+                    vm.showNotification(message);
                     vm.activeCardId = null; 
                     vm.activeCardIds = new Set(); 
                     vm.resumeTerminalPolling();

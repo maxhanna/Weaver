@@ -12,6 +12,7 @@ var basePath = builder.Environment.ContentRootPath;
 builder.Services.AddSingleton(new FileHintsManager(basePath));
 builder.Services.AddSingleton(new CalendarService(basePath));
 builder.Services.AddSingleton<GitService>();
+builder.Services.AddSingleton<PushNotificationService>(sp => new PushNotificationService(basePath));
 builder.Services.AddHttpClient("llama", client =>
 {
     client.Timeout = TimeSpan.FromMinutes(30);
@@ -72,6 +73,7 @@ app.MapGet("/{**path}", async context =>
         ".js" => "application/javascript",
         ".css" => "text/css",
         ".html" => "text/html",
+        ".json" => "application/json",
         ".png" => "image/png",
         ".jpg" => "image/jpeg",
         ".svg" => "image/svg+xml",

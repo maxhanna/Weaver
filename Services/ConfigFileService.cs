@@ -59,6 +59,8 @@ public class FrontendConfig
     public bool bughostedHeartbeatEnabled { get; set; } = false;
     // CSS theme overrides — keyed by variable name (e.g. "--bg"), value is the color
     public Dictionary<string, string>? themeColors { get; set; }
+    // Enabled agent step types (tools). Empty or null = all enabled.
+    public List<string> enabledTools { get; set; } = new();
 }
 
 public class ConfigFileService

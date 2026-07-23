@@ -1855,16 +1855,42 @@ public static class AgentUtilities
         if (targetStart < 0)
         {
             var bodySkeleton = GetSkeletonForRange(lines, structEnd, lines.Length);
-            return header + "\n" + bodySkeleton;
+            var fullFile = string.Join('\n', lines);
+
+            var result2 = new StringBuilder();
+            result2.AppendLine(header);
+            result2.AppendLine("// --- SKELETON (no excerpt found) ---");
+            result2.AppendLine(bodySkeleton);
+            result2.AppendLine("// --- FULL FILE (fallback) ---");
+            result2.AppendLine(fullFile);
+
+            return result2.ToString();
         }
+
         var preSkeleton = GetSkeletonForRange(lines, structEnd, targetStart);
         var excerpt = string.Join('\n', lines.Skip(targetStart).Take(targetEnd - targetStart));
         var postSkeleton = GetSkeletonForRange(lines, targetEnd, lines.Length);
         var result = new StringBuilder();
         result.AppendLine(header);
-        if (!string.IsNullOrWhiteSpace(preSkeleton)) result.AppendLine(preSkeleton);
+
+        if (!string.IsNullOrWhiteSpace(preSkeleton))
+        {
+            result.AppendLine("// --- PRE-SKELETON ---");
+            result.AppendLine(preSkeleton);
+        }
+
+        result.AppendLine("// --- EXCERPT ---");
         result.AppendLine(excerpt);
-        if (!string.IsNullOrWhiteSpace(postSkeleton)) result.AppendLine(postSkeleton);
+
+        if (!string.IsNullOrWhiteSpace(postSkeleton))
+        {
+            result.AppendLine("// --- POST-SKELETON ---");
+            result.AppendLine(postSkeleton);
+        }
+
+        result.AppendLine("// --- FULL FILE (always included) ---");
+        result.AppendLine(string.Join('\n', lines));
+
         return result.ToString();
     }
     /// <summary>
@@ -4163,42 +4189,7 @@ public static class AgentUtilities
         }
         return -1;
     }
-    public static string? ExtractVerbatimTargetSection(
-        string fileContent, string changeDesc, int contextLines = 10, int centerLine = 0)
-    {
-        if (string.IsNullOrWhiteSpace(fileContent) || string.IsNullOrWhiteSpace(changeDesc))
-            return null;
-        var lines = fileContent.Split('\n');
-        var anchorIdx = centerLine > 0 && centerLine <= lines.Length
-            ? centerLine - 1
-            : -1;
-        if (anchorIdx < 0)
-        {
-            var resolved = ResolveTargetLineNumber(fileContent, changeDesc);
-            if (resolved > 0) anchorIdx = resolved - 1;
-        }
-        if (anchorIdx < 0)
-        {
-            var words = changeDesc.ToLowerInvariant()
-                .Split(new[] { ' ', '-', '_', '/', '\\', '(', ')', '"', '\'', ',', '.', ':', ';' },
-                       StringSplitOptions.RemoveEmptyEntries)
-                .Where(w => w.Length >= 4)
-                .Distinct()
-                .ToList();
-            if (words.Count == 0) return null;
-            var bestScore = -1;
-            for (var i = 0; i < lines.Length; i++)
-            {
-                var lineLower = lines[i].ToLowerInvariant();
-                var score = words.Sum(w => lineLower.Contains(w) ? 1 : 0);
-                if (score > bestScore) { bestScore = score; anchorIdx = i; }
-            }
-            if (anchorIdx < 0 || bestScore == 0) return null;
-        }
-        var start = Math.Max(0, anchorIdx - contextLines);
-        var end = Math.Min(lines.Length - 1, anchorIdx + contextLines);
-        return string.Join("\n", lines[start..(end + 1)]);
-    }
+    
     public static int ResolveTargetLineNumber(
         string fileContent,
         string changeDesc,

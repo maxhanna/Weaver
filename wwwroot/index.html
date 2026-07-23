@@ -1149,6 +1149,20 @@
             </div>
           </div>
         </details>
+        <details>
+          <summary class="settings-header">Agent Tools</summary>
+          <div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+              Uncheck to remove a tool from the agent's available step types.
+            </div>
+            <div class="form-row" ng-repeat="tool in vm.toolList">
+              <label style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" ng-model="tool.enabled" />
+                <span ng-bind="tool.label"></span>
+              </label>
+            </div>
+          </div>
+        </details>
         <div class="form-row" style="display: flex; flex-direction: column;">
           <details>
             <summary
@@ -1480,12 +1494,14 @@
   <script src="/ide.js"></script>
   <script>
     (function () {
-      if (!('serviceWorker' in navigator) || !('Notification' in window)) return;
-      var swRegistration = null;
+      if (!('serviceWorker' in navigator)) return;
+      var swRegistration = null, swResolve = null;
+      window.__weaverSwReady = new Promise(function (r) { swResolve = r; });
       navigator.serviceWorker.register('/service-worker.js').then(function (reg) {
         swRegistration = reg;
-        if (Notification.permission === 'granted') subscribePush(reg);
-      }).catch(function () {});
+        if (swResolve) { swResolve(reg); swResolve = null; }
+        if ('Notification' in window && Notification.permission === 'granted') subscribePush(reg);
+      }).catch(function () { if (swResolve) { swResolve(null); swResolve = null; } });
       function subscribePush(reg) {
         reg.pushManager.getSubscription().then(function (sub) {
           if (sub) return sub;
@@ -1496,14 +1512,27 @@
           fetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub.toJSON()) });
         }).catch(function () {});
       }
-      window.__weaverSwReady = function () { return swRegistration; };
-      window.__weaverSendNotification = function (title, body) {
-        var reg = swRegistration;
-        if (reg) {
-          reg.showNotification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
+      window.__weaverNotify = function (title, body) {
+        if (swRegistration) {
+          swRegistration.showNotification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
         } else if ('Notification' in window && Notification.permission === 'granted') {
           new Notification(title || 'Weaver', { body: body || '', icon: '/weavericon.png' });
         }
+      };
+      window.__weaverRequestPermission = function () {
+        if (!('Notification' in window)) return Promise.resolve(false);
+        if (Notification.permission === 'granted') {
+          if (swRegistration) subscribePush(swRegistration);
+          return Promise.resolve(true);
+        }
+        if (Notification.permission === 'denied') return Promise.resolve(false);
+        return Notification.requestPermission().then(function (perm) {
+          if (perm === 'granted') {
+            if (swRegistration) subscribePush(swRegistration);
+            return true;
+          }
+          return false;
+        });
       };
       function urlBase64ToUint8Array(base64String) {
         var padding = '='.repeat((4 - base64String.length % 4) % 4);

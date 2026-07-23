@@ -115,6 +115,19 @@ angular.module('kanbanApp')
                 // Email Accounts
                 vm.emailAccounts = [];
 
+                // Agent Tools
+                vm.toolList = [
+                    { key: '_explore', label: 'Explore files for reference', enabled: true },
+                    { key: '_command', label: 'Run terminal commands', enabled: true },
+                    { key: '_create_file', label: 'Create new files', enabled: true },
+                    { key: '_web_search', label: 'Web search', enabled: true },
+                    { key: '_web_fetch', label: 'Fetch URLs', enabled: true },
+                    { key: '_git', label: 'Git operations', enabled: true },
+                    { key: '_rename_file', label: 'Rename files', enabled: true },
+                    { key: '_delete_file', label: 'Delete files', enabled: true },
+                    { key: '_show', label: 'Display text to user', enabled: true }
+                ];
+
                 // Discord/Update
                 vm.appVersion = null;
                 vm.updating = false;
@@ -176,6 +189,9 @@ angular.module('kanbanApp')
                             vm.buildOutputTailChars = typeof cfg.buildOutputTailChars === 'number' ? cfg.buildOutputTailChars : 8000;
                             vm.defaultMaxTokens = typeof cfg.defaultMaxTokens === 'number' ? cfg.defaultMaxTokens : 2048;
 
+                            vm.enabledTools = cfg.enabledTools || [];
+                            vm.toolList.forEach(function (t) { t.enabled = vm.enabledTools.length === 0 || vm.enabledTools.indexOf(t.key) !== -1; });
+
                             vm.emailAccounts = (cfg.emailAccounts || []).map(function (a) {
                                 return { imapServer: a.imapServer || '', imapPort: a.imapPort || 993, useSsl: a.useSsl !== false, username: a.username || '', password: a.password || '', label: a.label || '', showAppPasswordInstructions: false, testing: false, testResult: null };
                             });
@@ -218,6 +234,7 @@ angular.module('kanbanApp')
                         cfg.bughostedPassword = vm.bughostedPassword || '';
                         cfg.bughostedHeartbeatEnabled = vm.bughostedHeartbeatEnabled || false;
                         cfg.themeColors = vm.themeColors;
+                        cfg.enabledTools = vm.toolList.filter(function (t) { return t.enabled; }).map(function (t) { return t.key; });
                         return $http.post('/api/config/save', cfg);
                     }).then(function () {
                         vm.defaultProject = vm.settingsDefaultProject || vm.defaultProject;
