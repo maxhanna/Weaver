@@ -666,6 +666,10 @@ public class ToolSelectionEvalTests : IDisposable
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> InvokeOrchestrate(
         AgentController controller, string prompt, string[] attachedFiles)
     {
+        // Hermetic runs: the scripted edits must land verbatim — an external formatter
+        // (prettier via npx) rewriting quote style would break the exact-token assertions
+        // and the follow-up edits' anchors, and only on machines where npx exists.
+        CodeFormatterService.SuppressExternalFormattersForTests.Value = true;
         var method = typeof(AgentController).GetMethod("Orchestrate", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("Orchestrate not found");
         var task = (Task<(List<object> allSteps, AgentPlan? plan, bool complete)>)method.Invoke(controller, new object?[]

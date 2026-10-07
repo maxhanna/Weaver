@@ -11,6 +11,17 @@ public static class CodeFormatterService
     private static readonly string? _formatterDir;
     private static readonly string? _prettierCli;
 
+    /// <summary>Test seam: when set, external formatter binaries (prettier, black,
+    /// clang-format, …) are skipped and content passes through unchanged — exactly as on a
+    /// machine without them installed. Pipeline tests script verbatim edits and assert the
+    /// exact on-disk result, so their outcome must never depend on npx/node availability
+    /// (prettier's default singleQuote=false silently rewrites single-quoted TS lines, which
+    /// both broke verbatim assertions and broke subsequent edits' anchors in scripted plans).
+    /// AsyncLocal flows down the caller's async pipeline only and never leaks sideways into
+    /// concurrently running tests. In-process Roslyn (.cs) formatting stays on — it is
+    /// deterministic and spawns nothing.</summary>
+    internal static readonly System.Threading.AsyncLocal<bool> SuppressExternalFormattersForTests = new();
+
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         // Prettier built-in
@@ -145,6 +156,12 @@ public static class CodeFormatterService
 
         if (ext.Equals(".cs", StringComparison.OrdinalIgnoreCase))
             return FormatWithRoslyn(content);
+
+        // External formatters are processes with environment-dependent availability and
+        // opinionated defaults — tests that need byte-exact edits opt out here (see the
+        // AsyncLocal's doc above).
+        if (SuppressExternalFormattersForTests.Value)
+            return content;
 
         if (ext.Equals(".py", StringComparison.OrdinalIgnoreCase))
             return await FormatWithBlackAsync(content, ct);
