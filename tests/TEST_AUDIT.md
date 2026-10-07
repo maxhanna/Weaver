@@ -22,19 +22,19 @@ There are two completely separate test harnesses:
 
 | Harness | Location | Runner | Framework |
 |---|---|---|---|
-| C# unit / integration tests | `tests/UnitTests/*.cs` | `dotnet test` (project root) | xUnit (compiled **into** `Weaver.csproj` — see the comment at `Weaver.csproj:18`) |
+| C# unit / integration tests | `tests/UnitTests/*.cs` (+ corpus fixtures under `tests/UnitTests/corpus/`) | `dotnet test tests/Weaver.Tests.csproj` | xUnit in a dedicated test project (`tests/Weaver.Tests.csproj`) that references the app project |
 | JS client-logic tests | `tests/js/*.test.js` | `node tests/js/<file>.test.js` | Hand-rolled mini-runner (a local `test(name, fn)` + `process.exit(failed ? 1 : 0)` at the bottom of each file) |
 
 Run everything:
 
 ```bash
-dotnet test --nologo          # C# suite
+dotnet test tests/Weaver.Tests.csproj --nologo   # C# suite
 for f in tests/js/*.test.js; do node "$f" || break; done   # JS suite
 ```
 
 Notes:
 
-- **CI runs on every push** (`.github/workflows/test.yml`): `dotnet test --nologo
+- **CI runs on every push** (`.github/workflows/test.yml`): `dotnet test tests/Weaver.Tests.csproj --nologo
   -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false` (the shipped artifact is a
   self-contained win-x64 exe, so the test build must be framework-dependent + Linux RID
   or the Linux testhost dies on the missing `libhostpolicy.so`), then `node tests/js/run-all.js`.
@@ -48,9 +48,10 @@ Notes:
   LLM-deserialized `PlanStep` objects whose JSON can carry `"change": null`), plus
   `object?[]` reflection args, keyed `Assert.*` calls, and `async Task` test methods
   replacing `.GetAwaiter().GetResult()`.
-- The C# tests live inside the main project (not a separate test project), so
-  `dotnet test` builds the whole app first and the tests run against the real code —
-  there is no production/test assembly split.
+- The C# tests live in a dedicated test project (`tests/Weaver.Tests.csproj`), so
+  `dotnet test` from the repo root discovers nothing — always pass the test project
+  path. The app ships from `Weaver.csproj` alone (no test packages or test sources
+  leak into the published artifact).
 - Several suites are **self-contained mini-projects**: they spawn real
   `node wwwroot/filetree.js` (FileTreeOrderIndependenceTests), drive the real
   `Orchestrate` pipeline with fake/scripted LLM clients (the `*Pipeline*Tests`,
