@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- NOTE: coverlet.collector intentionally omitted — same reason as before the split:
+         its build target copies the whole test platform into $(PublishDir). The app
+         project no longer compiles tests, so publish output is already clean. Plain
+         dotnet test works without it. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Weaver.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Tool-selection corpus data: copied next to the test assembly so the data-driven
+         ToolCorpus MemberData loads it from AppContext.BaseDirectory (new cases = a JSON
+         edit, no C# change). A missing/empty corpus fails loudly at discovery. -->
+    <None Include="tool-selection-corpus.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

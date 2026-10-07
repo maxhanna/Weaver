@@ -1,3 +1,9 @@
+// Root-namespace shim: 37 test files say `using Weaver;` to reach the app's root-namespace
+// types (AgentController, DatabaseService, ...). With the tests now in a separate
+// Weaver.Tests assembly that namespace no longer encloses them, so this global using keeps
+// those files compiling unmodified.
+global using Weaver;
+
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
@@ -9,7 +15,6 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
-using Weaver;
 using Weaver.Controllers;
 using Weaver.Services;
 

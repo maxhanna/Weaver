@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
