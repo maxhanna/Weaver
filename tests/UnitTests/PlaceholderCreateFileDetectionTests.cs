@@ -122,14 +122,28 @@ public class PlaceholderCreateFileDetectionTests
     }
 
     [Theory]
-    [InlineData("x.txt", "keep this file for now")]
-    [InlineData("dummy.txt", "whatever")]
-    [InlineData("notes.txt", "placeholder to be replaced later")]
     [InlineData("x.txt", "just to create the folder")]
+    [InlineData("dummy.txt", "whatever")]
+    [InlineData("notes.txt", "placeholder file for the demo module")]
+    [InlineData("x.txt", "needed for folder creation")]
     [InlineData("temp", null)]
     public void PlaceholderHints_AreDetected(string fileName, string? content)
     {
         Assert.True(AgentTextUtilities.HasPlaceholderHint(fileName, content));
+    }
+
+    [Fact]
+    public void BareWordSentences_AreNotHints_AfterPhrasesOnlyTightening()
+    {
+        // The hint gate matches explicit placeholder/folder-creation PHRASES only. Bare words
+        // ("keep", "placeholder", "tmp", …) were deliberately dropped from the content regex
+        // because real code and comments contain them constantly (e.g. `return "keep"`), and
+        // every ordinary short _create_file would then burn an LLM round-trip. Sentences built
+        // from those words are therefore NOT hints anymore — the junk files they describe are
+        // only caught when the content carries an explicit creation/placeholder phrase or the
+        // FILENAME is a classic placeholder name (IsPlaceholderStem).
+        Assert.False(AgentTextUtilities.HasPlaceholderHint("x.txt", "keep this file for now"));
+        Assert.False(AgentTextUtilities.HasPlaceholderHint("notes.txt", "placeholder to be replaced later"));
     }
 
     [Fact]
