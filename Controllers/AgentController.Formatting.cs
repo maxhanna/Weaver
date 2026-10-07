@@ -587,23 +587,6 @@ partial class AgentController
             return content;
         }
     }
-    private static string NormalizeChangeForDedup(string? change)
-    {
-        if (string.IsNullOrWhiteSpace(change)) return "";
-        var norm = change.Trim().ToLowerInvariant();
-        norm = Regex.Replace(norm, @"[^\w\s]", "");
-        norm = string.Join(" ", norm.Split(default(char[]), StringSplitOptions.RemoveEmptyEntries));
-        return norm;
-    }
-    private static double CalculateChangeSimilarity(string s1, string s2)
-    {
-        if (string.IsNullOrWhiteSpace(s1) || string.IsNullOrWhiteSpace(s2)) return 0.0;
-        var words1 = new HashSet<string>(s1.Split(' '));
-        var words2 = new HashSet<string>(s2.Split(' '));
-        var intersection = words1.Intersect(words2).Count();
-        var union = words1.Union(words2).Count();
-        return union == 0 ? 0.0 : (double)intersection / union;
-    }
     private static string StripEditKnowledgeHeader(string discoveryContext)
     {
         if (string.IsNullOrWhiteSpace(discoveryContext)) return discoveryContext;

@@ -48,11 +48,7 @@ public class TaskKindPersistenceTests
     }
 
     private static string? InvokeClassifyTaskKind(string prompt, string projectRoot)
-    {
-        var method = typeof(AgentController).GetMethod("ClassifyTaskKind", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("ClassifyTaskKind not found");
-        return (string?)method.Invoke(null, new object?[] { prompt, projectRoot });
-    }
+        => AgentPlanningPolicy.ClassifyTaskKind(prompt, projectRoot);
 
     private static string BoardWithCard(string cardId, string column)
     {
