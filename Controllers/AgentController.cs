@@ -1693,10 +1693,14 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
         }
         return false;
     }
+    // _nextConnectivityCheck holds the EXPIRY instant of the cached verdict (set to now + 5 min
+    // after a probe). The cache is fresh only while utcNow is still before that instant.
+    internal static bool IsConnectivityCacheFresh(DateTime expiresAtUtc, DateTime utcNow) =>
+        expiresAtUtc != DateTime.MinValue && utcNow < expiresAtUtc;
+
     private async Task<bool> CheckLlmConnectivity(AgentRunContext runContext, string projectRoot, bool emitSse, CancellationToken ct)
     {
-        if (_nextConnectivityCheck != DateTime.MinValue &&
-            DateTime.UtcNow - _nextConnectivityCheck < TimeSpan.FromMinutes(5))
+        if (IsConnectivityCacheFresh(_nextConnectivityCheck, DateTime.UtcNow))
         {
             await EmitLog(emitSse, "info", "Skipping connectivity check (cached)", ct: ct);
             runContext.LastConnectionCheckResult = _cachedConnectionCheckResult;
