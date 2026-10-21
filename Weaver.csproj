@@ -57,6 +57,9 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.8" />
+    <!-- Pins the transitive Pkcs package (pulled by Microsoft.Data.Sqlite.Core and MimeKit)
+         above GHSA-846f-f764-76mx / CVE-2026-84008 (fixed in 10.0.13). -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="System.Management" Version="10.0.9" />
     <PackageReference Include="TreeSitter.DotNet" Version="1.3.0" />
     <PackageReference Include="WebPush" Version="1.0.13" />
