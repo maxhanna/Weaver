@@ -264,7 +264,7 @@ public static class AgentTextUtilities
     // fires on explicit folder-creation/placeholder intent. File names are covered by
     // IsPlaceholderStem.
     private static readonly Regex PlaceholderHintRegex = new(
-        @"(?:just\s+to\s+create|to\s+establish|establish(?:ing)?\s+the|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|placeholder\s+(?:file|text|content|to\s+be\s+replaced)|keep\s+this\s+file|dummy\s+(?:file|text|content)|empty\s+(?:file|folder|directory))",
+        @"(?:just\s+to\s+create|to\s+establish|establish(?:ing)?\s+the|create\s+(?:the\s+)?(?:folder|directory)|directory\s+creation|folder\s+creation|placeholder\s+(?:file|text|content)|dummy\s+(?:file|text|content)|empty\s+(?:file|folder|directory))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
