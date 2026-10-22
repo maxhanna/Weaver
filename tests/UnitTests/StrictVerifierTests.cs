@@ -276,7 +276,6 @@ public class StrictVerifierTests : IDisposable
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

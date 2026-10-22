@@ -1200,18 +1200,6 @@ partial class AgentController
     /// residual-by-subtraction approach collapsed to 0 because the token estimator is
     /// non-additive (file tokens can exceed the whole-context estimate).
     /// </summary>
-    private List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
-    {
-        var legacyContext = new AgentRunContext
-        {
-            DiscoverySteps = _discoverySteps,
-            SkeletonContextChars = _skeletonContextChars,
-            RequirementChecklist = _requirementChecklist,
-            TaskPromptContextChars = _taskPromptContextChars
-        };
-        return BuildContextBreakdownForRun(legacyContext, ds, discoveryContext);
-    }
-
     private List<object> BuildContextBreakdownForRun(AgentRunContext runContext, List<object> ds, string discoveryContext)
     {
         var rows = new List<object>();

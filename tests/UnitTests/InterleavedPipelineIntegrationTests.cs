@@ -215,10 +215,9 @@ public class InterleavedPipelineIntegrationTests : IDisposable
         // Hermetic runtime probe: nothing installed (no real process spawns in tests).
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         // Skip the real TCP/HTTP connectivity probe: the run must not depend on the host
-        // network. Cache the "reachable" verdict directly (_nextConnectivityCheck is static;
-        // _lastConnectionCheckResult is an instance field on the controller).
+        // network. Cache the "reachable" verdict directly (the gate reads the static
+        // _nextConnectivityCheck expiry and copies the cached verdict into the run context).
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

@@ -1959,7 +1959,6 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // Skip the real TCP/HTTP connectivity probe (the run must not depend on the host
         // network): cache the "reachable" verdict directly.
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

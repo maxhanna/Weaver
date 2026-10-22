@@ -17,7 +17,7 @@ public class AgentControllerSizeBudgetTests
 {
     // Total lines across Controllers/AgentController*.cs at the time the ratchet was added,
     // counted the same way the test counts (File.ReadAllLines, not wc -l).
-    private const int BaselineLines = 28825;
+    private const int BaselineLines = 28403;
 
     private static string FindRepoRoot()
     {

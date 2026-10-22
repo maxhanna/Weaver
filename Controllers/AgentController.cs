@@ -83,18 +83,7 @@ public partial class AgentController : ControllerBase
         return _cfgCache;
     }
     // Connectivity freshness is process-wide; the result observed by a run is stored in its
-    // AgentRunContext. The remaining fields below are legacy reflection adapters only.
-    // Legacy reflection adapters for the pre-context private helpers. Production code never
-    // reads these fields; they preserve the existing test seam while run state stays explicit.
-#pragma warning disable CS0649, CS0414
-    private bool _lastConnectionCheckResult = true;
-    private readonly List<object> _discoverySteps = new();
-    private int _skeletonContextChars;
-    private string? _requirementChecklist;
-    private int _taskPromptContextChars;
-#pragma warning restore CS0649
-    private AgentRunContext? _legacyRunContext;
-    private AgentRunContext LegacyRunContext => _legacyRunContext ??= new();
+    // AgentRunContext.
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static bool _cachedConnectionCheckResult = true;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
@@ -188,10 +177,6 @@ public partial class AgentController : ControllerBase
     /// Called by the LLM wrappers after a labeled call completes; never throws (metrics must not
     /// break the pipeline).
     /// </summary>
-    private async Task RecordLlmRoundMetricsAsync(string? label, string systemPrompt, string userMessage,
-        string? raw, bool emitSse, CancellationToken ct)
-        => await RecordLlmRoundMetricsForRunAsync(LegacyRunContext, label, systemPrompt, userMessage, raw, emitSse, ct);
-
     private async Task RecordLlmRoundMetricsForRunAsync(AgentRunContext runContext, string? label, string systemPrompt,
         string userMessage, string? raw, bool emitSse, CancellationToken ct)
     {
@@ -209,7 +194,6 @@ public partial class AgentController : ControllerBase
     /// "tokens used" counter on the agent panel — distinct from the per-step snapshot and
     /// from the discovery-context size. Returns null when no labeled LLM round has run yet.
     /// </summary>
-    private object? RunLlmSpend() => _legacyRunContext?.SnapshotRunLlmSpend();
     private static object? RunLlmSpendForRun(AgentRunContext runContext) => runContext.SnapshotRunLlmSpend();
 
     /// <summary>
@@ -217,7 +201,6 @@ public partial class AgentController : ControllerBase
     /// result the panel renders ("llmTokens": { calls, promptTokens, responseTokens,
     /// totalTokens }). Returns null when no labeled LLM rounds happened since the last step.
     /// </summary>
-    private object? TakeStepLlmMetrics() => _legacyRunContext?.TakeStepLlmMetrics();
     private static object? TakeStepLlmMetricsForRun(AgentRunContext runContext) => runContext.TakeStepLlmMetrics();
 
     /// <summary>
