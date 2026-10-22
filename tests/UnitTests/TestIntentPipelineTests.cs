@@ -182,7 +182,7 @@ public class TestIntentPipelineTests : IDisposable
             prompt, _projectRoot, /*emitSse*/ false, CancellationToken.None,
             /*attachedFiles*/ new List<string>(), /*skipContextReview*/ false, /*steeringContext*/ null,
             /*skipQualityCheck*/ false, /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }

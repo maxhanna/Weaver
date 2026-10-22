@@ -203,43 +203,59 @@ public class CommandFailureDetectionTests
     [Fact]
     public void NodeScriptPath_ResolvedFromCommand()
     {
-        // Quoted absolute path (the benchmark-22 command shape).
+        // CI runs on Linux; dev runs on Windows. Use the OS-native temp path + Path.Combine
+        // for expected values so the assertions hold on both (the old tests hardcoded
+        // "C:\Users\Saint\Desktop\benchmark_sandbox\..." which only matched a Windows dev box).
+        var root = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+        var sandbox = Path.Combine(root, "benchmark_sandbox");
+        var absDir = Path.Combine(sandbox, "benchmark_test_22");
+        var absScript = Path.Combine(absDir, "server.js");
+        var proj = Path.Combine(root, "proj");
+        // Quoted absolute path (the benchmark-22 command shape) — native separators so
+        // Path.IsPathRooted/GetFullPath treat it as rooted on the current OS.
         Assert.True(AgentController.TryResolveNodeScriptPath(
-            "node \"C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.js\"",
-            "C:\\proj", out var abs));
-        Assert.Equal("C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.js", abs);
+            "node \"" + absScript + "\"",
+            proj, out var abs));
+        Assert.Equal(absScript, abs);
         // Bare relative path resolves against the project root.
-        Assert.True(AgentController.TryResolveNodeScriptPath("node server.js", "C:\\proj", out var rel));
-        Assert.Equal("C:\\proj\\server.js", rel);
-        Assert.True(AgentController.TryResolveNodeScriptPath("node benchmark_test_22/server.js", "C:\\proj", out var rel2));
-        Assert.Equal("C:\\proj\\benchmark_test_22\\server.js", rel2);
+        Assert.True(AgentController.TryResolveNodeScriptPath("node server.js", proj, out var rel));
+        Assert.Equal(Path.Combine(proj, "server.js"), rel);
+        Assert.True(AgentController.TryResolveNodeScriptPath("node benchmark_test_22/server.js", proj, out var rel2));
+        Assert.Equal(Path.Combine(proj, "benchmark_test_22", "server.js"), rel2);
         // node -e / flags / non-JS targets are NOT plain script invocations.
-        Assert.False(AgentController.TryResolveNodeScriptPath("node -e \"console.log(1)\"", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolveNodeScriptPath("node --watch server.js", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolveNodeScriptPath("python app.py", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolveNodeScriptPath("node --version", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolveNodeScriptPath("", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("node -e \"console.log(1)\"", proj, out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("node --watch server.js", proj, out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("python app.py", proj, out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("node --version", proj, out _));
+        Assert.False(AgentController.TryResolveNodeScriptPath("", proj, out _));
     }
 
     [Fact]
     public void PythonScriptPath_ResolvedFromCommand()
     {
+        // See NodeScriptPath_ResolvedFromCommand — platform-native paths so CI (Linux) and
+        // dev (Windows) both pass. The old hardcoded "C:\Users\Saint\..." only ran on Windows.
+        var root = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+        var sandbox = Path.Combine(root, "benchmark_sandbox");
+        var absDir = Path.Combine(sandbox, "benchmark_test_22");
+        var absScript = Path.Combine(absDir, "server.py");
+        var proj = Path.Combine(root, "proj");
         // Quoted absolute path (the benchmark-22 command shape for a python server).
         Assert.True(AgentController.TryResolvePythonScriptPath(
-            "python \"C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.py\"",
-            "C:\\proj", out var abs));
-        Assert.Equal("C:\\Users\\Saint\\Desktop\\benchmark_sandbox\\benchmark_test_22\\server.py", abs);
+            "python \"" + absScript + "\"",
+            proj, out var abs));
+        Assert.Equal(absScript, abs);
         // Bare relative path resolves against the project root.
-        Assert.True(AgentController.TryResolvePythonScriptPath("python app.py", "C:\\proj", out var rel));
-        Assert.Equal("C:\\proj\\app.py", rel);
-        Assert.True(AgentController.TryResolvePythonScriptPath("python3 benchmark_test_22/server.py", "C:\\proj", out var rel2));
-        Assert.Equal("C:\\proj\\benchmark_test_22\\server.py", rel2);
+        Assert.True(AgentController.TryResolvePythonScriptPath("python app.py", proj, out var rel));
+        Assert.Equal(Path.Combine(proj, "app.py"), rel);
+        Assert.True(AgentController.TryResolvePythonScriptPath("python3 benchmark_test_22/server.py", proj, out var rel2));
+        Assert.Equal(Path.Combine(proj, "benchmark_test_22", "server.py"), rel2);
         // python -c / flags / non-PY targets are NOT plain script invocations.
-        Assert.False(AgentController.TryResolvePythonScriptPath("python -c \"print(1)\"", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolvePythonScriptPath("python -m flask run", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolvePythonScriptPath("node server.js", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolvePythonScriptPath("python --version", "C:\\proj", out _));
-        Assert.False(AgentController.TryResolvePythonScriptPath("", "C:\\proj", out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("python -c \"print(1)\"", proj, out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("python -m flask run", proj, out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("node server.js", proj, out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("python --version", proj, out _));
+        Assert.False(AgentController.TryResolvePythonScriptPath("", proj, out _));
     }
 
     [Fact]

@@ -631,7 +631,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     continue;
                 if (!edit.TryGetValue("newString", out var callNew))
                     callNew = "";
-                var (replaced, newContent, _, _) = TryReplaceSafe(fileContentMut, callOld, callNew);
+                var (replaced, newContent, _, _) = AnchorEditHeuristics.TryReplaceSafe(fileContentMut, callOld, callNew);
                 if (replaced)
                 {
                     fileContentMut = newContent;
@@ -663,18 +663,18 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
         return stepIndex;
     }
     private async Task<IncrementalStepProposal?> ProposeNextIncrementalStepAsync(
-        string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
+        AgentRunContext runContext, string originalPrompt, string discoveryContext, List<PlanStep> planSoFar,
         string? steeringContext, List<string> rejectionFeedback, bool emitSse, CancellationToken ct,
         string stepMode = "all", string? extendedReasoning = null, int? atomicStepEstimate = null,
         string? projectRoot = null)
     {
         var cfg = await LoadConfigAsync();
         var sys = BuildIncrementalStepSystemPrompt(stepMode, await FilterToolsForStepAsync(originalPrompt, cfg.enabledTools, ct), atomicStepEstimate);
-        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate, _requirementChecklist, projectRoot);
+        var user = BuildIncrementalStepUserPrompt(originalPrompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, extendedReasoning, atomicStepEstimate, runContext.RequirementChecklist, projectRoot);
         // Labeled so the agent panel shows the token spend of this planning round (prompt +
         // response) right in the run's log, and the step result aggregates it as llmTokens.
         var (raw, _, err) = await CallLlmRawStreaming(sys, user, emitSse, ct, requestTimeout: _infiniteTimeout,
-            maxTokens: 4096, llmRoundLabel: $"planner step {planSoFar.Count + 1}");
+            maxTokens: 4096, llmRoundLabel: $"planner step {planSoFar.Count + 1}", runContext: runContext);
         if (string.IsNullOrWhiteSpace(raw))
         {
             await EmitLog(emitSse, "warn", $"Incremental step proposal returned empty: {err}", ct: ct);
@@ -1444,7 +1444,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
 
     private async Task<(AgentPlan plan, string discoveryContext)> RunIncrementalPlanningLoop(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        AgentRunContext runContext, string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
         int? atomicStepEstimate = null, List<string>? attachedFiles = null)
     {
@@ -1481,7 +1481,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
             if (emitSse)
                 await SendSse(Response, "phase", new { message = $"Planning — step {planSoFar.Count + 1}/{MAX_INCREMENTAL_STEPS}" }, ct);
             var proposal = await ProposeNextIncrementalStepAsync(
-                prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct,
+                runContext, prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct,
                 atomicStepEstimate: atomicStepEstimate, projectRoot: projectRoot);
             if (proposal == null)
             {
@@ -1581,7 +1581,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
                         discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-                        await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                        await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                         regenAttempts = 0;
                         continue;
                     }
@@ -1621,7 +1621,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -1675,7 +1675,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     if (emitSse)
                         await SendSse(Response, "step", new
                         {
@@ -1707,7 +1707,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "info", "Incremental planning: _discover step — running project-wide search…", ct: ct);
                     discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     regenAttempts = 0;
                     continue;
                 }
@@ -2560,7 +2560,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
 
     private async Task<(AgentPlan plan, List<object> results, string discoveryContext, bool planCompleteDeclared,
         Dictionary<string, string> preEditSnapshots)> RunInterleavedPlanExecutionLoop(
-        string prompt, string discoveryContext, string projectRoot, bool emitSse,
+        AgentRunContext runContext, string prompt, string discoveryContext, string projectRoot, bool emitSse,
         CancellationToken ct, string? steeringContext, string? cardId = null,
         List<string>? attachedFiles = null, int? atomicStepEstimate = null)
     {
@@ -2723,7 +2723,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 try
                 {
-                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
                         replanBudget: new[] { 0 }, onActivity: planActivity,
                         skipLlmPreResolution: queuedIsConcrete);
@@ -2745,7 +2745,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
                 discoveryContext = AppendServerRecoveryToDiscoveryContext(discoveryContext, newResults);
-                await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -2796,7 +2796,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     "_planning", proposingText,
                     $"Proposing step {planSoFar.Count + 1}…", null, ct);
             }
-            var proposal = await ProposeNextIncrementalStepAsync(prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate, projectRoot: projectRoot);
+            var proposal = await ProposeNextIncrementalStepAsync(runContext, prompt, discoveryContext, planSoFar, steeringContext, rejectionFeedback, emitSse, ct, extendedReasoning: extendedReasoning, atomicStepEstimate: atomicStepEstimate, projectRoot: projectRoot);
             if (proposal == null)
             {
                 var jsonFb = "Your previous response could not be parsed as valid JSON. " +
@@ -2967,7 +2967,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 // unmet requirement as feedback so the next proposal addresses it.
                 if (lastAssessIncomplete && !string.IsNullOrWhiteSpace(lastAssessReason))
                 {
-                    var (recheckComplete, recheckReason) = await AssessCompletion(
+                    var (recheckComplete, recheckReason) = await AssessCompletionCore(runContext,
                         prompt, allResults, projectRoot, ct,
                         new AgentPlan { Plan = planSoFar.ToList(), Summary = "Plan-complete recheck", Score = 90 },
                         attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate,
@@ -3022,7 +3022,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     {
                         await EmitLog(emitSse, "info", "Planner requested _discover — running project-wide search…", ct: ct);
                         discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-                        await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                        await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                         regenAttempts = 0;
                         continue;
                     }
@@ -3055,7 +3055,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     regenAttempts = 0;
@@ -3088,7 +3088,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                     discoveryContext = await ExplorationPipeline(
                         new List<PlanStep> { new() { File = "_explore", Change = proposal.ExploreFile } },
                         discoveryContext, projectRoot, emitSse, ct, prompt);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     if (!string.IsNullOrWhiteSpace(cardId))
                         await AutoAttachFileToCardAsync(cardId, proposal.ExploreFile, emitSse, ct);
                     regenAttempts = 0;
@@ -3109,7 +3109,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 {
                     await EmitLog(emitSse, "info", "Planner proposed _discover step — running project-wide search…", ct: ct);
                     discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-                    await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                    await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                     regenAttempts = 0;
                     continue;
                 }
@@ -3536,7 +3536,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         {
                             await EmitLog(emitSse, "info", "Additional _discover step — running project-wide search…", ct: ct);
                             discoveryContext = await RunDiscoveryToolAsync(prompt, discoveryContext, projectRoot, emitSse, ct);
-                            await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                            await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                         }
                         continue;
                     }
@@ -3617,7 +3617,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 }
                 try
                 {
-                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, singleStepPlan, ct, allResults,
                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
                         replanBudget: new[] { 0 }, onActivity: planActivity,
                         skipLlmPreResolution: stepToRunIsConcrete);
@@ -3640,7 +3640,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 discoveryContext = AppendWebResultsToDiscoveryContext(discoveryContext, newResults);
                 discoveryContext = AppendCreatedPathsToDiscoveryContext(discoveryContext, newResults, projectRoot);
                 discoveryContext = AppendServerRecoveryToDiscoveryContext(discoveryContext, newResults);
-                await EmitContextUpdateAsync(discoveryContext, emitSse, ct);
+                await EmitContextUpdateAsync(runContext, discoveryContext, emitSse, ct);
                 var globalPlanIdx = planSoFar.Count - 1;
                 foreach (var r in newResults)
                 {
@@ -3681,7 +3681,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         }
                         try
                         {
-                            await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
+                            await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, synthPlan, ct, allResults,
                                 steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
                                 replanBudget: new[] { 0 }, onActivity: planActivity);
                         }
@@ -4015,7 +4015,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                                 var autoBeforeCount = allResults.Count;
                                 try
                                 {
-                                    await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
+                                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, autoPlan, ct, allResults,
                                         steeringContext: steeringContext, attachedFiles: attachedFiles, cardId: cardId,
                                         replanBudget: new[] { 0 }, onActivity: planActivity);
                                 }
@@ -4061,7 +4061,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                         await SendPlanActivityEventAsync(thinkingLog, planSoFar, emitSse,
                             "_verifying", $"Verifying whole task — checking if the plan is complete after Step {planSoFar.Count}…",
                             $"Verifying whole task after Step {planSoFar.Count}…", planSoFar.Count - 1, ct);
-                    var (isComplete, assessReason) = await AssessCompletion(
+                    var (isComplete, assessReason) = await AssessCompletionCore(runContext,
                         prompt, allResults, projectRoot, ct,
                         new AgentPlan { Plan = planSoFar.ToList(), Summary = "Interleaved verification", Score = 90 },
                         attachedFiles: attachedFiles, atomicStepEstimate: atomicStepEstimate,
@@ -4170,7 +4170,7 @@ Reply ONLY with the JSON array — no explanation, no markdown.";
                 await EmitLog(emitSse, "warn",
                     $"The interleaved loop halted without a _browser_test step — deterministically injecting a live web test: \"{inspectTarget}\"", ct: ct);
                 planSoFar.Add(new PlanStep { File = "_browser_test", Change = inspectTarget });
-                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext,
+                await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext,
                     new AgentPlan
                     {
                         Plan = new List<PlanStep> { new PlanStep { File = "_browser_test", Change = inspectTarget } },

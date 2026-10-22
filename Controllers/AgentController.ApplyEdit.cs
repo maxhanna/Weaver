@@ -65,7 +65,8 @@ partial class AgentController
     /// corruption).</summary>
     private async Task<int?> ApplyTabularEditAsync(
         PlanStep step, string relPath, string fullPath, string projectRoot, bool emitSse,
-        CancellationToken ct, List<object> allResults, int stepIndex, int planItemIndex, string? cardId)
+        CancellationToken ct, List<object> allResults, int stepIndex, int planItemIndex, string? cardId,
+        AgentRunContext runContext)
     {
         var change = step.Change ?? "";
         var isBinary = TabularFileService.IsSpreadsheetBinary(relPath);
@@ -127,7 +128,7 @@ partial class AgentController
                 await System.IO.File.WriteAllBytesAsync(fullPath, newBytes, ct);
             await EmitLog(emitSse, "success", $"🧮 Tabular edit on {relPath}: {reason}", ct: ct);
             var r = new Dictionary<string, object?>();
-            PopulateEditResult(r, "modified", relPath, null, null, "");
+            PopulateEditResult(runContext, r, "modified", relPath, null, null, "");
             r["index"] = stepIndex;
             r["planItemIndex"] = planItemIndex;
             r["reason"] = reason;
@@ -159,7 +160,7 @@ partial class AgentController
         await System.IO.File.WriteAllTextAsync(fullPath, newText!, Encoding.UTF8, ct);
         await EmitLog(emitSse, "success", $"🧮 Tabular edit on {relPath}: {reason}", ct: ct);
         var res = new Dictionary<string, object?>();
-        PopulateEditResult(res, "modified", relPath, oldText, newText, newText!);
+        PopulateEditResult(runContext, res, "modified", relPath, oldText, newText, newText!);
         res["index"] = stepIndex;
         res["planItemIndex"] = planItemIndex;
         res["reason"] = reason;
@@ -171,7 +172,26 @@ partial class AgentController
         return stepIndex + 1;
     }
 
-    private async Task<int> ResolveAndApplyEdit(
+    private Task<int> ResolveAndApplyEdit(
+        PlanStep step,
+        string projectRoot,
+        bool emitSse,
+        CancellationToken ct,
+        List<object> allResults,
+        int stepIndex,
+        string? prompt = null,
+        AgentPlan? plan = null,
+        int planItemIndex = -1,
+        string? cardId = null,
+        List<string>? attachedFiles = null,
+        int replanDepth = 0,
+        Func<string, Task>? onActivity = null,
+        bool skipLlmPreResolution = false)
+        => ResolveAndApplyEditCore(new AgentRunContext(), step, projectRoot, emitSse, ct, allResults, stepIndex,
+            prompt, plan, planItemIndex, cardId, attachedFiles, replanDepth, onActivity, skipLlmPreResolution);
+
+    private async Task<int> ResolveAndApplyEditCore(
+        AgentRunContext runContext,
         PlanStep step,
         string projectRoot,
         bool emitSse,
@@ -245,7 +265,7 @@ partial class AgentController
         if (TabularFileService.IsTabularFile(relPath) && System.IO.File.Exists(fullPath))
         {
             var tabIdx = await ApplyTabularEditAsync(step, relPath, fullPath, projectRoot, emitSse, ct,
-                allResults, stepIndex, planItemIndex, cardId);
+                allResults, stepIndex, planItemIndex, cardId, runContext);
             if (tabIdx != null) return tabIdx.Value;
         }
         var cfg8 = await LoadConfigAsync();
@@ -282,7 +302,7 @@ partial class AgentController
         if (preValidatedIdx != null) return preValidatedIdx.Value;
         var (preparedStep, explorationContext, preservationDirective, decidedEditStrategy, explorationTargetSymbol) =
             await PrepareEditContextAsync(step, projectRoot, emitSse, ct, prompt, plan, planItemIndex,
-                cardId, attachedFiles, skipLlmPreResolution, relPath, fullPath);
+                cardId, attachedFiles, skipLlmPreResolution, relPath, fullPath, runContext);
         step = preparedStep;
         // Fully deterministic edits (old+new synthesized server-side) need no causal
         // reasoning and no multi-round LLM verification — they are correct by construction.
@@ -318,7 +338,7 @@ partial class AgentController
         // round-trip is wasted resolving replacement code against it; the resolver then
         // re-anchors against the real file content from scratch.
         if (!string.IsNullOrWhiteSpace(planOldStr) &&
-            ShouldBounceGarbageAnchor(planOldStr, isDeterministicEdit))
+            StructureEditHeuristics.ShouldBounceGarbageAnchor(planOldStr, isDeterministicEdit))
         {
             await EmitLog(emitSse, "warn",
                 $"✗ Plan-provided oldString for {relPath} is bare punctuation ('{OneLinePreview(planOldStr)}') — not a usable anchor. " +
@@ -433,8 +453,8 @@ partial class AgentController
                                 // apply would replace the class with a method and produce an immediate
                                 // IndentationError/SyntaxError. Reject BEFORE applying so the retry
                                 // regenerates a replacement that matches the oldString's scope.
-                                var pyOldKind = fmtExt == ".py" ? AgentEditHeuristics.PythonDeclarationKind(oldStr) : null;
-                                var pyNewKind = fmtExt == ".py" ? AgentEditHeuristics.PythonDeclarationKind(newStr) : null;
+                                var pyOldKind = fmtExt == ".py" ? ContentEditHeuristics.PythonDeclarationKind(oldStr) : null;
+                                var pyNewKind = fmtExt == ".py" ? ContentEditHeuristics.PythonDeclarationKind(newStr) : null;
                                 var scopeMismatch = pyOldKind is "class" or "function"
                                     && pyNewKind is "class" or "function"
                                     && pyOldKind != pyNewKind;
@@ -552,7 +572,7 @@ partial class AgentController
             // the resolver produced — the same "}" class — without any apply attempt or verify
             // call, feeding the model clear feedback on why the anchor is unusable.
             if (resolveError == null && !string.IsNullOrWhiteSpace(oldStr) &&
-                ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
+                StructureEditHeuristics.ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
             {
                 var err = "ANCHOR SANITY: oldString is bare punctuation (e.g. a lone '}'), which would match dozens of places " +
                           "or destroy structural code. Output a real, unique code line (with surrounding context) as your oldString.";
@@ -639,7 +659,7 @@ partial class AgentController
                 }
                 stepIndex = await ApplyFullFile(
                     fullContent, step, fullPath, relPath,
-                    projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults);
+                    projectRoot, stepIndex, planItemIndex, cardId, emitSse, ct, allResults, runContext);
                 return stepIndex;
             }
             var fileContent = System.IO.File.Exists(fullPath)
@@ -763,7 +783,7 @@ partial class AgentController
                         if (string.IsNullOrWhiteSpace(edit.OldString)) continue;
                         var normOld = AgentTextUtilities.NormalizeLineEndings(edit.OldString);
                         var normNew = AgentTextUtilities.NormalizeLineEndings(edit.NewString);
-                        var (hasReplaced, nc, err, _) = TryReplaceSafe(batchContent, normOld, normNew,
+                        var (hasReplaced, nc, err, _) = AnchorEditHeuristics.TryReplaceSafe(batchContent, normOld, normNew,
                             edit.LineNumber > 0 ? edit.LineNumber : step.LineNumber, step.Change);
                         if (!hasReplaced)
                         {
@@ -896,7 +916,7 @@ partial class AgentController
                     else
                     {
                         var (safeReplaced, safeContent, safeError, safeSnippet) =
-                            TryReplaceSafe(fileContent, oldStr, newStr ?? string.Empty, step.LineNumber, step.Change);
+                            AnchorEditHeuristics.TryReplaceSafe(fileContent, oldStr, newStr ?? string.Empty, step.LineNumber, step.Change);
                         replaced = safeReplaced;
                         newContent = safeContent;
                         matchError = safeReplaced
@@ -987,7 +1007,7 @@ partial class AgentController
                             normOld = AgentTextUtilities.NormalizeLineEndings(oldStr).Trim('\n', '\r');
                             oldLinesArr = normOld.Split('\n').ToList();
                         }
-                        var finalNewLines = AgentEditHeuristics.ReindentReplacementSnippet(
+                        var finalNewLines = FormattingEditHeuristics.ReindentReplacementSnippet(
                             newLinesArr, oldLinesArr, fileLinesArr, matchIdx,
                             HtmlDomEditor.IsHtmlDomFile(relPath));
                         fileLinesArr.RemoveRange(matchIdx, oldLinesArr.Count);
@@ -999,19 +1019,19 @@ partial class AgentController
                     }
                     else
                     {
-                        var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
+                        var (r, nc, me, sn) = AnchorEditHeuristics.TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
                         replaced = r; newContent = nc; matchError = me; snippet = sn;
                     }
                 }
                 else
                 {
-                    var (r, nc, me, sn) = TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
+                    var (r, nc, me, sn) = AnchorEditHeuristics.TryReplaceSafe(fileContent, oldStr!, newStr ?? string.Empty, step.LineNumber, step.Change);
                     replaced = r; newContent = nc; matchError = me; snippet = sn;
                 }
             }
-            if (!string.IsNullOrWhiteSpace(newStr) && !AgentEditHeuristics.IsBraceBalanced(newStr))
+            if (!string.IsNullOrWhiteSpace(newStr) && !StructureEditHeuristics.IsBraceBalanced(newStr))
             {
-                var oldIsUnbalanced = !string.IsNullOrWhiteSpace(oldStr) && !AgentEditHeuristics.IsBraceBalanced(oldStr);
+                var oldIsUnbalanced = !string.IsNullOrWhiteSpace(oldStr) && !StructureEditHeuristics.IsBraceBalanced(oldStr);
                 if (oldIsUnbalanced)
                 {
                     await EmitLog(emitSse, "info",
@@ -1116,14 +1136,14 @@ partial class AgentController
                 }
                 if (wipeReason == null)
                 {
-                    wipeReason = AgentEditHeuristics.DetectDuplicatePropertyAddition(oldStr!, newStr!, relPath);
+                    wipeReason = ContentEditHeuristics.DetectDuplicatePropertyAddition(oldStr!, newStr!, relPath);
                 }
                 if (wipeReason == null)
                 {
                     // The mirror of the duplicate-key guard: an aggregation edit (the change
                     // description names a grouping verb) whose grouped output has FEWER entries
                     // than the flat input silently dropped rows — reject before it lands.
-                    wipeReason = AgentEditHeuristics.DetectDroppedEntriesInGroupedOutput(oldStr!, newStr!, step.Change);
+                    wipeReason = ContentEditHeuristics.DetectDroppedEntriesInGroupedOutput(oldStr!, newStr!, step.Change);
                 }
                 if (wipeReason == null)
                 {
@@ -1133,7 +1153,7 @@ partial class AgentController
                     // a similar template token, and a typo of a real TS member is caught even
                     // when the real name appears nowhere in the template.
                     var relatedTsContent = TryReadComponentTsContent(relPath, projectRoot);
-                    wipeReason = AgentEditHeuristics.DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath, relatedTsContent);
+                    wipeReason = ContentEditHeuristics.DetectHallucinatedProperties(oldStr!, newStr!, fileContent, relPath, relatedTsContent);
                 }
                 if (wipeReason == null)
                 {
@@ -1234,15 +1254,15 @@ partial class AgentController
                 // the block from the REAL file text — real indentation, real surrounding lines.
                 // Grounded on an identifier the oldString itself names, it can never select an
                 // unrelated block (a "tradeNotifsCount" line) the tolerant matcher would.
-                var idReanchor = AgentEditHeuristics.TryIdentifierAnchoredReanchor(
+                var idReanchor = AnchorEditHeuristics.TryIdentifierAnchoredReanchor(
                     fileContent, oldStr!, step.LineNumber);
                 var surroundingReanchor = idReanchor == null
-                    ? AgentEditHeuristics.TrySurroundingLineReanchor(
+                    ? AnchorEditHeuristics.TrySurroundingLineReanchor(
                         fileContent, oldStr!, step.LineNumber, step.Change)
                     : null;
                 var correctedBlock = idReanchor?.correctedBlock
                     ?? surroundingReanchor?.correctedBlock
-                    ?? BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
+                    ?? AnchorEditHeuristics.BuildExactMatchBlock(fileContent, oldStr!, step.LineNumber, step.Change);
                 if (correctedBlock != null && correctedBlock != oldStr)
                 {
                     if (idReanchor != null)
@@ -1295,7 +1315,7 @@ partial class AgentController
                             indentNewStr = AgentDiffUtilities.ReconstructFromVerbatimDiff(correctedBlock, indentNewStr);
                         }
                         var (replaced2, newContent2, _, _) =
-                            TryReplaceSafe(fileContent, correctedBlock, indentNewStr, step.LineNumber, step.Change);
+                            AnchorEditHeuristics.TryReplaceSafe(fileContent, correctedBlock, indentNewStr, step.LineNumber, step.Change);
                         if (replaced2)
                         {
                             var (approved2, _, _) =
@@ -1377,7 +1397,7 @@ partial class AgentController
                     goto continueResolveLoop;
                 }
             }
-            if (ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
+            if (StructureEditHeuristics.ShouldBounceGarbageAnchor(oldStr, isDeterministicEdit))
             {
                 var err = $"oldString starts with a standalone '}}' (just a closing brace) — it includes the previous method's closing brace. " +
                     "Set oldString to start AT the target method declaration, not before it.";
@@ -1455,7 +1475,7 @@ partial class AgentController
                                 $"Stripped unnecessary ?. from defined properties in {relPath}", ct: ct);
                             newStr = fixed2;
                             var (replaced3, newContent3, _, _) =
-                                TryReplaceSafe(fileContent, oldStr!, fixed2, step.LineNumber, step.Change);
+                                AnchorEditHeuristics.TryReplaceSafe(fileContent, oldStr!, fixed2, step.LineNumber, step.Change);
                             if (replaced3)
                             {
                                 newContent = newContent3;
@@ -1707,10 +1727,10 @@ partial class AgentController
             {
                 try
                 {
-                    var newUnbalanced = AgentEditHeuristics.HasUnbalancedBraces(newContent);
+                    var newUnbalanced = StructureEditHeuristics.HasUnbalancedBraces(newContent);
                     if (newUnbalanced)
                     {
-                        var preBraceOk = !string.IsNullOrWhiteSpace(preEditContent) && !AgentEditHeuristics.HasUnbalancedBraces(preEditContent);
+                        var preBraceOk = !string.IsNullOrWhiteSpace(preEditContent) && !StructureEditHeuristics.HasUnbalancedBraces(preEditContent);
                         if (preBraceOk)
                         {
                             await EmitLog(emitSse, "warn",
@@ -1837,7 +1857,7 @@ partial class AgentController
                                new List<bool> { false }, false)
                             : await RunLlmVerifyRoundsAsync(newStr, oldStr, relPath, prompt, step.Change,
                                 preEditContent, newContent, emitSse, ct, attemptScores, explorationContext ?? "",
-                                plan, planItemIndex, sqlMigrationNote, causalContext);
+                                plan, planItemIndex, sqlMigrationNote, causalContext, runContext);
                 stepNeedsExtraStep = needsExtraStepFlags.Any(f => f);
                 stepExtraStepReason = reasons.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
                 var roundsDone = decisions.Count;
@@ -2142,12 +2162,13 @@ partial class AgentController
             return await CompleteSuccessfulEditAsync(
                 attempt, history, oldStr, newStr, step, prompt, projectRoot, relPath, fullPath,
                 plan, planItemIndex, stepNeedsExtraStep, stepExtraStepReason, stepExtraStepFile,
-                emitSse, ct, allResults, stepIndex, cardId, fileExt, preEditContent, newContent);
+                emitSse, ct, allResults, stepIndex, cardId, fileExt, runContext,
+                preEditContent, newContent);
         }
     RecordFailure:
         return await HandleStepFailureAsync(history, attemptScores, bestScore, bestAttempt, relPath,
             step, stepIndex, planItemIndex, cardId, allResults, emitSse, ct, replanDepth,
-            plan, prompt, attachedFiles, projectRoot, onActivity);
+            plan, prompt, attachedFiles, projectRoot, onActivity, runContext);
     }
 
     /// <summary>

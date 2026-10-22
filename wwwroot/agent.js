@@ -815,6 +815,11 @@ angular.module('kanbanApp')
                             vm.activeCardText = card.text; vm._agentStartTime = Date.now();
                             var files = Array.isArray(card.attached) ? card.attached : (card.attached ? [card.attached] : []);
                             var payload = { prompt: card.text, project: runProj, files: files, maxIterations: 5, maxStepsPerBatch: 8, steeringContext: vm.steeringContext || '', selfImproving: card.selfImproving || false, isDecomposing: card.isDecomposing || false, createTests: card.createTests || false, cardId: card.id, isBenchmark: card._benchmark || false, benchmarkProjectRoot: (card._benchmark && vm.systemInfoCustom && vm.systemInfoCustom.benchmarkProjectRoot) || '', buildCommands: vm.getProjectBuildCommands(proj) || null, endpointId: card.llmEndpointId || '', runId: run.runId };
+                            // StrictVerifier tri-state → payload: checked checkbox (true) → strict;
+                            // unchecked (false/undefined) → null so the backend falls back to the
+                            // project default (defaultStrictVerifier) or legacy behavior. The
+                            // 'relaxed' (false) state is only set via the project default / API.
+                            payload.strictVerifier = (card.strictVerifier === true) ? true : null;
                             vm.moveCardToDoing(card.id); vm.activeCardId = card.id; vm.activeCardIds.add(card.id);
                             var localAbortController = run.abortController;
                             fetch('/api/agent/execute-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: localAbortController.signal })
@@ -1921,6 +1926,7 @@ angular.module('kanbanApp')
                         autoPr: vm.prByDefault !== false,
                         selfImproving: false,
                         createTests: false,
+                        strictVerifier: false,
                         llmEndpointId: sourceCard.llmEndpointId || '',
                         _fromSuggestion: true,
                         _suggestionSourceCardId: sourceCard.id

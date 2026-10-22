@@ -2138,7 +2138,7 @@ public class SyntheticGroundTruthEvalTests : IDisposable
             /*attachedFiles*/ attachedFiles ?? new List<string> { GlobeCssRel, GlobeHtmlRel },
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }
@@ -2251,7 +2251,8 @@ public class SyntheticGroundTruthEvalTests : IDisposable
             {
                 prompt, _projectRoot, /*emitSse*/ false, allResults, CancellationToken.None,
                 /*discoveryContext*/ null, /*atomicStepEstimate*/ null, /*preEditSnapshots*/ null,
-                /*cardId*/ cardId, /*steeringContext*/ null
+                /*cardId*/ cardId, /*steeringContext*/ null,
+                /*strictVerifier*/ null // legacy behavior — these tests predate the hard-gate toggle
             })!;
         return await task;
     }

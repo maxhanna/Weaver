@@ -27,7 +27,7 @@ namespace Weaver.Controllers;
 partial class AgentController
 {
     private async Task<List<object>> ExecuteSteps(
-        List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse,
+        AgentRunContext runContext, List<AgentStep> steps, string projectRoot, int indexOffset, bool emitSse,
         CancellationToken ct = default)
     {
         var results = new List<object>();
@@ -53,7 +53,7 @@ partial class AgentController
             {
                 switch (step.Type?.ToLowerInvariant())
                 {
-                    case "edit": await ExecuteEditStep(step, projectRoot, result, editContentCache); break;
+                    case "edit": await ExecuteEditStep(runContext, step, projectRoot, result, editContentCache); break;
                     case "command": if (!terminalStarted) { _terminal.Start(); terminalStarted = true; } await ExecuteCommandStep(step, projectRoot, result, emitSse, ct); break;
                     case "rename": await ExecuteRenameStep(step, projectRoot, result); break;
                     case "read": await ExecuteReadStep(step, projectRoot, result); break;
@@ -469,7 +469,7 @@ partial class AgentController
         return (null, null);
     }
     private async Task ExecuteEditStep(
-        AgentStep step, string projectRoot, Dictionary<string, object?> result,
+        AgentRunContext runContext, AgentStep step, string projectRoot, Dictionary<string, object?> result,
         Dictionary<string, string>? contentCache = null)
     {
         var rawPath = (step.Path ?? "").Replace('/', Path.DirectorySeparatorChar);
@@ -495,7 +495,7 @@ partial class AgentController
                     if (!string.IsNullOrEmpty(d) && !Directory.Exists(d)) Directory.CreateDirectory(d);
                     await System.IO.File.WriteAllTextAsync(targetPath, newString, Encoding.UTF8);
                     result["oldStartLine"] = 0;
-                    PopulateEditResult(result, "created", step.Path!, null, newString, newString);
+                    PopulateEditResult(runContext, result, "created", step.Path!, null, newString, newString);
                     if (contentCache != null) contentCache[targetPath] = newString;
                     return;
                 }
@@ -510,12 +510,12 @@ partial class AgentController
             content += newString;
             await System.IO.File.WriteAllTextAsync(targetPath, content, Encoding.UTF8);
             if (contentCache != null) contentCache[targetPath] = content;
-            PopulateEditResult(result, "modified", step.Path!, null, newString, newString);
+            PopulateEditResult(runContext, result, "modified", step.Path!, null, newString, newString);
             try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
             catch { }
             return;
         }
-        var (replaced, newContent, matchError, snippet) = TryReplaceSafe(content, oldString, newString);
+        var (replaced, newContent, matchError, snippet) = AnchorEditHeuristics.TryReplaceSafe(content, oldString, newString);
         if (!replaced)
         {
             result["status"] = "error"; result["error"] = matchError ?? "oldString not found";
@@ -543,7 +543,7 @@ partial class AgentController
         result["oldStartLine"] = normOld[..diffIdx].Count(c => c == '\n');
         await System.IO.File.WriteAllTextAsync(targetPath, newContent, Encoding.UTF8);
         if (contentCache != null) contentCache[targetPath] = newContent;
-        PopulateEditResult(result, "modified", step.Path!, oldString, newString, newContent, content);
+        PopulateEditResult(runContext, result, "modified", step.Path!, oldString, newString, newContent, content);
         try { _fileHints.LearnFromAppliedEdit(projectRoot, targetPath, newString); }
         catch { }
     }
@@ -656,8 +656,15 @@ partial class AgentController
         sb.AppendLine();
     }
 
-    private async Task<(bool isComplete, string reason)> AssessCompletion(
+    private Task<(bool isComplete, string reason)> AssessCompletion(
         string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
+        AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null,
+        string? steeringContext = null)
+        => AssessCompletionCore(new AgentRunContext(), prompt, executedSteps, projectRoot, ct,
+            plan, attachedFiles, atomicStepEstimate, steeringContext);
+
+    private async Task<(bool isComplete, string reason)> AssessCompletionCore(
+        AgentRunContext runContext, string prompt, List<object> executedSteps, string projectRoot, CancellationToken ct,
         AgentPlan? plan = null, List<string>? attachedFiles = null, int? atomicStepEstimate = null,
         string? steeringContext = null)
     {
@@ -855,7 +862,7 @@ Respond with JSON only:
         // deadline turns a healthy completion assessment into a fake "timed out" verdict,
         // which then forces the interleaved loop to plan a redundant follow-up step.
         var (raw, _, _) = await CallLlmRaw(sys, sb.ToString(), ct, _infiniteTimeout,
-            llmRoundLabel: "completion assessment");
+            llmRoundLabel: "completion assessment", runContext: runContext);
         if (string.IsNullOrWhiteSpace(raw))
         {
             // One retry — transient endpoint slowness shouldn't veto a verified-complete task.
@@ -966,7 +973,7 @@ Respond with JSON only:
         catch (Exception ex) { result["status"] = "error"; result["error"] = ex.Message; }
     }
     private void PopulateEditResult(
-        Dictionary<string, object?> result, string action, string path,
+        AgentRunContext runContext, Dictionary<string, object?> result, string action, string path,
         string? oldStr, string? newStr, string writtenContent, string? beforeContent = null)
     {
         result["type"] = "edit";
@@ -1000,7 +1007,7 @@ Respond with JSON only:
         }
         // Per-step LLM token spend (planning + verification rounds since the last emitted
         // step) so the panel shows what this step cost, not just the discovery context.
-        var llmMetrics = TakeStepLlmMetrics();
+        var llmMetrics = TakeStepLlmMetricsForRun(runContext);
         if (llmMetrics != null) result["llmTokens"] = llmMetrics;
     }
     private async Task<string> EnrichWithTypeChain(
@@ -1165,7 +1172,7 @@ Respond with JSON only:
     }
     private async Task<int> ApplyFullFile(string fullContent, PlanStep step, string fullPath, string relPath,
         string projectRoot, int stepIndex, int planItemIndex, string? cardId, bool emitSse, CancellationToken ct,
-        List<object> allResults)
+        List<object> allResults, AgentRunContext runContext)
     {
         // Safety net: never File.WriteAllText to an existing directory path (throws
         // UnauthorizedAccessException on Windows). The ResolveAndApplyEdit directory-target guard
@@ -1237,7 +1244,7 @@ Respond with JSON only:
         await System.IO.File.WriteAllTextAsync(fullPath, fullContent, Encoding.UTF8, ct);
         await EmitLog(emitSse, "success", $"✓ Written {relPath} ({fullContent.Length} chars)", ct: ct);
         var r = new Dictionary<string, object?>();
-        PopulateEditResult(r, "modified", relPath, null, fullContent, "");
+        PopulateEditResult(runContext, r, "modified", relPath, null, fullContent, "");
         r["index"] = stepIndex;
         r["planItemIndex"] = planItemIndex;
         if (emitSse) await SendSse(Response, "step", r, ct);

@@ -249,7 +249,7 @@ public class LiveSteerEndpointTests : IDisposable
             /*attachedFiles*/ new List<string> { DemoTsRel },
             /*skipContextReview*/ false, /*steeringContext*/ steeringContext, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }

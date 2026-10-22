@@ -1911,7 +1911,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             /*attachedFiles*/ new List<string>(),
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ existingPlan, /*completedStepIndices*/ completedStepIndices, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ webResults
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ webResults
         })!;
         var result = await task;
         return result;

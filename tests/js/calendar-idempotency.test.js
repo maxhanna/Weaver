@@ -34,7 +34,7 @@ function test(name, fn) {
 }
 
 // ── Extract hasLiveCalendarInstance from the live calendar.js ────────────
-const calSrc = fs.readFileSync(path.join(__dirname, '../../wwwroot/calendar.js'), 'utf8');
+const calSrc = fs.readFileSync(path.join(__dirname, '../../wwwroot/calendar.js'), 'utf8').replace(/\r\n/g, '\n');
 const guardMatch = /function hasLiveCalendarInstance\(boardState, cal\) \{[\s\S]*?\n  \}/.exec(calSrc);
 assert(guardMatch, 'hasLiveCalendarInstance not found in wwwroot/calendar.js — marker format may have drifted');
 const hasLive = eval('(function () { ' + guardMatch[0] + '\n return hasLiveCalendarInstance; })()');

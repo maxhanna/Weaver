@@ -617,9 +617,9 @@ partial class AgentController
         var fuzzyAnchor = TryFuzzyAnchorRepair(normalized, oldStr, fileContent, targetLine, change);
         return fuzzyAnchor;
     }
-    private static string? TryAutoAppendMissingClosingBraces(string code)
+    private string? TryAutoAppendMissingClosingBraces(string code)
     {
-        if (string.IsNullOrWhiteSpace(code) || AgentEditHeuristics.IsBraceBalanced(code))
+        if (string.IsNullOrWhiteSpace(code) || StructureEditHeuristics.IsBraceBalanced(code))
             return null;
         var depth = 0;
         var inSingle = false;
@@ -716,7 +716,7 @@ partial class AgentController
         var formatted = await CodeFormatterService.FormatAsync(relPath, newStr, ct);
         if (string.IsNullOrWhiteSpace(formatted) || formatted == newStr)
             return null;
-        return AgentEditHeuristics.IsBraceBalanced(formatted) ? formatted : null;
+        return StructureEditHeuristics.IsBraceBalanced(formatted) ? formatted : null;
     }
     private string AutoFormatEditedRegion(string content, string appliedNewStr)
     {
@@ -1161,7 +1161,8 @@ partial class AgentController
         string preEditContent, string postEditContent, bool emitSse, CancellationToken ct,
         List<(int score, string reason, string failedNew)>? priorAttempts = null,
         string? explorationContext = null, AgentPlan? fullPlan = null,
-        int currentStepIndex = -1, string? causalContext = null, string? llmRoundLabel = null)
+        int currentStepIndex = -1, string? causalContext = null, string? llmRoundLabel = null,
+        AgentRunContext? runContext = null)
     {
         var anchor = newStr.Split('\n')
             .Select(l => l.Trim())
@@ -1231,7 +1232,7 @@ partial class AgentController
             var (raw, _, error) = await CallLlmRawStreaming(
                 sysPrompt, userMsg, emitSse, ct,
                 requestTimeout: _infiniteTimeout,
-                maxTokens: 256, llmRoundLabel: llmRoundLabel);
+                maxTokens: 256, llmRoundLabel: llmRoundLabel, runContext: runContext);
             if (string.IsNullOrWhiteSpace(raw))
                 return ("error", $"LLM returned empty response. {error}", 0, false);
             var cleaned = raw.Trim();

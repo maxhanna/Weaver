@@ -485,6 +485,7 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
           autoPr: vm.prByDefault !== false,
           selfImproving: false,
           createTests: false,
+          strictVerifier: false,
           llmEndpointId: ''
         });
         vm.saveCards();
@@ -894,6 +895,10 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
 
           // When moving back to To Do from done/doing/archived, clear feedback,
           // verification, and agent logs — but preserve the plan (agentAnalysis).
+          // NB: agentAnalysis is intentionally NOT deleted here (the comment and the
+          // kanban-move-card test both require it preserved for previous-analysis
+          // display); an earlier revision deleted it, contradicting the comment and
+          // breaking the "preserves agentAnalysis" test.
           if (to.toLowerCase() === 'todo') {
             delete card._feedback;
             delete card._feedbackSent;
@@ -926,8 +931,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             if (vm.streamingActive && vm.activeCardId === card.id) {
               vm.stopAgent(card);
             }
-            // Scroll to the card after moving it back to To Do
+            // Scroll to the card after moving it back to To Do. Guard against `document`
+            // being undefined so the same moveCard code can run in the dependency-free
+            // Node test harness (which evals this function without a DOM); in the browser
+            // the guard is a no-op and the scroll behaves exactly as before.
             $timeout(function () {
+              if (typeof document === 'undefined') return;
               var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
               if (cardElement) {
                 cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -956,8 +965,12 @@ angular.module('kanbanApp').factory('KanbanMixin', function ($window, $timeout, 
             if (card.filePath !== vm.selectedProject) {
               vm.activeCardId = null;
             }
-            // Scroll to the card after moving it back to To Do
+            // Scroll to the card after moving it back to To Do. Guard against `document`
+            // being undefined so the same drop-handler code can run in the dependency-free
+            // Node test harness (which evals this function without a DOM); in the browser
+            // the guard is a no-op and the scroll behaves exactly as before.
             $timeout(function () {
+              if (typeof document === 'undefined') return;
               var cardElement = document.querySelector('[data-card-id="' + card.id + '"]');
               if (cardElement) {
                 cardElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

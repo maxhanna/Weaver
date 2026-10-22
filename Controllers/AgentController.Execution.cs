@@ -133,8 +133,19 @@ partial class AgentController
         return full[(rootFull.Length + 1)..].Replace('\\', '/');
     }
 
-    private async Task ExecutePlan(
+    private Task ExecutePlan(
         string prompt, string projectRoot, bool emitSse, string discoveryContext,
+        AgentPlan plan, CancellationToken ct, List<object> allResults,
+        string? steeringContext = null, List<string>? attachedFiles = null,
+        HashSet<int>? completedStepIndices = null, string? cardId = null,
+        int[]? replanBudget = null,
+        Func<string, Task>? onActivity = null,
+        bool skipLlmPreResolution = false)
+        => ExecutePlanCore(new AgentRunContext(), prompt, projectRoot, emitSse, discoveryContext, plan, ct, allResults,
+            steeringContext, attachedFiles, completedStepIndices, cardId, replanBudget, onActivity, skipLlmPreResolution);
+
+    private async Task ExecutePlanCore(
+        AgentRunContext runContext, string prompt, string projectRoot, bool emitSse, string discoveryContext,
         AgentPlan plan, CancellationToken ct, List<object> allResults,
         string? steeringContext = null, List<string>? attachedFiles = null,
         HashSet<int>? completedStepIndices = null, string? cardId = null,
@@ -738,10 +749,10 @@ partial class AgentController
                     _terminal.Start();
                     var cs = new AgentStep { Index = 0, Type = "command", Command = cmd, Description = cmd };
                     var prevCount = allResults.Count;
-                    var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
+                    var cr = await ExecuteSteps(runContext, new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += cr.Count; allResults.AddRange(cr);
                     await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
-                    planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                    planItems = await TryReplanAfterStep(runContext, prompt, allResults, plan,
                         steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                         stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
                 }
@@ -802,7 +813,7 @@ partial class AgentController
                 if (dst != null)
                 {
                     var rs = new AgentStep { Index = 0, Type = "rename", Path = planFile, ToPath = dst, Description = $"Move {planFile} → {dst}" };
-                    var rr = await ExecuteSteps(new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
+                    var rr = await ExecuteSteps(runContext, new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
                     stepIndex += rr.Count; allResults.AddRange(rr);
                 }
                 await PersistBoardDataPlanStepAsync(cardId, itemIdx, emitSse, ct, projectRoot: projectRoot);
@@ -895,8 +906,8 @@ partial class AgentController
                 try
                 {
                     var prevSigCount = completedStepSignatures.Count;
-                    stepIndex = await ResolveAndApplyEdit(
-                        item, projectRoot, emitSse, ct, allResults, stepIndex,
+                    stepIndex = await ResolveAndApplyEditCore(
+                        runContext, item, projectRoot, emitSse, ct, allResults, stepIndex,
                         prompt: prompt, plan: plan, planItemIndex: itemIdx,
                         cardId: cardId, attachedFiles: attachedFiles,
                         onActivity: onActivity,
@@ -1169,7 +1180,7 @@ partial class AgentController
                 }
                 if (status != "skipped")
                 {
-                    planItems = await TryReplanAfterStep(prompt, allResults, plan,
+                    planItems = await TryReplanAfterStep(runContext, prompt, allResults, plan,
                         steeringContext, projectRoot, emitSse, ct, planItems, itemIdx,
                         stepSkipped, allResults.Count > prevCount, attachedFiles, replanBudget, cardId: cardId);
                 }
@@ -1200,7 +1211,7 @@ partial class AgentController
             if (!dst.Contains('/') && src.Contains('/'))
                 dst = src[..(src.LastIndexOf('/') + 1)] + dst;
             var rs = new AgentStep { Index = 0, Type = "rename", Path = src, ToPath = dst, Description = $"Rename {src} → {dst}" };
-            var rr = await ExecuteSteps(new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
+            var rr = await ExecuteSteps(new AgentRunContext(), new List<AgentStep> { rs }, projectRoot, stepIndex, emitSse, ct);
             stepIndex += rr.Count; allResults.AddRange(rr);
         }
         else await EmitLog(emitSse, "error", $"_rename: could not parse src/dst from: {changeDesc}", ct: ct);
@@ -1229,7 +1240,7 @@ partial class AgentController
         await EmitLog(emitSse, "info", $"Git: {gitCmd}", ct: ct);
         _terminal.Start();
         var gs = new AgentStep { Index = 0, Type = "command", Command = gitCmd, Description = gitCmd };
-        var gr = await ExecuteSteps(new List<AgentStep> { gs }, projectRoot, stepIndex, emitSse, ct);
+        var gr = await ExecuteSteps(new AgentRunContext(), new List<AgentStep> { gs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += gr.Count; allResults.AddRange(gr);
         return stepIndex;
     }
@@ -1249,7 +1260,7 @@ partial class AgentController
         await EmitLog(emitSse, "info", $"Ping: {pingCmd}", ct: ct);
         _terminal.Start();
         var cs = new AgentStep { Index = 0, Type = "command", Command = pingCmd, Description = pingCmd };
-        var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
+        var cr = await ExecuteSteps(new AgentRunContext(), new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += cr.Count; allResults.AddRange(cr);
         return stepIndex;
     }
@@ -1261,7 +1272,7 @@ partial class AgentController
         await EmitLog(emitSse, "info", $"Package install: {installCmd}", ct: ct);
         _terminal.Start();
         var cs = new AgentStep { Index = 0, Type = "command", Command = installCmd, Description = installCmd };
-        var cr = await ExecuteSteps(new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
+        var cr = await ExecuteSteps(new AgentRunContext(), new List<AgentStep> { cs }, projectRoot, stepIndex, emitSse, ct);
         stepIndex += cr.Count; allResults.AddRange(cr);
         return stepIndex;
     }

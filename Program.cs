@@ -149,6 +149,10 @@ builder.Services.AddHttpClient("llama", client =>
     client.Timeout = TimeSpan.FromMinutes(30);
 });
 builder.Services.AddSingleton<AiServerDiscoveryService>();
+builder.Services.AddSingleton<IContentEditHeuristic, ContentEditHeuristic>();
+builder.Services.AddSingleton<IFormattingEditHeuristic, FormattingEditHeuristic>();
+builder.Services.AddSingleton<IStructureEditHeuristic, StructureEditHeuristic>();
+builder.Services.AddSingleton<IAnchorEditHeuristic, AnchorEditHeuristic>();
 builder.Services.AddControllers();
 builder.Services.AddSingleton<BoardDataService>(sp =>
 {

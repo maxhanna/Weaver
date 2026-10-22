@@ -39,6 +39,24 @@ public partial class AgentController : ControllerBase
     private readonly PushNotificationService _push;
     private readonly DatabaseService _db;
     private readonly AiServerDiscoveryService _aiDiscovery;
+    private ILlmClient LlmTransport => new LlmClient(
+        _clientFactory,
+        LoadConfigAsync,
+        () => _infiniteTimeout,
+        async (token, ct) => await SendSse(Response, "token", new { token }, ct),
+        async (progress, percent, ct) => await SendSse(Response, "progress", new { progress, percent }, ct));
+    private IContentEditHeuristic? _contentEditHeuristics;
+    private IContentEditHeuristic ContentEditHeuristics =>
+        _contentEditHeuristics ??= new ContentEditHeuristic();
+    private IFormattingEditHeuristic? _formattingEditHeuristics;
+    private IFormattingEditHeuristic FormattingEditHeuristics =>
+        _formattingEditHeuristics ??= new FormattingEditHeuristic();
+    private IStructureEditHeuristic? _structureEditHeuristics;
+    private IStructureEditHeuristic StructureEditHeuristics =>
+        _structureEditHeuristics ??= new StructureEditHeuristic();
+    private IAnchorEditHeuristic? _anchorEditHeuristics;
+    private IAnchorEditHeuristic AnchorEditHeuristics =>
+        _anchorEditHeuristics ??= new AnchorEditHeuristic(StructureEditHeuristics);
     // Builds + runs KNOWN-GOOD scraper scripts for the host environment (OS, interpreters,
     // installed scraping packages) when _web_fetch keeps failing — the "_scraper" fallback
     // step. Tests swap this via reflection with a fake runner.
@@ -64,45 +82,21 @@ public partial class AgentController : ControllerBase
         }
         return _cfgCache;
     }
+    // Connectivity freshness is process-wide; the result observed by a run is stored in its
+    // AgentRunContext. The remaining fields below are legacy reflection adapters only.
+    // Legacy reflection adapters for the pre-context private helpers. Production code never
+    // reads these fields; they preserve the existing test seam while run state stays explicit.
+#pragma warning disable CS0649, CS0414
     private bool _lastConnectionCheckResult = true;
-    private bool _gracefulStop;
-    // Chars of the discovery context occupied by the project skeleton (layout + architecture
-    // note), captured when the skeleton section is built so the context-breakdown pop can show
-    // the skeleton as its own row with a real token estimate.
+    private readonly List<object> _discoverySteps = new();
     private int _skeletonContextChars;
-    // The extracted EXPLICIT REQUIREMENTS CHECKLIST for the current run. NEVER appended to the
-    // task `prompt` — the prompt feeds TaskHintsWebNeed / ConfirmWebNeedAsync / the OS-task
-    // classifier and the fetch-in-command guard, and checklist wording ("search", "fetch",
-    // "current", "latest") can trip the broad web hints and hijack a plain code run into a
-    // web task. Threaded into the PLANNER prompts only (incremental user prompt, classic plan
-    // user prompt, replan prompt) so the planner still verifies each requirement.
     private string? _requirementChecklist;
-    // Chars of the planner's TASK input (the raw user prompt + the extracted requirement
-    // checklist, when present) — shown as its own row in the context-breakdown pop so the
-    // categories cover every part of what the LLM sees, instead of the task being swallowed
-    // by the "headers / steering / other" residual (the checklist itself never enters the
-    // discovery context, so neither does its share). Set once per run in StepResolutionPipeline.
     private int _taskPromptContextChars;
-    // Estimated token spend of LABELED LLM rounds (planner, verify, replan, assessment,
-    // command steps) accumulated since the last step result was emitted. Attached to step
-    // results as "llmTokens" so the agent panel shows per-step spend (planning + verification
-    // rounds), not just the discovery context. Reset at run start in StepResolutionPipeline.
-    private int _stepLlmPromptTokens;
-    private int _stepLlmResponseTokens;
-    private int _stepLlmCalls;
-    // RUN-level cumulative LLM spend (never reset mid-run) — the live "tokens currently in
-    // use" counter. The discovery-context counter alone is meaningless on OS/benchmark tasks
-    // whose sandbox holds no files (context ≈ 0 tokens) even while every planner round burns
-    // thousands of prompt+response tokens; this total is what the run actually cost. Emitted
-    // on every context SSE event so the agent panel shows it growing in real time. Reset at
-    // run start in StepResolutionPipeline alongside the per-step accumulators.
-    private int _runLlmPromptTokens;
-    private int _runLlmResponseTokens;
-    private int _runLlmCalls;
-    // Phase-1 discovery steps (read results), used to build the live context breakdown as the
-    // discovery context grows during execution.
-    private List<object> _discoverySteps = new();
+#pragma warning restore CS0649
+    private AgentRunContext? _legacyRunContext;
+    private AgentRunContext LegacyRunContext => _legacyRunContext ??= new();
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
+    private static bool _cachedConnectionCheckResult = true;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
     private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
     private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
@@ -135,11 +129,19 @@ public partial class AgentController : ControllerBase
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
         ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
-        PushNotificationService push, DatabaseService db, AiServerDiscoveryService aiDiscovery)
+        PushNotificationService push, DatabaseService db, AiServerDiscoveryService aiDiscovery,
+        IContentEditHeuristic? contentEditHeuristics = null,
+        IFormattingEditHeuristic? formattingEditHeuristics = null,
+        IStructureEditHeuristic? structureEditHeuristics = null,
+        IAnchorEditHeuristic? anchorEditHeuristics = null)
     {
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
         _boardData = boardData; _push = push; _db = db; _aiDiscovery = aiDiscovery;
+        _contentEditHeuristics = contentEditHeuristics;
+        _formattingEditHeuristics = formattingEditHeuristics;
+        _structureEditHeuristics = structureEditHeuristics;
+        _anchorEditHeuristics = anchorEditHeuristics;
         // Wire the per-endpoint stream-health tracker to SQLite so badges reflect
         // reliability across app restarts, not just the current session. The static
         // hooks capture this controller's DatabaseService (same singleton in DI).
@@ -188,16 +190,15 @@ public partial class AgentController : ControllerBase
     /// </summary>
     private async Task RecordLlmRoundMetricsAsync(string? label, string systemPrompt, string userMessage,
         string? raw, bool emitSse, CancellationToken ct)
+        => await RecordLlmRoundMetricsForRunAsync(LegacyRunContext, label, systemPrompt, userMessage, raw, emitSse, ct);
+
+    private async Task RecordLlmRoundMetricsForRunAsync(AgentRunContext runContext, string? label, string systemPrompt,
+        string userMessage, string? raw, bool emitSse, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(label)) return;
         var promptTokens = AgentTokenMetrics.EstimateTokens(systemPrompt) + AgentTokenMetrics.EstimateTokens(userMessage);
         var responseTokens = AgentTokenMetrics.EstimateTokens(raw ?? "");
-        _stepLlmPromptTokens += promptTokens;
-        _stepLlmResponseTokens += responseTokens;
-        _stepLlmCalls++;
-        _runLlmPromptTokens += promptTokens;
-        _runLlmResponseTokens += responseTokens;
-        _runLlmCalls++;
+        runContext.RecordLlmRound(promptTokens, responseTokens);
         await EmitLog(emitSse, "metric",
             $"📊 LLM round [{label}]: ~{promptTokens:N0} prompt + ~{responseTokens:N0} response = ~{(promptTokens + responseTokens):N0} tokens",
             ct: ct);
@@ -208,38 +209,16 @@ public partial class AgentController : ControllerBase
     /// "tokens used" counter on the agent panel — distinct from the per-step snapshot and
     /// from the discovery-context size. Returns null when no labeled LLM round has run yet.
     /// </summary>
-    private object? RunLlmSpend()
-    {
-        if (_runLlmCalls == 0) return null;
-        return new
-        {
-            calls = _runLlmCalls,
-            promptTokens = _runLlmPromptTokens,
-            responseTokens = _runLlmResponseTokens,
-            totalTokens = _runLlmPromptTokens + _runLlmResponseTokens
-        };
-    }
+    private object? RunLlmSpend() => _legacyRunContext?.SnapshotRunLlmSpend();
+    private static object? RunLlmSpendForRun(AgentRunContext runContext) => runContext.SnapshotRunLlmSpend();
 
     /// <summary>
     /// Snapshots and clears the per-step LLM token accumulator, for attaching to the step
     /// result the panel renders ("llmTokens": { calls, promptTokens, responseTokens,
     /// totalTokens }). Returns null when no labeled LLM rounds happened since the last step.
     /// </summary>
-    private object? TakeStepLlmMetrics()
-    {
-        if (_stepLlmCalls == 0) return null;
-        var metrics = new
-        {
-            calls = _stepLlmCalls,
-            promptTokens = _stepLlmPromptTokens,
-            responseTokens = _stepLlmResponseTokens,
-            totalTokens = _stepLlmPromptTokens + _stepLlmResponseTokens
-        };
-        _stepLlmCalls = 0;
-        _stepLlmPromptTokens = 0;
-        _stepLlmResponseTokens = 0;
-        return metrics;
-    }
+    private object? TakeStepLlmMetrics() => _legacyRunContext?.TakeStepLlmMetrics();
+    private static object? TakeStepLlmMetricsForRun(AgentRunContext runContext) => runContext.TakeStepLlmMetrics();
 
     /// <summary>
     /// Emits a distinct 'rejected' log entry for a rejected step/proposal. Renders as its
@@ -657,6 +636,10 @@ public partial class AgentController : ControllerBase
                 await EmitLog(true, "info", "Benchmark sandbox active", new { sandbox = projectRoot });
                 await SendSse(Response, "phase", new { phase = "sandbox", sandbox = projectRoot }, ct: Response.HttpContext.RequestAborted);
             }
+            // Resolve the strict-verifier mode: a card's explicit StrictVerifier value wins;
+            // when the card omitted it (null), fall back to the project-wide default
+            // (defaultStrictVerifier). Stays null when neither is set → legacy behavior.
+            var resolvedStrictVerifier = req.StrictVerifier ?? (await LoadConfigAsync()).defaultStrictVerifier;
             var (allSteps, plan, complete) = await Orchestrate(
                 req.Prompt, projectRoot, emitSse: true,
                 ct: Response.HttpContext.RequestAborted,
@@ -667,6 +650,7 @@ public partial class AgentController : ControllerBase
                 cardId: req.CardId,
                 createTests: req.CreateTests,
                 buildCommands: req.BuildCommands,
+                strictVerifier: resolvedStrictVerifier,
                 webResults: loadedWebResults);
             var filesEdited = ExtractFilesEdited(allSteps);
             var editsApplied = AgentProjectUtilities.HasSuccessfulEdits(allSteps);
@@ -1709,18 +1693,24 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
         }
         return false;
     }
-    private async Task<bool> CheckLlmConnectivity(string projectRoot, bool emitSse, CancellationToken ct)
+    // _nextConnectivityCheck holds the EXPIRY instant of the cached verdict (set to now + 5 min
+    // after a probe). The cache is fresh only while utcNow is still before that instant.
+    internal static bool IsConnectivityCacheFresh(DateTime expiresAtUtc, DateTime utcNow) =>
+        expiresAtUtc != DateTime.MinValue && utcNow < expiresAtUtc;
+
+    private async Task<bool> CheckLlmConnectivity(AgentRunContext runContext, string projectRoot, bool emitSse, CancellationToken ct)
     {
-        if (_nextConnectivityCheck != DateTime.MinValue &&
-            DateTime.UtcNow - _nextConnectivityCheck < TimeSpan.FromMinutes(5))
+        if (IsConnectivityCacheFresh(_nextConnectivityCheck, DateTime.UtcNow))
         {
             await EmitLog(emitSse, "info", "Skipping connectivity check (cached)", ct: ct);
-            return _lastConnectionCheckResult;
+            runContext.LastConnectionCheckResult = _cachedConnectionCheckResult;
+            return runContext.LastConnectionCheckResult;
         }
         var baseUrl = await GetLlamaBaseUrl();
-        _lastConnectionCheckResult = await CheckForConnectivity(projectRoot, emitSse, baseUrl, ct);
+        runContext.LastConnectionCheckResult = await CheckForConnectivity(projectRoot, emitSse, baseUrl, ct);
+        _cachedConnectionCheckResult = runContext.LastConnectionCheckResult;
         _nextConnectivityCheck = DateTime.UtcNow.AddMinutes(5);
-        return _lastConnectionCheckResult;
+        return runContext.LastConnectionCheckResult;
     }
     private async Task<bool> CheckForConnectivity(
         string projectRoot, bool emitSse, string baseUrl, CancellationToken ct)
@@ -1731,7 +1721,7 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
             ? $"powershell -Command \"Test-NetConnection {uri.Host} -Port {uri.Port} -WarningAction SilentlyContinue | Select-Object TcpTestSucceeded | Format-List\""
             : $"nc -zv -w 2 {uri.Host} {uri.Port} 2>&1";
         var step = new AgentStep { Index = 0, Type = "command", Command = tcpCmd, Description = "TCP Check" };
-        var results = await ExecuteSteps(new List<AgentStep> { step }, projectRoot, 0, emitSse, ct);
+        var results = await ExecuteSteps(new AgentRunContext(), new List<AgentStep> { step }, projectRoot, 0, emitSse, ct);
         var first = results.FirstOrDefault() as Dictionary<string, object?>;
         var output = first?.TryGetValue("output", out var o) == true ? o?.ToString() ?? "" : "";
         var succeeded = output.Contains("TcpTestSucceeded : True", StringComparison.OrdinalIgnoreCase) ||

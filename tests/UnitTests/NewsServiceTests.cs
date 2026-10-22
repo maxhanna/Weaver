@@ -504,10 +504,15 @@ public class NewsServiceTests
 
     private static AgentController BuildRoutingController(IHttpClientFactory factory, string baseDir)
     {
+        // Unique per construction (matches the weaver_webtask_<guid> pattern used by the
+        // other DB-backed test classes). A shared fixed temp DB is reopened across runs and
+        // its stale WAL/-shm sidecars made DatabaseService's init fail transiently with
+        // SQLite Error 10 'disk I/O error' under full-suite parallel load (2 of 5 runs).
+        var dir = Path.Combine(baseDir, "weaver_news_" + Guid.NewGuid().ToString("N"));
         var db = new DatabaseService(
-            Path.Combine(baseDir, "weaver_news_", "weaver.db"),
-            Path.Combine(baseDir, "weaver_news_"),
-            Path.Combine(baseDir, "weaver_news_", "weaverconfig.json"));
+            Path.Combine(dir, "weaver.db"),
+            dir,
+            Path.Combine(dir, "weaverconfig.json"));
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["Editor:DisableLLMRetries"] = "true" })
             .Build();

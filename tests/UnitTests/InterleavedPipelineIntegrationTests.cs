@@ -186,7 +186,7 @@ public class InterleavedPipelineIntegrationTests : IDisposable
             /*attachedFiles*/ new List<string> { HtmlRel, TsRel },
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }
