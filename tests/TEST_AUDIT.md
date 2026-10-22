@@ -380,13 +380,18 @@ Concrete, prioritized. These are the weakest spots found in the sweep.
     for. The corpus-loop shape is right; grow it rather than adding more one-off traces.
 
 ### 4.5 Fuzz discipline is strong in the edit layer, absent elsewhere
-- The seeded-RNG `FuzzHarness` guards are used by the CSS/HTML/AST/format corpora — the
+- The seeded-RNG `FuzzHarness` guards are used by the CSS/HTML/AST/format corpora - the
   strongest part of the suite. But the same corpus-vs-hand-picked gap exists for the
-  **verification layer**: `PostExecuteVerifyTests` and `TemplateBindingValidatorTests`
-  are hand-picked only; a seeded fuzz sweep of random templates against
-  `ExtractComponentMembers`/`ExtractTemplateSymbols` would lock the false-positive
-  regression class that has already bitten twice (the `#keywordsInput`/`parentRef`
-  false positives, the `s.departure.ested` hallucination).
+  **verification layer**: `PostExecuteVerifyTests` is hand-picked only.
+  ~~`TemplateBindingValidatorTests` is hand-picked only~~ **Done**:
+  `TemplateBindingValidatorFuzzTests` sweeps 620 seeded docs through
+  `ExtractComponentMembers`/`ExtractTemplateSymbols`/`ValidateTemplateBindings` (never
+  throws, deterministic, declared members never flagged across 14 binding-shape
+  families, root-only chains/pipes/loop-locals/template-refs, undeclared roots still
+  flagged) - and caught two residual false-positive classes on its first run (bare
+  `#ref` declarations invisible to the attr regex but extractable via later references;
+  `*ngIf="expr as alias"` aliases leaking as component symbols). Both extractor fixes
+  are in the same commit.
 
 ### 4.6 Some suites test the extracted helper rather than the wiring
 - `AnchorSanityTests`, `BetweenStepsVerificationTests`, `ExternalFilesystemTaskTests`

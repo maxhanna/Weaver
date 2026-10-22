@@ -275,13 +275,33 @@ public static class TemplateBindingValidator
         var symbols = new List<string>();
         var locals = new HashSet<string>(StringComparer.Ordinal);
         var cleaned = Regex.Replace(html, @"<!--[\s\S]*?-->", " ");
+        // Bare template reference declarations (#x / ref-x, usually value-less) are invisible
+        // to _attrRegex (it only matches name="value" pairs), yet later references to them
+        // inside binding expressions must not extract as component symbols — the residual
+        // #keywordsInput false positive. Scan for the declarations outside string literals
+        // (so href="#anchor" never seeds a local).
+        var refScan = _stringLiteralRegex.Replace(cleaned, " ");
+        foreach (Match m in Regex.Matches(refScan, @"(?<=[\s""'<])#([A-Za-z_$][\w$]*)(?![\w$-])"))
+            locals.Add(m.Groups[1].Value);
+        foreach (Match m in Regex.Matches(refScan, @"\bref-([A-Za-z_$][\w$]*)(?![\w$-])"))
+            locals.Add(m.Groups[1].Value);
         foreach (Match m in _attrRegex.Matches(cleaned))
         {
             var name = m.Groups["name"].Value.Trim();
             var value = m.Groups["value"].Value;
             var lower = name.ToLowerInvariant();
-            if (lower.StartsWith("let-", StringComparison.Ordinal) || name.StartsWith('#'))
-                continue; // template context var / template reference — not component symbols
+            if (lower.StartsWith("let-", StringComparison.Ordinal) || name.StartsWith('#')
+                || lower.StartsWith("ref-", StringComparison.Ordinal))
+            {
+                // Template reference variables (#x / ref-x) and let- context vars are
+                // template-scoped: LATER references to them inside binding expressions are
+                // not component symbols. (Residual of the #keywordsInput false positive:
+                // the declaration was skipped, but a later keywordsInput.value reference
+                // still extracted the ref name as a component root and got flagged.)
+                if (name.StartsWith('#')) locals.Add(name.Substring(1));
+                else locals.Add(name.Substring(4));
+                continue;
+            }
             if (lower.StartsWith("*ngfor", StringComparison.Ordinal))
             {
                 AddSymbolsFromLoop(value, symbols, locals);
@@ -383,6 +403,14 @@ public static class TemplateBindingValidator
     private static void AddSymbolsFromExpr(string expr, List<string> symbols, HashSet<string> locals)
     {
         var cleaned = _stringLiteralRegex.Replace(expr, " ");
+        // Trailing 'expr as alias' microsyntax (*ngIf / @if): the alias is template-scoped,
+        // never a component symbol — same treatment the loop path already gives 'as'.
+        var asMatch = Regex.Match(cleaned, @"\s+as\s+([A-Za-z_$][\w$]*)\s*$");
+        if (asMatch.Success)
+        {
+            locals.Add(asMatch.Groups[1].Value);
+            cleaned = cleaned.Substring(0, asMatch.Index);
+        }
         var isPipeTarget = false;
         foreach (var segment in cleaned.Split('|'))
         {
