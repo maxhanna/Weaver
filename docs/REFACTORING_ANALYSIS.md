@@ -331,8 +331,15 @@ controller's dependency count drops from 25 to the handful of services it orches
   suggestion Cts + tombstones + gate lock, executing-card gate), injected into the
   controller. Retires the `SetStaticField` dance AND the parallel-test bleed from
   tests mutating process-global maps.
-- [ ] Move the per-run endpoint leftovers (`_runBaseUrl`, `_runModel`) into
-  `AgentRunContext` — run state, not controller state.
+- [x] ~~Move the per-run endpoint leftovers (`_runBaseUrl`, `_runModel`) into
+  `AgentRunContext` — run state, not controller state.~~ **Examined and deliberately
+  rejected.** They are written by the HTTP endpoint (`Execute` / the streaming endpoint)
+  BEFORE `Orchestrate` constructs a run context, and controllers are transient — one
+  instance per request — so the field lifetime already equals the run lifetime. Moving
+  them would thread a context through 11+ deep call sites (`GetLlamaBaseUrl`/`GetLlamaModel`
+  are called from `Llm`, `Discovery`, `Execution` and the two endpoints) for zero
+  correctness change. That fails this section's own test (=4). Re-open only if a future
+  change makes a controller serve more than one execution.
 - [x] ~~Move the 13 `static`/`ConcurrentDictionary` fields into a scoped `RunRegistry`
   (per-run) or `CardSessionStore` (per-card), injected.~~ Partly subsumed: per-run
   state went to `AgentRunContext` in `6fea28d`; the cross-request half is the item
