@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http.Features;
 using System.Collections.Concurrent;
 using System.Text;
@@ -87,38 +87,33 @@ public partial class AgentController : ControllerBase
     private static DateTime _nextConnectivityCheck = DateTime.MinValue;
     private static bool _cachedConnectionCheckResult = true;
     private static TimeSpan _infiniteTimeout = Timeout.InfiniteTimeSpan;
-    private static readonly ConcurrentDictionary<string, PendingQuestion> _pendingQuestions = new();
-    private static readonly ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews = new();
-    private static readonly ConcurrentDictionary<string, HashSet<int>> _cancelledSteps = new();
-    // Live steering messages posted to POST api/agent/steer while a card is RUNNING, keyed
-    // by cardId. The incremental planner drains the pending message on its next turn and
-    // merges it into the persistent steering context (consumed once, never re-applied). The
-    // latest message wins — repeated steers overwrite, they never queue.
-    private static readonly ConcurrentDictionary<string, string> _liveSteer = new();
-    private static readonly ConcurrentDictionary<string, StringBuilder> _stepThinkingStore = new();
-    private static readonly ConcurrentDictionary<string, int> _complexityScores = new();
-    private static readonly ConcurrentDictionary<string, int> _atomicStepEstimates = new();
-    // Server-side abort handles for in-flight suggestion generations, keyed by cardId.
-    // The front end POSTs suggest-improvements/cancel when a card stops being a completed
-    // card (moved back to To Do, text edited, another card started) so the running LLM
-    // call is cancelled and stops burning tokens. _suggestionCancelled is a tombstone set
-    // for cancels that arrive BEFORE the generation request registers its handle (the
-    // request is still building its prompt/context) — the registration consumes it and
-    // skips the LLM call entirely.
-    private static readonly object SuggestionGateLock = new();
-    private static readonly Dictionary<string, CancellationTokenSource> _suggestionCts = new();
-    private static readonly HashSet<string> _suggestionCancelled = new();
-    // Executions currently running ("card:<cardId>" or "anon:<guid>" → started ticks).
-    // Any entry means the board is NOT idle: Done-card suggestion generation must not start,
-    // and the moment a run starts every in-flight generation is aborted server-side — the
-    // suggestion system only ever works while the system is completely idle. The completion
-    // request for the card that JUST finished is exempt (its run is winding down).
-    private static readonly ConcurrentDictionary<string, long> _executingCards = new();
+    // Card-scoped, cross-request state lives in the injected CardSessionStore (a singleton)
+    // rather than in `static` fields: a steer/cancel/answer arrives on a DIFFERENT request
+    // than the one running the pipeline, so the state must outlive a single request — but it
+    // must not be process-global state that tests mutate for every other parallel test. These
+    // forwarding properties keep the call sites unchanged.
+    private ConcurrentDictionary<string, PendingQuestion> _pendingQuestions => Store.PendingQuestions;
+    private ConcurrentDictionary<string, PendingContextReview> _pendingContextReviews => Store.PendingContextReviews;
+    private ConcurrentDictionary<string, HashSet<int>> _cancelledSteps => Store.CancelledSteps;
+    private ConcurrentDictionary<string, string> _liveSteer => Store.LiveSteer;
+    private ConcurrentDictionary<string, StringBuilder> _stepThinkingStore => Store.StepThinkingBuffers;
+    private ConcurrentDictionary<string, int> _complexityScores => Store.ComplexityScores;
+    private ConcurrentDictionary<string, int> _atomicStepEstimates => Store.AtomicStepEstimates;
+    private object SuggestionGateLock => Store.SuggestionGateLock;
+    private Dictionary<string, CancellationTokenSource> _suggestionCts => Store.SuggestionCts;
+    private HashSet<string> _suggestionCancelled => Store.SuggestionCancelled;
+    private ConcurrentDictionary<string, long> _executingCards => Store.ExecutingCards;
+    // Injected singleton in production. Left null by reflection-constructed test
+    // controllers (RuntimeHelpers.GetUninitializedObject), which then get a private
+    // per-instance store via Store — so no test can touch another test's card state.
+    private CardSessionStore? _sessions;
+    private CardSessionStore Store => _sessions ??= new CardSessionStore();
     public AgentController(
         IHttpClientFactory cf, IConfiguration config,
         IWebHostEnvironment env, TerminalService terminal, FileHintsManager fileHints,
         ConfigFileService configFile, EmailService emailService, BoardDataService boardData,
         PushNotificationService push, DatabaseService db, AiServerDiscoveryService aiDiscovery,
+        CardSessionStore sessions,
         IContentEditHeuristic? contentEditHeuristics = null,
         IFormattingEditHeuristic? formattingEditHeuristics = null,
         IStructureEditHeuristic? structureEditHeuristics = null,
@@ -127,6 +122,7 @@ public partial class AgentController : ControllerBase
         _clientFactory = cf; _config = config; _env = env; _terminal = terminal;
         _fileHints = fileHints; _configFile = configFile; _emailService = emailService;
         _boardData = boardData; _push = push; _db = db; _aiDiscovery = aiDiscovery;
+        _sessions = sessions;
         _contentEditHeuristics = contentEditHeuristics;
         _formattingEditHeuristics = formattingEditHeuristics;
         _structureEditHeuristics = structureEditHeuristics;
@@ -1234,7 +1230,7 @@ If nothing meaningful remains, reply with an empty array [] — never invent wor
     /// run was started from another client. Each request's finally removes its own
     /// registration from <see cref="_suggestionCts"/>.
     /// </summary>
-    private static void AbortAllInFlightSuggestions(string reason)
+    private void AbortAllInFlightSuggestions(string reason)
     {
         lock (SuggestionGateLock)
         {

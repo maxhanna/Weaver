@@ -316,16 +316,69 @@ is exactly what retires the reflection-test coupling.
 After Phase 1, `AgentController` shrinks to ~HTTP + SSE wiring that delegates; the
 controller's dependency count drops from 25 to the handful of services it orchestrates.
 
-### Phase 2 — Kill the static state (correctness)
+### Phase 2 — Kill the static state (correctness) — **SCOPED, see §4.1**
 
-- [ ] Move the 13 `static`/`ConcurrentDictionary` fields into a scoped `RunRegistry`
-  (per-run) or `CardSessionStore` (per-card), injected. Fixes the cross-request hazard
-  and removes the test `SetStaticField` dance.
+> Scope after measurement (see §4.1): only the CROSS-REQUEST RENDEZVOUS state.
+> `AgentRunContext` already owns per-run state; the remaining statics are keyed by
+> cardId because a steer/cancel/answer arrives on a *different* request than the
+> running pipeline (controllers are transient). They must stay process-lifetime —
+> the defect is that they are `static` GLOBALS, not that they are shared. Move them
+> behind one injected singleton so each test instance gets its own store instead of
+> mutating process-global state.
+
+- [ ] Extract a `CardSessionStore` singleton (pending questions/context reviews,
+  cancelled steps, live steer, step-thinking buffers, complexity estimates,
+  suggestion Cts + tombstones + gate lock, executing-card gate), injected into the
+  controller. Retires the `SetStaticField` dance AND the parallel-test bleed from
+  tests mutating process-global maps.
+- [ ] Move the per-run endpoint leftovers (`_runBaseUrl`, `_runModel`) into
+  `AgentRunContext` — run state, not controller state.
+- [x] ~~Move the 13 `static`/`ConcurrentDictionary` fields into a scoped `RunRegistry`
+  (per-run) or `CardSessionStore` (per-card), injected.~~ Partly subsumed: per-run
+  state went to `AgentRunContext` in `6fea28d`; the cross-request half is the item
+  above. Deliberately process-wide statics stay static: the connectivity cache, the
+  `AsyncLocal` step index, and the SSE write lock.
 
 ### Phase 3 — Front-end
 
 - [ ] **Split `meeting.js`** into `meeting-ui.js`, `meeting-ticker.js`,
   `meeting-spider.js`, `meeting-state.js`. No compile risk, big DX win.
+
+---
+
+## 4.1 Where extraction stops (decided after Phase 0/1 landed)
+
+The god-class problem was never line count. It was three things: shared mutable state
+with the wrong lifetime, untestable seams, and unbounded growth. Phase 0/1 addressed the
+middle two (`AgentRunContext`, the heuristic-family split, `LlmClient`, the retired
+legacy reflection seam) and the size ratchet contains the third. The remaining partials
+are **orchestration**, and moving orchestration behind an interface changes indirection
+without changing ownership.
+
+**Extract only if at least one holds:**
+1. the unit would own state with a lifetime different from the request (correctness), or
+2. a real second caller exists or is imminent (reuse), or
+3. it becomes testable in isolation *and* those tests will actually be written, or
+4. the boundary is narrow — data in, data out, no `Response`/SSE leakage.
+
+Measured against that, the rest of Phase 1 is a stop:
+
+| Partial | Lines | SSE/HTTP refs | Verdict |
+|---|---|---|---|
+| `.Llm.cs` residue | 513 | streaming glue | **Stop.** `LlmClient` is the right seam; the residue is stream-window orchestration + per-run endpoint fields. Extracting it leaks SSE primitives into a service. The endpoint fields belong in `AgentRunContext` (Phase 2 item). |
+| `.Formatting.cs` | 1921 | 22 | **Don't extract — rename.** It is persistence/publishing (`PersistWebResultsToCardAsync`, `PublishVerificationAsync`, `PublishTaskKindAsync`), not formatting. Pure orchestration over `_boardData`/`_push`. |
+| `.BrowserTest.cs` | 774 | 23 | Already thin delegation over the browser services. |
+| `.Terminal.cs` | 828 | low | Single caller, no shared state: a static helper at most; a DI service adds nothing. |
+| `.Planning` / `.Pipeline` / `.EditResolution` / `.ApplyEdit` / `.Execution` / `.Discovery` | 4668 / 2473 / 2575 / 2430 / 2025 / 2092 | 135 / 84 / 106 / 86 / 75 | **The big skip.** Orchestration, single caller, behavior already pinned end-to-end by the scripted-pipeline harnesses; extracting means threading an emitter through thousands of lines to move code behind an interface. Per §4.6 of the test audit, indirection can also *hide* wiring breaks. |
+
+So the roadmap's "`AgentPlanner` last" is reclassified from *last* to *only on trigger*.
+Re-open triggers: a genuine second caller, a state-lifetime bug traced to a partial, or a
+hard testability wall. Absent one of those, further extraction is negative value: after
+Phase 2 the controller is ~28k lines of orchestrated partials with explicit run state,
+and that is a reasonable place to live.
+
+**Phase 3 remains worthwhile** — splitting `meeting.js` is frontend DX, a different track
+with no compile risk.
 
 ---
 
@@ -338,9 +391,12 @@ controller's dependency count drops from 25 to the handful of services it orches
 
 ## 6. Next steps
 
-1. Pick Phase 0's `AgentRunContext` extract as the first concrete commit — it's the
-   safest, highest-leverage move and unblocks cleaner tests for everything that follows.
+1. ~~Pick Phase 0's `AgentRunContext` extract as the first concrete commit.~~ Done
+   (`6fea28d`). Phase 0/1's real wins are in: run context, heuristic split, `LlmClient`,
+   `AgentPlanningPolicy`, legacy seam removed. **Phase 1 stops here — see §4.1.**
 2. Re-measure the controller aggregate after each phase to confirm the line/dependency
    counts actually drop (the metric is the proof the refactor worked).
 3. Keep the "one extract per commit, tests green" discipline that held for the
    StrictVerifier + CI work.
+4. **Next concrete work: scoped Phase 2** (`CardSessionStore` + per-run endpoint fields),
+   then Phase 3 (`meeting.js`), then stop.

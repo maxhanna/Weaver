@@ -17,7 +17,13 @@ public class AgentControllerSizeBudgetTests
 {
     // Total lines across Controllers/AgentController*.cs at the time the ratchet was added,
     // counted the same way the test counts (File.ReadAllLines, not wc -l).
-    private const int BaselineLines = 28403;
+    //
+    // Note: shrinking this number is welcome but NOT the goal. Per
+    // docs/REFACTORING_ANALYSIS.md §4.1 ("Where extraction stops"), the remaining partials
+    // are orchestration with a single caller; further extraction would add indirection
+    // without changing state ownership. The ratchet exists to stop GROWTH, not to drive
+    // extraction — do not split a partial just to buy budget here.
+    private const int BaselineLines = 28399;
 
     private static string FindRepoRoot()
     {

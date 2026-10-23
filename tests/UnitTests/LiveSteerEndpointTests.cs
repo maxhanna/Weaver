@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -80,8 +80,6 @@ public class LiveSteerEndpointTests : IDisposable
     public void Dispose()
     {
         _clientFactory.Dispose();
-        LiveSteer().Clear();
-        ExecutingCards().Clear();
         try { Directory.Delete(_base, true); } catch { }
     }
 
@@ -91,13 +89,13 @@ public class LiveSteerEndpointTests : IDisposable
     public void Steer_StoresMessage_AndReportsActiveForExecutingCard()
     {
         var controller = MakeController();
-        ExecutingCards()["card:steer-1"] = DateTime.UtcNow.Ticks; // run in flight
+        ExecutingCards(controller)["card:steer-1"] = DateTime.UtcNow.Ticks; // run in flight
 
         var result = controller.SteerRun(new SteerRequest { CardId = "steer-1", Message = LiveSteerMessage });
 
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Contains("\"active\":true", JsonSerializer.Serialize(ok.Value));
-        Assert.Equal(LiveSteerMessage, LiveSteer()["steer-1"]);
+        Assert.Equal(LiveSteerMessage, LiveSteer(controller)["steer-1"]);
     }
 
     [Fact]
@@ -111,7 +109,7 @@ public class LiveSteerEndpointTests : IDisposable
 
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Contains("\"active\":false", JsonSerializer.Serialize(ok.Value));
-        Assert.Equal("hold the first step", LiveSteer()["steer-2"]);
+        Assert.Equal("hold the first step", LiveSteer(controller)["steer-2"]);
     }
 
     [Fact]
@@ -122,7 +120,7 @@ public class LiveSteerEndpointTests : IDisposable
         controller.SteerRun(new SteerRequest { CardId = "steer-3", Message = "first message" });
         controller.SteerRun(new SteerRequest { CardId = "steer-3", Message = "second message" });
 
-        Assert.Equal("second message", LiveSteer()["steer-3"]);
+        Assert.Equal("second message", LiveSteer(controller)["steer-3"]);
     }
 
     [Fact]
@@ -139,11 +137,11 @@ public class LiveSteerEndpointTests : IDisposable
         var result = controller.SteerRun(new SteerRequest { CardId = cardId, Message = LiveSteerMessage });
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Contains("\"active\":false", JsonSerializer.Serialize(ok.Value));
-        Assert.Equal(LiveSteerMessage, LiveSteer()[cardId]);
+        Assert.Equal(LiveSteerMessage, LiveSteer(controller)[cardId]);
 
         // 2) The run ends without consuming it — the exact cleanup the stream's finally runs.
         InvokeClearRunState(controller, cardId);
-        Assert.False(LiveSteer().ContainsKey(cardId));
+        Assert.False(LiveSteer(controller).ContainsKey(cardId));
 
         // 3) A fresh run on the same card must start clean: the stale steer never appears in
         //    any planner prompt, so it cannot steer the next execution.
@@ -165,7 +163,7 @@ public class LiveSteerEndpointTests : IDisposable
         var controller = MakeController();
         Assert.IsType<BadRequestObjectResult>(controller.SteerRun(new SteerRequest { CardId = "", Message = "x" }));
         Assert.IsType<BadRequestObjectResult>(controller.SteerRun(new SteerRequest { CardId = "steer-4", Message = "" }));
-        Assert.False(LiveSteer().ContainsKey("steer-4"));
+        Assert.False(LiveSteer(controller).ContainsKey("steer-4"));
     }
 
     // ── Mid-run injection through the live endpoint ──────────────────────────────────────
@@ -183,7 +181,7 @@ public class LiveSteerEndpointTests : IDisposable
         // human who sees the turn-2 proposal and corrects course before it becomes the plan).
         _clientFactory.OnPlannerTurn = n =>
         {
-            if (n == 2) LiveSteer()[cardId] = LiveSteerMessage;
+            if (n == 2) LiveSteer(controller)[cardId] = LiveSteerMessage;
         };
 
         var (_, plan, complete) = await InvokeOrchestrate(controller, cardId,
@@ -222,7 +220,7 @@ public class LiveSteerEndpointTests : IDisposable
         Assert.DoesNotContain("getItemsCount", ts);
 
         // Consumed exactly once: nothing remains in the registry, so no later turn re-applied it.
-        Assert.False(LiveSteer().ContainsKey(cardId));
+        Assert.False(LiveSteer(controller).ContainsKey(cardId));
         Assert.Empty(_clientFactory.Unmatched);
 
         // The delivered steer survives on the card as a transcript: message + the turn it
@@ -310,15 +308,11 @@ public class LiveSteerEndpointTests : IDisposable
     private static AgentController MakeController()
         => (AgentController)RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
 
-    private static System.Collections.Concurrent.ConcurrentDictionary<string, string> LiveSteer()
-        => (System.Collections.Concurrent.ConcurrentDictionary<string, string>)typeof(AgentController)
-            .GetField("_liveSteer", BindingFlags.NonPublic | BindingFlags.Static)!
-            .GetValue(null)!;
+    private static System.Collections.Concurrent.ConcurrentDictionary<string, string> LiveSteer(AgentController controller)
+        => CardStoreAccess.Of(controller).LiveSteer;
 
-    private static System.Collections.Concurrent.ConcurrentDictionary<string, long> ExecutingCards()
-        => (System.Collections.Concurrent.ConcurrentDictionary<string, long>)typeof(AgentController)
-            .GetField("_executingCards", BindingFlags.NonPublic | BindingFlags.Static)!
-            .GetValue(null)!;
+    private static System.Collections.Concurrent.ConcurrentDictionary<string, long> ExecutingCards(AgentController controller)
+        => CardStoreAccess.Of(controller).ExecutingCards;
 
     private AgentController BuildController()
     {
