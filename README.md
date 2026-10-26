@@ -12,6 +12,8 @@ Download EXE: https://Bughosted.com/assets/Weaver.exe
 
 Source code: https://github.com/maxhanna/Weaver
 
+Project Kanban: https://github.com/users/maxhanna/projects/1
+
 Discord:
 https://discord.gg/YQWkD6ZQDx
 <pre>
