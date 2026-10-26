@@ -14,3 +14,11 @@ artifacts/
 **/TestResultsCoverage/
 *.cobertura.xml
 
+# Local tooling/runtime artifacts (never committed)
+# .dirac-cache/ — local symbol-index cache held open by tooling
+# weaverconfig.json — stale legacy config; settings now live in data/weaver.db (weaver_config table)
+# nul — Windows reserved device name git for Windows reports as untracked
+.dirac-cache/
+weaverconfig.json
+nul
+

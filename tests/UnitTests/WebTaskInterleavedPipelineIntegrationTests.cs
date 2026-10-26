@@ -1911,7 +1911,7 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
             /*attachedFiles*/ new List<string>(),
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ existingPlan, /*completedStepIndices*/ completedStepIndices, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ webResults
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ webResults
         })!;
         var result = await task;
         return result;
@@ -1959,7 +1959,6 @@ public class WebTaskInterleavedPipelineIntegrationTests : IDisposable
         // Skip the real TCP/HTTP connectivity probe (the run must not depend on the host
         // network): cache the "reachable" verdict directly.
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

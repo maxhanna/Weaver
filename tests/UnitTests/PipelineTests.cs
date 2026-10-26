@@ -8,34 +8,6 @@ namespace Weaver.UnitTests;
 public class PipelineTests
 {
     [Fact]
-    public void ClassifyTask_TerminalCommand_ScoresHighOnCommand()
-    {
-        // Arrange
-        var prompt = "ping 8.8.8.8";
-
-        // Act
-        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
-
-        // Assert
-        Assert.Equal(PipelineType.CommandExecution, type);
-        Assert.True(cmdScore > editScore);
-    }
-
-    [Fact]
-    public void ClassifyTask_CodeEdit_ScoresHighOnEdit()
-    {
-        // Arrange
-        var prompt = "add a new button to the navbar that alerts 'hello'";
-
-        // Act
-        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
-
-        // Assert
-        Assert.Equal(PipelineType.CodeEdit, type);
-        Assert.True(editScore > cmdScore);
-    }
-
-    [Fact]
     public void ExtractRelevantExcerpt_SmallFile_ReturnsFullContent()
     {
         // Arrange
@@ -113,20 +85,6 @@ public class PipelineTests
         Assert.Contains("Test", result);
         Assert.Contains("M1", result);
         Assert.Contains("M2", result);
-    }
-
-    [Theory]
-    [InlineData("delete the file appsettings.json", PipelineType.CommandExecution)]
-    [InlineData("show me the logs for the web service", PipelineType.CommandExecution)]
-    [InlineData("refactor the login component to use hooks", PipelineType.CodeEdit)]
-    [InlineData("fix the padding on the sidebar", PipelineType.CodeEdit)]
-    public void ClassifyTask_VariousPrompts_CorrectPipeline(string prompt, PipelineType expected)
-    {
-        // Act
-        var (type, _, _) = AgentPlanParsing.ClassifyTask(prompt);
-
-        // Assert
-        Assert.Equal(expected, type);
     }
 
     [Fact]
@@ -621,19 +579,6 @@ class Dto { int id; }
         Assert.Equal("api.cs", plan.Plan[0].File);
         Assert.Equal("dto.cs", plan.Plan[1].File);
         Assert.Contains("void Get(int id) {}", plan.Plan[0].NewString);
-    }
-
-    [Fact]
-    public void ClassifyTask_WeightedScoring_AmbiguousPrompts()
-    {
-        // Prompt with both command keywords (fetch, data) and edit keywords (update, component)
-        var prompt = "fetch the latest weather data and update the WeatherComponent with the new values";
-        
-        var (type, cmdScore, editScore) = AgentPlanParsing.ClassifyTask(prompt);
-        
-        // Should favor CodeEdit because of 'component' and 'update' which are strong edit signals
-        Assert.Equal(PipelineType.CodeEdit, type);
-        Assert.True(editScore > 0);
     }
 
     // ─── Post-execution repair-loop churn circuit breaker ────────────────────

@@ -15,31 +15,27 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <ApplicationIcon>WeaverIcon.ico</ApplicationIcon>
-    <!-- Unit tests live in this project (see tests/UnitTests) so `dotnet test`
-         works straight from the repo root with no separate test project. The
-         app already defines its own entry point (top-level Program.cs), so the
-         test SDK must not generate a second one. -->
-    <IsTestProject>true</IsTestProject>
-    <GenerateProgramFile>false</GenerateProgramFile>
-  </PropertyGroup> 
+    <!-- Tests live in tests/Weaver.Tests.csproj (run with `dotnet test
+         tests/Weaver.Tests.csproj`). This assembly is the shipped app only.
+         NOTE: raw <InternalsVisibleTo> is an ItemGroup element — the ItemGroup
+         form requires a .NET 10 MSBuild; a plain SDK ItemGroup works on the
+         shipping 10 SDK too, but the explicit attribute file is the most
+         portable form and reads the same. -->
+  </PropertyGroup>
 
   <ItemGroup>
-    <!-- Test sources (tests/UnitTests) compile into this project via the SDK's
-         default compile glob. The js/ test helper stays out of content and
+    <!-- Test sources stay out of this project entirely (they used to be globbed in).
+         The js/ test helper and corpus JSON also stay out of content and
          embedded-resource globs. -->
+    <Compile Remove="tests\**" />
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Tool-selection corpus data (tests/tool-selection-corpus.json): copied to the test
-         output so the data-driven ToolCorpus MemberData loads from disk (new cases = a JSON
-         edit, no C# change). CopyToPublishDirectory=Never keeps the test data out of the
-         published single-file EXE. -->
-    <None Include="tests/tool-selection-corpus.json"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="Never"
-          TargetPath="tool-selection-corpus.json" />
+    <!-- The xunit suites reach internal statics directly (e.g. the CodeFormatterService
+         test seam); they now compile into a separate Weaver.Tests assembly. -->
+    <InternalsVisibleTo Include="Weaver.Tests" />
   </ItemGroup>
 
   <ItemGroup>
@@ -61,31 +57,13 @@
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.8" />
+    <!-- Pins the transitive Pkcs package (pulled by Microsoft.Data.Sqlite.Core and MimeKit)
+         above GHSA-846f-f764-76mx / CVE-2026-84008 (fixed in 10.0.13). -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="System.Management" Version="10.0.9" />
     <PackageReference Include="TreeSitter.DotNet" Version="1.3.0" />
     <PackageReference Include="WebPush" Version="1.0.13" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Test framework for the in-project unit tests (tests/UnitTests). PrivateAssets
-         keeps the test platform from flowing into consumers / NuGet output; the test
-         DLLs still land in bin/ so `dotnet test` resolves them. -->
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1">
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <PackageReference Include="xunit" Version="2.9.2">
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <!-- NOTE: coverlet.collector intentionally omitted. Its build target copies the
-         whole test platform into $(PublishDir), and code-coverage collection
-         (dotnet test with the XPlat coverage collector) is therefore unavailable.
-         To re-enable coverage, add the package AND extend CleanTestPlatformFromPublish
-         below with a coverlet* glob. Plain dotnet test works without it. -->
   </ItemGroup>
 
   <Target Name="ExecuteJsLint" BeforeTargets="BeforeBuild">
@@ -96,35 +74,6 @@
           Condition="!Exists('$(UserProfile)\.dotnet\tools\dotnet-script.exe')"
           ContinueOnError="true" StandardOutputImportance="low" />
     <Exec Command="dotnet-script lint.csx" ContinueOnError="false" />
-  </Target>
-
-  <!-- Tests live in this project (so `dotnet test` works from the repo root), but
-       the xunit packages are PrivateAssets=all and therefore are NOT bundled into
-       the single-file EXE. A published Weaver.dll that still references xunit types
-       crashes at startup: MVC's controller scan calls GetDefinedTypes() over the
-       whole module and throws ReflectionTypeLoadException when the test classes
-       can't resolve xunit.core (FileNotFoundException). The dotnet CLI passes
-       _IsPublishing=true (global property) only for `dotnet publish`, so the test
-       sources are compiled out of the shipped EXE while `dotnet build`/`dotnet
-       test` still compile them. -->
-  <ItemGroup Condition="'$(_IsPublishing)' == 'true'">
-    <Compile Remove="tests\UnitTests\**" />
-  </ItemGroup>
-
-<!-- Tests live in this project, so the test platform (testhost, code-coverage
-       profilers, Mono.Cecil, satellite resources) would otherwise leak into the
-       published single-file EXE. The Microsoft.CodeCoverage / TestHost packages
-       force-copy their folders into $(PublishDir) via raw Copy tasks that bypass
-       ResolvedFileToPublish, so the only reliable way to keep them out of the
-       shipped artifact is to delete them after publish completes. `dotnet test`
-       runs from bin/ and is unaffected. -->
-  <Target Name="CleanTestPlatformFromPublish" AfterTargets="Publish">
-    <ItemGroup>
-      <_TestPlatformFiles Include="$(PublishDir)testhost*;$(PublishDir)Microsoft.CodeCoverage*;$(PublishDir)Microsoft.TestPlatform*;$(PublishDir)Microsoft.VisualStudio.TestPlatform*;$(PublishDir)Microsoft.VisualStudio.TraceDataCollector*;$(PublishDir)Microsoft.DiaSymReader*;$(PublishDir)Mono.Cecil*;$(PublishDir)NuGet.*" />
-      <_TestPlatformResources Include="$(PublishDir)*\Microsoft.VisualStudio.TraceDataCollector.resources.dll" />
-    </ItemGroup>
-    <Delete Files="@(_TestPlatformFiles);@(_TestPlatformResources)" />
-    <RemoveDir Directories="$(PublishDir)CodeCoverage;$(PublishDir)InstrumentationEngine;$(PublishDir)cs;$(PublishDir)de;$(PublishDir)es;$(PublishDir)fr;$(PublishDir)it;$(PublishDir)ja;$(PublishDir)ko;$(PublishDir)pl;$(PublishDir)pt-BR;$(PublishDir)ru;$(PublishDir)tr" />
   </Target>
 
 </Project>

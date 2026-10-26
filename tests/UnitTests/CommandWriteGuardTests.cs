@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -22,7 +23,7 @@ public class CommandWriteGuardTests
     [Fact]
     public void AndChain_Unquoted_Rejected()
     {
-        var reason = AgentController.WindowsPowerShellAndChainReason("echo a > f && echo b >> f");
+        var reason = AgentPlanningPolicy.WindowsPowerShellAndChainReason("echo a > f && echo b >> f");
         Assert.NotNull(reason);
         Assert.Contains("&&", reason);
         Assert.Contains("PowerShell", reason);
@@ -32,16 +33,16 @@ public class CommandWriteGuardTests
     public void AndChain_InsideQuotes_Allowed()
     {
         // A literal "a && b" inside a quoted string is valid PowerShell 5.1.
-        Assert.Null(AgentController.WindowsPowerShellAndChainReason("Set-Content -Path \"f\" -Value \"a && b\""));
-        Assert.Null(AgentController.WindowsPowerShellAndChainReason("echo 'a && b'"));
+        Assert.Null(AgentPlanningPolicy.WindowsPowerShellAndChainReason("Set-Content -Path \"f\" -Value \"a && b\""));
+        Assert.Null(AgentPlanningPolicy.WindowsPowerShellAndChainReason("echo 'a && b'"));
     }
 
     [Fact]
     public void AndChain_NoAndOrBlank_Null()
     {
-        Assert.Null(AgentController.WindowsPowerShellAndChainReason("Set-Content -Path \"C:\\x\\y.txt\" -Value hello"));
-        Assert.Null(AgentController.WindowsPowerShellAndChainReason(null));
-        Assert.Null(AgentController.WindowsPowerShellAndChainReason(""));
+        Assert.Null(AgentPlanningPolicy.WindowsPowerShellAndChainReason("Set-Content -Path \"C:\\x\\y.txt\" -Value hello"));
+        Assert.Null(AgentPlanningPolicy.WindowsPowerShellAndChainReason(null));
+        Assert.Null(AgentPlanningPolicy.WindowsPowerShellAndChainReason(""));
     }
 
     // ── RedundantOsWriteReason (prompt-pinned absolute path ⇒ OS-independent) ─
@@ -60,7 +61,7 @@ public class CommandWriteGuardTests
     [Fact]
     public void RedundantWrite_NoDemand_Null()
     {
-        Assert.Null(AgentController.RedundantOsWriteReason(
+        Assert.Null(AgentPlanningPolicy.RedundantOsWriteReason(
             "Fix the login bug", "echo x > out.txt", new List<PlanStep>()));
     }
 
@@ -68,14 +69,14 @@ public class CommandWriteGuardTests
     public void RedundantWrite_FirstWriteToDemand_Allowed()
     {
         // Nothing committed yet — the FIRST write to the demanded location is the legit one.
-        Assert.Null(AgentController.RedundantOsWriteReason(
+        Assert.Null(AgentPlanningPolicy.RedundantOsWriteReason(
             PinnedPrompt, "Set-Content -Path \"C:\\Users\\Test\\Desktop\\results.txt\" -Value \"v2.1\"", new List<PlanStep>()));
     }
 
     [Fact]
     public void RedundantWrite_SameFileAgain_Rejected()
     {
-        var reason = AgentController.RedundantOsWriteReason(
+        var reason = AgentPlanningPolicy.RedundantOsWriteReason(
             PinnedPrompt, "Set-Content -Path \"C:\\Users\\Test\\Desktop\\results.txt\" -Value \"more\"", new List<PlanStep> { FirstWrite });
         Assert.NotNull(reason);
         Assert.Contains("ALREADY written", reason);
@@ -84,7 +85,7 @@ public class CommandWriteGuardTests
     [Fact]
     public void RedundantWrite_RedirectSameFile_Rejected()
     {
-        var reason = AgentController.RedundantOsWriteReason(
+        var reason = AgentPlanningPolicy.RedundantOsWriteReason(
             PinnedPrompt, "echo more > \"C:\\Users\\Test\\Desktop\\results.txt\"", new List<PlanStep> { FirstWrite });
         Assert.NotNull(reason);
         Assert.Contains("ALREADY written", reason);
@@ -93,7 +94,7 @@ public class CommandWriteGuardTests
     [Fact]
     public void RedundantWrite_DifferentLocation_Allowed()
     {
-        Assert.Null(AgentController.RedundantOsWriteReason(
+        Assert.Null(AgentPlanningPolicy.RedundantOsWriteReason(
             PinnedPrompt, "Set-Content -Path \"C:\\Users\\Test\\Desktop\\other.txt\" -Value \"more\"", new List<PlanStep> { FirstWrite }));
     }
 
@@ -103,7 +104,7 @@ public class CommandWriteGuardTests
         // The committed step wrote somewhere ELSE — the demand is not satisfied, so a genuine
         // write to the demanded file must stay allowed (the repair path can never be blocked).
         var committedElsewhere = new PlanStep { File = "_command", Change = "Set-Content -Path \"C:\\temp\\scratch.txt\" -Value \"x\"" };
-        Assert.Null(AgentController.RedundantOsWriteReason(
+        Assert.Null(AgentPlanningPolicy.RedundantOsWriteReason(
             PinnedPrompt, "Set-Content -Path \"C:\\Users\\Test\\Desktop\\results.txt\" -Value \"v2.1\"", new List<PlanStep> { committedElsewhere }));
     }
 
@@ -179,21 +180,16 @@ public class CommandWriteGuardTests
         if (string.IsNullOrWhiteSpace(desktop)) return;
         const string prompt = "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop";
         var first = new PlanStep { File = "_command", Change = $"Set-Content -Path \"{desktop}\ai_article_summary.txt\" -Value \"content\"" };
-        var reason = AgentController.RedundantOsWriteReason(
-            prompt, $"echo more > \"{desktop}\ai_article_summary.txt\"", new List<PlanStep> { first });
+        var reason = AgentPlanningPolicy.RedundantOsWriteReason(
+            prompt, $"echo more > \"{desktop}\\ai_article_summary.txt\"", new List<PlanStep> { first });
         Assert.NotNull(reason);
         Assert.Contains("ALREADY written", reason);
     }
 
     // ── Classic-route whole-plan gate (FindPlanCommandViolations) ────────────
 
-    private static readonly MethodInfo FindViolationsMethod = typeof(AgentController).GetMethod(
-        "FindPlanCommandViolations", BindingFlags.NonPublic | BindingFlags.Static)!;
-
     private static List<(PlanStep Step, string Reason)> FindViolations(AgentPlan plan, string prompt)
-    {
-        return (List<(PlanStep, string)>)FindViolationsMethod.Invoke(null, new object?[] { plan, prompt })!;
-    }
+        => AgentPlanningPolicy.FindPlanCommandViolations(plan, prompt);
 
     [Fact]
     public void ClassicPlan_RedundantWrite_Flagged()

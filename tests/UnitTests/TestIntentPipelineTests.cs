@@ -161,7 +161,6 @@ public class TestIntentPipelineTests : IDisposable
         SetField(controller, "_editKnowledge", new EditKnowledgeService(_db));
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         // Deterministic live-test service: HTTP fallback only, real launcher.
         SetField(controller, "_browserTestService", new BrowserAutomationService
         {
@@ -182,7 +181,7 @@ public class TestIntentPipelineTests : IDisposable
             prompt, _projectRoot, /*emitSse*/ false, CancellationToken.None,
             /*attachedFiles*/ new List<string>(), /*skipContextReview*/ false, /*steeringContext*/ null,
             /*skipQualityCheck*/ false, /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }

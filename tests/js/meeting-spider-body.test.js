@@ -28,7 +28,7 @@ function test(name, fn) {
   }
 }
 
-const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/meeting.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/meeting.js'), 'utf8').replace(/\r\n/g, '\n');
 
 // ── Body block: from the de-cartoon comment through the rim-light fill ───────
 const bodyM = /\/\/ Body: a soft head\+abdomen egg silhouette[\s\S]*?ctx\.fillStyle = 'rgba\(255,255,255,0\.16\)';[\s\S]*?ctx\.fill\(\);\n(?=          var look = )/.exec(src);

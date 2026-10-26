@@ -234,6 +234,11 @@ angular.module('kanbanApp')
                 };
                 vm.buildCommands = "";
                 vm.prByDefault = false;
+                // StrictVerifier project default: null = legacy, true = strict by default for new
+                // runs, false = relaxed by default (deterministic issues non-blocking). A card's
+                // explicit STRICT checkbox (binary: checked=true/unchecked=null) always wins; the
+                // relaxed(false) state is only reachable here / via the API.
+                vm.defaultStrictVerifier = null;
                 vm.themeColors = {};
                 vm.presetThemeList = Object.keys(PRESET_THEMES);
                 vm.savedThemes = [];
@@ -484,6 +489,7 @@ angular.module('kanbanApp')
                             if (typeof cfg.ideTheme === 'string') vm.ideTheme = cfg.ideTheme;
                             if (typeof cfg.ideMinimapVisible === 'boolean' && vm.ide) vm.ide.minimapVisible = cfg.ideMinimapVisible;
                             if (typeof cfg.prByDefault === 'boolean') vm.prByDefault = cfg.prByDefault;
+                            if (typeof cfg.defaultStrictVerifier === 'boolean') vm.defaultStrictVerifier = cfg.defaultStrictVerifier;
                             vm.llamaUrl = cfg.llamaUrl || "http://localhost:8080";
                             vm.llamaModel = cfg.llamaModel || "medgemma:4b";
                             vm.llamaEndpoints = (cfg.llamaEndpoints || []).map(function (e) { return { id: e.id || ('ep-' + Math.random().toString(36).slice(2, 9)), name: e.name || '', url: e.url || '', model: e.model || '' }; });
@@ -576,6 +582,13 @@ angular.module('kanbanApp')
                         cfg.meetingMuted = (vm.meetingVolume || 0) <= 0;
                         if (vm.meeting) cfg.meetingPanel = { left: vm.meeting.left, top: vm.meeting.top, width: vm.meeting.width, height: vm.meeting.height };
                         cfg.useVSCodeInsteadOfIDE = vm.useVSCodeInsteadOfIDE === true;
+                        cfg.prByDefault = vm.prByDefault === true;
+                        // Persist the strict-verifier project default explicitly: null = legacy,
+                        // true = strict by default, false = relaxed. (prByDefault above was previously
+                        // never explicitly written here — a toggle only survived if another setting
+                        // happened to force a save AND resp.data already carried it. Explicit write
+                        // fixes that for both flags.)
+                        cfg.defaultStrictVerifier = (vm.defaultStrictVerifier === true || vm.defaultStrictVerifier === false) ? vm.defaultStrictVerifier : null;
                         cfg.ideTheme = vm.ideTheme || 'weaver-dark';
                         cfg.ideMinimapVisible = !!(vm.ide && vm.ide.minimapVisible);
                         cfg.fontSizes = { log: vm.logFontSize, llm: vm.llmFontSize, plan: vm.planFontSize, metaplan: vm.metaPlanFontSize };

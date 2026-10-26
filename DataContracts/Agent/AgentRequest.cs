@@ -16,6 +16,16 @@ public class AgentRequest
     public bool IsBenchmark { get; set; }
     public string? BenchmarkProjectRoot { get; set; }
     public string? BuildCommands { get; set; }
+    // Strict verifier (hard-gate) toggle. Three states preserve backward compatibility:
+    //  null  → legacy behavior (deterministic findings still force complete=false, but the
+    //          LLM verification round and the post-verify repair loop still run).
+    //  true  → HARD-GATE: when a deterministic check (template binding, CSS wiring, rename-all,
+    //          OS-output, applied-edit-on-disk, browser-test, state-probe mismatch) fires, the
+    //          run ends immediately with a FAILED verdict — no LLM verifier round, no repair
+    //          loop. Saves the 3× replan churn a compile-time error otherwise triggers.
+    //  false → explicitly relaxed: deterministic issues are published as ground truth but do
+    //          not force complete=false.
+    public bool? StrictVerifier { get; set; }
     public string? EndpointId { get; set; }
     public string? RunId { get; set; }
 

@@ -25,12 +25,13 @@ jobs:
           node-version: '22'
 
       - name: C# suite
-        # Weaver.csproj pins RuntimeIdentifier=win-x64 + SelfContained=true (the shipped
-        # desktop artifact). A plain `dotnet test` then builds a self-contained win-x64 app
-        # whose runtimeconfig has no framework entry — the Linux testhost cannot launch it
-        # ("libhostpolicy.so not found"). Override both for the TEST build only: a
-        # framework-dependent linux-x64 build runs under the runner's installed .NET.
-        run: dotnet test --nologo -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false
+        # Tests live in tests/Weaver.Tests.csproj, which references Weaver.csproj.
+        # The app project pins RuntimeIdentifier=win-x64 + SelfContained=true (the
+        # shipped desktop artifact); the overrides below are passed as global
+        # properties so the TEST build is framework-dependent linux-x64 and the
+        # Linux testhost can launch it (a self-contained win-x64 runtimeconfig has
+        # no framework entry — "libhostpolicy.so not found").
+        run: dotnet test tests/Weaver.Tests.csproj --nologo -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false
 
       - name: JS client-logic suite
         run: node tests/js/run-all.js

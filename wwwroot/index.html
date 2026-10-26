@@ -1781,6 +1781,11 @@
                   <input type="checkbox" ng-model="vm.prByDefault" />
                   PR enabled by default
                 </label>
+                <label style="display:flex;align-items:center;gap:8px;"
+                  title="New runs default to the strict verifier hard-gate: deterministic checks (binding/CSS/rename/OS-output/compile) are terminal — a failed check ends the run immediately, skipping the LLM verifier round and the 3x replan repair loop. A card's STRICT checkbox overrides this default when explicitly checked. Unchecked here = legacy behavior.">
+                  <input type="checkbox" ng-model="vm.defaultStrictVerifier" ng-change="vm.saveSettings(true)" />
+                  Strict verifier by default
+                </label>
                 <label style="display:flex;align-items:center;gap:8px;">
                   <input type="checkbox" ng-model="vm.autoQueue" />
                   Auto-queue: process next Todo card when one completes

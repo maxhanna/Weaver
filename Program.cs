@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Reflection;
+using Weaver;
 using Weaver.Services;
 using Weaver.Hubs;
 
@@ -149,6 +150,15 @@ builder.Services.AddHttpClient("llama", client =>
     client.Timeout = TimeSpan.FromMinutes(30);
 });
 builder.Services.AddSingleton<AiServerDiscoveryService>();
+builder.Services.AddSingleton<IContentEditHeuristic, ContentEditHeuristic>();
+builder.Services.AddSingleton<IFormattingEditHeuristic, FormattingEditHeuristic>();
+builder.Services.AddSingleton<IStructureEditHeuristic, StructureEditHeuristic>();
+builder.Services.AddSingleton<IAnchorEditHeuristic, AnchorEditHeuristic>();
+// Cross-request, card-scoped state (live steer, pending questions/reviews, executing-card
+// gate, suggestion abort handles). Controllers are transient, so this must be a singleton;
+// injecting it keeps the lifetime explicit instead of implied by `static`. See
+// docs/REFACTORING_ANALYSIS.md §4.1.
+builder.Services.AddSingleton<CardSessionStore>();
 builder.Services.AddControllers();
 builder.Services.AddSingleton<BoardDataService>(sp =>
 {

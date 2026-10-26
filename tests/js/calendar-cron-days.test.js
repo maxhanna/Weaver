@@ -34,7 +34,7 @@ function test(name, fn) {
 }
 
 // ── Extract matchField + cronDayMatches from the live calendar.js ──────────
-const calSrc = fs.readFileSync(path.join(__dirname, '../../wwwroot/calendar.js'), 'utf8');
+const calSrc = fs.readFileSync(path.join(__dirname, '../../wwwroot/calendar.js'), 'utf8').replace(/\r\n/g, '\n');
 const fieldMatch = /function matchField\(field, val\) \{[\s\S]*?\n  \}/.exec(calSrc);
 assert(fieldMatch, 'matchField not found in wwwroot/calendar.js — marker format may have drifted');
 const dayMatch = /function cronDayMatches\(expr, dt\) \{[\s\S]*?\n  \}/.exec(calSrc);

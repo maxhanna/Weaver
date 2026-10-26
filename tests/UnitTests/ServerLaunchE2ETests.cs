@@ -84,18 +84,27 @@ public class ServerLaunchE2ETests : IDisposable
         Assert.Equal("Weaver's own server", server.Kind);
     }
 
-    /// <summary>Weaver's apphost exe sits next to the test assembly (win-x64 on Windows,
-    /// plain "Weaver" on Linux CI). Launch it directly when present — faster and fully
-    /// hermetic; otherwise fall back to `dotnet run` (the launcher's real detection).</summary>
+    /// <summary>Weaver's self-contained apphost sits in the app project's RID output
+    /// (bin/Debug/net10.0/win-x64 on Windows, bin/Release/linux-x64 on CI) — the test
+    /// project's own bin folder only receives the framework-dependent Weaver.dll plus a
+    /// hosting-expectations-mismatched apphost copy. Launch the real apphost when present
+    /// (faster and fully hermetic); otherwise fall back to `dotnet run` (the launcher's
+    /// real detection).</summary>
     private static (string Command, string Arguments) BuildWeaverLaunchPlan()
     {
-        var baseDir = AppContext.BaseDirectory;
-        var exe = OperatingSystem.IsWindows()
-            ? Path.Combine(baseDir, "Weaver.exe")
-            : Path.Combine(baseDir, "Weaver");
-        return File.Exists(exe)
-            ? (exe, "--urls http://127.0.0.1:{port} --no-open-browser")
-            : ("dotnet", "run --project Weaver.csproj --urls http://127.0.0.1:{port}");
+        var exeName = OperatingSystem.IsWindows() ? "Weaver.exe" : "Weaver";
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            var exe = Path.Combine(dir.FullName, exeName);
+            // Only an apphost NEXT TO its self-contained runtime files launches standalone;
+            // a bare apphost copy (no hostpolicy.dll/coreclr.dll beside it) dies with
+            // "library 'hostpolicy.dll' required to execute the application was not found".
+            if (File.Exists(exe) && File.Exists(Path.Combine(dir.FullName, "hostpolicy.dll")))
+                return (exe, "--urls http://127.0.0.1:{port} --no-open-browser");
+            dir = dir.Parent!;
+        }
+        return ("dotnet", "run --project Weaver.csproj --urls http://127.0.0.1:{port}");
     }
 
     private static string Excerpt(string text)

@@ -20,6 +20,7 @@ using static Weaver.Services.AgentCodeFormatting;
 using static Weaver.Services.AgentSkeleton;
 using static Weaver.Services.AgentDiffUtilities;
 using static Weaver.Services.AgentJsonUtilities;
+using static Weaver.Services.AgentPlanningPolicy;
 using Weaver;
 namespace Weaver.Controllers;
 
@@ -31,7 +32,8 @@ partial class AgentController
         EditPlanDecision? DecidedStrategy, string? TargetSymbol)> PrepareEditContextAsync(
         PlanStep step, string projectRoot, bool emitSse, CancellationToken ct,
         string? prompt, AgentPlan? plan, int planItemIndex, string? cardId,
-        List<string>? attachedFiles, bool skipLlmPreResolution, string relPath, string fullPath)
+        List<string>? attachedFiles, bool skipLlmPreResolution, string relPath, string fullPath,
+        AgentRunContext runContext)
     {
         var fe = System.IO.File.Exists(fullPath);
         var fc = fe ? await System.IO.File.ReadAllTextAsync(fullPath, Encoding.UTF8, ct) : "";
@@ -243,7 +245,7 @@ partial class AgentController
         string? preEditContent, string newContent, bool emitSse, CancellationToken ct,
         List<(int attempt, int score, string reason, string failedNew)> attemptScores,
         string explorationContext, AgentPlan? plan, int planItemIndex,
-        string? sqlMigrationNote, string? causalContext)
+        string? sqlMigrationNote, string? causalContext, AgentRunContext runContext)
     {
         const int VerificationRounds = 3;
         var decisions = new List<string>();
@@ -254,7 +256,7 @@ partial class AgentController
         for (int r = 0; r < VerificationRounds; r++)
         {
                     if (r == 0 && !string.IsNullOrWhiteSpace(newStr) &&
-                        AgentEditHeuristics.LooksLikePlaceholderStub(newStr, preExisting: oldStr))
+                        ContentEditHeuristics.LooksLikePlaceholderStub(newStr, preExisting: oldStr))
                     {
                         deterministicPlaceholderReject = true;
                         await EmitLog(emitSse, "warn",
@@ -301,7 +303,8 @@ partial class AgentController
                         causalContext: sqlMigrationNote == null
                             ? causalContext
                             : (causalContext ?? "") + "\n\n" + sqlMigrationNote,
-                        llmRoundLabel: $"verify step {planItemIndex + 1} round {r + 1}/{VerificationRounds}");
+                        llmRoundLabel: $"verify step {planItemIndex + 1} round {r + 1}/{VerificationRounds}",
+                        runContext: runContext);
                     decisions.Add(d);
                     reasons.Add(reason);
                     scores.Add(score);
@@ -344,7 +347,8 @@ partial class AgentController
         string relPath, string fullPath, AgentPlan? plan, int planItemIndex,
         bool stepNeedsExtraStep, string? stepExtraStepReason, string? stepExtraStepFile,
         bool emitSse, CancellationToken ct, List<object> allResults, int stepIndex,
-        string? cardId, string fileExt, string? beforeContent = null, string? afterContent = null)
+        string? cardId, string fileExt, AgentRunContext runContext,
+        string? beforeContent = null, string? afterContent = null)
     {
         var successReason = "";
             if (attempt > 0 && history.Count > 0)
@@ -398,7 +402,7 @@ partial class AgentController
                 }
             }
             var result = new Dictionary<string, object?>();
-            PopulateEditResult(result, "modified", relPath, oldStr, newStr ?? "",
+            PopulateEditResult(runContext, result, "modified", relPath, oldStr, newStr ?? "",
                 afterContent ?? "", beforeContent);
             // Deterministic multi-match batches: surface the applied/total counts plus the
             // per-edit lines so the board step card can render "5/5 occurrences updated"
@@ -447,7 +451,7 @@ partial class AgentController
         int stepIndex, int planItemIndex, string? cardId, List<object> allResults,
         bool emitSse, CancellationToken ct, int replanDepth, AgentPlan? plan,
         string? prompt, List<string>? attachedFiles, string projectRoot,
-        Func<string, Task>? onActivity)
+        Func<string, Task>? onActivity, AgentRunContext runContext)
     {
         var lastErr = history.Count > 0 ? history[^1].error : "resolve failed";
         var failureSummary = new StringBuilder();
@@ -533,7 +537,7 @@ partial class AgentController
                 $"  - Breaking the change into a simpler, smaller edit\n" +
                 $"Score your new plan 85+ only if it addresses the specific failure reasons above.";
             var replanSteps = await GenerateReplanStepsAsync(
-                prompt ?? step.Change ?? "", allResults, plan,
+                runContext ?? new AgentRunContext(), prompt ?? step.Change ?? "", allResults, plan,
                 replanSteering, projectRoot, emitSse, ct,
                 attachedFiles: attachedFiles,
                 qualityCheckReason: failureContext);
@@ -589,8 +593,8 @@ partial class AgentController
                 var replanStepIndex = stepIndex;
                 try
                 {
-                    replanStepIndex = await ResolveAndApplyEdit(
-                        replanStep, projectRoot, emitSse, ct,
+                    replanStepIndex = await ResolveAndApplyEditCore(
+                        runContext ?? new AgentRunContext(), replanStep, projectRoot, emitSse, ct,
                         replanResults, replanStepIndex,
                         prompt, plan, planItemIndex, cardId, attachedFiles,
                         replanDepth + 1, onActivity);

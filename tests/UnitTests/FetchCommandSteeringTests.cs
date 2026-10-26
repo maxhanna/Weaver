@@ -1,12 +1,11 @@
-using System.Reflection;
 using Xunit;
-using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Locks the steering feedback behind the fetch-in-command guard (Planning.cs
-/// FetchCommandFeedbackFor): when a _command step runs Invoke-RestMethod/curl/urllib
+/// Locks the steering feedback behind the fetch-in-command guard (the
+/// AgentPlanningPolicy.FetchCommandFeedbackFor builder): when a _command step runs Invoke-RestMethod/curl/urllib
 /// against a URL on a web-needing task, the rejection must do more than say "not a
 /// shell command" — it must (1) name the attempted URL, (2) tell the planner whether
 /// that URL is verbatim among the harvested search results, and (3) steer to a
@@ -16,18 +15,12 @@ namespace Weaver.UnitTests;
 /// </summary>
 public class FetchCommandSteeringTests
 {
-    private static readonly MethodInfo FeedbackFor = typeof(AgentController).GetMethod(
-        "FetchCommandFeedbackFor", BindingFlags.NonPublic | BindingFlags.Static)
-        ?? throw new InvalidOperationException("FetchCommandFeedbackFor not found");
-    private static readonly MethodInfo ExtractUrl = typeof(AgentController).GetMethod(
-        "ExtractCommandUrl", BindingFlags.NonPublic | BindingFlags.Static)
-        ?? throw new InvalidOperationException("ExtractCommandUrl not found");
-
     private static string Feedback(string prompt, string command, List<PlanStep> planSoFar, string discovery)
-        => (string)FeedbackFor.Invoke(null, new object?[] { prompt, new PlanStep { File = "_command", Change = command }, planSoFar, discovery })!;
+        => AgentPlanningPolicy.FetchCommandFeedbackFor(
+            prompt, new PlanStep { File = "_command", Change = command }, planSoFar, discovery);
 
     private static string? Url(string command)
-        => (string?)ExtractUrl.Invoke(null, new object?[] { command });
+        => AgentPlanningPolicy.ExtractCommandUrl(command);
 
     private const string SearchStep = "AI research breakthroughs latest";
 
