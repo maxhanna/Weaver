@@ -22,19 +22,19 @@ There are two completely separate test harnesses:
 
 | Harness | Location | Runner | Framework |
 |---|---|---|---|
-| C# unit / integration tests | `tests/UnitTests/*.cs` | `dotnet test` (project root) | xUnit (compiled **into** `Weaver.csproj` — see the comment at `Weaver.csproj:18`) |
+| C# unit / integration tests | `tests/UnitTests/*.cs` (+ corpus fixtures under `tests/UnitTests/corpus/`) | `dotnet test tests/Weaver.Tests.csproj` | xUnit in a dedicated test project (`tests/Weaver.Tests.csproj`) that references the app project |
 | JS client-logic tests | `tests/js/*.test.js` | `node tests/js/<file>.test.js` | Hand-rolled mini-runner (a local `test(name, fn)` + `process.exit(failed ? 1 : 0)` at the bottom of each file) |
 
 Run everything:
 
 ```bash
-dotnet test --nologo          # C# suite
+dotnet test tests/Weaver.Tests.csproj --nologo   # C# suite
 for f in tests/js/*.test.js; do node "$f" || break; done   # JS suite
 ```
 
 Notes:
 
-- **CI runs on every push** (`.github/workflows/test.yml`): `dotnet test --nologo
+- **CI runs on every push** (`.github/workflows/test.yml`): `dotnet test tests/Weaver.Tests.csproj --nologo
   -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false` (the shipped artifact is a
   self-contained win-x64 exe, so the test build must be framework-dependent + Linux RID
   or the Linux testhost dies on the missing `libhostpolicy.so`), then `node tests/js/run-all.js`.
@@ -48,9 +48,10 @@ Notes:
   LLM-deserialized `PlanStep` objects whose JSON can carry `"change": null`), plus
   `object?[]` reflection args, keyed `Assert.*` calls, and `async Task` test methods
   replacing `.GetAwaiter().GetResult()`.
-- The C# tests live inside the main project (not a separate test project), so
-  `dotnet test` builds the whole app first and the tests run against the real code —
-  there is no production/test assembly split.
+- The C# tests live in a dedicated test project (`tests/Weaver.Tests.csproj`), so
+  `dotnet test` from the repo root discovers nothing — always pass the test project
+  path. The app ships from `Weaver.csproj` alone (no test packages or test sources
+  leak into the published artifact).
 - Several suites are **self-contained mini-projects**: they spawn real
   `node wwwroot/filetree.js` (FileTreeOrderIndependenceTests), drive the real
   `Orchestrate` pipeline with fake/scripted LLM clients (the `*Pipeline*Tests`,
@@ -379,13 +380,18 @@ Concrete, prioritized. These are the weakest spots found in the sweep.
     for. The corpus-loop shape is right; grow it rather than adding more one-off traces.
 
 ### 4.5 Fuzz discipline is strong in the edit layer, absent elsewhere
-- The seeded-RNG `FuzzHarness` guards are used by the CSS/HTML/AST/format corpora — the
+- The seeded-RNG `FuzzHarness` guards are used by the CSS/HTML/AST/format corpora - the
   strongest part of the suite. But the same corpus-vs-hand-picked gap exists for the
-  **verification layer**: `PostExecuteVerifyTests` and `TemplateBindingValidatorTests`
-  are hand-picked only; a seeded fuzz sweep of random templates against
-  `ExtractComponentMembers`/`ExtractTemplateSymbols` would lock the false-positive
-  regression class that has already bitten twice (the `#keywordsInput`/`parentRef`
-  false positives, the `s.departure.ested` hallucination).
+  **verification layer**: `PostExecuteVerifyTests` is hand-picked only.
+  ~~`TemplateBindingValidatorTests` is hand-picked only~~ **Done**:
+  `TemplateBindingValidatorFuzzTests` sweeps 620 seeded docs through
+  `ExtractComponentMembers`/`ExtractTemplateSymbols`/`ValidateTemplateBindings` (never
+  throws, deterministic, declared members never flagged across 14 binding-shape
+  families, root-only chains/pipes/loop-locals/template-refs, undeclared roots still
+  flagged) - and caught two residual false-positive classes on its first run (bare
+  `#ref` declarations invisible to the attr regex but extractable via later references;
+  `*ngIf="expr as alias"` aliases leaking as component symbols). Both extractor fixes
+  are in the same commit.
 
 ### 4.6 Some suites test the extracted helper rather than the wiring
 - `AnchorSanityTests`, `BetweenStepsVerificationTests`, `ExternalFilesystemTaskTests`

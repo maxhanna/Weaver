@@ -666,6 +666,10 @@ public class ToolSelectionEvalTests : IDisposable
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> InvokeOrchestrate(
         AgentController controller, string prompt, string[] attachedFiles)
     {
+        // Hermetic runs: the scripted edits must land verbatim — an external formatter
+        // (prettier via npx) rewriting quote style would break the exact-token assertions
+        // and the follow-up edits' anchors, and only on machines where npx exists.
+        CodeFormatterService.SuppressExternalFormattersForTests.Value = true;
         var method = typeof(AgentController).GetMethod("Orchestrate", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("Orchestrate not found");
         var task = (Task<(List<object> allSteps, AgentPlan? plan, bool complete)>)method.Invoke(controller, new object?[]
@@ -674,7 +678,7 @@ public class ToolSelectionEvalTests : IDisposable
             /*attachedFiles*/ attachedFiles.ToList(),
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }
@@ -703,7 +707,6 @@ public class ToolSelectionEvalTests : IDisposable
         // Hermetic runtime probe: nothing installed (no real process spawns in tests).
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

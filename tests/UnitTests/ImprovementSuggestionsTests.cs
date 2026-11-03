@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -477,14 +477,9 @@ public class ImprovementSuggestionsTests
         var (controller, db, dbPath) = BuildHarness();
         try
         {
-            // Simulate card-2 executing (server-side run registry).
-            // _executingCards is a static readonly field — mutate the live instance in place
-            // (seed the entry) and clean up in the finally below so no state leaks between tests.
-            var registry = typeof(AgentController).GetField("_executingCards",
-                BindingFlags.NonPublic | BindingFlags.Static)
-                ?? throw new InvalidOperationException("_executingCards not found");
-            var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, long>?)registry.GetValue(null)
-                ?? throw new InvalidOperationException("_executingCards null");
+            // Simulate card-2 executing. The run registry lives in this controller's own
+            // card-session store, so the entry cannot leak into other tests.
+            var dict = CardStoreAccess.Of(controller).ExecutingCards;
             dict["card:card-2"] = DateTime.UtcNow.Ticks;
             try
             {

@@ -77,6 +77,14 @@ public class FrontendConfig
     public bool meetingMuted { get; set; } = false;
     public int meetingVolume { get; set; } = 70;
     public bool prByDefault { get; set; } = false;
+    /// <summary>
+    /// Project-wide default for the strict-verifier (hard-gate) toggle. Mirrors the per-card
+    /// <see cref="AgentRequest.StrictVerifier"/> three-state: null = legacy behavior (LLM
+    /// verifier round + repair loop still run on a deterministic failure), true = hard-gate
+    /// on by default for new cards, false = relaxed by default (deterministic issues are
+    /// non-blocking). A card's explicit StrictVerifier value always wins over this default.
+    /// </summary>
+    public bool? defaultStrictVerifier { get; set; }
     public string buildCommands { get; set; } = "dotnet clean & dotnet build";
     public string llamaUrl { get; set; } = "http://localhost:8080";
     public string llamaModel { get; set; } = "medgemma:4b";

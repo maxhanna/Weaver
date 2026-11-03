@@ -726,7 +726,7 @@ partial class AgentController
                 if (ur != null) { results.Add(new EditResult { Path = filePath, Status = "error", Error = ur }); hasError = true; break; }
                 if (!fileExists && string.IsNullOrEmpty(edit.OldString)) { content = edit.NewString ?? ""; continue; }
                 if (string.IsNullOrEmpty(edit.OldString)) { content += edit.NewString ?? ""; continue; }
-                var (ok, newContent, err, snippet) = TryReplaceSafe(content, edit.OldString, edit.NewString ?? "");
+                var (ok, newContent, err, snippet) = AnchorEditHeuristics.TryReplaceSafe(content, edit.OldString, edit.NewString ?? "");
                 if (!ok)
                 {
                     var fullErr = err;

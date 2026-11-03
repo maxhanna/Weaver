@@ -1,5 +1,5 @@
 using Xunit;
-using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -25,7 +25,7 @@ public class RepeatedWebStepGuardTests
     [Fact]
     public void IdenticalSearchQuery_IsRejected_WhenResultsAreInContext()
     {
-        var reason = AgentController.RepeatedWebStepReason(
+        var reason = AgentPlanningPolicy.RepeatedWebStepReason(
             Search("AI research breakthroughs latest"),
             new List<PlanStep> { Search("AI research breakthroughs latest") },
             CtxWithResults);
@@ -39,7 +39,7 @@ public class RepeatedWebStepGuardTests
     {
         // "AI news article sources" vs "AI news articles RSS feed or public API" shares too
         // few whole tokens for the 0.82 edit threshold (~0.2) but is the SAME research intent.
-        var reason = AgentController.RepeatedWebStepReason(
+        var reason = AgentPlanningPolicy.RepeatedWebStepReason(
             Search("AI news article sources"),
             new List<PlanStep> { Search("AI news articles RSS feed or public API") },
             CtxWithResults);
@@ -50,7 +50,7 @@ public class RepeatedWebStepGuardTests
     [Fact]
     public void SameFetchUrl_IsRejected_WhenResultsAreInContext()
     {
-        var reason = AgentController.RepeatedWebStepReason(
+        var reason = AgentPlanningPolicy.RepeatedWebStepReason(
             Fetch("https://example.com/ai-article"),
             new List<PlanStep> { Fetch("https://example.com/ai-article") },
             CtxWithResults);
@@ -63,7 +63,7 @@ public class RepeatedWebStepGuardTests
     public void DifferentFetchUrl_IsAllowed()
     {
         // Fetching a SECOND article from the same result set is legitimate work.
-        Assert.Null(AgentController.RepeatedWebStepReason(
+        Assert.Null(AgentPlanningPolicy.RepeatedWebStepReason(
             Fetch("https://example.com/other-article"),
             new List<PlanStep> { Fetch("https://example.com/ai-article") },
             CtxWithResults));
@@ -73,7 +73,7 @@ public class RepeatedWebStepGuardTests
     public void DifferentTopicSearch_IsAllowed()
     {
         // A genuinely different research question (no shared intent words) may run.
-        Assert.Null(AgentController.RepeatedWebStepReason(
+        Assert.Null(AgentPlanningPolicy.RepeatedWebStepReason(
             Search("current weather in London"),
             new List<PlanStep> { Search("AI research breakthroughs latest") },
             CtxWithResults));
@@ -84,7 +84,7 @@ public class RepeatedWebStepGuardTests
     {
         // The search FAILED (nothing harvested) — retrying the same query is a repair, not a loop.
         var ctxNoResults = "### read file.ts\n```\ncode\n```\n";
-        Assert.Null(AgentController.RepeatedWebStepReason(
+        Assert.Null(AgentPlanningPolicy.RepeatedWebStepReason(
             Search("AI research breakthroughs latest"),
             new List<PlanStep> { Search("AI research breakthroughs latest") },
             ctxNoResults));
@@ -93,7 +93,7 @@ public class RepeatedWebStepGuardTests
     [Fact]
     public void NonWebStep_IsNeverRejected()
     {
-        Assert.Null(AgentController.RepeatedWebStepReason(
+        Assert.Null(AgentPlanningPolicy.RepeatedWebStepReason(
             new PlanStep { File = "src/app.ts", Change = "Add a helper method" },
             new List<PlanStep> { Search("AI research breakthroughs latest") },
             CtxWithResults));
@@ -103,7 +103,7 @@ public class RepeatedWebStepGuardTests
     public void FirstWebStep_IsAllowed_EvenWithResultsInContext()
     {
         // The guard only rejects a web step that duplicates a COMMITTED web step.
-        Assert.Null(AgentController.RepeatedWebStepReason(
+        Assert.Null(AgentPlanningPolicy.RepeatedWebStepReason(
             Search("AI research breakthroughs latest"),
             new List<PlanStep>(),
             CtxWithResults));

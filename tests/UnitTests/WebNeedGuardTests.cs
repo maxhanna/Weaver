@@ -7,8 +7,7 @@ using Weaver.Services;
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Locks the missing-web-search gate helpers in the interleaved plan loop
-/// (Controllers/AgentController.Planning.cs). TaskHintsWebNeed is a deliberately
+/// Locks the missing-web-search gate helpers (Services/AgentPlanningPolicy.cs). TaskHintsWebNeed is a deliberately
 /// BROAD regex gate — it only opens the LLM verification, never rejects on its
 /// own — so it must catch web-flavored tasks (including noisy "search for" /
 /// "look up" phrasing that may be repo-internal) without snagging plain coding
@@ -17,16 +16,8 @@ namespace Weaver.UnitTests;
 /// </summary>
 public class WebNeedGuardTests
 {
-    private static readonly MethodInfo HintsMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("TaskHintsWebNeed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("TaskHintsWebNeed static method not found.");
-
-    private static readonly MethodInfo WebStepMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("IsWebStep", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("IsWebStep static method not found.");
-
-    private static bool Hints(string? p) => (bool)(HintsMethod.Invoke(null, new object?[] { p }) ?? false);
-    private static bool IsWeb(string? f) => (bool)(WebStepMethod.Invoke(null, new object?[] { f }) ?? false);
+    private static bool Hints(string? p) => AgentPlanningPolicy.TaskHintsWebNeed(p);
+    private static bool IsWeb(string? f) => AgentPlanningPolicy.IsWebStep(f);
 
     [Theory]
     [InlineData("Perform 3 independent web searches and write the results to a file")]
@@ -86,11 +77,7 @@ public class WebNeedGuardTests
 
     // ── TaskExplicitlyCommandsWeb (decisive explicit web-search commands) ──
 
-    private static readonly MethodInfo ExplicitWebMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("TaskExplicitlyCommandsWeb", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("TaskExplicitlyCommandsWeb static method not found.");
-
-    private static bool ExplicitWeb(string? p) => (bool)(ExplicitWebMethod.Invoke(null, new object?[] { p }) ?? false);
+    private static bool ExplicitWeb(string? p) => AgentPlanningPolicy.TaskExplicitlyCommandsWeb(p);
 
     // A direct web-search command is AUTHORITATIVE — the classifier may not veto it.
     // These are the exact phrasings that must bypass the LLM verification entirely.
@@ -132,15 +119,10 @@ public class WebNeedGuardTests
 
     // ── TryParseWebNeedVerdict (classifier JSON parsing + reason capture) ──
 
-    private static readonly MethodInfo ParseVerdictMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("TryParseWebNeedVerdict", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("TryParseWebNeedVerdict static method not found.");
-
     private static (bool Ok, bool NeedsWeb, string? Query, string Reason) ParseVerdict(string json)
     {
-        var args = new object?[] { json, null, null, null };
-        var ok = (bool)(ParseVerdictMethod.Invoke(null, args) ?? false);
-        return (ok, (bool)(args[1] ?? false), (string?)args[2], (string)(args[3] ?? ""));
+        var ok = AgentPlanningPolicy.TryParseWebNeedVerdict(json, out var needsWeb, out var query, out var reason);
+        return (ok, needsWeb, query, reason);
     }
 
     [Fact]
@@ -201,12 +183,8 @@ public class WebNeedGuardTests
     // The guard fires ONLY on tasks that hint at needing web data, so a bare legit
     // `curl https://…/health` on a non-web task stays allowed as a real command.
 
-    private static readonly MethodInfo RejectFetchMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("ShouldRejectFetchCommand", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("ShouldRejectFetchCommand static method not found.");
-
     private static bool RejectFetch(string? prompt, string? command) =>
-        (bool)(RejectFetchMethod.Invoke(null, new object?[] { prompt, command }) ?? false);
+        AgentPlanningPolicy.ShouldRejectFetchCommand(prompt, command);
 
     [Fact]
     public void ShouldRejectFetchCommand_RejectsOnWebHintingTask()
@@ -248,19 +226,11 @@ public class WebNeedGuardTests
 
     // ── WebNotNeededFeedback (rejection feedback for web steps on non-web tasks) ──
 
-    private static string Constant(string name)
-    {
-        var field = typeof(Weaver.Controllers.AgentController)
-            .GetField(name, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-            ?? throw new InvalidOperationException(name + " constant not found.");
-        return (string)(field.GetRawConstantValue() ?? "");
-    }
-
     [Fact]
     public void WebNotNeededFeedback_ExistsAndIsDistinctFromWebNeedFeedback()
     {
-        var notNeeded = Constant("WebNotNeededFeedback");
-        var needed = Constant("WebNeedFeedback");
+        var notNeeded = AgentPlanningPolicy.WebNotNeededFeedback;
+        var needed = AgentPlanningPolicy.WebNeedFeedback;
         Assert.False(string.IsNullOrWhiteSpace(notNeeded));
         Assert.NotEqual(needed, notNeeded);
     }
@@ -268,7 +238,7 @@ public class WebNeedGuardTests
     [Fact]
     public void WebNotNeededFeedback_SteersAwayFromWebTools()
     {
-        var fb = Constant("WebNotNeededFeedback");
+        var fb = AgentPlanningPolicy.WebNotNeededFeedback;
         // The feedback must tell the model to drop the web step and work from repo context.
         Assert.Contains("does NOT need CURRENT EXTERNAL information", fb);
         Assert.Contains("_web_search/_web_fetch step is unnecessary", fb);
@@ -314,12 +284,7 @@ public class WebNeedGuardTests
     // bouncing them for "no web step yet" (the "failed over and over to create a directory"
     // report: mkdir/_create_file proposals were rejected 3× before _create_directory landed).
 
-    private static readonly MethodInfo PrepStepMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("IsFilesystemPrepStep", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("IsFilesystemPrepStep static method not found.");
-
-    private static bool IsPrep(PlanStep step) =>
-        (bool)(PrepStepMethod.Invoke(null, new object?[] { step }) ?? false);
+    private static bool IsPrep(PlanStep step) => AgentPlanningPolicy.IsFilesystemPrepStep(step);
 
     [Theory]
     [InlineData("_create_directory")]
@@ -360,12 +325,7 @@ public class WebNeedGuardTests
     // When the planner reaches for _create_file to make a directory, the gate must reject
     // with TARGETED steering toward _create_directory instead of the generic web feedback.
 
-    private static readonly MethodInfo DirIntentMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("DirectoryIntentFeedback", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("DirectoryIntentFeedback static method not found.");
-
-    private static string? DirFeedback(PlanStep step) =>
-        (string?)(DirIntentMethod.Invoke(null, new object?[] { step }));
+    private static string? DirFeedback(PlanStep step) => AgentPlanningPolicy.DirectoryIntentFeedback(step);
 
     [Theory]
     [InlineData("Create benchmark_test_16 directory")]
@@ -394,12 +354,7 @@ public class WebNeedGuardTests
     // forgets _web_fetch exists and plans a script that programs the HTTP request
     // (requests.get + open(...,"w")). The gate must steer to _web_fetch.
 
-    private static readonly MethodInfo ScraperFeedbackMethod = typeof(Weaver.Controllers.AgentController)
-        .GetMethod("ScraperScriptFeedback", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)
-        ?? throw new InvalidOperationException("ScraperScriptFeedback static method not found.");
-
-    private static string? ScraperFb(PlanStep step) =>
-        (string?)(ScraperFeedbackMethod.Invoke(null, new object?[] { step }));
+    private static string? ScraperFb(PlanStep step) => AgentPlanningPolicy.ScraperScriptFeedback(step);
 
     [Theory]
     [InlineData("import requests\nresp = requests.get(\"https://pokeapi.co/api/v2/pokemon?limit=1025\")\nwith open(\"pokemon_data.csv\", \"w\") as f: f.write(resp.text)\n")]

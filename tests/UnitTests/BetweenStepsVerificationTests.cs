@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using Xunit;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -399,12 +400,7 @@ public class BetweenStepsVerificationTests
     }
 
     private static bool InvokeIsDumpTask(string prompt, string projectRoot)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "IsDumpTask", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("IsDumpTask not found");
-        return (bool)(method.Invoke(null, new object?[] { prompt, projectRoot }) ?? false);
-    }
+        => AgentPlanningPolicy.IsDumpTask(prompt, projectRoot);
 
     private static async Task<(bool isComplete, string reason)> InvokeAssessCompletion(
         List<object> executedSteps, string projectRoot)

@@ -20,6 +20,7 @@ using static Weaver.Services.AgentCodeFormatting;
 using static Weaver.Services.AgentSkeleton;
 using static Weaver.Services.AgentDiffUtilities;
 using static Weaver.Services.AgentJsonUtilities;
+using static Weaver.Services.AgentPlanningPolicy;
 using Weaver;
 namespace Weaver.Controllers;
 
@@ -41,12 +42,13 @@ partial class AgentController
         return header;
     }
     private async Task<(List<object> steps, AgentPlan plan, bool complete)> StepResolutionPipeline(
-        string prompt, string projectRoot, bool emitSse, CancellationToken ct,
+        AgentRunContext runContext, string prompt, string projectRoot, bool emitSse, CancellationToken ct,
         List<string>? attachedFiles = null,
         bool skipContextReview = false,
         string? steeringContext = null,
         string? cardId = null,
-        Task<bool>? connectivityTask = null)
+        Task<bool>? connectivityTask = null,
+        bool? strictVerifier = null)
     {
         var cfg = await LoadConfigAsync();
 
@@ -56,19 +58,9 @@ partial class AgentController
         // of one-after-another. The LLM connectivity probe (started in Orchestrate)
         // overlaps them too and is awaited before any LLM call below.
         var allSteps = new List<object>();
-        // The requirement checklist is per-run: reset it here so a reused controller instance
-        // (tests) never leaks a previous run's checklist into a run that did not extract one.
-        _requirementChecklist = null;
-        _taskPromptContextChars = 0;
-        // Per-step LLM token accounting is per-run: reset here so a reused controller instance
-        // (tests) never leaks a previous run's spend into the first step result of a new run.
-        _stepLlmPromptTokens = 0;
-        _stepLlmResponseTokens = 0;
-        _stepLlmCalls = 0;
-        // Run-level cumulative LLM spend (the live "tokens used" counter) is per-run too.
-        _runLlmPromptTokens = 0;
-        _runLlmResponseTokens = 0;
-        _runLlmCalls = 0;
+        // Run-scoped state is reset here rather than left on the controller. This keeps
+        // repeated executions isolated and makes ownership explicit.
+        runContext.Reset();
         await EmitLog(emitSse, "info", "Phase 1 — DISCOVER", new { prompt, attachedFiles, steeringContext, cardId }, ct: ct);
         // These disk/DB tasks deliberately start before the connectivity probe is
         // awaited: on the rare probe failure their results are discarded, which is
@@ -91,12 +83,12 @@ partial class AgentController
             editKnowledgeTask = LoadEditKnowledgeHeaderAsync(projectRoot, emitSse, ct);
 
         // LLM connectivity must pass before any LLM call below.
-        connectivityTask ??= CheckLlmConnectivity(projectRoot, emitSse, ct);
+        connectivityTask ??= CheckLlmConnectivity(runContext, projectRoot, emitSse, ct);
         if (!await connectivityTask)
             throw new InvalidOperationException("LLM connectivity check failed.");
 
         var (discoveryContext, ds) = await bootstrapTask;
-        _discoverySteps = ds;
+        runContext.DiscoverySteps = ds;
         allSteps.AddRange(ds);
         string? editKnowledgeHeader = editKnowledgeTask != null ? await editKnowledgeTask : null;
         AgentSkeleton.SkeletonResult? skeleton = skeletonTask != null ? await skeletonTask : null;
@@ -157,7 +149,7 @@ partial class AgentController
                 // Track how much of the discovery context is the skeleton (layout + note) so
                 // the context-breakdown pop can show it as its own row instead of burying it
                 // in the "headers / steering" residual.
-                _skeletonContextChars = skeletonSection.Length;
+                runContext.SkeletonContextChars = skeletonSection.Length;
                 await EmitLog(emitSse, "info",
                     $"Skeleton trimmed from {skeleton!.Paths.Count} paths to {trimmed.Length} chars {(string.IsNullOrWhiteSpace(note) ? "" : "— " + note)}", ct: ct);
             }
@@ -176,13 +168,13 @@ partial class AgentController
         // separately (BuildIncrementalStepUserPrompt, AnalyzePromptAndPlanCodeChanges,
         // BuildReplanPrompt) so the planner still verifies each requirement without polluting
         // task classification.
-        _requirementChecklist = string.IsNullOrWhiteSpace(requirementChecklist) ? null : requirementChecklist;
+        runContext.RequirementChecklist = string.IsNullOrWhiteSpace(requirementChecklist) ? null : requirementChecklist;
         // The context-breakdown "task prompt + requirements" row: the raw task text plus the
         // checklist share (the checklist is threaded into the planner, never the discovery
         // context, so it is accounted for here, not in the scaffolding residual).
-        _taskPromptContextChars = prompt.Length + (_requirementChecklist?.Length ?? 0);
-        if (_requirementChecklist != null)
-            await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist }, ct: ct);
+        runContext.TaskPromptContextChars = prompt.Length + (runContext.RequirementChecklist?.Length ?? 0);
+        if (runContext.RequirementChecklist != null)
+            await EmitLog(emitSse, "info", "Extracted requirement checklist", new { requirementChecklist = runContext.RequirementChecklist }, ct: ct);
         else
             await EmitLog(emitSse, "warn", "Requirement checklist was empty.", ct: ct);
         if (attachedFiles != null && attachedFiles.Count > 0)
@@ -312,7 +304,7 @@ partial class AgentController
         if (emitSse && !skipContextReview)
         {
             await EmitLog(emitSse, "info", $"Reviewing context from {ds.Count} discovery steps ...", ct: ct);
-            discoveryContext = await RunContextReview(ds, discoveryContext, allSteps, ct);
+            discoveryContext = await RunContextReview(runContext, ds, discoveryContext, allSteps, ct);
         }
         MetaPlanResult? metaPlan = null;
         var planAlreadyExecuted = false;
@@ -346,7 +338,7 @@ partial class AgentController
                     // prematurely truncate a valid multi-step stage. The budget is enforced in
                     // the top-level interleaved loop, which is the actual execution path.
                     var (incSubPlan, updatedCtx) = await RunIncrementalPlanningLoop(
-                        subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId,
+                        runContext, subPrompt, discoveryContext, projectRoot, emitSse, ct, subPlan.ContextNote, cardId,
                         atomicStepEstimate: null, attachedFiles: attachedFiles);
                     subPlanResult = incSubPlan;
                     discoveryContext = updatedCtx;
@@ -420,7 +412,7 @@ partial class AgentController
                     // Snapshot the sub-plan's HTML targets before execution so template-binding
                     // validation only flags bindings these edits introduce (first capture wins).
                     SnapshotPreEditFiles(projectRoot, subPlanResult, preEditSnapshots);
-                    await ExecutePlan(prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", subPlanResult, ct, subResults,
                         steeringContext: subPlan.ContextNote, attachedFiles: attachedFiles, cardId: cardId);
                     await UpdateMetaPlanSubPlanStatusAsync(cardId, subPlan.Id, true, emitSse, ct);
                     accumulatedContext.AppendLine($"## Sub-plan {i + 1} ({subPlan.Title}) — COMPLETED ##");
@@ -455,11 +447,11 @@ partial class AgentController
             await EmitLog(emitSse, "info", "Phase 2 — PLAN & EXECUTE (interleaved, one atomic step at a time)", ct: ct);
             if (emitSse)
             {
-                var ctxBreakdown = BuildContextBreakdown(ds, discoveryContext);
+                var ctxBreakdown = BuildContextBreakdownForRun(runContext, ds, discoveryContext);
                 await SendSse(Response, "phase", new { phase = "plan", message = "Planning & executing one atomic step at a time...", contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext), contextChars = discoveryContext.Length, contextBreakdown = ctxBreakdown, prompt }, ct);
             }
             var (interleavedPlan, interleavedResults, updatedContext, interleavedComplete, interleavedSnapshots) = await RunInterleavedPlanExecutionLoop(
-                prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
+                runContext, prompt, discoveryContext, projectRoot, emitSse, ct, steeringContext, cardId, attachedFiles, atomicStepEstimate);
             // Merge the loop's per-step pre-edit captures (captured right before each edit) so
             // post-execution template-binding validation sees the run's pre-edit content even
             // when the pre-loop meta-plan named no HTML files. First capture per file wins.
@@ -490,7 +482,7 @@ partial class AgentController
         if (!planAlreadyExecuted)
         {
             var validationReason = await ValidatePlanAsync(prompt, plan, ct);
-            if (_gracefulStop)
+            if (runContext.GracefulStop)
             {
                 await EmitLog(emitSse, "warn", "User did not respond to command confirmation — skipping card.", ct: ct);
                 return (allSteps, plan, false);
@@ -502,8 +494,8 @@ partial class AgentController
                 var validationSteering = $"A reviewer flagged the previous plan: {validationReason}. " +
                     "Fix exactly that issue — do not add unrelated files, features, or refactors." +
                     (string.IsNullOrWhiteSpace(steeringContext) ? "" : $"\n\n{steeringContext}");
-                var replan = await AnalyzePromptAndPlanCodeChanges(
-                    prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
+                var replan = await AnalyzePromptAndPlanCodeChangesCore(
+                    runContext, prompt, discoveryContext, projectRoot, emitSse, ct, validationSteering);
                 if (replan != null && replan.Plan.Count > 0)
                 {
                     plan = MergePlans(plan, replan);
@@ -604,7 +596,7 @@ partial class AgentController
             }
             try
             {
-                await ExecutePlan(prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
+                await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, discoveryContext, plan ?? new AgentPlan(), ct, allSteps,
                     steeringContext: steeringContext, attachedFiles: attachedFiles,
                     cardId: cardId);
             }
@@ -651,7 +643,7 @@ partial class AgentController
         if (anyEditsApplied || planCompleteDeclared || hasOsOutputDemand)
         {
             (taskComplete, verificationDetails, verificationIssues, speculativeVerificationIssues, _) =
-                 await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                 await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
         }
         else
         {
@@ -671,7 +663,7 @@ partial class AgentController
                     $"Post-execution verification says task is incomplete despite all steps having status 'done', " +
                     $"but gave no specific issues. Verifier details: {verificationDetails}. Re-running verifier...", ct: ct);
                 var (reverifyComplete, reverifyDetails, reverifyIssues, reverifySpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                    await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 if (reverifyComplete)
                 {
                     await EmitLog(emitSse, "info", "Re-verification passed — trusting verifier on retry.", ct: ct);
@@ -726,13 +718,24 @@ partial class AgentController
         }
         if (!taskComplete)
         {
+            // STRICT VERIFIER HARD-GATE (outer guard): when StrictVerifier===true and the
+            // verifier tripped the hard-gate, PostExecuteVerify returned early with a
+            // "Strict verifier hard-gate: ..." details string and the deterministic issues
+            // as confirmedIssues. The whole point of the hard-gate is to NOT attempt repair
+            // (the deterministic finding is terminal and the LLM cannot fix it better), so
+            // skip the repair loop entirely. A non-gate incomplete verdict (strict mode on
+            // but no deterministic issue, so the LLM round ran and returned complete=false)
+            // still repairs normally.
+            var strictGateTripped = strictVerifier == true
+                && verificationDetails != null
+                && verificationDetails.StartsWith("Strict verifier hard-gate:", StringComparison.Ordinal);
             const int MaxPostVerifyRepairIterations = 3;
             const int MaxZeroChangeRepairs = 2; // consecutive repair passes that change NO files trip the churn circuit breaker
             var repairIteration = 0;
             var exhaustedWithNoSteps = false;
             var partialEditFeedback = new StringBuilder();
             var zeroChangeRepairs = 0;
-            while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations)
+            while (!taskComplete && repairIteration < MaxPostVerifyRepairIterations && !strictGateTripped)
             {
                 repairIteration++;
                 await EmitLog(emitSse, "warn",
@@ -764,8 +767,8 @@ partial class AgentController
                         await EmitLog(emitSse, "success",
                             $"💾 Repair auto-dumped web results to {dumpPath} — the task asked to write a file to {osDemand.DirectoryPath}", ct: ct);
                         var (dumpVerified, dumpDetails, dumpIssues, dumpSpeculative, _) =
-                            await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
-                                atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                            await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext,
+                                atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                         taskComplete = dumpVerified;
                         verifierVerdict = dumpVerified;
                         verificationDetails = dumpDetails;
@@ -899,7 +902,7 @@ partial class AgentController
                 }
                 else
                 {
-                    replanSteps = await GenerateReplanStepsAsync(prompt, allSteps, plan,
+                    replanSteps = await GenerateReplanStepsAsync(runContext, prompt, allSteps, plan,
                         enhancedSteering, projectRoot, emitSse, ct,
                         attachedFiles: attachedFiles,
                         qualityCheckReason: qualityCheckReason.ToString());
@@ -978,7 +981,7 @@ partial class AgentController
                     // A repair step carrying a concrete oldString/newString (deterministic
                     // repairs, scripted replans) is applied directly — no LLM pre-resolution
                     // round-trip, mirroring the interleaved loop's ShouldApplyDirectly path.
-                    await ExecutePlan(prompt, projectRoot, emitSse, "", plan, ct, allSteps,
+                    await ExecutePlanCore(runContext, prompt, projectRoot, emitSse, "", plan, ct, allSteps,
                         steeringContext: enhancedSteering, attachedFiles: attachedFiles,
                         completedStepIndices: mergedDone, cardId: cardId,
                         skipLlmPreResolution: ShouldApplyDirectly(singleStep));
@@ -1047,7 +1050,7 @@ partial class AgentController
                         $"verifier issue likely false-positive; next no-change pass trips the circuit breaker.", ct: ct);
                 }
                 var (reVerified, reDetails, reIssues, reSpeculative, _) =
-                    await PostExecuteVerify(prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext);
+                    await PostExecuteVerifyCore(runContext, prompt, projectRoot, emitSse, allSteps, ct, discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier: strictVerifier);
                 taskComplete = reVerified;
                 verifierVerdict = reVerified;
                 verificationDetails = reDetails;
@@ -1116,6 +1119,15 @@ partial class AgentController
                     });
                 }
             }
+            else if (strictGateTripped)
+            {
+                // Strict verifier hard-gate: the repair loop was intentionally skipped because a
+                // deterministic finding is terminal. The run stays incomplete with the exact
+                // deterministic issue(s) already published as ground truth.
+                await EmitLog(emitSse, "warn",
+                    $"🔒 Strict verifier hard-gate tripped — no repair attempted. Remaining issue(s): " +
+                    $"{string.Join("; ", verificationIssues ?? [])}", ct: ct);
+            }
             else
             {
                 await EmitLog(emitSse, "warn",
@@ -1143,7 +1155,7 @@ partial class AgentController
         // showing the peak size on the completed card instead of whatever mid-run value
         // was last streamed. Marked final so the frontend persists it to the card.
         if (emitSse)
-            await EmitContextUpdateAsync(discoveryContext, true, ct, final: true);
+            await EmitContextUpdateAsync(runContext, discoveryContext, true, ct, final: true);
         return (allSteps, plan ?? new AgentPlan(), taskComplete);
     }
     private async Task<Dictionary<string, string>> AskUserAsync(string question, List<QuestionField>? fields = null, CancellationToken ct = default, Object? additionalData = null)
@@ -1188,7 +1200,7 @@ partial class AgentController
     /// residual-by-subtraction approach collapsed to 0 because the token estimator is
     /// non-additive (file tokens can exceed the whole-context estimate).
     /// </summary>
-    private List<object> BuildContextBreakdown(List<object> ds, string discoveryContext)
+    private List<object> BuildContextBreakdownForRun(AgentRunContext runContext, List<object> ds, string discoveryContext)
     {
         var rows = new List<object>();
         var accountedChars = 0;
@@ -1208,7 +1220,7 @@ partial class AgentController
             accountedChars += output.Length;
         }
         var remainingChars = Math.Max(0, discoveryContext.Length - accountedChars);
-        var skeletonChars = Math.Min(_skeletonContextChars, remainingChars);
+        var skeletonChars = Math.Min(runContext.SkeletonContextChars, remainingChars);
         if (skeletonChars > 0)
         {
             rows.Add(new
@@ -1225,14 +1237,14 @@ partial class AgentController
         // is NOT subtracted from the scaffolding residual — the categories now cover every
         // part of what the LLM sees: files, skeleton, task prompt + requirements, and the
         // discovery scaffolding (headers / steering / plan-so-far).
-        if (_taskPromptContextChars > 0)
+        if (runContext.TaskPromptContextChars > 0)
         {
             rows.Add(new
             {
-                name = _requirementChecklist != null ? "task prompt + requirements checklist" : "task prompt",
+                name = runContext.RequirementChecklist != null ? "task prompt + requirements checklist" : "task prompt",
                 kind = "task",
-                chars = _taskPromptContextChars,
-                tokens = CharsToTokens(_taskPromptContextChars)
+                chars = runContext.TaskPromptContextChars,
+                tokens = CharsToTokens(runContext.TaskPromptContextChars)
             });
         }
         if (remainingChars > 0)
@@ -1260,7 +1272,7 @@ partial class AgentController
     /// size onto the card — the last mid-run value is often NOT the peak, because execution
     /// keeps reading files and fetching web results after the final context update fires.
     /// </summary>
-    private async Task EmitContextUpdateAsync(string discoveryContext, bool emitSse, CancellationToken ct,
+    private async Task EmitContextUpdateAsync(AgentRunContext runContext, string discoveryContext, bool emitSse, CancellationToken ct,
         bool final = false)
     {
         if (!emitSse) return;
@@ -1268,16 +1280,16 @@ partial class AgentController
         {
             contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
             contextChars = discoveryContext.Length,
-            contextBreakdown = BuildContextBreakdown(_discoverySteps, discoveryContext),
+            contextBreakdown = BuildContextBreakdownForRun(runContext, runContext.DiscoverySteps, discoveryContext),
             // The cumulative LLM spend so far — the live "tokens used" number. The context
             // size alone is meaningless on OS/benchmark tasks (empty sandbox ≈ 0 context
             // tokens) while every planner/verify round still costs thousands of tokens.
-            llmSpend = RunLlmSpend(),
+            llmSpend = RunLlmSpendForRun(runContext),
             final
         }, ct);
     }
     private async Task<string> RunContextReview(
-        List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
+        AgentRunContext runContext, List<object> ds, string discoveryContext, List<object> allSteps, CancellationToken ct)
     {
         var readFiles = ds.OfType<Dictionary<string, object?>>()
             .Where(s => s.TryGetValue("type", out var t) && t?.ToString() == "read")
@@ -1300,7 +1312,7 @@ partial class AgentController
             files = readFiles.Select(f => new { path = f }).ToList(),
             contextSize = AgentTokenMetrics.EstimateTokens(discoveryContext),
             contextChars = discoveryContext.Length,
-            contextBreakdown = BuildContextBreakdown(ds, discoveryContext)
+            contextBreakdown = BuildContextBreakdownForRun(runContext, ds, discoveryContext)
         }, ct);
         try
         {
@@ -1656,12 +1668,25 @@ partial class AgentController
         return snap;
     }
 
-    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerify(
+    // Compatibility entry point retained for existing reflection-based tests. Production
+    // execution uses the explicit-context overload below.
+    private Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerify(
         string originalPrompt, string projectRoot, bool emitSse,
         List<object> allResults, CancellationToken ct,
         string? discoveryContext = null, int? atomicStepEstimate = null,
         Dictionary<string, string>? preEditSnapshots = null,
-        string? cardId = null, string? steeringContext = null)
+        string? cardId = null, string? steeringContext = null,
+        bool? strictVerifier = null)
+        => PostExecuteVerifyCore(new AgentRunContext(), originalPrompt, projectRoot, emitSse, allResults, ct,
+            discoveryContext, atomicStepEstimate, preEditSnapshots, cardId, steeringContext, strictVerifier);
+
+    private async Task<(bool complete, string details, List<string> confirmedIssues, List<string> speculativeIssues, List<string> groundTruth)> PostExecuteVerifyCore(
+        AgentRunContext runContext, string originalPrompt, string projectRoot, bool emitSse,
+        List<object> allResults, CancellationToken ct,
+        string? discoveryContext = null, int? atomicStepEstimate = null,
+        Dictionary<string, string>? preEditSnapshots = null,
+        string? cardId = null, string? steeringContext = null,
+        bool? strictVerifier = null)
     {
         var modifiedPaths = allResults
             .OfType<Dictionary<string, object?>>()
@@ -1908,6 +1933,31 @@ partial class AgentController
             groundTruthItems.AddRange(deterministicIssues);
             if (groundTruthItems.Count > 0)
                 await PublishGroundTruthAsync(cardId, groundTruthItems, emitSse, ct);
+        }
+        // STRICT VERIFIER HARD-GATE — when the user opts in (StrictVerifier=true), a CONFIRMED
+        // deterministic finding is terminal: the run ends FAILED right here, BEFORE the LLM
+        // verifier round and the post-verify repair loop. This kills the 3× replan churn a
+        // compile-time / binding / wiring error otherwise triggers (each repair pass burns a
+        // full planner round + step resolution + another verifier round for an issue the LLM
+        // verifier cannot fix any better than the deterministic check already described), and
+        // it prevents the LLM verifier from "helpfully" re-wording a deterministic issue into
+        // a requirement the replanner then chases in the wrong direction. The ground truth was
+        // just published above, so the card shows the exact deterministic issue. StrictVerifier
+        // === null preserves the legacy behavior (the LLM round runs; deterministic issues
+        // still force complete=false but the run may attempt repair). StrictVerifier === false
+        // is the explicit relaxed mode: the early-return is skipped, so even a deterministic
+        // issue does not fail the run from this point (the relaxed handling below applies).
+        if (strictVerifier == true && deterministicIssues.Count > 0)
+        {
+            var strictDetails = $"Strict verifier hard-gate: {deterministicIssues.Count} deterministic issue(s) — " +
+                string.Join("; ", deterministicIssues);
+            await EmitLog(emitSse, "warn",
+                $"🔒 Strict verifier: FAILING run immediately ({deterministicIssues.Count} deterministic issue(s)) — " +
+                "skipping LLM verification round and repair loop.", ct: ct);
+            var strictGroundTruth = new List<string>();
+            strictGroundTruth.AddRange(confirmedEdits.Select(e => $"✓ Applied edit confirmed on disk: {e}"));
+            strictGroundTruth.AddRange(deterministicIssues);
+            return (false, strictDetails, deterministicIssues, new List<string>(), strictGroundTruth);
         }
         var sb = new StringBuilder();
         sb.AppendLine("### ORIGINAL TASK ###");
@@ -2158,6 +2208,16 @@ partial class AgentController
             await EmitLog(emitSse, "warn", $"Verification LLM returned empty: {error}", ct: ct);
             if (deterministicIssues.Count > 0)
             {
+                // Legacy (null) → deterministic still fails. Relaxed (false) → the LLM gave no
+                // verdict and the user opted out of deterministic gating, so publish the findings
+                // as ground truth but do not fail the run. Strict (true) never reaches here: the
+                // hard-gate early-return above already handled any deterministicIssues.Count > 0.
+                if (strictVerifier == false)
+                {
+                    return (true,
+                        $"Verification LLM call failed: {error}. Deterministic checks (relaxed, non-blocking): {string.Join("; ", deterministicIssues)}",
+                        new List<string>(), new List<string>(), deterministicIssues);
+                }
                 return (false,
                     $"Verification LLM call failed: {error}. Deterministic checks found: {string.Join("; ", deterministicIssues)}",
                     deterministicIssues, new List<string>(), deterministicIssues);
@@ -2181,11 +2241,25 @@ partial class AgentController
                 var (confirmedIssues, speculativeIssues) = ParseVerifyIssues(doc.RootElement);
                 if (deterministicIssues.Count > 0)
                 {
-                    // Deterministic findings always fail verification and are never triaged away.
-                    isComplete = false;
-                    confirmedIssues.AddRange(deterministicIssues);
-                    if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
-                    reason += "Deterministic checks: " + string.Join("; ", deterministicIssues);
+                    // Deterministic findings always fail verification and are never triaged away
+                    // — UNLESS StrictVerifier===false (explicit relaxed mode), in which case the
+                    // user has opted out of the hard-gate AND out of deterministic failures: the
+                    // issues are published as ground truth (informational) but do not force
+                    // complete=false or seed the repair loop. Legacy mode (null) keeps the
+                    // original "deterministic always fails" behavior.
+                    if (strictVerifier != false)
+                    {
+                        isComplete = false;
+                        confirmedIssues.AddRange(deterministicIssues);
+                        if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
+                        reason += "Deterministic checks: " + string.Join("; ", deterministicIssues);
+                    }
+                    else
+                    {
+                        // Relaxed: record the deterministic findings as ground truth only.
+                        if (!string.IsNullOrWhiteSpace(reason)) reason = reason.Trim() + " ";
+                        reason += "Deterministic checks (relaxed, non-blocking): " + string.Join("; ", deterministicIssues);
+                    }
                 }
                 var issuesJoined = string.Join("; ", confirmedIssues);
                 var details = reason + (string.IsNullOrWhiteSpace(issuesJoined) ? "" : $"\nIssues: {issuesJoined}");
@@ -2206,17 +2280,26 @@ partial class AgentController
             }
         }
         catch { }
-        // LLM output unparseable — deterministic findings still fail the run.
-        if (deterministicIssues.Count > 0)
+        // LLM output unparseable — deterministic findings still fail the run, unless the user
+        // opted into the relaxed mode (StrictVerifier===false), in which case the run is
+        // treated as complete (the LLM gave no verdict and deterministic issues are non-blocking).
+        if (deterministicIssues.Count > 0 && strictVerifier != false)
         {
             return (false,
                 "Verification LLM output unparseable. Deterministic checks found: " + string.Join("; ", deterministicIssues),
                 deterministicIssues, new List<string>(), deterministicIssues);
         }
+        if (deterministicIssues.Count > 0 && strictVerifier == false)
+        {
+            // Relaxed: publish the deterministic findings as ground truth but complete the run.
+            return (true,
+                "Verification LLM output unparseable. Deterministic checks (relaxed, non-blocking): " + string.Join("; ", deterministicIssues),
+                new List<string>(), new List<string>(), deterministicIssues);
+        }
         return (true, "", new List<string>(), new List<string>(), new List<string>());
     }
     private async Task<List<PlanStep>> TryReplanAfterStep(
-        string prompt, List<object> allResults, AgentPlan plan,
+        AgentRunContext runContext, string prompt, List<object> allResults, AgentPlan plan,
         string? steeringContext, string projectRoot, bool emitSse,
         CancellationToken ct, List<PlanStep> planItems, int itemIdx,
         bool stepSkipped, bool stepSucceeded, List<string>? attachedFiles,
@@ -2232,7 +2315,7 @@ partial class AgentController
                 "Replan budget exhausted — any remaining gaps will be handled by post-execution verification.", ct: ct);
             return planItems;
         }
-        var moreSteps = await GenerateReplanStepsAsync(prompt, allResults, plan,
+        var moreSteps = await GenerateReplanStepsAsync(runContext, prompt, allResults, plan,
             steeringContext, projectRoot, emitSse, ct, attachedFiles: attachedFiles);
         if (moreSteps != null && moreSteps.Count > 0)
         {

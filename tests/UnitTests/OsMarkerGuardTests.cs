@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -73,15 +74,11 @@ public class OsMarkerGuardTests
         // web-step exclusion, so the research-verb guard bounced a genuinely web-needing task right
         // after the web-need gate approved it (the interleaved deadlock). Feeding the whitespace-y
         // field through ParseStepFromJson then ValidateIncrementalStepAsync is the true runtime path.
-        var parseMethod = typeof(AgentController).GetMethod(
-            "ParseStepFromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var parsed = (PlanStep)parseMethod.Invoke(null, new object?[]
-        {
+        var parsed = AgentPlanningPolicy.ParseStepFromJson(
             /*file*/ " _web_search \n", /*change*/ "Search for recent AI articles about machine learning advancements",
             /*targetSymbol*/ null, /*line*/ 0, /*oldString*/ null, /*newString*/ null,
             /*refFiles*/ new List<string>(), /*edits*/ new List<EditPair>(), /*targetType*/ null,
-            /*targetName*/ null, /*insertAfter*/ null, /*newCode*/ null, /*fullFile*/ null
-        })!;
+            /*targetName*/ null, /*insertAfter*/ null, /*newCode*/ null, /*fullFile*/ null);
         Assert.Equal("_web_search", parsed.File);
         var (valid, reason) = Validate(parsed,
             "Search the web for an interesting and relevant AI article and write the data into a text file on my desktop.");
@@ -117,15 +114,11 @@ public class OsMarkerGuardTests
         // Root cause: a stray newline/space in the LLM's "file" field used to dodge IsWebStep and
         // the web-step exclusion, so the research-verb guard fired "'search' is not an actionable edit"
         // on a legitimate _web_search step. ParseStepFromJson must collapse it to the clean marker.
-        var parseMethod = typeof(AgentController).GetMethod(
-            "ParseStepFromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var step = (PlanStep)parseMethod.Invoke(null, new object?[]
-        {
+        var step = AgentPlanningPolicy.ParseStepFromJson(
             /*file*/ " _web_search \n", /*change*/ "Search for AI articles", /*targetSymbol*/ null,
             /*line*/ 0, /*oldString*/ null, /*newString*/ null, /*refFiles*/ new List<string>(),
             /*edits*/ new List<EditPair>(), /*targetType*/ null, /*targetName*/ null, /*insertAfter*/ null,
-            /*newCode*/ null, /*fullFile*/ null
-        })!;
+            /*newCode*/ null, /*fullFile*/ null);
         Assert.Equal("_web_search", step.File);
     }
 

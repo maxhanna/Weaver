@@ -6,46 +6,40 @@ using Weaver.Controllers;
 namespace Weaver.UnitTests;
 
 /// <summary>
-/// Tests for <c>AgentController.BuildContextBreakdown</c> — the per-category rows behind the
-/// agent-panel token counter. Regression: the old "headers / skeleton / steering" row was
-/// derived as a token RESIDUAL (whole-context estimate minus per-file estimates). The token
-/// estimator is non-additive, so the residual routinely collapsed to 0 tokens even when the
-/// scaffolding text was non-trivial — the counter showed a starting token count and every
-/// non-file category read 0, and nothing updated during execution. The rewrite estimates
-/// non-file rows at the UI's documented ~chars/4 rate and splits the skeleton into its own
-/// row, so no row shows 0 while it has content.
+/// Tests for <c>AgentController.BuildContextBreakdownForRun</c> — the per-category rows
+/// behind the agent-panel token counter. Regression: the old "headers / skeleton /
+/// steering" row was derived as a token RESIDUAL (whole-context estimate minus per-file
+/// estimates). The token estimator is non-additive, so the residual routinely collapsed
+/// to 0 tokens even when the scaffolding text was non-trivial — the counter showed a
+/// starting token count and every non-file category read 0, and nothing updated during
+/// execution. The rewrite estimates non-file rows at the UI's documented ~chars/4 rate
+/// and splits the skeleton into its own row, so no row shows 0 while it has content.
+///
+/// The tests construct the <see cref="AgentRunContext"/> directly and pass it as an
+/// argument — the same way the run-time callers do — instead of seeding controller
+/// fields. (The old test seeded legacy reflection adapter fields that fed a dead
+/// 2-arg BuildContextBreakdown overload; both are gone.)
 /// </summary>
 public class ContextBreakdownTests
 {
-    private static dynamic InvokeBuildContextBreakdown(AgentController controller,
-        List<object> ds, string discoveryContext)
+    private static object UninitializedController() =>
+        RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
+
+    private static dynamic InvokeBuildContextBreakdownForRun(
+        AgentRunContext runContext, List<object> ds, string discoveryContext)
     {
         var method = typeof(AgentController).GetMethod(
-            "BuildContextBreakdown", BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("BuildContextBreakdown not found");
-        return method.Invoke(controller, new object?[] { ds, discoveryContext })!;
-    }
-
-    private static void SetField(object target, string name, object value)
-    {
-        var field = target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException($"Field {name} not found");
-        field.SetValue(target, value);
-    }
-
-    private static AgentController NewController()
-    {
-        var controller = (AgentController)RuntimeHelpers.GetUninitializedObject(typeof(AgentController));
-        SetField(controller, "_discoverySteps", new List<object>());
-        return controller;
+            "BuildContextBreakdownForRun", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("BuildContextBreakdownForRun not found");
+        return method.Invoke(UninitializedController(),
+            new object?[] { runContext, ds, discoveryContext })!;
     }
 
     [Fact]
     public void SkeletonAndScaffoldingRows_ShowRealTokenEstimates_NeverZero()
     {
-        var controller = NewController();
         // 400 chars of skeleton in the context.
-        SetField(controller, "_skeletonContextChars", 400);
+        var runContext = new AgentRunContext { SkeletonContextChars = 400 };
         // One discovery read: 800 chars of file output.
         var ds = new List<object>
         {
@@ -57,7 +51,7 @@ public class ContextBreakdownTests
         // Context = headers (400, not part of any file output) + file output (800) + extra (100).
         var discoveryContext = new string('H', 400) + new string('x', 800) + new string('O', 100);
 
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, ds, discoveryContext);
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(runContext, ds, discoveryContext);
         var rowList = rows.Cast<dynamic>().ToList();
 
         // File row: chars from the read output, tokens estimated.
@@ -82,11 +76,11 @@ public class ContextBreakdownTests
     [Fact]
     public void NoSkeleton_NoSkeletonRow_ScaffoldingStillShowsRealEstimate()
     {
-        var controller = NewController(); // _skeletonContextChars stays 0
+        var runContext = new AgentRunContext(); // SkeletonContextChars stays 0
         var ds = new List<object>();
         var discoveryContext = new string('H', 60); // headers only, no reads, no skeleton
 
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, ds, discoveryContext);
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(runContext, ds, discoveryContext);
         var rowList = rows.Cast<dynamic>().ToList();
 
         Assert.DoesNotContain(rowList, r => (string)r.kind == "skeleton");
@@ -99,12 +93,11 @@ public class ContextBreakdownTests
     [Fact]
     public void SkeletonLargerThanContextRemainder_CappedToRemainder()
     {
-        var controller = NewController();
-        SetField(controller, "_skeletonContextChars", 1000); // larger than what remains
+        var runContext = new AgentRunContext { SkeletonContextChars = 1000 }; // larger than what remains
         var ds = new List<object>();
         var discoveryContext = new string('H', 300); // 300 chars total, no file reads
 
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, ds, discoveryContext);
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(runContext, ds, discoveryContext);
         var rowList = rows.Cast<dynamic>().ToList();
 
         var skeletonRow = rowList.Single(r => (string)r.kind == "skeleton");
@@ -115,8 +108,8 @@ public class ContextBreakdownTests
     [Fact]
     public void EmptyContext_NoRows()
     {
-        var controller = NewController();
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, new List<object>(), "");
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(
+            new AgentRunContext(), new List<object>(), "");
         Assert.Empty(rows.Cast<dynamic>().ToList());
     }
 
@@ -129,14 +122,16 @@ public class ContextBreakdownTests
     [Fact]
     public void TaskPromptRow_IncludesChecklistShare_ShowsRealEstimate()
     {
-        var controller = NewController();
         // Prompt (300 chars) + requirement checklist (100 chars) = 400 chars of task input.
-        SetField(controller, "_taskPromptContextChars", 400);
-        SetField(controller, "_requirementChecklist", "### EXPLICIT REQUIREMENTS CHECKLIST ###\n 1. …");
+        var runContext = new AgentRunContext
+        {
+            TaskPromptContextChars = 400,
+            RequirementChecklist = "### EXPLICIT REQUIREMENTS CHECKLIST ###\n 1. …"
+        };
         var ds = new List<object>();
         var discoveryContext = new string('H', 60); // headers only
 
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, ds, discoveryContext);
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(runContext, ds, discoveryContext);
         var rowList = rows.Cast<dynamic>().ToList();
 
         var taskRow = rowList.Single(r => (string)r.kind == "task");
@@ -154,17 +149,15 @@ public class ContextBreakdownTests
     public void TaskPromptRow_NoChecklist_NamesJustTaskPrompt_AndZeroTaskCharsOmitsRow()
     {
         // Without a checklist the row is still shown, named plainly.
-        var controller = NewController();
-        SetField(controller, "_taskPromptContextChars", 300);
-        SetField(controller, "_requirementChecklist", null!);
-        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(controller, new List<object>(), "HHH");
+        var runContext = new AgentRunContext { TaskPromptContextChars = 300, RequirementChecklist = null };
+        var rows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(runContext, new List<object>(), "HHH");
         var taskRow = rows.Cast<dynamic>().Single(r => (string)r.kind == "task");
         Assert.Equal("task prompt", (string)taskRow.name);
         Assert.Equal(300, (int)taskRow.chars);
 
-        // Fresh controller (never set) → no task row (mirrors the old behaviour).
-        var fresh = NewController();
-        var freshRows = (IEnumerable<dynamic>)InvokeBuildContextBreakdown(fresh, new List<object>(), "");
+        // A fresh context (TaskPromptContextChars 0) → no task row (mirrors the old behaviour).
+        var freshRows = (IEnumerable<dynamic>)InvokeBuildContextBreakdownForRun(
+            new AgentRunContext(), new List<object>(), "");
         Assert.DoesNotContain(freshRows.Cast<dynamic>(), r => (string)r.kind == "task");
     }
 }

@@ -112,6 +112,15 @@
                 title="Auto-create tests for the code changes">
                 <input type="checkbox" ng-model="card.createTests" ng-change="vm.saveCardText(card)" /> TEST
               </label>
+              <!-- STRICT verifier (hard-gate): tri-state backend (null=legacy, true=strict,
+                   false=relaxed), surfaced here as a binary checkbox. Checked = strict (a
+                   deterministic finding ends the run FAILED immediately); unchecked = null
+                   (legacy — LLM verifier + repair loop still run). The 'relaxed' (false) state
+                   is only reachable via the project default or API, by design. -->
+              <label class="pr-toggle" ng-if="!card._fromSuggestion" ng-click="$event.stopPropagation()"
+                title="Strict verifier: deterministic checks (binding/CSS/rename/OS-output/compile) are terminal — a failed check ends the run immediately instead of triggering the 3x replan repair loop. Checked = strict, unchecked = legacy.">
+                <input type="checkbox" ng-model="card.strictVerifier" ng-change="vm.saveCardText(card)" /> STRICT
+              </label>
             </div>
           </div>
 

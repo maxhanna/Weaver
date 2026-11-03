@@ -2,6 +2,7 @@ using System.Reflection;
 using Xunit;
 using Weaver;
 using Weaver.Controllers;
+using Weaver.Services;
 
 namespace Weaver.UnitTests;
 
@@ -20,8 +21,6 @@ public class RequirementChecklistSeparationTests
         "BuildIncrementalStepUserPrompt", BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly MethodInfo BuildReplanPromptMethod = typeof(AgentController).GetMethod(
         "BuildReplanPrompt", BindingFlags.NonPublic | BindingFlags.Static)!;
-    private static readonly MethodInfo TaskHintsWebNeedMethod = typeof(AgentController).GetMethod(
-        "TaskHintsWebNeed", BindingFlags.NonPublic | BindingFlags.Static)!;
 
     private const string Checklist =
         "### EXPLICIT REQUIREMENTS CHECKLIST ###\n" +
@@ -57,7 +56,7 @@ public class RequirementChecklistSeparationTests
         })!;
 
     private static bool TaskHintsWebNeed(string? prompt)
-        => (bool)TaskHintsWebNeedMethod.Invoke(null, new object?[] { prompt })!;
+        => AgentPlanningPolicy.TaskHintsWebNeed(prompt);
 
     [Fact]
     public void IncrementalPlannerPrompt_ChecklistRidesAsOwnSection_NotInsideTask()

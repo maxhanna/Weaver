@@ -1,3 +1,9 @@
+// Root-namespace shim: 37 test files say `using Weaver;` to reach the app's root-namespace
+// types (AgentController, DatabaseService, ...). With the tests now in a separate
+// Weaver.Tests assembly that namespace no longer encloses them, so this global using keeps
+// those files compiling unmodified.
+global using Weaver;
+
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
@@ -9,7 +15,6 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
-using Weaver;
 using Weaver.Controllers;
 using Weaver.Services;
 
@@ -798,6 +803,11 @@ public class AdversarialUserScenarioTests : IDisposable
     private async Task<(List<object> allSteps, AgentPlan? plan, bool complete)> InvokeOrchestrate(
         AgentController controller, string prompt, string? steeringContext)
     {
+        // Hermetic runs: the scripted edits must land verbatim — an external formatter
+        // (prettier via npx) rewriting quote style would corrupt the scripted plan's later
+        // steps (their oldString anchors no longer match the re-quoted file) and flip the
+        // ground-truth assertions, and only on machines where npx exists.
+        CodeFormatterService.SuppressExternalFormattersForTests.Value = true;
         var method = typeof(AgentController).GetMethod("Orchestrate", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("Orchestrate not found");
         var task = (Task<(List<object> allSteps, AgentPlan? plan, bool complete)>)method.Invoke(controller, new object?[]
@@ -806,7 +816,7 @@ public class AdversarialUserScenarioTests : IDisposable
             /*attachedFiles*/ new List<string> { DemoTsRel },
             /*skipContextReview*/ false, /*steeringContext*/ steeringContext, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ null,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }
@@ -904,7 +914,6 @@ public class AdversarialUserScenarioTests : IDisposable
         // Hermetic runtime probe: nothing installed (no real process spawns in tests).
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

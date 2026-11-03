@@ -983,7 +983,7 @@ partial class AgentController
                     sb.AppendLine($"  ```");
                     sb.AppendLine($"  {h.old[..Math.Min(400, h.old.Length)]}");
                     sb.AppendLine($"  ```");
-                    var exactBlock = BuildExactMatchBlock(fileContent, h.old);
+                    var exactBlock = AnchorEditHeuristics.BuildExactMatchBlock(fileContent, h.old);
                     if (exactBlock != null)
                     {
                         sb.AppendLine($"  The EXACT lines from the file at the matched location (copy these VERBATIM for oldString):");
@@ -993,7 +993,7 @@ partial class AgentController
                     }
                     else
                     {
-                        var hint = BuildExactMatchHint(fileContent, h.old);
+                        var hint = AnchorEditHeuristics.BuildExactMatchHint(fileContent, h.old);
                         if (hint != null)
                         {
                             sb.AppendLine($"  These lines in the file are SIMILAR to what you wrote:");
@@ -1008,9 +1008,9 @@ partial class AgentController
                     // loop: the identical oldString 3× → abort).
                     if (h.error.Contains("not found verbatim", StringComparison.OrdinalIgnoreCase))
                     {
-                        var groundedBlock = AgentEditHeuristics.TryIdentifierAnchoredReanchor(
+                        var groundedBlock = AnchorEditHeuristics.TryIdentifierAnchoredReanchor(
                             fileContent, h.old, 0)?.correctedBlock;
-                        groundedBlock ??= AgentEditHeuristics.FindIdentifierGroundedLines(fileContent, h.old);
+                        groundedBlock ??= AnchorEditHeuristics.FindIdentifierGroundedLines(fileContent, h.old);
                         if (!string.IsNullOrWhiteSpace(groundedBlock))
                         {
                             sb.AppendLine($"  Your oldString's anchor was NOT found verbatim (indentation/context differs). " +

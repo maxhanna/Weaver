@@ -13,9 +13,8 @@ namespace Weaver.UnitTests;
 /// Full-chain corpus for the FORMAT D HTML payload route — the LLM-payload path the
 /// plan-based fuzz (FormatCCorpusTests) skips because it builds PlanSteps with
 /// AST-resolved oldString directly. Here the step is composed from raw payload fields
-/// exactly as the agent does: <c>AgentController.ParseStepFromJson</c> is invoked via
-/// reflection (private static, same pattern as FormatCCorpusTests.InvokePreEditValidation)
-/// to map targetType/targetName/insertAfter/newCode/fullFile onto a PlanStep — the
+/// exactly as the agent does: <c>AgentPlanningPolicy.ParseStepFromJson</c> (the same
+/// composition helper the planner pipeline calls) maps targetType/targetName/insertAfter/newCode/fullFile onto a PlanStep — the
 /// targetName→TargetSymbol mapping and fullFile→NewString mapping are the load-bearing
 /// composition rules. Then the FORMAT D apply chain runs the agent's exact branch
 /// (AgentController ~1317 / ~1954): join newCode → StripLeadingClosingDivs → already-done
@@ -31,12 +30,13 @@ namespace Weaver.UnitTests;
 /// </summary>
 public class FormatDPayloadCorpusTests
 {
-    // ── Reflection into the real composition ─────────────────────────────────
+    // ── The real composition (AgentPlanningPolicy.ParseStepFromJson) ─────────
 
     /// <summary>
-    /// Invokes the actual <c>AgentController.ParseStepFromJson</c> (private static,
-    /// 13 params incl. optionals) — the same composition the executor uses to map a
-    /// raw payload onto a PlanStep. Reflection keeps the test pinned to the real
+    /// Calls the actual <c>AgentPlanningPolicy.ParseStepFromJson</c> (13 params incl.
+    /// optionals) — the same composition the executor uses to map a
+    /// raw payload onto a PlanStep. Calling the policy directly keeps the test pinned
+    /// to the real
     /// mapping (targetName→TargetSymbol, fullFile→NewString, newCode preservation,
     /// _edit/ prefix normalization) instead of a drifting re-implementation.
     /// </summary>
@@ -45,17 +45,8 @@ public class FormatDPayloadCorpusTests
         List<string> refFiles, List<EditPair> edits,
         string? targetType = null, string? targetName = null, bool? insertAfter = null,
         List<string>? newCode = null, string? fullFile = null)
-    {
-        var method = typeof(AgentController).GetMethod(
-            "ParseStepFromJson", BindingFlags.NonPublic | BindingFlags.Static)
-            ?? throw new InvalidOperationException("ParseStepFromJson not found");
-        var result = method.Invoke(null, new object?[]
-        {
-            file, change, targetSymbol, line, oldString, newString, refFiles, edits,
-            targetType, targetName, insertAfter, newCode, fullFile
-        }) ?? throw new InvalidOperationException("ParseStepFromJson returned null");
-        return (PlanStep)result;
-    }
+        => AgentPlanningPolicy.ParseStepFromJson(file, change, targetSymbol, line, oldString, newString,
+            refFiles, edits, targetType, targetName, insertAfter, newCode, fullFile);
 
     /// <summary>
     /// Invokes the actual <c>AgentController.HasConcreteEdit</c> (private static) — the

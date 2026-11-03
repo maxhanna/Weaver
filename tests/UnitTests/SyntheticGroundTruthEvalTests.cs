@@ -629,23 +629,24 @@ public class SyntheticGroundTruthEvalTests : IDisposable
         // EstimateTokens(prompt)+EstimateTokens(response) each, TakeStepLlmMetrics snapshots
         // and RESETS (a second take is null), and unlabeled rounds record nothing.
         var controller = BuildController();
-        var record = typeof(AgentController).GetMethod("RecordLlmRoundMetricsAsync",
+        var runContext = new AgentRunContext();
+        var record = typeof(AgentController).GetMethod("RecordLlmRoundMetricsForRunAsync",
             BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("RecordLlmRoundMetricsAsync not found");
-        var take = typeof(AgentController).GetMethod("TakeStepLlmMetrics",
-            BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("TakeStepLlmMetrics not found");
+            ?? throw new InvalidOperationException("RecordLlmRoundMetricsForRunAsync not found");
+        var take = typeof(AgentController).GetMethod("TakeStepLlmMetricsForRun",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("TakeStepLlmMetricsForRun not found");
 
         // No labeled rounds yet → nothing to attach.
-        Assert.Null(take.Invoke(controller, null));
+        Assert.Null(take.Invoke(controller, new object?[] { runContext }));
 
         const string sys = "You are a planner.";
         const string user = "plan the next atomic step";
         const string resp = "{\"planComplete\":false,\"step\":{\"file\":\"a.ts\",\"change\":\"x\"}}";
-        await (Task)record.Invoke(controller, new object?[] { "planner step 1", sys, user, resp, false, CancellationToken.None })!;
-        await (Task)record.Invoke(controller, new object?[] { "verify step 1 round 1/3", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "planner step 1", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "verify step 1 round 1/3", sys, user, resp, false, CancellationToken.None })!;
 
-        dynamic m = take.Invoke(controller, null)!;
+        dynamic m = take.Invoke(controller, new object?[] { runContext })!;
         Assert.NotNull(m);
         Assert.Equal(2, (int)m.calls);
         var expectedPrompt = 2 * (AgentTokenMetrics.EstimateTokens(sys) + AgentTokenMetrics.EstimateTokens(user));
@@ -655,11 +656,11 @@ public class SyntheticGroundTruthEvalTests : IDisposable
         Assert.Equal(expectedPrompt + expectedResponse, (int)m.totalTokens);
 
         // Take resets — a second take is null again.
-        Assert.Null(take.Invoke(controller, null));
+        Assert.Null(take.Invoke(controller, new object?[] { runContext }));
 
         // Unlabeled rounds record nothing.
-        await (Task)record.Invoke(controller, new object?[] { null, "ignored sys", "ignored user", "x", false, CancellationToken.None })!;
-        Assert.Null(take.Invoke(controller, null));
+        await (Task)record.Invoke(controller, new object?[] { runContext, null, "ignored sys", "ignored user", "x", false, CancellationToken.None })!;
+        Assert.Null(take.Invoke(controller, new object?[] { runContext }));
     }
 
     [Fact]
@@ -670,25 +671,26 @@ public class SyntheticGroundTruthEvalTests : IDisposable
         // total even when the discovery context is tiny (OS/benchmark runs with an empty
         // sandbox) — the numbers the per-step badges and the 📊 logs report, summed.
         var controller = BuildController();
-        var record = typeof(AgentController).GetMethod("RecordLlmRoundMetricsAsync",
+        var runContext = new AgentRunContext();
+        var record = typeof(AgentController).GetMethod("RecordLlmRoundMetricsForRunAsync",
             BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("RecordLlmRoundMetricsAsync not found");
-        var take = typeof(AgentController).GetMethod("TakeStepLlmMetrics",
-            BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("TakeStepLlmMetrics not found");
-        var spend = typeof(AgentController).GetMethod("RunLlmSpend",
-            BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("RunLlmSpend not found");
+            ?? throw new InvalidOperationException("RecordLlmRoundMetricsForRunAsync not found");
+        var take = typeof(AgentController).GetMethod("TakeStepLlmMetricsForRun",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("TakeStepLlmMetricsForRun not found");
+        var spend = typeof(AgentController).GetMethod("RunLlmSpendForRun",
+            BindingFlags.NonPublic | BindingFlags.Static)
+            ?? throw new InvalidOperationException("RunLlmSpendForRun not found");
 
-        Assert.Null(spend.Invoke(controller, null));
+        Assert.Null(spend.Invoke(controller, new object?[] { runContext }));
 
         const string sys = "You are a planner.";
         const string user = "plan the next atomic step";
         const string resp = "{\"planComplete\":false,\"step\":{\"file\":\"a.ts\",\"change\":\"x\"}}";
-        await (Task)record.Invoke(controller, new object?[] { "planner step 1", sys, user, resp, false, CancellationToken.None })!;
-        await (Task)record.Invoke(controller, new object?[] { "verify step 1", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "planner step 1", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "verify step 1", sys, user, resp, false, CancellationToken.None })!;
 
-        dynamic run1 = spend.Invoke(controller, null)!;
+        dynamic run1 = spend.Invoke(controller, new object?[] { runContext })!;
         Assert.NotNull(run1);
         Assert.Equal(2, (int)run1.calls);
         var expectedPrompt = 2 * (AgentTokenMetrics.EstimateTokens(sys) + AgentTokenMetrics.EstimateTokens(user));
@@ -698,20 +700,20 @@ public class SyntheticGroundTruthEvalTests : IDisposable
         Assert.Equal(expectedPrompt + expectedResponse, (int)run1.totalTokens);
 
         // A per-step TAKE snapshots+resets the step counters but must NOT touch the run total.
-        dynamic taken = take.Invoke(controller, null)!;
+        dynamic taken = take.Invoke(controller, new object?[] { runContext })!;
         Assert.Equal(2, (int)taken.calls);
-        Assert.Null(take.Invoke(controller, null)); // step counters reset
+        Assert.Null(take.Invoke(controller, new object?[] { runContext })); // step counters reset
 
         // More rounds accumulate on top of the run total — still 4 calls, doubled values.
-        await (Task)record.Invoke(controller, new object?[] { "planner step 2", sys, user, resp, false, CancellationToken.None })!;
-        await (Task)record.Invoke(controller, new object?[] { "web assess", sys, user, resp, false, CancellationToken.None })!;
-        dynamic run2 = spend.Invoke(controller, null)!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "planner step 2", sys, user, resp, false, CancellationToken.None })!;
+        await (Task)record.Invoke(controller, new object?[] { runContext, "web assess", sys, user, resp, false, CancellationToken.None })!;
+        dynamic run2 = spend.Invoke(controller, new object?[] { runContext })!;
         Assert.Equal(4, (int)run2.calls);
         Assert.Equal(2 * expectedPrompt, (int)run2.promptTokens);
         Assert.Equal(2 * expectedResponse, (int)run2.responseTokens);
         Assert.Equal(2 * (expectedPrompt + expectedResponse), (int)run2.totalTokens);
         // The run total is never reset by a take.
-        dynamic run3 = spend.Invoke(controller, null)!;
+        dynamic run3 = spend.Invoke(controller, new object?[] { runContext })!;
         Assert.Equal(4, (int)run3.calls);
     }
 
@@ -2138,7 +2140,7 @@ public class SyntheticGroundTruthEvalTests : IDisposable
             /*attachedFiles*/ attachedFiles ?? new List<string> { GlobeCssRel, GlobeHtmlRel },
             /*skipContextReview*/ false, /*steeringContext*/ null, /*skipQualityCheck*/ false,
             /*existingPlan*/ null, /*completedStepIndices*/ null, /*cardId*/ cardId,
-            /*createTests*/ false, /*buildCommands*/ null, /*webResults*/ null
+            /*createTests*/ false, /*buildCommands*/ null, /*strictVerifier*/ null, /*webResults*/ null
         })!;
         return await task;
     }
@@ -2251,7 +2253,8 @@ public class SyntheticGroundTruthEvalTests : IDisposable
             {
                 prompt, _projectRoot, /*emitSse*/ false, allResults, CancellationToken.None,
                 /*discoveryContext*/ null, /*atomicStepEstimate*/ null, /*preEditSnapshots*/ null,
-                /*cardId*/ cardId, /*steeringContext*/ null
+                /*cardId*/ cardId, /*steeringContext*/ null,
+                /*strictVerifier*/ null // legacy behavior — these tests predate the hard-gate toggle
             })!;
         return await task;
     }
@@ -2280,7 +2283,6 @@ public class SyntheticGroundTruthEvalTests : IDisposable
         // Hermetic runtime probe: nothing installed (no real process spawns in tests).
         SetField(controller, "_runtimeProbe", new RuntimeProbeService((_, _, _) => (-1, "", "")));
         SetStaticField("_nextConnectivityCheck", DateTime.UtcNow.AddMinutes(5));
-        SetField(controller, "_lastConnectionCheckResult", true);
         return controller;
     }
 

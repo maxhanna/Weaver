@@ -28,7 +28,7 @@ function test(name, fn) {
   }
 }
 
-const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/meeting.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '../../wwwroot/meeting.js'), 'utf8').replace(/\r\n/g, '\n');
 
 function extract(name) {
   const m = new RegExp('function ' + name + '\\(([^)]*)\\) \\{\\n([\\s\\S]*?)\\n        \\}').exec(src);

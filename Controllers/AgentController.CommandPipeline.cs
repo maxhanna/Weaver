@@ -27,8 +27,9 @@ partial class AgentController
 {
     private async Task<(List<object> steps, AgentPlan? plan)> CommandExecutionPipeline(
         string prompt, string projectRoot, bool emitSse, CancellationToken ct,
-        string? steeringContext = null, string? cardId = null)
+        string? steeringContext = null, string? cardId = null, AgentRunContext? runContext = null)
     {
+        runContext ??= new AgentRunContext();
         var steps = new List<object>();
         var fastPlan = AgentPlanParsing.TryDetectSimpleIntent(prompt);
         if (fastPlan != null)
@@ -118,7 +119,7 @@ partial class AgentController
             AgentTokenMetrics.CompactConversation(conversation, pipelineCfg.contextWindowTokens);
             var (raw, _, err) = await CallLlmRaw(
                 "You are a terminal agent. Output only JSON.",
-                conversation.ToString(), ct, _infiniteTimeout, llmRoundLabel: $"command step {i + 1}");
+                conversation.ToString(), ct, _infiniteTimeout, llmRoundLabel: $"command step {i + 1}", runContext: runContext);
             if (string.IsNullOrWhiteSpace(raw)) { summary ??= "Completed with issues"; break; }
             var cleaned = raw.Trim();
             if (cleaned.StartsWith("```")) { var m = Regex.Match(cleaned, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase); if (m.Success) cleaned = m.Groups[1].Value.Trim(); }
@@ -357,7 +358,7 @@ partial class AgentController
                 if (!usedSearchQueries.Add(query)) { conversation.AppendLine("Already searched for \"" + query + "\". Use the results above."); continue; }
                 var (searchOut, _) = await ExecuteWebSearchAsync(query, null, ct);
                 var wr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_search", ["query"] = query, ["status"] = "done", ["output"] = searchOut };
-                var wrMetrics = TakeStepLlmMetrics();
+                var wrMetrics = TakeStepLlmMetricsForRun(runContext);
                 if (wrMetrics != null) wr["llmTokens"] = wrMetrics;
                 steps.Add(wr);
                 if (emitSse)
@@ -383,7 +384,7 @@ partial class AgentController
                 var isFetchError = fetchOut.StartsWith("HTTP 4") || fetchOut.StartsWith("HTTP 5") ||
                     (!string.IsNullOrWhiteSpace(fetchErr) && (fetchErr.Contains("404") || fetchErr.Contains("500")));
                 var fr = new Dictionary<string, object?> { ["index"] = stepIndex++, ["type"] = "web_fetch", ["url"] = url, ["status"] = isFetchError ? "error" : "done", ["output"] = fetchOut };
-                var frMetrics = TakeStepLlmMetrics();
+                var frMetrics = TakeStepLlmMetricsForRun(runContext);
                 if (frMetrics != null) fr["llmTokens"] = frMetrics;
                 steps.Add(fr);
                 if (emitSse)
