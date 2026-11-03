@@ -26,11 +26,18 @@ jobs:
 
       - name: C# suite
         # Tests live in tests/Weaver.Tests.csproj, which references Weaver.csproj.
-        # The app project pins RuntimeIdentifier=win-x64 + SelfContained=true (the
+        # The app project defaults to RuntimeIdentifier=win-x64 + SelfContained=true (the
         # shipped desktop artifact); the overrides below are passed as global
         # properties so the TEST build is framework-dependent linux-x64 and the
         # Linux testhost can launch it (a self-contained win-x64 runtimeconfig has
         # no framework entry — "libhostpolicy.so not found").
+        # WEAVER_RID is ALSO exported because ServerLaunchE2ETests starts Weaver with a
+        # NESTED `dotnet run`, which re-evaluates the project and does not inherit the
+        # CLI property — without the env var it rebuilt a win-x64 apphost and exec'd it
+        # on Linux ("Exec format error"). Children inherit the environment, so this
+        # reaches the nested build.
+        env:
+          WEAVER_RID: linux-x64
         run: dotnet test tests/Weaver.Tests.csproj --nologo -p:RuntimeIdentifier=linux-x64 -p:SelfContained=false
 
       - name: JS client-logic suite

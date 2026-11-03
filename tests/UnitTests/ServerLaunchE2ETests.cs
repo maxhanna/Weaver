@@ -98,9 +98,12 @@ public class ServerLaunchE2ETests : IDisposable
         {
             var exe = Path.Combine(dir.FullName, exeName);
             // Only an apphost NEXT TO its self-contained runtime files launches standalone;
-            // a bare apphost copy (no hostpolicy.dll/coreclr.dll beside it) dies with
+            // a bare apphost copy (no host policy beside it) dies with
             // "library 'hostpolicy.dll' required to execute the application was not found".
-            if (File.Exists(exe) && File.Exists(Path.Combine(dir.FullName, "hostpolicy.dll")))
+            // The file name is OS-specific (hostpolicy.dll / libhostpolicy.so /
+            // libhostpolicy.dylib), so check all three rather than the Windows name only.
+            if (File.Exists(exe) && new[] { "hostpolicy.dll", "libhostpolicy.so", "libhostpolicy.dylib" }
+                    .Any(h => File.Exists(Path.Combine(dir.FullName, h))))
                 return (exe, "--urls http://127.0.0.1:{port} --no-open-browser");
             dir = dir.Parent!;
         }
